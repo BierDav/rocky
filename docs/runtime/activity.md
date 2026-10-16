@@ -2,7 +2,7 @@
 
 `RockyDatabase.activity()` and `RockySession.activity()` expose a
 `Flow<RockyEvent>` describing background work: peer attempt outcomes,
-changed sets of scopes a peer refused, failed result pulls, nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
+changed sets of scopes a peer refused, failed result pulls, nonempty transfers, checkpoint imports, bootstrap,
 enrollment, renewal, revocation, author assignment and partition key/holding
 changes. Events follow successful local work; they are diagnostic observations,
 not durable receipts or proof that every peer has the latest data.
@@ -64,7 +64,7 @@ is refused any more.
 `ScopesWaiting` (`scopes_waiting`) lists the scopes a sync pushed no history
 of because the peer restores them from a checkpoint: it is
 [importing](checkpoint-import.md#while-a-scope-is-importing) them, or is behind
-this device's pruning horizon. The sync continues with the other scopes. It is
+this device's pruned prefix. The sync continues with the other scopes. It is
 recorded when that set changes for the peer; an empty list means nothing waits
 any more.
 

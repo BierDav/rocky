@@ -65,7 +65,7 @@ one-window variant runs in every workspace check.
 | --- | --- |
 | Reordered requests and holes | Higher sequence may confirm first; gaps stay open until acknowledged or expired |
 | Retirement | Confirmed and never-confirmed prefixes reject execution forever, including an empty session |
-| Abandoned sessions and churn | Response windows backpressure; horizon removes responses and old floors |
+| Abandoned sessions and churn | Response windows backpressure; pruned prefix removes responses and old floors |
 | Renewal / copied invocation | Fresh timed identities proceed; old admission never reopens |
 | Clock rollback / leader change / snapshot | Authority time clamps backwards; expired stays expired |
 | Quotas | New confirmations backpressure without evicting retained responses |

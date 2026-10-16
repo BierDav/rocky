@@ -92,7 +92,7 @@ verification of publisher signatures from peers.
 ## Peer discovery
 
 Meeting a peer running another generation does not change the installed
-workspace. Incompatible frames, checkpoints and horizon statements return an
+workspace. Incompatible frames and checkpoints return an
 admission error; sync never fetches or adopts another generation to retry them.
 Explicit schema opens retain the existing signed generation verification and
 recoverable switch. Replica-level [tips and bookmarks](tips-and-bookmarks.md) select the live
@@ -116,8 +116,7 @@ Grant profiles name tables, so a table added later is in no existing grant.
 The SDK schema's `granted_like` maps a new table to an existing one, as in
 `{"item_categories": "items"}`; Kotlin declares `grantedLike = "items"` on
 the table. Wherever the SDK turns a profile into grants or asks whether it
-reads a table (enrollment, renewal, revocation rotation, group delivery and
-horizons), a grant naming `items` in whole rows also names `item_categories`
+reads a table (enrollment, renewal, revocation rotation, group delivery), a grant naming `items` in whole rows also names `item_categories`
 with the same read and write rights. Partition selectors on
 `items` select the same partitions of `item_categories`. A grant without
 columns covers every field in every generation, so nothing widens fields.
@@ -191,9 +190,8 @@ manifests belong to it and carry, for each step, the field ids rows of the
 earlier generation may lack and the table and field ids it named and removed.
 Removal and re-adding are read from them alone ([removal](removal.md)), and a
 device checks a step against its manifests where it holds both. A manifest of an
-earlier generation is kept only while a retained frame, a checkpoint, a
-horizon statement or an existence base names it; credential chains name
-none. After a horizon finalizes,
+earlier generation is kept only while a retained frame, a checkpoint or an
+existence base names it; credential chains name none. After compaction,
 `EncryptedReplica::drop_unreferenced_generations` drops the others, and the
 SDK removes them from the saved lineage. Retained history stays verifiable
 by its transitions. Frames whose schemas the replica no longer holds are
@@ -234,11 +232,9 @@ SDK `tests/generations.rs` also requires a field with a migration while an
 older member keeps its unsynced work across an explicit target schema open
 (`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),
 reads the default for a NULL an older generation writes
-(`a_null_an_older_generation_writes_to_a_required_field_reads_its_default`),
-keeps a dropped manifest absent when an old peer returns
-(`a_dropped_manifest_stays_dropped_when_an_old_peer_returns`), and grants
-a new table like an existing one. The shopping example's `SchemaUpgradeTest`
-moves a version 6 household to version 7 while a version 6 member keeps syncing.
+(`a_null_an_older_generation_writes_to_a_required_field_reads_its_default`)
+and grants a new table like an existing one. The shopping example's
+`SchemaUpgradeTest` awaits phase 17's restoration of adoption on discovery.
 `rocky-secure`'s `tests::generations` interrupts shadow creation, backfill, switch
 and definition activation; verifies atomic visibility, stale sessions, pending
 work, old peers and typed checkpoint recovery, and drops and learns again an

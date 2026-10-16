@@ -83,7 +83,7 @@ keep links open while online. See [Android](android.md#lifecycle).
 ## Requests and live push
 
 Connecting starts reconciliation. Rows, existence logs and bases, checkpoints,
-horizons, results and their acknowledgments, envelopes and contact exchange, including requests for an unknown peer route,
+results and their acknowledgments, envelopes and contact exchange, including requests for an unknown peer route,
 use logical request channels. Both directions can request concurrently. Each
 channel inherits the fresh link admission and holding binding and has its own
 signed sequence, chain table and byte budget. Direction, slot and generation

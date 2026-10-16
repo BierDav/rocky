@@ -44,7 +44,7 @@ stored rows across 18 scopes. Imported-row counts were monotonic and reached
 to Live. The lists and selected list remained usable while verified pages
 continued to arrive.
 
-There was no `link channel read timeout` or behind-horizon failure. Initial
+There was no `link channel read timeout` or behind-pruned-prefix failure. Initial
 key delivery did encounter `connection lost`, and subsequently recovered. The
 issuer's logs mislabeled one link failure as `local storage I/O`; this does not
 establish a storage failure. A previously discovered, absent peer also produced

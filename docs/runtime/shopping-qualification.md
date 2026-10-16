@@ -1,181 +1,83 @@
 # Shopping qualification
 
-Qualified on 2026-10-09 by [phase 10](../features_06/10-qualification.md) on
-the JVM desktop profile (macOS arm64, loopback TCP), with each device in its own
-process, and its sharing and move steps on two Android emulators. Phone runs are
-[outstanding](#outstanding). This is not an Internet, NAT or relay claim.
-
-The 2026-10-12 JVM consolidation uses isolated iroh. Household and contact-handover
-classes passed three consecutive complete runs (36 tests), and the full shopping
-check passed all 36 JVM tests and desktop/Android compilation. The three-process
-live-link mesh opened every pair, detected process death and reopened after restart.
-The custody harness now passes all four scenarios over isolated iroh, including
-initial catch-up, all nine relayed horizons and long-offline rebootstrap. The
-EOF repair and repeated gate measurements are recorded [below](#evidence).
-The JVM live-link harness exercises SDK lifecycle hooks; it does not measure
-Android activity handling, cellular connectivity, battery cost or radio wake-ups.
+This guide identifies the shopping app's current checks and the limits of
+older qualification evidence. Phase 15 removes the declaration-based release
+gate; [phase 20](../features_09/20-seal-qualification.md) qualifies the app on
+seals. The native seal-compaction evidence is in
+[phase 15](../features_09/15-lazy-compaction-evidence.md).
 
 ## Commands
 
 | Command | Runs |
 | --- | --- |
-| `./examples/shoppinglist-app/qualify` | Builds the packaged `rocky-peer`, then the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt): every device is a JVM running the app's Room repository; evidence in `local/shopping-qualification/evidence.json` |
-| `cargo test -p rocky-sdk --test shopping_release` | The native gate and checkpoint join run in the e2e tier; custody restart is integration |
-| `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` | The required schema by hand and from Room, installed natively |
-| `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and every partitioned refusal |
-| `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
-| `./examples/shoppinglist-app/qualify-live-links <command>` | Live links between independent JVM processes over iroh: latency, SDK lifecycle hooks, process traffic and a three-process mesh; see the [commands](../../examples/shoppinglist-app/README.md#verify) |
+| `./examples/shoppinglist-app/check` | Required schema, JVM and Android shared tests, desktop and Android builds; stops at the first failing step |
+| `./examples/shoppinglist-app/qualify` | Packaged peer and [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt), with Room repositories in separate JVMs; evidence in `local/shopping-qualification/evidence.json` |
+| `cargo test -p rocky-sdk --test shopping_release` | Native custody, move/checkpoint join and restart scenarios |
+| `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` | Required schema by hand and from Room, installed natively |
+| `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and partitioned schema refusals |
+| `./examples/shoppinglist-app/qualify-live-links <command>` | Independent JVM processes over isolated iroh; see [commands](../../examples/shoppinglist-app/README.md#verify) |
 
-`ROCKY_SCENARIOS=gate,relink` selects harness scenarios. The application
-modules contain no Rust source; the custody process is the packaged launcher
-([always-on peer](always-on-peer.md)).
+`ROCKY_SCENARIOS=gate,relink` selects harness scenarios. App modules contain
+no Rust source. The custody process is the packaged
+[always-on peer](always-on-peer.md).
 
-## Release gate
+## Current scenarios
 
-The harness's `gate` scenario: phones A and B are never online together and
-meet only the custody process, which restarts in between. A and B share three
-lists through direct envelope delivery, add the same title offline (one survives
-by `LatestWins`), and A moves an item B ticked offline: the item arrives in the
-other list ticked, without its categories. Deleting a category hides only its
-links; deleting a list cascades to its items. A horizon on all twelve
-group-partition table scopes finalizes on A and B, and phone C, which joined from
-checkpoints and stayed offline across the horizon, rebootstraps to the finalized
-state. `two_phones_never_online_together_pass_the_release_gate_through_custody`
-repeats it natively. Measured: see [evidence](#evidence).
+The `gate` scenario alternates phones A and B through a keyless custody peer:
+they share lists, add duplicate titles offline, move an item while its other
+holder ticks it offline, and converge. Deleting a category hides its links;
+deleting a list cascades to its items. An offline phone returns and catches
+up to those deletes. The removed declaration and finalization requests are
+no longer part of this harness, and it makes no seal-compaction qualification
+claim. Native seal probes are listed in [lazy compaction](lazy-compaction.md#evidence).
 
-On 2026-10-10, [Phase 13](../features_07/13-relayed-horizon-evidence.md)
-qualified all nine horizons through keyless custody alone. A and B enroll and
-receive authors through local credential APIs, then alternate online; they
-never connect to each other, including setup.
-
-## Acceptance scenarios
-
-The deliverable is the shopping-list application as a packaged Kotlin app with
-no Rust source: Room DAOs on Rocky's file, lists, categories and items in one
-partition group, per-list sharing through one envelope that sync delivers to
-its recipient alone, a packaged always-on custody peer that holds envelopes as
-a mailbox, and a second issuing device. Every scenario ends by querying the removed `keys` and `identities` tables
-and checking `no such table`; on members it also checks `devices`. Its lists merge; its approvals are strong
-commands the public coordination service orders, which this harness does not
-run: its devices open over isolated iroh without a coordinator. Strong commands under
-contention, loss, takeover and voter faults are not qualified as processes.
-
-| Scenario | Evidence | Status |
-| --- | --- | --- |
-| 1 Phones alternate through custody; checkpoint join | Harness `gate`; native `shopping_release` | Passed on JVM processes |
-| 2 Per-list exclusion and revocation | Harness `exclusion-revocation`; `group_secrets` tests | Passed on JVM processes |
-| 3 Offline relink and duplicate title policy | Harness `relink` and `gate` | Passed on JVM processes |
-| 4 Creator loss; second issuer invites and renews | Harness `creator-loss`; `IssuerRecoveryTest` | Passed on JVM processes |
-| 5 All-device horizon and long-offline rebootstrap | Harness `gate` | Passed on JVM processes |
-| 7 ERP fixture, 200 partitions | `measure_200_partition_group_sync`, `erp_group_sync_preserves_all_references_and_reopens` | Measured; see [evidence](#evidence) |
-
-## Partitioned constraints acceptance
-
-| # | Evidence |
+| Scenario | Coverage |
 | --- | --- |
-| 1 | `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` passes |
-| 2 | `partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen`; harness `gate` |
-| 3 | `partition_frames_keys_custody_sql_and_checkpoints_are_isolated`; harness `exclusion-revocation` |
-| 4 | `group_references_hold_cascade_and_null_only_category_per_partition`, `group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step`; harness `gate` |
-| 5 | `partition_checkpoint_rebuilds_keyless_support_and_base_import_preserves_unrelated_graph`, the eviction cases above; `a_device_joining_after_a_move_starts_the_list_from_a_checkpoint` |
-| 6 | The ERP measurement below, against [the budget](partitioned-scopes.md#limits-and-budget) |
-| 7 | [Refusal regressions](#refusal-regressions) |
+| Alternating phones through custody | Harness `gate`; native `two_phones_never_online_together_pass_the_release_gate_through_custody` |
+| Per-list exclusion and revocation | Harness `exclusion-revocation`; SDK `group_secrets` |
+| Offline relink and duplicate titles | Harness `relink` and `gate` |
+| Creator loss and second-issuer renewal | Harness `creator-loss`; `IssuerRecoveryTest` |
+| Joining after a move | Native `a_device_joining_after_a_move_starts_the_list_from_a_checkpoint` |
+| Custody restart | Native `custody_keeps_offered_partitions_across_restart` |
+| ERP partition sync | `measure_200_partition_group_sync`, `erp_group_sync_preserves_all_references_and_reopens` |
 
-## Move acceptance
+Approval numbering uses [coordinated writes](coordinated-writes.md). The
+isolated-iroh harness does not configure a coordinator, so it does not qualify
+that path across processes. `ApprovalsTest` exercises the application's
+configured JVM coordinator path separately.
 
-| # | Evidence |
-| --- | --- |
-| 1 | `foreign_author_move_follows_offline_edit_once_and_keeps_identity`; harness `gate` |
-| 2, 3 | `source_only_author_drops_offline_update_and_cannot_open_destination` |
-| 4 | `destination_edit_with_later_stamp_wins_over_offline_update` |
-| 5 | `attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuilds` |
-| 6 | `missing_child_holding_and_interrupted_move_leave_everything_unchanged` |
+## Constraints and moves
 
-`six_scenarios_across_device_processes` runs all six with each device in its own
-process. Phone runs are outstanding.
+The native regressions cover partition-local key winners, authenticated
+frames/checkpoints, group cascade and SET NULL, eviction and reopening.
+`partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen`,
+`partition_frames_keys_custody_sql_and_checkpoints_are_isolated` and
+`group_references_hold_cascade_and_null_only_category_per_partition` remain.
+Schema qualification refuses cross-partition uniqueness, natural-key foreign
+references, RESTRICT, confirmed partition rows and references between groups.
 
-## Refusal regressions
+Move checks include `foreign_author_move_follows_offline_edit_once_and_keeps_identity`,
+`source_only_author_drops_offline_update_and_cannot_open_destination`,
+`destination_edit_with_later_stamp_wins_over_offline_update`,
+`attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuilds`
+and `missing_child_holding_and_interrupted_move_leave_everything_unchanged`.
+`six_scenarios_across_device_processes` runs their process fixture.
 
-Each shape under [not requested](../features_06/scope-partitioned-constraints.md#not-requested)
-and every reference between groups is refused natively and in Kotlin:
+## Historical evidence and remaining work
 
-| Shape | Native | Kotlin (`qualification/schema`) |
-| --- | --- | --- |
-| Uniqueness across partitions | `partitioned_tables_refuse_incomplete_indexes_references_and_command_control` | `must include every partition column` |
-| `RESTRICT` | `partitioned_foreign_keys_refuse_restrict` | Room `onDelete RESTRICT` |
-| Natural-key reference | `partitioned_foreign_keys_refuse_natural_keys` | builder and Room identity messages |
-| Partitioned command control | as uniqueness | `cannot be command-controlled` |
-| Confirmed rows of a partitioned table | `partitioned_confirmed_rows_are_refused_on_every_profile` | `cannot hold confirmed rows` |
-| Reference between groups | `foreign_keys_refuse_different_partition_groups`, `foreign_keys_refuse_unlogged_parent_outside_group` | `needs the same explicit partition group` |
+Earlier JVM and emulator runs are historical evidence for prior protocols
+and schemas. They do not qualify the current seal-based release gate. The
+old JVM gate ran over loopback iroh, not Internet or NAT conditions. Current
+[device procedures and emulator evidence](shopping-devices.md) remain available.
 
-## Defects fixed during qualification
-
-- Live-link custody sync intermittently ended with EOF during initial catch-up
-  and horizon relay. The requester now uses the admitted link immediately;
-  stream I/O failures no longer trigger credential renewal that cancels other
-  active links. Deterministic SDK regressions cover competing short requests and
-  EOF with an available renewal service.
-- A keyless custody peer could not hold a list created after it enrolled, and a
-  device syncing with it failed its whole batch as an end of file. Devices now
-  offer partition tuples to custody ([decision 0045](../decisions/0045-custody-partition-offers.md)).
-- Two issuers that each created a list before meeting ended every session with
-  each other, so neither list could be shared. Each side now refuses only the
-  list it has not learned ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
-- Accepting a second list while a checkpoint-first bootstrap waited for a
-  checkpoint peer was refused; it now joins the pending intent.
-- Importing a checkpoint of a list an item had moved out of failed on the
-  imageless tombstone, so no device could start that list from a checkpoint.
-- A participant finalized a parent table before its child, after which the
-  child's horizon could never be acknowledged. Finalization now waits for
-  pending dependent children ([horizon](mergeable-horizon.md#dependencies-and-ordering)).
-- The Share button shared with the custody peer, which holds no key, and
-  failed; it now skips custody devices.
-- The trusted profile installed a partitioned confirmed table.
-- The Compose screen crashed when a DAO flow's read transaction met an
-  authority change or an incomplete list; the repository observes again.
-
-## Phase 20 audit
-
-Version 6 removes `keys` and `identities`, and keeps `devices` beside the
-trusted-only invitations and coordination tables. Kotlin `RosterFreeTest`
-checks missing tables, member sharing by scanned contact, and contact handover
-without discovery. `ApprovalsTest` checks member labels and trusted registry
-names; coordinator registration no longer waits for roster rows.
-
-After all functional steps, `gate` scans member B's entire directory for other
-devices' node keys (hex and raw bytes), names and registry labels, and checks
-that B addressed no envelope to another device. A control requires the names in
-the trusted device's directory. It writes `member-privacy.json` before
-asserting no matches. The SDK installs only readable physical projections,
-keyless custody serves archived finalized checkpoint pages to read-only
-horizon participants, and saved contacts and proofs keep
-[one-way references](../decisions/0062-node-references-and-credential-aliases.md)
-instead of node keys. The table-absence, custody-horizon and directory
-assertions pass; the [Phase 20 evidence](../features_07/20-shopping-without-a-roster-evidence.md)
-records the runs. The two-emulator and simulator/emulator pair/share/revoke
-procedures passed on version 6. The earlier passes below describe prior schemas.
-
-## Evidence
-
-Recorded on 2026-10-09; see the [phase brief](../features_06/10-qualification.md#evidence).
-The custody-only horizon rerun on 2026-10-10 passed the JVM gate in 35.747 s;
-see [Phase 13 evidence](../features_07/13-relayed-horizon-evidence.md).
-
-The 2026-10-12 EOF repair passed all four scenarios over isolated loopback iroh
-with the rebuilt JVM SDK and custody launcher. Three consecutive `gate` runs
-passed in 92.493, 207.148 and 320.622 s, including checkpoint catch-up, all nine
-horizons, long-offline rebootstrap and the member privacy audit. Other scenarios
-passed in 25.858 s (exclusion/revocation), 9.256 s (relink) and 12.982 s
-(creator loss). These runs overlapped a heavily loaded workspace build; they
-qualify behavior, not latency or throughput. Local artifacts are in
-`local/custody-eof-fixed{,-2,-3}/evidence.json`. All three native
-`shopping_release` tests passed as well.
+Current full-script verification is recorded in the
+[phase 15 evidence](../features_09/15-lazy-compaction-evidence.md#verification-of-slices-4-and-5).
+`SchemaUpgradeTest` awaits phase 17's restoration of adoption on discovery.
+When that JVM failure stops `check`, its Android tests and builds have not run.
 
 ## Outstanding
 
-| Scenario | Blocking contract |
-| --- | --- |
-| Two-phone runs of the gate, moves and revocation | Two physical Android phones on the qualification host, running the [device procedure](shopping-devices.md#two-phone-procedure). Only one phone, in personal use, was attached; the procedure [passed on two emulators](shopping-devices.md#emulator-pair-2026-10-09) |
-| Release scenarios over Internet, NAT and relays | The scenarios above ran on loopback and one LAN only. Live links between a desktop and a phone on cellular through an iroh relay are measured separately in the [phase 6 evidence](../features_08/06-qualification-evidence.md) |
-
-The earlier single-phone LAN run is recorded in [shopping devices](shopping-devices.md).
+Two physical-phone runs remain outstanding. The procedure passed on two
+emulators; see [shopping devices](shopping-devices.md#emulator-pair-2026-10-09)
+and the [two-phone procedure](shopping-devices.md#two-phone-procedure).
+Cellular, relay, lifecycle and radio costs need their own measurements.

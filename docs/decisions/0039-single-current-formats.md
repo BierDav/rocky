@@ -34,5 +34,5 @@ operation, outbox and revision commits remain required.
 Owning contracts: [schemas](../runtime/schema-definitions.md),
 [frames](../runtime/secure-sessions.md),
 [checkpoints](../runtime/encrypted-checkpoints.md),
-[horizons](../runtime/mergeable-horizon.md),
+[seal compaction](../runtime/lazy-compaction.md),
 [SDK enrollment](../runtime/sdk-enrollment.md).

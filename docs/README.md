@@ -61,7 +61,7 @@ Select the guide for your task rather than reading every document.
 | Open a secure database without a network, share it between sessions or attach your own transport | [SDK composition](runtime/sdk-composition.md) |
 | Inspect scaling/observer measurements and Kotlin qualification limits | [Phase 6 evidence](runtime/scaling-limits.md#measured-limits) |
 | Run sustained scale qualification and collect hardware evidence | [Scale qualification](runtime/scaling-limits.md#scale-qualification) |
-| Configure retention, rebootstrap or audit a file; the [horizon](runtime/mergeable-horizon.md) until lazy compaction at seals | [Checkpoints, pruning and rebootstrap](runtime/checkpoints.md) |
+| Configure retention, rebootstrap or audit a file; [compact encrypted history at seals](runtime/lazy-compaction.md) | [Checkpoints, pruning and rebootstrap](runtime/checkpoints.md) |
 | Find why pruning stopped and release a strong request or silent peer | [Retention holds](runtime/retention-holds.md) |
 | The same for `EncryptedReplica` | [Encrypted checkpoints](runtime/encrypted-checkpoints.md) |
 | Import a checkpoint page by page and read rows while it runs | [Importing an encrypted checkpoint](runtime/checkpoint-import.md) |

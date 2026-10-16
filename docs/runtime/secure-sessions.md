@@ -144,13 +144,13 @@ proofs bind the key epoch, scope and mutual handshake; keyless custody uses the
 tuple and custody authority. A link proves the holdings of both sides when
 it opens; a channel may prove more. Frontier batches refuse unproved members alone.
 Scoped requests fail with the same denial and session outcome as an unknown
-scope, before row, checkpoint, horizon or command result state is inspected.
+scope, before row, checkpoint or command result state is inspected.
 Scope enumeration includes only proved partitions and granted unpartitioned
 scopes. Proof memory is local to that link; the application
 `SecureSession` transaction and invalidation rules above are unchanged.
 
 The link's bounded logical channels carry the request handlers for rows,
-checkpoints, existence, horizons, results, envelopes, contacts and
+checkpoints, existence, results, envelopes, contacts and
 [coordinated entries](coordinated-writes.md). Admission
 and holding proofs bind the link; each channel has its own signed sequence and
 chain table. Committed pushes carry self-contained chains and use the same

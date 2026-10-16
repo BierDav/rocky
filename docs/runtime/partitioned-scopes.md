@@ -148,7 +148,7 @@ partition before they next meet. A replica learns a partition's tuple by
 installing its envelope or from a custody offer; until then it cannot resolve
 the peer's grant for it, so it refuses that member of the frontier batch.
 Only that member is skipped: the session goes on for every other scope, and the
-partition is neither pulled, pushed nor horizon-acknowledged with that peer.
+partition is neither pulled nor pushed with that peer.
 Range, push and checkpoint requests for it stay refused, so the replica never
 holds or serves its ciphertext. The SDK records `scopes_refused`; once the
 partition is shared and installed, the next sync exchanges it
@@ -258,7 +258,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 2, one secret per recipient, bound to manifest, group address, epoch identity and revocation IDs ([0050](../decisions/0050-concurrent-key-epochs.md)) |
 | Frame | Row format 11 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
-| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 7 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
+| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 15 names its seal and optional partition ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |
 
 Readers recompute the tuple from both row images and refuse a mismatch before

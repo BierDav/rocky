@@ -136,7 +136,7 @@ Use `confirmed_publications` for explicit locally applied history and
 `operation_page`, `request_page` and `result_page` provide ordered continuation
 pages. Consume `items`, then pass `next` until it is `None`. Each page caps records
 and bytes. Restart reconciliation to discover new keys inserted before a cursor.
-Records behind the [horizon](checkpoints.md) are no longer returned; use
+Records behind the [pruned prefix](checkpoints.md) are no longer returned; use
 `catch_up` to learn that a peer needs a checkpoint. The convenience exact receipt/status/
 history APIs are bounded by the hard retention ceilings below.
 

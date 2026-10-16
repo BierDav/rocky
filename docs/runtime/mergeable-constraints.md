@@ -99,8 +99,7 @@ merged rows and requires no other partition's key.
 
 Hidden rows return when the conflicting value changes or a parent
 becomes live; a re-created parent has a new `id` and revives no old child.
-Hidden rows and orphans are retained until the [horizon](mergeable-horizon.md)
-finalizes them.
+Hidden rows and orphans are retained until the [seal](lazy-compaction.md) finalizes them.
 
 ## Local writes
 
@@ -149,15 +148,15 @@ slot. `items.list → lists.id` and `(items.list, items.category) → (categorie
 categories.id)` therefore resolve only within the list partition. `CASCADE` hides
 children when that parent disappears; `SET NULL` changes only non-partition
 reference columns. A missing or unheld parent partition keeps the child pending,
-and a horizon cannot be declared without the corresponding parent partition.
-Horizon cuts name concrete parent scopes, never their table templates.
+and finalization needs the corresponding parent evidence. Seals use
+per-author frontiers; checkpoints name concrete scopes, never templates.
 
 Rebuild and eviction re-resolve constrained tables of the same group partition.
-Other partitions remain unchanged. Horizon finalization drops hidden losers and
+Other partitions remain unchanged. Seal finalization drops hidden losers and
 cascade orphans in that scope; checkpoint import rebuilds candidates and support
 in its group partition. An unpartitioned existence-base import rebuilds only its
-connected constraint graph. [Partition horizon evidence](mergeable-horizon.md#evidence)
-covers eviction, offline rebootstrap and interruption recovery.
+connected constraint graph. See [lazy compaction](lazy-compaction.md) for
+finalization, signed bases and rebootstrap.
 A partitioned child may also reference an
 unpartitioned logged parent; its liveness and puppets use the existing keyless
 log contract. Partitioned existence logs remain deferred. These native shapes

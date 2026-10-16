@@ -57,7 +57,7 @@ altogether; see [stored cut rows](../optimizations_on_demand/stored-cut-rows.md)
 
 ## A delivery target that does not acknowledge
 
-The horizon passes an operation only when every configured delivery target has
+The pruned prefix passes an operation only when every configured delivery target has
 acknowledged it or is declared behind. A device that never returns therefore
 holds history until the byte bound stops writes.
 
@@ -67,7 +67,7 @@ Declare it behind explicitly with `declare_behind(peer)`, or set a time limit:
 RetentionPolicy { behind_after: Some(Duration::from_secs(7 * 24 * 3600)), ..Default::default() }
 ```
 
-A target is timed from the first prune step in which it holds the horizon back.
+A target is timed from the first prune step in which it holds the pruned prefix back.
 When the limit passes, it is declared behind as if by `declare_behind`, and
 `retention_status().behind` lists it. The time is stored with the retention
 state and survives a restart. A target that stops holding back, or names itself

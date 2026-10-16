@@ -185,6 +185,14 @@ remain. `secure_compaction_live_creations` replaces the scratch table, and
 the horizon's bootstrap and participant tables are gone. Coordinated-cut
 fences and the off-path exception in `check_frontier` remain.
 
+The trusted profile's separate pruning signal is also renamed:
+`PrunedNotice`, `Catchup::BehindPruned`, `SyncState.pruned_prefix` and
+`RetentionStatus.pruned_prefix`; its worker module is `pruning`. Its only
+notice wire magic is `rocky.pruned.v1`. The retained-state JSON field is
+`pruned_prefix`, so its file identity revision moves from 3 to 4, refusing
+older files before configuration or schema writes. This preserves the trusted
+pruned prefix and its existing tests; it removes none of its behavior.
+
 Checkpoint format 15 removes both declaration fields; format 14 is refused.
 All of phase 15 is unpushed, so link `rocky.link.v9`, replica file
 `rocky.encrypted-replica.v25`, row frame 11 and witness envelope 1 stay current.
@@ -203,3 +211,95 @@ probe now uses 64 create/delete cycles (131 records before the fold and none
 after it). Unchanged scopes reuse their prior seal checkpoint when no included
 operation or finalization diff changed them; the regression checks identical
 checkpoint bytes, no table observer event and a working session after compact.
+
+## Slice 5: guides
+
+The three owning guides now describe only seal compaction, seal-based existence
+bases and format-15 checkpoints. Live runtime links use lazy compaction. The
+former guide is a 21-line pointer, retained because phases 6 and 14 still link
+it as a prerequisite or historical evidence; those plans are unchanged. The
+roadmap README identifies the replacement. The owning guides are 183, 180 and
+161 lines respectively. The module map names compaction and existence-base
+ownership; the root README listed no declaration API.
+
+The shopping qualification guide distinguishes current custody/move checks
+from historical release qualification. The removed harness calls and activity
+kind are gone. Seal qualification on the app remains phase 20. This does not
+claim a new physical-phone run or restore phase 17's schema discovery.
+
+### Completion gate recheck
+
+This table rechecks every gate item after slices 4 and 5. The naming pass
+also covers the separate trusted runtime and its desktop/benchmark consumers,
+so the source scan has no storage API or wire format named horizon.
+
+| Completion-gate item | Current test / check |
+| --- | --- |
+| 64 insert/delete cycles leave no deleted-row tombstones or stubs, and no existence records | `tests::compaction::compaction_at_seals_plateaus_under_insert_delete_churn`; `tests::existence::seals::a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_its_signed_base` now uses 64 cycles |
+| Compacted and uncompacted devices apply the same late frames through two continue seals | `tests::compaction::compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_alike` |
+| A child-only holder imports the issuer base and resolves the same orphans | The existence-base probe above, with pages of two and no parent row key |
+| Changing one table leaves another base, observer and session untouched | `tests::compaction::changing_one_table_keeps_the_other_base_observer_and_session_untouched`: byte-identical checkpoint, no observer event, session reads after compaction |
+| A logged final seal compacts immediately; keep=1 survives a winning rival; keep=0 rebootstraps from a listed checkpoint or frames | `a_seal_its_log_committed_becomes_final_and_beats_a_later_owner_seal`; `a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_rebootstraps`; `a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_lists`; `a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer` |
+| Inspection shows seal checkpoints and signers | SDK `compact_keeps_the_requested_seals_and_every_row_across_reopen`; credentials `checkpoint_records_name_a_held_seal_and_revocation_unlists_them`; Kotlin `TipsTest` |
+| No horizon code, format or SDK operation remains | `rg -n -i horizon crates sdks/kotlin .config/test-tiers.toml` has no matches; repository consumer scan finds no `SignedHorizon`, `horizon_pending`, `HorizonFinalized` or `"type":"horizon"`; `tests::formats::unsupported_replica_and_checkpoint_formats_refuse_before_writes` rejects format 14 |
+
+Other retained boundaries: `a_tainted_checkpoint_guards_its_scope_until_a_clean_base_is_imported`
+checks cut guards on writes, range/transfer serving and checkpoint imports;
+`unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_leave_first`
+now checks bounded frontiers without participant credentials. Pruned-prefix
+bootstrap and behind-peer tests remain in native and SDK checkpoint tests.
+`the_previous_trusted_file_identity_is_refused_before_writes` verifies identity
+3 is refused without a file write, and the trusted notice roundtrip test also
+refuses an unknown version.
+
+### Verification of slices 4 and 5
+
+- `./scripts/lint`: passed.
+- `./scripts/check`: passed; 165 unit and 962 integration tests, including
+  the SDK without default features, within the tier budgets.
+- After the final unchanged-base check also retained key-epoch/revocation
+  refreshes, `cargo test -p rocky-secure tests::compaction::` passed all seven
+  probes and `cargo clippy -p rocky-secure --all-targets --locked -- -D warnings`
+  passed. The existence seal probes passed both tests, including 64 churn cycles.
+- `sdks/kotlin/gradlew -p sdks/kotlin check`: passed.
+- Local SDK packages rebuilt with `publishToMavenLocal`; the standalone chaos
+  harness passed `cargo check --manifest-path benchmarks/chaos/Cargo.toml --locked`.
+- Both new changes pass `scripts/commitlint --jj`.
+- `cargo test -p rocky-secure -p rocky-credentials -p rocky-sdk`: passed,
+  including the 100,000-row migration (the migrations binary took 1,091 s
+  while the workspace and SDK artifacts built). After the trusted naming pass,
+  package tests also passed with that unchanged large case skipped
+  (`-- --skip a_migration_of_100000_rows_converges_on_every_member`).
+- `./examples/shoppinglist-app/check`: the required-schema comparison passed;
+  the final run compiled shared JVM and Android code and ran all 58 JVM tests:
+  56 passed. `SchemaUpgradeTest` fails as expected until phase 17.
+  `ApprovalsTest` again failed with "coordinated write: Undecided"; it passed
+  in the preceding run (57/58 JVM tests). Android tests and the desktop/Android
+  app builds did not run because the script stopped at the JVM failures.
+  Initial stale Maven-local SDK and extracted Android AAR caches were refreshed
+  using the app README's documented procedure; the compilation error is resolved.
+- Final workspace, package and Kotlin reruns after trusted-prefix renaming
+  passed. The workspace rerun includes the new trusted-file identity regression;
+  Kotlin's final check also ran its simulator tests successfully.
+- All 35 added relative Markdown links and heading anchors resolve. The code
+  scan has no horizon names across the Rust crates, Kotlin SDK or tier config.
+
+Every completion-gate item above holds. Phase 15 is implemented with the
+limits below.
+
+### Remaining limits after phase 15
+
+The earlier slices' open lists remain history. Unchanged scope bases are now
+reused, and the declaration-removal and guide slices are complete. These
+limitations remain:
+
+- Change detection for constraint finalization is per table, not per partition;
+  a waiting seal scans stored frame headers on each maintenance step.
+- The SDK signs existence folds only in `compact`. Its existing schemas do
+  not test logged tables, and no SDK test drives a losing seal race end to end.
+- A logged scope whose off-path fold released records needs a listed checkpoint
+  and signed existence base; frame replay alone cannot restore its records.
+- A pre-graph arbitrary-cut base with pruned history is found by
+  `seal_rebootstraps`, but that particular import path has no dedicated test.
+- Graph-domain join falls back to frames until a peer has a seal checkpoint.
+- Old SDK generation-discovery qualification is not restored; phase 17 owns it.

@@ -40,7 +40,9 @@ row dropped at a seal stays dropped, however many seals the frame walks.
 newest finalized seal that is [final](seal-finality.md) or has at least
 `keep` seals after it on the path. The base is a checkpoint at that seal
 (`CheckpointStatement.seal`), signed by this node. Only the compacted seal
-stays recorded with the seals finalized after it; operations behind the
+stays recorded with the seals finalized after it. An unchanged scope keeps
+its earlier base while its key epoch and revocation policy still match;
+operations behind the
 base are released under the usual [retention](retention-holds.md) rules.
 `pruned` and `blocked` report what the call released and what stopped it.
 The base names the creations of the rows it stores only, so another device
@@ -155,8 +157,27 @@ re-authors them. The SDK runs these steps at the start of every sync pass
 | Checkpoint record | Format 1, signed `rocky.checkpoint-record.v1` |
 | Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
 
-The mergeable-horizon protocol and SDK operation are removed. Checkpoint
+The declaration protocol and its SDK operation are removed. Checkpoint
 statements contain neither admitted nor finalized declarations. Pruned log
 prefixes remain: `pruned_page`, `behind_pruned`, `PrunedPage` and
 `CheckpointMessage::Pruned`/`PrunedLogs` signal missing history without a
 separate finalization protocol. Seals and existence records do not change.
+
+
+## Evidence
+
+The plateau probes are seal-based and independent of the removed guide:
+
+```sh
+cargo test -p rocky-secure compaction_at_seals_plateaus_under_insert_delete_churn -- --nocapture
+cargo test -p rocky-secure a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_its_signed_base
+```
+
+After cycles 16 and 64, the row probe has the same counts: one live row,
+its creation stub, no tombstones, operations or applied entries, four handles
+and one compacted seal. The existence probe folds 131 records after 64 churn
+cycles and a parent deletion into one live parent's entry and no records.
+No deleted row retains a tombstone or stub. The same signed base gives a
+child-only holder the parent's orphan resolution. The
+[gate evidence](../features_09/15-lazy-compaction-evidence.md#completion-gate-recheck)
+lists the remaining late-frame, incremental, finality and rebootstrap probes.

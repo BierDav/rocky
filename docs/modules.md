@@ -139,7 +139,7 @@ and supplies bounded snapshot queries with committed watch observations
 backends are not an MVP requirement.
 
 History is bounded: each trusted domain keeps a verified checkpoint copy of its
-projection, prunes operations behind a horizon and rebootstraps a peer that fell
+projection, prunes operations behind a pruned prefix and rebootstraps a peer that fell
 behind it ([checkpoints](runtime/checkpoints.md),
 [design rationale](runtime/checkpoints.md#design-rationale)).
 
@@ -152,7 +152,7 @@ capabilities `rocky-credentials` verifies under the revocation set it holds,
 reader key epochs and rotation,
 encrypted row operations, a framework-transaction p2panda store adapter and bounded
 authenticated synchronization over live links and their request channels
-(`network.rs`, `network/link.rs`), signed per-scope checkpoints, pruning and
+(`network.rs`, `network/link.rs`), seal finalization and lazy compaction (`replica/compaction`), signed per-scope checkpoints, pruning and
 rebootstrap ([encrypted checkpoints](runtime/encrypted-checkpoints.md)), and
 replica roles: scope subscriptions, frontier range sync, eviction under full-node
 custody and remote reads ([replica roles](runtime/replica-roles.md)).
@@ -172,6 +172,7 @@ with availability-checked cursors and table events in
 Secure history range access, redundant recovery archive pruning and same-definition
 shadow rebuilds are described in [scaling and rebuilds](runtime/scaling-and-rebuilds.md).
 Existence logs, puppets and virtual rows for references across reader scopes
+and seal-based existence-base transfer (`replica/existence/base.rs`)
 are in [existence logs](runtime/existence-logs.md); `rocky-core` owns the
 descriptor entry and `rocky-storage` the support-row SQL filter.
 

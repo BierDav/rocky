@@ -54,7 +54,7 @@ cancel admitted work.
 `rocky_replica` stores identity, sequence, maximum clock and revision;
 `rocky_operations` keeps original canonical bytes and processing metadata;
 `rocky_outbox` references local operations until every named target received
-them. History behind the horizon is pruned once a verified checkpoint covers it
+them. History behind the pruned prefix is pruned once a verified checkpoint covers it
 ([checkpoints](checkpoints.md)).
 
 ## Queries, observations and shutdown
@@ -81,9 +81,9 @@ transaction.
 | --- | --- |
 | `receive(bytes)` / `receive_page(records)` | Bytes and receipt state committed and flushed; acknowledgment says whether applied ([incoming pages](write-concurrency.md#incoming-pages)) |
 | `process_pending()` | Dependency-ready operations applied, at most 32 per transaction |
-| `sync_state()` | Held prefix per author, at most 256 retained IDs above it, applied frontier and horizon |
-| `missing_operations(known)` | At most 32 records absent from an exact set; cannot signal the horizon |
-| `catch_up(peer, state)` / `catch_up_after(peer, state, after)` | At most 32 records the peer lacks with a range cursor, or a `HorizonNotice` |
+| `sync_state()` | Held prefix per author, at most 256 retained IDs above it, applied frontier and pruned prefix |
+| `missing_operations(known)` | At most 32 records absent from an exact set; cannot signal the pruned prefix |
+| `catch_up(peer, state)` / `catch_up_after(peer, state, after)` | At most 32 records the peer lacks with a range cursor, or a `PrunedNotice` |
 | `checkpoint_page(cursor)` / `import_checkpoint(page)` | One page of the latest checkpoint; the last imported page switches the projection |
 | `acknowledge(peer, ack)` | Received/applied acknowledgment persisted; outbox cleared once all targets received |
 | `peer_acknowledgments(peer)`, `peer_progress(peer)` | Retained evidence and the peer's contiguous applied frontier |
@@ -103,7 +103,7 @@ Reconciliation compares per-author held frontiers both ways and pages the gap
 ([replica roles](replica-roles.md#trusted-path)). It repairs missing
 acknowledgments from the receiver's committed state; enqueueing never clears
 outgoing work, applied entries are monotonic, and a frontier advances only over
-a contiguous prefix. A replica behind the horizon rebootstraps.
+a contiguous prefix. A replica behind the pruned prefix rebootstraps.
 `todo_desktop::transport::SimulatedTransport` is the bounded test adapter:
 `set_paused`, `reconcile`, `deliver`, `duplicate`, `drop_message` and `clear`
 inject delay, reordering, duplicates and loss without sleeps.

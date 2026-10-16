@@ -9,6 +9,7 @@ API or guides ([evidence](10-stuck-recovery-evidence.md));
 [phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phases 12
 and 18 are skipped. Phase 14 is in progress: all slices are implemented, and
 [two gate gaps remain](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
+Phase 15 is implemented ([evidence](15-lazy-compaction-evidence.md)).
 Phases 14–17, 19 and 20 replace
 generations' transitions, the mergeable horizon and recovery cuts with
 [sealed forks](#generations-as-sealed-forks).
@@ -80,13 +81,12 @@ versions are tolerated belong to the application, not to Rocky.
   signed it. Every device ignores writes to the
   field stamped before it, and a device adopting the generation pulls again
   the frames of that field's tables stamped after it. The
-  [mergeable horizon](../runtime/mergeable-horizon.md) guarantees the rest:
-  every copy that meets a finalized cut either reproduces its state digest
-  or imports the finalized checkpoint. Nothing holds back pruning.
+  [lazy compaction](../runtime/lazy-compaction.md) finalizes sealed history:
+  each copy uses the seal's frontier or imports its checkpoint. Nothing
+  requires a participant declaration before compaction.
 - **No device inventory.** Rocky never needs to know how many devices exist
   or whether two of them share a key. Every rule here is applied by each
-  copy on its own state; the horizon's participant list only bounds how long
-  finalization waits.
+  copy on its own state; seals carry no device inventory.
 - **Receivers check field by field.** A frame from a device that has not
   migrated yet applies its kept fields and ignores removed ones, the same way
   on every device.

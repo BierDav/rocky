@@ -52,7 +52,7 @@ with a 16-result window and reopens the invoking writer after each hundred.
 Open took 16–38 ms and the first sync 25–28 ms. The retained payload audit is
 bounded by the window, the base and pinned unobserved jobs. A separate
 `rocky-secure` regression confirms 4,100 commands, reopens the reader, imports
-a peer below the horizon and confirms after takeover ([strong history](strong-history.md)).
+a peer below the pruned prefix and confirms after takeover ([strong history](strong-history.md)).
 
 ## Device limits
 

@@ -167,7 +167,7 @@ never acknowledges operations it did not include.
 Frames are bounded to 256 KiB (`MAX_SECURE_FRAME`); native pages to 128 KiB;
 sessions to a caller budget of at most 32 MiB with a 10-second per-I/O timeout.
 Nothing about a peer is written before its chain verified, and a replica keeps
-horizon credentials and frontiers of at most 256 unconfigured peers
+frontiers of at most 256 unconfigured peers
 (`MAX_UNCONFIGURED_PEERS`), dropping the least recently served first; the peers
 its owner configures and full nodes are kept.
 Retained row operations follow `RetentionLimits`: 32 MiB starts checkpointing

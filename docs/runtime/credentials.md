@@ -76,7 +76,7 @@ identity → node certificate. See
   decrease strictly, so issuers nest at most six
   deep and an issuer renews only identities below it.
 - **Endorsements** sign the domain's statements: manifests, transitions,
-  horizon statements and discovery values carry an `Endorsement`, the
+  seal-based existence bases and discovery values carry an `Endorsement`, the
   signer's issuer links (none for the owner) and its signature. `verify`
   checks authenticity whatever happened later; `verify_current` also needs
   the signer's chain current under a revocation set, which is what adopting
@@ -301,7 +301,7 @@ revoke at the same time.
 | Identity request | 1 | `rocky.credentials.identity-request.v1`, signed by the new node and its identity for an answering node; the answer (`rocky.credentials.identity-answer.v1`) is sealed to a one-time X25519 key |
 | Capability extension | 4 | `authors`, `device`, `node`, `partitions` and `issues`; see [the chain format](credential-primitives.md#chain-format) |
 | Author binding | 2 | `rocky.credentials.author-binding.v2`, with the link's `issues` flag |
-| Endorsement | | The signer's issuer links and signature in `SignedManifest` (`rocky.signed-manifest.v2`), `SignedTransition` (`rocky.signed-transition.v2`), `SignedHorizon` (`rocky.horizon-statement.v2`, horizon format 6) and `DiscoverySecret` (`rocky.discovery-secret.v2`) |
+| Endorsement | | The signer's issuer links and signature in `SignedManifest` (`rocky.signed-manifest.v2`), `SignedTransition` (`rocky.signed-transition.v2`), `SignedExistenceBase` (`rocky.existence-base.v1`, format 1) and `DiscoverySecret` (`rocky.discovery-secret.v2`) |
 | Contact URI | 2 | `issuer` and `enrollment_only` flags; `issuer` written only by issuers |
 | Capability | 2 | Signed under `rocky.capability.v2`, id `rocky.capability.id.v2`; no manifest; extension body 4 ([chain format](credential-primitives.md#chain-format)) |
 | Revocation statement and set | 3 | See [revocations](revocations.md#formats) |

@@ -1,9 +1,8 @@
 # 15. Lazy compaction
 
-Status: in progress. The [final-seal proposal](#proposal-final-seals) was
-accepted and is implemented; slices 1 to 4 are implemented. See the
-[evidence](15-lazy-compaction-evidence.md) and the
-[guide](../runtime/lazy-compaction.md).
+Status: implemented. All five slices and the completion gate hold. See the
+[evidence](15-lazy-compaction-evidence.md) for verification and remaining limits,
+and the [guide](../runtime/lazy-compaction.md).
 Owner: `rocky-secure` finalization, existence bases, checkpoints and
 pruning; `rocky-sdk` maintenance. Depends on
 [phase 14](14-seals-and-bookmarks.md). Follow the
@@ -13,7 +12,7 @@ record 0075.
 ## Inputs and objective
 
 Read [the generation model](README.md#generations-as-sealed-forks),
-[mergeable horizon](../runtime/mergeable-horizon.md),
+[lazy compaction](../runtime/lazy-compaction.md),
 [existence logs](../runtime/existence-logs.md) and
 [encrypted checkpoints](../runtime/encrypted-checkpoints.md).
 
@@ -74,9 +73,8 @@ and the mergeable horizon is gone.
 
 ## Completion gate
 
-- The plateau probe of the [horizon guide](../runtime/mergeable-horizon.md#evidence)
-  holds with seals: 64 insert/delete cycles leave no tombstones, stubs or
-  existence records after compaction.
+- The [seal plateau probes](../runtime/lazy-compaction.md#evidence) hold:
+  64 insert/delete cycles leave no tombstones, stubs or existence records after compaction.
 - Two devices, one compacted and one not, apply the same late frames,
   across two `continue` seals, to the same rows.
 - A device that holds only a child partition imports the issuer's existence
@@ -146,7 +144,8 @@ the domain model avoids.
 
 ## Prerequisites checked
 
-Checked against code on 2026-10-16:
+Checked before implementation on 2026-10-16. The failures below are the
+historical starting point; the evidence records their repairs:
 
 - **Seals and the tip graph** hold: `SealStatement` (format 1) and
   `TipGraph`, persisted in `secure_tip_statements`, now resolved by

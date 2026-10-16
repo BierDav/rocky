@@ -9,14 +9,14 @@ Every granted SDK collection gets a persisted `RetentionPolicy` when no policy
 exists. The defaults are `copies = 1`, `window = 256`, and empty `required` and
 `behind` sets. Pruning still requires a verified, flushed checkpoint and at
 least one other acknowledged copy. It never releases a sole copy. No timer
-silently declares peers behind; an issuer schedules
-[horizons](mergeable-horizon.md#sdk) explicitly.
+silently declares peers behind; the application calls
+[`tips.compact(keep)`](lazy-compaction.md#compacting) explicitly.
 Existing policies survive reopening.
 
 The native session `retention` request names `collection`; optional `policy`
 replaces its policy with `required`, `behind` (node public keys), `copies` and
 `window`. The response includes the policy, covered/uncovered operation counts,
-horizon and maintenance error. `maintain = true` completes checkpoint creation
+`pruned_prefix` and maintenance error. `maintain = true` completes checkpoint creation
 and pruning under those rules. Kotlin exposes `session.retention(collection,
 policy, maintain)`.
 
@@ -31,11 +31,11 @@ blocks, and [replica roles](replica-roles.md) for custody requirements.
 ## Catch-up
 
 SDK reconciliation restores the peer's base before pushing local operations.
-`NativeSession::sync_scope` uses the existing behind-horizon signal to stage,
+`NativeSession::sync_scope` uses the existing pruned-prefix signal to stage,
 verify and atomically adopt a checkpoint, then pull its tail. Local operations
 not covered by the checkpoint are reapplied under the runtime's admission rules;
 mutation handles survive. An interrupted import resumes from durable staging.
-A peer behind this device's own horizon must initiate its own catch-up. A push
+A peer behind this device's pruned prefix must initiate its own catch-up. A push
 skips that scope, and any scope the peer reports it is
 [importing](checkpoint-import.md#while-a-scope-is-importing), and continues with
 the others; the SDK records the skipped scopes as

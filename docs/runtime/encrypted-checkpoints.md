@@ -1,206 +1,161 @@
 # Encrypted checkpoints and pruning
 
-`EncryptedReplica` path. The trusted path shares no code or format; see
-[checkpoints](checkpoints.md). Finalizing rows at an issuer-signed cut is in
-[mergeable horizon](mergeable-horizon.md); the statement and rationale are at the
-[end](#the-signed-statement).
-[Phase 15](../features_09/15-lazy-compaction.md) places checkpoints only at
-seals and lists them in the tip graph.
+This guide is for applications configuring encrypted history and transports
+serving a device that needs a base. The trusted runtime has a separate
+[checkpoint contract](checkpoints.md).
 
-A scope keeps its stored rows, a signed checkpoint of them, and the operations
-after a per-log *horizon*. This guide is for an application or transport author
-who configures retention, syncs a peer that was offline, or verifies a file.
+A scope keeps its stored rows, a verified signed checkpoint and operations
+after that base. In a domain with a [tip graph](tips-and-bookmarks.md),
+checkpoints sit at seals of the followed path. Devices finalize and compact
+locally; see [lazy compaction](lazy-compaction.md) for frontiers, final seals,
+late frames and losing-seal rebootstrap.
 
 ## What runs on its own
 
-After each group commit the replica runs one bounded step for the scopes it
-wrote: continue or start a checkpoint, otherwise prune one batch. A checkpoint
-refreshes when its policy or key epoch changes, even without new operations. It
-starts after `checkpoint_operations` applied operations, or earlier once
-retained bytes reach `soft_bytes`. `checkpoint(scope)` and `prune(scope)` run the
-same steps to completion. `checkpoint_status(scope)` reports the checkpoint,
-covered and uncovered operations, the horizon per log, retained bytes and the
-last `maintenance_error`.
+After a group commit the replica runs a bounded maintenance step for its
+written scopes. Graph domains finalize ready seals but create no arbitrary-cut
+checkpoint: `compact(keep)` installs a base at a seal. Until someone compacts,
+a graph-domain join uses frames. Unchanged scopes keep their earlier seal base.
+
+Without a tip graph, maintenance still creates arbitrary-cut checkpoints. It
+starts after `checkpoint_operations` applied operations or at `soft_bytes`,
+and refreshes after a policy or key change. `checkpoint(scope)` completes
+checkpoint work, and `prune(scope)` completes pruning. `checkpoint_status`
+reports the base, covered/uncovered operations, each log's `pruned_prefix`,
+retained bytes and the last `maintenance_error`.
 
 | `RetentionLimits` field | Default | Meaning |
 | --- | --- | --- |
-| `checkpoint_operations` | 1,024 | Applied operations after the last checkpoint that start the next |
-| `soft_bytes` | 32 MiB | Retained header and body bytes that start checkpointing and pruning |
-| `hard_bytes` | 64 MiB | Retained bytes, other than a [staged publication](secure-sql.md#staged-publications)'s frames, at which `author` and `receive` return `Error::Backpressure` |
-| `handles` | 65,536 | Newest mutation handles kept after their operations are pruned |
+| `checkpoint_operations` | 1,024 | Applied operations that start an ordinary checkpoint |
+| `soft_bytes` | 32 MiB | Retained header/body bytes that start maintenance |
+| `hard_bytes` | 64 MiB | Retained bytes at which authoring/receipt backpressure, excluding staged publication frames |
+| `handles` | 65,536 | Newest mutation handles retained after pruning |
 
-Limits are per open replica and not persisted: call `set_retention_limits` after
-every open. A replica without a key for a scope holds custody only; it cannot
-verify a checkpoint, so it never prunes and eventually reports backpressure.
-
-The SDK installs configurable [default policies](sdk-bootstrapping.md#retention)
-for its granted collections. Direct runtime consumers still configure their own.
+Limits are per open replica; install them after every open. The SDK installs
+[default policies](sdk-bootstrapping.md#retention). A keyless custody holder
+cannot verify row replay or prune operations itself.
 
 ## When pruning waits
 
-Nothing is pruned until `set_retention_policy(scope, policy)` names who must
-hold copies. `prune` reports what stopped it as a `PruneBlock`:
+`set_retention_policy(scope, policy)` names required peers, declared-behind
+peers, copy count and retained window. Pruning releases only operations covered
+by a verified, durable checkpoint, in atomic batches of 64, oldest first.
+The newest `window` covered operations remain.
 
 | `PruneBlock` | Cause |
 | --- | --- |
-| `NoCheckpoint` | No verified checkpoint, or it no longer verifies |
-| `NoPolicy` | No `RetentionPolicy` for the scope |
-| `RecoveryCustody` | The domain requires recovery custodians, whose packages carry complete history |
-| `Unacknowledged` | A `required` peer not listed in `behind` has not acknowledged the operation |
-| `HorizonCustody` | Finalized existence bases lack enough other holders with a cut acknowledgment or finalized bootstrap receipt |
-| `SoleCopy` | Fewer than `max(1, copies)` other nodes acknowledged it; the last copy is never released |
-| `Custody` | Fewer configured full nodes than the [role](replica-roles.md) requires have applied it |
+| `NoCheckpoint` | No verified checkpoint |
+| `NoPolicy` | No retention policy |
+| `Unacknowledged` | A required peer not declared behind lacks the operation |
+| `SoleCopy` | Fewer than `max(1, copies)` other nodes acknowledged it |
+| `Custody` | Too few configured full nodes applied it |
 
-Pruning deletes headers, bodies, acknowledgments and outbox entries in atomic
-batches of 64, oldest first, and only behind a verified, flushed checkpoint.
-
-The newest `window` covered operations always stay, for peers that are slightly
-behind. `export_recovery` refuses a scope with a mergeable operation horizon;
-a strong horizon instead travels as a base with its retained suffix.
+Headers, bodies, acknowledgments and outbox entries go together. Declaring a
+peer behind removes a required-peer wait, never the durable-copy requirement.
+[Retention holds](retention-holds.md) and coordinated evidence keep their own
+rules. Recovery export still needs complete mergeable history.
 
 ## Syncing a peer
 
-`NativeSession::pull_page` returns the frames and, in `rebootstrap`, the scopes
-whose history the peer pruned past what this replica holds; their frames are not
-received. `pull` fails for such a scope instead. Without a session, compare
-`horizon_page` of the source with `behind_horizon` on the target.
+A pruned prefix is a per-author sequence through which operations were
+released. It is storage metadata, separate from seal finalization.
+`pruned_page` returns it as a `PrunedPage`; `behind_pruned` compares it with
+the receiving replica. Native requests use the checkpoint message family's
+`Pruned` and `PrunedLogs`. Range pages keep their `behind` flag.
 
-A frame at or before the local horizon is answered `ReceiveStatus::Pruned` and
-not stored. Ordinary checkpoint pruning keeps tombstones, so nothing recreates a
-deleted row; only a [mergeable horizon](mergeable-horizon.md) removes them.
+`NativeSession::pull_page` reports scopes needing rebootstrap instead of
+receiving their frames; `pull` fails for such a scope. A frame at or below
+the local pruned prefix returns `ReceiveStatus::Pruned` without storage.
+Ordinary checkpoints retain tombstones; compaction at seals releases dead
+rows, hidden losers, cascade orphans and their unused creation stubs.
 
 ## Rebootstrap
 
-SDK [join](sdk-bootstrapping.md#join) requests a checkpoint before ordinary
-catch-up, even when the source still retains its history. A writable source
-seals a current checkpoint on demand when offering it; in a domain with a tip
-graph it offers only its base at a seal ([checkpoints at
-seals](lazy-compaction.md#checkpoints-at-seals)). The import verifies and
-stores the checkpoint's rows page by page and then switches to it; a scope that
-held nothing is readable as each page commits. See
-[importing a checkpoint](checkpoint-import.md) for the calls, signed pages,
-what is readable meanwhile and the report of the switch. The SDK reports
-[bootstrapping readiness](sdk-bootstrapping.md#readiness) with its progress
-while an import remains.
+The SDK requests a checkpoint before ordinary catch-up. A graph-domain source
+offers only a base at a seal on its followed path; a source without a graph may
+sign a current checkpoint on demand. A scope with no offered seal base joins
+by frames. The graph lists issuer-authorized checkpoint records with their
+seal, signer, digest and rows; checkpoint bodies travel only on request.
+
+The importer verifies pages and switches transactionally to the checkpoint.
+A previously empty scope becomes readable as each page commits. Existing rows
+stay readable until the switch. See [checkpoint import](checkpoint-import.md)
+for staging, retained local operations and reports, and
+[SDK readiness](sdk-bootstrapping.md#readiness) for progress.
+
+A compacted seal that loses a race follows the winning path with writes
+refused. The SDK imports a listed checkpoint there, else rebuilds from its
+own frames or a peer retaining every frame, else waits for owner recovery.
+Logged scopes whose old fold released records need a signed existence base
+with the checkpoint. See [rebootstrap at seals](lazy-compaction.md#rebootstrap).
+
+A replica refuses its own checkpoint signature. Without a graph an authorized
+writer holding an imported base can sign a local replacement before offering
+it back to its signer. A graph-domain holder serves its existing seal base to
+other peers; it creates no arbitrary cut to change the signer.
+
+Keyless custody can serve a complete sealed checkpoint archive at a seal.
+Archive messages verify the signer's authority and page signatures; interrupted
+archives retain a cursor, and incomplete ones offer no checkpoint. There is no
+separate declaration exchange that automatically deposits archives.
 
 ## Retries
 
-A mutation handle whose operation was pruned is not authored again: `author`
-returns `Rejected`, while `author_buffered` and `lookup_mutation` return the
-operation hash. Reusing it with other input returns `Conflict`. Pruning forgets
-the oldest handles beyond `handles` whose operations are gone; a retry of one of
-those authors a new operation. Strong history uses a [per-domain base and window](strong-history.md): settled
-commands and redundant preparations are released, and results whose jobs have
-finished are pruned after required readers apply them. The latest result stays.
-A retained marker prevents a pruned command handle from being signed again;
-retry returns `Error::Pruned`, and other input returns `Conflict`. Recovery
-transfers carry these markers. Effect observations remain retained.
+A pruned mutation handle is not authored again while retained: `author`
+refuses it, and `author_buffered`/`lookup_mutation` return its operation hash.
+Reusing it with other input conflicts. Once it falls outside the handle
+window, its retry is a new operation.
 
 ## Verifying a file
 
-Open replays only the operations after each scope's verified checkpoint and
-compares the result with the stored rows and digest. `audit(scope)` checks every
-retained operation, the counters, handles, stored rows and checkpoint rows
-against their digests, and the replay, in batches under the replica lock.
-
-## Limits
-
-- Surviving rows are stored twice. A creation stub (hash, clock; about 45 bytes)
-  stays per stored row, tombstones included, until a horizon finalizes it.
-  Handles cost about 200 bytes each up to the window.
-- A frame naming a pruned dependency other than its log predecessor or a row
-  creation stays pending until a late copy of it arrives or a newer checkpoint
-  is imported.
-- The rebootstrap switch and `rebuild_projection` are one transaction
-  proportional to the scope's rows.
-- A row record names its author's bindings by digest; the sets are stored once
-  and are not removed with the rows. See
-  [stored row records](checkpoint-import.md#stored-row-records).
-- A checkpoint names at most 256 logs per scope and must fit one 256 KiB frame.
-- Checkpoint pages use the whole frame, less 8 KiB. A page's sealed plaintext
-  must fit one 64 KiB package, so a page holds at most 63 KiB of row records
-  and the author bindings they name, and at most 256 rows; stored bytes are
-  CBOR byte strings and count once. Each page carries its signer's signature;
-  a holder of an imported checkpoint serves the signer's pages. The first page also
-  carries a command table's strong state: 3.1 KB after one command, whatever
-  the chains, where it was 79 KB with two 20-grant chains embedded.
-- A chain beside the page must fit one 256 KiB session frame, and the confirmed
-  command itself 128 KiB with both chains.
-- `export_recovery` and recovery custodians need complete mergeable history.
-
-A keyless custody holder can also serve a complete sealed archive of a writer's
-finalized checkpoint. Native horizon exchanges deposit the pages when the writer
-initiates, or pull them when custody initiates. Referenced existence bases travel
-before the pages. Interrupted transfers resume from a durable cursor; incomplete
-archives offer no checkpoint. Readers use the normal verified import path.
-See [decision 0061](../decisions/0061-readable-projections-and-checkpoint-custody.md).
-
-## Offering an imported checkpoint back to its signer
-
-A replica refuses to rebootstrap from its own signed checkpoint. An authorized
-writer holding an imported checkpoint therefore creates a locally signed cut
-before offering it back to the original signer, even when no row has changed.
-Retries keep that new offer stable. A read-only holder cannot replace the
-signature and offers no checkpoint to the original signer; it can still serve
-the imported cut to other authorized peers. Signature, write-grant, generation,
-key-epoch and transactional import checks remain enforced.
+Open replays the retained suffix over the verified base and compares it with
+the stored rows. `audit(scope)` checks retained operations, counters, handles,
+row sets and replay in batches under the replica lock.
 
 ## The signed statement
 
-A checkpoint covers one `ResourceScope`. `SignedCheckpoint` is a
-`CheckpointStatement`, the signer's key and credential chain, signed under
-`rocky.encrypted-checkpoint.v3`; its identity is the
-`rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 13.
-Partition candidates, support rows and hidden marks are derived locally. A
-partition checkpoint carries only its authenticated tuple, materialized rows and
-identity marks; rebootstrap rebuilds its group partition and leaves other
-partitions unchanged. See [decision 0043](../decisions/0043-partition-horizon-state.md).
-
-Partition, admitted horizon and finalized horizon are independent optional
-fields; an admitted cut is never treated as finalized. The required additive
-`moves` field ([decision 0038](../decisions/0038-row-moves.md)) and the signer's
-revocation digest ([decision 0049](../decisions/0049-mergeable-revocation-set.md))
-are required. Other formats are refused before writes.
+`SignedCheckpoint` contains a `CheckpointStatement`, the node signer and its
+credential chain, signed under `rocky.encrypted-checkpoint.v3`. Its identity
+is `rocky.encrypted-checkpoint.id.v3` over the bytes. Format **15** is the only
+accepted checkpoint format; there are no legacy readers or migrations.
 
 | Field | Binds |
 | --- | --- |
-| `tip`, `schema` | The checkpoint tip and its schema generation; the local graph resolves its manifest |
-| `revocations`, `key_epoch`, `scope`, `partition` | The signer's [revocation](revocations.md) digest, the scope and its key generation |
-| `sequence`, `previous` | Position in the scope's checkpoint chain and the prior identity |
-| `frontier`, `clock`, `operations` | Per author applied sequence, tip hash and clock, ordered by author; highest clock; applied count |
+| `seal` | The base's seal in a graph domain; absent for ordinary checkpoints without a graph |
+| `tip`, `schema` | The sealed tip and schema generation; the graph resolves its manifest |
+| `revocations`, `key_epoch`, `scope`, `partition` | Signer's revocation set, encryption epoch, scope and optional authenticated tuple |
+| `sequence`, `previous` | Position in the scope's checkpoint chain and prior identity |
+| `frontier`, `clock`, `operations` | Per-author sequence/hash/clock, highest clock and covered count |
 | `identities` | Per-author identity high-water marks |
-| `moves` | Count and digest of opaque move links carried in the authenticated row records |
-| `rows`, `tombstones` | Count and digest of every stored row record, tombstones and creation hashes included |
-| `creations`, `handles` | Count and digest of (creation hash, clock) of stored rows, and of retained mutation handles |
-| `strong` | Base sequence/head and command-row commitment; retained results, commands, preparations and observations by identity |
-| `custody` | Covered operations others acknowledged, sole copies and recovery archives held |
-| `horizon`, `finalized` | Admitted and finalized [horizon](mergeable-horizon.md) declarations |
+| `moves` | Count/digest of opaque move links in row records |
+| `rows`, `tombstones` | Count/digest of stored row records and tombstone count |
+| `creations`, `handles` | Creation witness and retained mutation-handle summaries |
+| `custody` | Covered acknowledgments, sole copies and recovery archives |
+| `coordinated` | The [coordinated-log binding](stuck-recovery.md#checkpoint-binding) |
 
-Creation is capture (frontier, counts and live digest in one transaction),
-replay of retained frames into an overlay over the previous checkpoint (64
-operations per transaction), seal (the replayed digest must equal the captured
-one, else the previous checkpoint stays and pruning stops there) and install
-(256 rows per transaction).
+A statement carries no admitted or finalized declaration fields. The link
+and replica file stay `rocky.link.v9` and `rocky.encrypted-replica.v25` for
+this unpushed phase. Row frames remain format 11.
 
 ## Design rationale
 
-- **Per scope**, because keys, read authority and custody are per scope.
-- **Set digests are LtHash16 with 1,024 lanes** (SHA-256 of the state in the
-  statement): members can be added and removed, so the digest is maintained in
-  every applying transaction and a checkpoint never scans a scope. Rejected: a
-  plain sum of 256-bit hashes (collisions at about 2^32 work, and peers here are
-  adversarial) and a streamed hash (one pass over the scope per checkpoint).
-- **Verified by recomputation**: a checkpoint is used only after "previous
-  checkpoint plus retained operations" reproduced the stored projection. The
-  local application order is causally closed, so any prefix is a consistent cut.
-- **A handle window**, not a residue per authored operation, so the file stops
-  growing; a retry older than the window authors again.
-- **The last copy is never released** and a custody-only replica never prunes:
-  it cannot verify what a checkpoint claims.
-- Open: may a custody-only replica prune under a checkpoint signed by a reader a
-  policy names as trusted, and should recovery packages carry a checkpoint so
-  that domains with required custodians can prune?
+Checkpoints are per scope because keys, read authority and custody are per
+scope. Set digests use LtHash16 with 1,024 lanes and SHA-256 of the accumulator,
+maintained transactionally so an ordinary checkpoint need not scan live rows.
 
-Every checkpoint uses the node key. Its numbered node credential proves whole-scope
-read and write authority. Checkpoint format 13 is the sole current version;
-older formats are refused.
+## Limits
+
+- Surviving rows are stored twice, in the live workspace and its replay base.
+  A creation stub remains for each stored row and required suffix dependency.
+- A checkpoint names at most 256 logs and fits one 256 KiB frame.
+- Pages hold at most 256 rows and 63 KiB plaintext, leaving room for framing
+  and author bindings; every page carries its signer's signature.
+- A missing pruned dependency other than a predecessor or creation witness
+  waits for evidence or a replacement checkpoint.
+- The final switch and projection rebuild are one transaction proportional
+  to the scope's rows. Constraint candidates and support rows are derived,
+  with [partition-local rebuilds](partitioned-scopes.md).
+- A row's author bindings are stored by digest; see
+  [stored records](checkpoint-import.md#stored-row-records).
+- Recovery export and recovery custodians still require complete mergeable
+  history. The ordinary pruning copy gate never releases the last copy.

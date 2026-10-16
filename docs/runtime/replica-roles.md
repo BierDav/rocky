@@ -43,8 +43,8 @@ only while its credentials grant whole-scope read.
 ### Syncing a scope
 
 The SDK exchanges selected group-member frontiers in bounded batches, retaining
-one scope per table and partition. Equal applied frontiers and horizons skip
-empty row transfers; existence logs and horizon acknowledgments still run.
+one scope per table and partition. Equal applied frontiers skip empty row transfers; existence logs and bases
+still reconcile.
 A scope either side may not hold whole, including a partition the server has not
 learned, is refused alone and skipped for that session; the rest of the batch
 proceeds. [Decision 0044](../decisions/0044-group-frontier-exchange.md) defines
@@ -57,7 +57,7 @@ A `NativeSession` request channel of a [live link](live-links.md) pulls by front
 | Call | What it does |
 | --- | --- |
 | `catch_up(replica, scope, quota)` | Pages of at most 32 frames the replica lacks; acknowledges its frontier after each page |
-| `sync_scope(replica, scope, quota)` | `catch_up`, rebootstrapping first if the replica is behind the peer's horizon |
+| `sync_scope(replica, scope, quota)` | `catch_up`, rebootstrapping first if the replica is behind the peer's pruned prefix |
 | `push(replica, scope, quota)` | Sends what the peer lacks; the peer's frontier comes back as acknowledgment |
 | `peer_frontier` / `peer_scopes` | The peer's frontier of a scope; the scopes it holds that this replica may hold |
 | `read_remote(replica, scope, after, rows)` | A remote read, below |
@@ -75,7 +75,7 @@ log gets `behind` and no frames.
 
 Any admitted peer may report frontiers, so the replica bounds what peers it
 was not told to keep leave behind: at most 256 unconfigured peers hold
-frontiers or horizon credentials, and the least recently served lose theirs
+frontiers, and the least recently served lose theirs
 first. Full nodes and the peers named with `configure_peers` are never
 dropped; a dropped frontier only delays pruning
 ([decision 0051](../decisions/0051-roster-free-admission.md)).
@@ -161,7 +161,7 @@ pass without one. Naming a delivery target records its held and applied
 frontiers as acknowledgment and clears the outgoing work they cover.
 
 `RuntimeConfig::full_nodes` names delivery targets that are full nodes. With
-`RetentionPolicy::custody` set, only their applied frontiers move the horizon,
+`RetentionPolicy::custody` set, only their applied frontiers advance the pruned prefix,
 and the other targets rebootstrap from a full node when they fall behind.
 `RetentionStatus::peers` reports what each target last reported.
 
@@ -173,8 +173,7 @@ A frame's signed header names its author's credential chain by digest
 its pages hold frames alone: 32 frames of a 20-grant author in a 128 KiB page,
 where 3 fit with the 32 KB chain in every header.
 
-A replica stores each chain once. A retained operation, the horizon credential
-of a peer and a registered row author name it; the transaction that removes
+A replica stores each chain once. A retained operation and a registered row author name it; the transaction that removes
 the last of them removes the chain, so an interrupted prune leaves no
 operation without its chain. Chain bytes do not count toward the retention
 limits. `audit` fails on an operation whose chain is missing.

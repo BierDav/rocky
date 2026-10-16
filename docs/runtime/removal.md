@@ -77,7 +77,7 @@ scope is rebuilt from its checkpoint base and the retained frames after it,
 one transaction per scope. The queue (`secure_repull`) survives a crash.
 Writes covered by the base and pruned are not recovered; such a copy differs
 from the finalized cut and imports the
-[finalized checkpoint](mergeable-horizon.md).
+[checkpoint at a seal](lazy-compaction.md#checkpoints-at-seals).
 
 ## The SDK
 

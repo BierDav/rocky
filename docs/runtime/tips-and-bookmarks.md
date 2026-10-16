@@ -13,9 +13,8 @@ off an open tip first ends that tip's log
 ([seals and moves](coordinated-writes.md#seals-and-moves)). A call whose seal
 lost to one this device already holds fails `sealed` (not retryable); one the
 coordinator did not confirm fails `coordinator_unavailable` (retryable) and
-publishes nothing. Until
-[phase 15](../features_09/15-lazy-compaction.md) a seal compacts nothing and
-the [mergeable horizon](mergeable-horizon.md) still releases evidence; until
+publishes nothing. A seal changes no rows; each device
+[finalizes and compacts locally](lazy-compaction.md). Until
 [phase 17](../features_09/17-schema-changes-through-seals.md) schema changes are
 explicit [generations](generations.md), refused once a domain has a graph.
 

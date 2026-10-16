@@ -26,7 +26,7 @@ a pass after new receipts or subscription changes, including insertions before t
 cursor. Custody and application remain distinct. Operation headers and bodies
 behind a verified checkpoint are pruned under a retention policy; tombstones,
 strong requests and effect identities are not. Each page names the scopes with
-a horizon, and a replica behind it rebootstraps from a signed checkpoint; see
+a pruned prefix, and a replica behind it rebootstraps from a signed checkpoint; see
 [encrypted checkpoints](encrypted-checkpoints.md).
 
 ## Redundant recovery custody

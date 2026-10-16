@@ -63,7 +63,7 @@ against the statement, then installs the checkpoint record and frontier.
 `RebootstrapReport` accounts for every local operation: `superseded` when the
 checkpoint covers it, otherwise `reapplied`, `rejected` with the reason, or
 `pending` on a dependency or key. A checkpoint that ends before the replica's
-own horizon, or whose signature, signer or definition does not verify, is
+own pruned prefix, or whose signature, signer or definition does not verify, is
 refused. The signer needs whole-scope read and a write grant; see
 [bootstrap signers](sdk-bootstrapping.md#bootstrap-signers). Its credentials
 must be valid at admission and again at the switch; an interrupted import does

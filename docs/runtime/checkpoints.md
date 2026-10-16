@@ -5,7 +5,7 @@ see [encrypted checkpoints](encrypted-checkpoints.md). Rationale is at the
 [end](#design-rationale).
 
 A domain no longer keeps every operation. It keeps the stored projection, a
-verified checkpoint of it, and the operations after a *horizon*. This guide is
+verified checkpoint of it, and the operations after a *pruned prefix*. This guide is
 for an application or transport author who has to configure retention, sync a
 peer that was offline, or verify a file.
 
@@ -20,7 +20,7 @@ step beside each group of writes of a domain:
    as the group wrote, until the copy reaches the candidate.
 3. The copy's row digest must equal the projection's digest at that frontier.
    The checkpoint is then verified and the writer flushes once.
-4. The horizon moves up to the checkpoint, less the retained window, as far as
+4. The pruned prefix moves up to the checkpoint, less the retained window, as far as
    delivery targets allow. Operations behind it are deleted in batches.
 
 Nothing runs while a domain is idle. `Replica::checkpoint()` and
@@ -35,19 +35,19 @@ way with `automatic: false`.
 | `handles` | 65,536 | Most recent local mutation and command handles kept for retries |
 | `automatic` | true | Run steps beside writes |
 | `request_hold` | None | How long an unresolved strong request may hold checkpoints before it is released |
-| `behind_after` | None | How long a delivery target may hold back the horizon before it is declared behind |
-| `custody` | 0 | Full nodes that must have applied an operation before the horizon passes it; zero waits for every delivery target |
+| `behind_after` | None | How long a delivery target may hold back the pruned prefix before it is declared behind |
+| `custody` | 0 | Full nodes that must have applied an operation before the pruned prefix passes it; zero waits for every delivery target |
 
 Set it in `RuntimeOptions::retention`. `Replica::open_with_options` takes options
 for a single-domain file.
 
 ## When pruning waits
 
-The horizon passes an operation only when every configured delivery target has
+The pruned prefix passes an operation only when every configured delivery target has
 acknowledged it, has reported it applied in `catch_up`, or has been declared
 behind. An operation nobody else is known to hold is never deleted.
 
-`Replica::retention_status()` reports the checkpoint, horizon, retained counts
+`Replica::retention_status()` reports the checkpoint, pruned prefix, retained counts
 and a hold:
 
 | `CheckpointHold` | Cause | What to do |
@@ -73,27 +73,29 @@ requests uses `catch_up_after` with the cursor in `TransferPage::next`; see
 ```rust
 match source.catch_up(Some(peer), target.sync_state().await?).await? {
     Catchup::Operations(page) => { /* receive, acknowledge, process_pending */ }
-    Catchup::BehindHorizon(notice) => { /* import the checkpoint, below */ }
+    Catchup::BehindPruned(notice) => { /* import the checkpoint, below */ }
 }
 ```
 
-`catch_up` compares the peer's applied frontier with the horizon. Run
+`catch_up` compares the peer's applied frontier with the pruned prefix. Run
 `process_pending` on the peer first, or received operations it has not applied
 yet make it look behind. Naming a delivery target records its held and applied
 frontiers as acknowledgment and clears a `declare_behind`. With
-`RetentionPolicy::custody`, only full nodes' applied frontiers move the horizon.
+`RetentionPolicy::custody`, only full nodes' applied frontiers move the pruned prefix.
 
 `SyncState::held` is the contiguous prefix per author; `received` lists at most
 256 retained operations above it.
 `missing_operations(known)` still returns retained operations absent from an
 exact set, but it cannot tell a peer that pruned from one that never received,
-and it cannot signal the horizon.
+and it cannot signal the pruned prefix.
 
-`HorizonNotice::encode` is the wire form of the signal (magic `rocky.horizon.v1`):
-scope, node, horizon, and the commitment and sequence of the checkpoint to import.
-From the moment a horizon is stored, operations at or before it count as applied.
-Pruning is driven by the stored horizon alone, so it is idempotent and resumes
-after a crash.
+`PrunedNotice::encode` is the wire form of the signal (magic `rocky.pruned.v1`):
+scope, node, pruned prefix, and the commitment and sequence of the checkpoint to import.
+From the moment a pruned prefix is stored, operations at or before it count as applied.
+Pruning is driven by the stored pruned prefix alone, so it is idempotent and resumes
+after a crash. The stored field is `pruned_prefix`; trusted file identity
+revision 4 is the sole current version. Earlier identities are refused before
+configuration or schema writes, with no migration or legacy reader.
 
 ## Rebootstrap
 
@@ -145,10 +147,10 @@ option, for the reason above. A leaner mode for very large applications is
 
 ## What a retry or a late operation sees
 
-- An operation at or before the horizon that arrives again is acknowledged as an
+- An operation at or before the pruned prefix that arrives again is acknowledged as an
   applied duplicate. Its bytes are not compared.
-- An operation that depends on one behind the horizon is ready. A row deleted
-  before the horizon stays deleted, because its tombstone is a stored row.
+- An operation that depends on one behind the pruned prefix is ready. A row deleted
+  before the pruned prefix stays deleted, because its tombstone is a stored row.
 - A mutation or command handle whose operation or request was pruned returns
   `Error::Pruned` and is not executed. Reusing it with other input still returns
   `Conflict`. A handle older than `handles` is forgotten.

@@ -26,7 +26,7 @@ Replies contain `version: 2` and either `status: "ok", value: {...}` or
 `status: "error", error: {code, retryable, message}`. Codes are stable strings:
 `denied`, `unsupported_generation`, `missing_dependencies`, `missing_head`,
 `quota`, `corruption`, `conflict`, `closed`, `unknown_confirmation`,
-`horizon_pending` and `storage`. Coordinated writes, seals and bookmark moves
+and `storage`. Coordinated writes, seals and bookmark moves
 add `sealed` (not retryable) and `coordinator_unavailable` (retryable), and
 owner-signed cuts `abandoned`, `cut_conflict` and `cut_base_missing` (not
 retryable); see [coordinated writes](coordinated-writes.md#failures) and

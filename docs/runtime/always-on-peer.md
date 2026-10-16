@@ -11,9 +11,9 @@ does not count as applied full-node custody for pruning or eviction.
 A custody grant covers every partition of its tables. A device
 offers each list's partition tuple to a peer whose credentials grant custody
 without read, and the peer registers and keeps it across restarts
-([decision 0045](../decisions/0045-custody-partition-offers.md)). It does not
-admit horizon statements or forward acknowledgments: participants exchange them
-with an issuer directly.
+([decision 0045](../decisions/0045-custody-partition-offers.md)). It relays the tip graph and
+retains ciphertext under its custody grants; devices choose their own
+[compaction schedule](lazy-compaction.md).
 
 ## Enroll and configure
 

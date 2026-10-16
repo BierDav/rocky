@@ -57,7 +57,6 @@ list, and each list's key is shared explicitly with `partition_share`.
 | `close_during_sync` | Graceful close during bootstrap, sync and a subscription |
 | `foreground_rebind` | Socket fault and background/foreground on fixed and ephemeral ports |
 | `pending_forever` | Readiness of full writers with none, some or all lists shared |
-| `horizon_freeze` | Horizon declared while a participant is dead |
 | `bootstrap_from_partial` | A new full node can reach only a partial peer |
 | `revoked_via_stale_peer` | A revoked writer pushes through a peer unaware of the revocation |
 | `double_open` | Same directory in two processes; stale locks after SIGKILL |

@@ -307,7 +307,7 @@ every request.
   registry tombstoned.
 - Limits: 64 contacts, 16 selected per sync pass, 64 historical peers met retained, with active/opening links listed independently,
   8 issuers, 4 routes per contact,
-  2,048-byte addresses. The replica keeps horizon credentials and frontiers of
+  2,048-byte addresses. The replica keeps frontiers of
   at most 256 unconfigured peers ([transport bounds](sdk-transports.md#bounds)).
 - Any contact can be removed, the last issuer included; it is no longer dialed
   and is still served. `authority.renewalRoutes` lists the remaining known renewal candidates,

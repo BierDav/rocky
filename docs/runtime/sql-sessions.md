@@ -155,7 +155,7 @@ recorded outcome when the statements are the same and `Conflict` otherwise.
 until it is pruned.
 
 A token record is kept as long as a mutation handle of the same commit: until
-its operations are behind the [pruning horizon](checkpoints.md) and
+its operations are behind the [pruned prefix](checkpoints.md) and
 `RetentionPolicy::handles` newer local operations exist, 65,536 by default.
 After that the token is unknown: `sql_outcome` returns None and a commit
 under it is a new commit. Ask for an uncertain outcome before then.

@@ -1,5 +1,10 @@
 # Adopting newer generations
 
+Adoption on discovery is deferred until
+[phase 17](../features_09/17-schema-changes-through-seals.md). The current
+[explicit generation-open contract](generations.md#peer-discovery) refuses
+incompatible peers. The earlier discovery workflow below is historical.
+
 A database is exactly one [generation](generations.md). A device moves its
 database to any newer generation it meets, whatever schema its application
 declares, and keeps syncing. [Decision 0068](../decisions/0068-adopting-newer-generations.md)
@@ -8,7 +13,7 @@ records why.
 ## Discovery
 
 A sync finds a peer on a newer generation when the peer's session hello, a
-frame or a [horizon statement](mergeable-horizon.md) names a manifest this
+frame or checkpoint names a manifest this
 device does not know, including when opening the link to the peer fails on
 it; after adopting, earlier failures no longer back that peer off.
 Credentials name no generation, so they never decide this. The device then
@@ -128,7 +133,6 @@ undefined. This is an
   and `one_schema_signed_apart_is_one_generation_with_the_earliest_baseline`.
 - `rocky-sdk` `tests/generations.rs`: `an_older_application_adopts_the_newer_generation_it_meets`,
   `a_crash_before_the_switch_resumes_at_the_newer_generation`,
-  `a_newer_horizon_is_acknowledged_after_adopting_its_generation`,
   `an_older_application_joins_at_the_households_generation` and
   `issuers_that_sign_one_schema_apart_end_on_one_generation`.
 - Adoption without an issuer: `rocky-sdk` `tests/generations.rs`

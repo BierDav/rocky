@@ -66,7 +66,7 @@ unreserved record is 0076; 0064 remains reserved for
 | Replica roles, subsets, range reconciliation | [replica-roles](../runtime/replica-roles.md#design-rationale) |
 | Checkpoints, pruning horizon, rebootstrap | [checkpoints](../runtime/checkpoints.md#design-rationale) |
 | Signed encrypted checkpoints | [encrypted-checkpoints](../runtime/encrypted-checkpoints.md#design-rationale) |
-| Issuer-declared mergeable horizon | [mergeable-horizon](../runtime/mergeable-horizon.md#design-rationale) |
+| Lazy compaction at seals | [lazy-compaction](../runtime/lazy-compaction.md) |
 | Existence logs, puppets, virtual rows | [existence-logs](../runtime/existence-logs.md#design-rationale) |
 | Encrypted strong bases and retained suffixes | [strong-history](../runtime/strong-history.md#design-rationale) |
 | Logical schema, typed projections, row identity | [logical-schema](../runtime/logical-schema.md#design-rationale) |

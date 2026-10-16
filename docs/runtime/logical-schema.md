@@ -73,7 +73,7 @@ signs and zero are refused.
   stay bound to the canonical natural key, never to `id`.
 - The typed table shows, per natural key, the live incarnation with the
   greatest creation stamp. Hidden incarnations and tombstones are retained
-  until the [horizon](mergeable-horizon.md).
+  until [compaction at a seal](lazy-compaction.md).
 
 Moving an independently partitioned row keeps its `id`, original birth proof
 and field stamps. Use the dedicated [row-move surface](row-moves.md), rather

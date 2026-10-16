@@ -72,11 +72,11 @@ the assigned executor refuses delivered commands, and a fenced one answers witho
 | Window | Default | After it |
 | --- | --- | --- |
 | Admission | 24 h after the identity's issue time | Never confirmed: the ticket reads `Expired` and never executes |
-| Response horizon | 7 days, or earlier once the invoker acknowledged | Coordinator lookup ends: an unknown ticket reads `Retired`, outcome unavailable there |
+| Response window | 7 days, or earlier once the invoker acknowledged | Coordinator lookup ends: an unknown ticket reads `Retired`, outcome unavailable there |
 
 Run the same ticket again after any uncertainty; never submit a replacement, and
 never treat `Expired`/`Retired` as success or failure of the business intent. Keep
-results and receipt evidence on your devices: after the horizon only they prove an
+results and receipt evidence on your devices: after that window only they prove an
 outcome. A provider's genesis states its exact limits. See
 [coordinator retention](coordinator-retention.md).
 
@@ -121,9 +121,9 @@ list derives every table's key:
 4. `moveRow` moves an item to another list in one commit; an offline edit follows it.
 5. Revoking a recorded device rotates only scopes it could read, and queues new
    epochs for remaining readers. No replicated row records recipients.
-6. A horizon declares per table and list, with participants from the issuer
-   registry. Finalize items, then categories, then lists. Custody relays the
-   statements and acknowledgments; a participant need not contact an issuer.
+6. The application seals its followed tip, then each device chooses when to
+   [compact](lazy-compaction.md) locally. No participant list or deadline
+   blocks ordinary writes while a seal waits for evidence.
 
 Shopping version 6 exposes only lists, categories, items, requests and decisions
 on members. Device names and kinds are trusted-only; command identities in

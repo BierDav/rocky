@@ -207,7 +207,7 @@ session follows.
 | Request channels per sync and peer | 16, each with its own byte budget |
 | Contacts kept; contacts dialed per sync pass | 64; 16, issuers first, then the least recently attempted |
 | Peers met without a contact that `peers` lists | 64, the least recent dropped |
-| Unconfigured peers with horizon credentials or frontiers per replica | 256, the least recently served since open losing theirs; contacts, issuers and full nodes are kept |
+| Unconfigured peers with frontiers per replica | 256, the least recently served since open losing theirs; contacts, issuers and full nodes are kept |
 | Closing a network service | 5 s drain, then cancellation |
 | Discovery | [its own bounds](discovery.md#bounds) |
 

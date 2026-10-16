@@ -123,12 +123,40 @@ A record is refused before any state change when its format, tip, domain,
 table, signature, node chain, insert/delete right, creation author or log
 position is wrong. A gap returns `PendingDependencies` and is not stored.
 
+## Bases at seals
+
+A holder of the parent scope folds records through a seal's per-author
+frontier locally, alongside row compaction. Each frame counts its signed
+existence records; the seal waits until every counted record is held.
+The fold records per-signer log heads, per-author identity high-water marks,
+and rows having a creation or a deletion alone. Rows with both are dead;
+their records and liveness entries go, while their ids stay retired.
+
+Local folds are never served as authority. The SDK signs them after `compact`
+when its identity may sign tip statements. `SignedExistenceBase` (format 1,
+`rocky.existence-base.v1`) binds the domain, seal, an
+`ExistenceCut` of `ExistenceLog` heads and an authenticated `ExistenceBase`
+descriptor. The neutral type names do not change the signed field encoding.
+There is no declaration or participant certificate in the attachment.
+
+Child-only holders and joiners fetch the signed base instead of released
+records. `existence_base_offer/page`, `begin_existence_base`,
+`stage_existence_base` and `finish_existence_base` transfer at most 256 rows
+per page, with durable cursors, canonical order and root checks. The installed
+base and retained suffix switch atomically; tampered or incomplete staging
+changes no installed state. A received base must name a seal on the followed
+path. Records after the cut continue each signer log from its folded head.
+
+A child-only holder cannot count the parent's frames and never folds its log
+itself. After a compacted seal loses, a logged scope whose fold released its
+records needs a checkpoint and signed base on the winning path; it cannot
+recreate the records from row frames. See
+[rebootstrap](lazy-compaction.md#rebootstrap).
+
 ## Limits
 
 - Logs keep every record until a holder compacts at a seal
-  ([lazy compaction](lazy-compaction.md#existence-logs)) or, without a tip
-  graph, a [mergeable horizon](mergeable-horizon.md)
-  seals them into an existence base.
+  ([bases](#bases-at-seals)). Without a tip graph they remain records.
 - Partitioned children may reference an unpartitioned logged parent. Partitioned
   existence logs and references between different partition groups remain deferred.
 - Across a reference to a logged table, a child depends on the parent's log

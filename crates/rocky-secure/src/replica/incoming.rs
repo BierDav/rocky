@@ -250,6 +250,7 @@ impl<A: RowApplication> Inner<A> {
         }
 
         let mut retired_creations = BTreeSet::new();
+        // Behind a finalized base, a creation whose row is gone is retired.
         if let Some(scope_id) = self
             .find_scope_id(operation.header.extensions.scope)
             .await?
@@ -257,7 +258,9 @@ impl<A: RowApplication> Inner<A> {
                 .checkpoint_record(scope_id, true)
                 .await?
                 .and_then(|record| record.signed)
-                .and_then(|signed| signed.statement.finalized)
+                .filter(|signed| {
+                    signed.statement.finalized.is_some() || signed.statement.seal.is_some()
+                })
             && let Some(key) = self.opening_key(
                 operation.header.extensions.scope,
                 operation.header.extensions.generation,

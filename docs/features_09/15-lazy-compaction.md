@@ -1,8 +1,9 @@
 # 15. Lazy compaction
 
-Status: proposed; not started. Blocked on the README's open question
-[how members see a final seal](README.md#open-questions); a
-[proposal](#proposal-final-seals) awaits the user's decision.
+Status: in progress. The [final-seal proposal](#proposal-final-seals) was
+accepted and is implemented; slice 1 is implemented. See the
+[evidence](15-lazy-compaction-evidence.md) and the
+[guide](../runtime/lazy-compaction.md).
 Owner: `rocky-secure` finalization, existence bases, checkpoints and
 pruning; `rocky-sdk` maintenance. Depends on
 [phase 14](14-seals-and-bookmarks.md). Follow the

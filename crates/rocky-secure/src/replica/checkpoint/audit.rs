@@ -124,7 +124,7 @@ impl<A: RowApplication> Inner<A> {
             let (last, next) = transaction!(@commit self, |inner| {
                 let mut next = sets.clone();
                 let last = inner
-                    .replay(
+                    .replay_sealed(
                         scope,
                         id,
                         Overlay::Scratch,
@@ -145,7 +145,7 @@ impl<A: RowApplication> Inner<A> {
         let differing = collect_rows(
             self.conn
                 .query(
-                    "SELECT 1 FROM secure_checkpoint_scratch s LEFT JOIN secure_rows r ON r.scope=? AND r.row=s.row WHERE s.scope=? AND (r.fields IS NULL OR r.fields<>s.fields) LIMIT 1",
+                    "SELECT 1 FROM secure_checkpoint_scratch s LEFT JOIN secure_rows r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND (s.fields=X'' AND r.fields IS NOT NULL OR s.fields<>X'' AND (r.fields IS NULL OR r.fields<>s.fields)) LIMIT 1",
                     bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(id)]),
                 )
                 .await?,

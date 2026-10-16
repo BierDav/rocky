@@ -123,6 +123,12 @@ async fn a_seal_its_log_committed_becomes_final_and_beats_a_later_owner_seal() {
         .unwrap();
     let graph = tom.1.tip_graph(fixture.lineage.domain).await.unwrap();
     assert_eq!(graph.seal(main.tip).unwrap(), Some(&committed));
+    // The writer holds every frame through the final seal: it compacts
+    // there at once, whatever count of seals it leaves uncompacted.
+    share(&tom.1, &alice.1).await;
+    let report = alice.1.compact(fixture.lineage.domain, 5).await.unwrap();
+    assert_eq!(report.waiting, None);
+    assert_eq!(report.compacted, Some(committed.id().unwrap()));
     // Reopening verifies the stored record again.
     drop(carol);
     let carol = open(&fixture.lineage, &fixture.dir, "carol", &key).await;

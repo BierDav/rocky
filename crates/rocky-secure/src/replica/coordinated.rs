@@ -580,7 +580,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(CoordinatedError::Sealed);
         }
         if head.closed {
-            return Err(CoordinatedError::Refused(rocky_core::CoordinationError::Denied));
+            return Err(CoordinatedError::Refused(
+                rocky_core::CoordinationError::Denied,
+            ));
         }
         if head.pending.is_some() {
             return Err(CoordinatedError::Conflict);

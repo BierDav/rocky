@@ -586,6 +586,15 @@ impl Session {
         self.tips(json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}))
             .await
     }
+    /// Finalizes ready seals of the followed path and compacts at the newest
+    /// one that is final or has `keep` seals after it.
+    pub async fn compact(&self, keep: usize) -> Result<crate::TipCompaction, Failure> {
+        self.tips(json!({"action":"compact","keep":keep})).await
+    }
+    /// Where this device's compaction of the followed path stands.
+    pub async fn compaction(&self) -> Result<crate::TipCompaction, Failure> {
+        self.tips(json!({"action":"compaction"})).await
+    }
     /// Opens a tip on `seal` and returns it.
     pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
         let opened: Value = self

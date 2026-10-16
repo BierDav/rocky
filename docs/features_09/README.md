@@ -281,23 +281,9 @@ stay and are compacted at seals.
 
 ## Open questions
 
-- **How members see a final seal.** [Phase 15](15-lazy-compaction.md)
-  treats a seal committed in its tip's log as final. Today the graph, not
-  the log, decides between seals: trusted nodes end the log first, but any
-  seal of an ended log is admitted, because members cannot verify the
-  coordinator's decision
-  ([evidence](14-seals-and-bookmarks-evidence.md#integration-terminal-seals-in-the-graph)).
-  Finality needs evidence members verify, such as the in-sync set's
-  acknowledgments of the terminal entry, and a rule for an owner seal that
-  arrives after it. Settle this before phase 15's first slice.
-
-  Proposed ([details](15-lazy-compaction.md#proposal-final-seals)): trusted
-  nodes sign an acknowledgment of the terminal the coordinator reports
-  committed, and a graph record carrying enough of them makes a seal final.
-  A final seal beats every other seal of its tip, the owner's included; the
-  coordinator commits one terminal per log, so an owner seal is final only
-  when it is that terminal, and loses only when it was never committed. The
-  owner then moves the bookmark instead. Awaiting the user's decision.
+None. How members see a final seal was settled for phase 15: trusted
+nodes acknowledge the committed terminal and a graph record carrying enough
+acknowledgments makes a seal final ([final seals](../runtime/seal-finality.md)).
 
 ## Agent execution contract
 

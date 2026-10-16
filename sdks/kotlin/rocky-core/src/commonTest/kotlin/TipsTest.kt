@@ -78,6 +78,23 @@ class TipsTest {
     }
 
     @Test
+    fun compactSendsKeepAndDecodesTheReport() = runBlocking {
+        val report = Json.parseToJsonElement(
+            """{"finalized":"second","compacted":"first","uncompacted":["second"],"waiting":null,
+              "rebootstrap":null,"pruned":18446744073709551615,
+              "blocked":[{"scope":"{\"table\":\"items\"}","reason":"NoPolicy"}]}""",
+        ).jsonObject
+        val (transport, tips) = recordingTips { report }
+        assertEquals(
+            TipCompaction("second", "first", listOf("second"), null, null, ULong.MAX_VALUE, listOf(TipPruneBlock("""{"table":"items"}""", "NoPolicy"))),
+            tips.compact(keep = 1u),
+        )
+        tips.compaction()
+        assertEquals(JsonPrimitive(1), transport.calls.first().getValue("keep"))
+        assertEquals(listOf("compact", "compaction"), transport.calls.map { it.action() })
+    }
+
+    @Test
     fun openRefusesAZeroMinimumBeforeSending() = runBlocking {
         val (transport, tips) = recordingTips()
         assertFailsWith<IllegalArgumentException> { tips.open("seal-id", 0u) }

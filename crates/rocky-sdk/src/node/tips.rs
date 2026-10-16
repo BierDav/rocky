@@ -2,8 +2,8 @@
 //! graph. See `docs/runtime/tips-and-bookmarks.md`.
 use super::*;
 use crate::tips::{
-    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipDevice, TipFrontierLog, TipInspection,
-    TipNode, TipOpening, TipScopeFrontier, TipSeal, TipStatus,
+    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipCompaction, TipDevice, TipFrontierLog,
+    TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier, TipSeal, TipStatus,
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
@@ -52,6 +52,35 @@ impl Node {
         match action {
             "status" => {}
             "inspect" => return Ok(serde_json::to_value(self.inspect_tips(scope).await?)?),
+            "compaction" => {
+                return Ok(serde_json::to_value(
+                    self.compaction(scope, 0, Vec::new()).await?,
+                )?);
+            }
+            "compact" => {
+                let keep = match &request["keep"] {
+                    Value::Null => 0,
+                    keep => keep
+                        .as_u64()
+                        .and_then(|keep| usize::try_from(keep).ok())
+                        .ok_or_else(|| refused("keep must be a non-negative number"))?,
+                };
+                let report = self.replica.compact(scope, keep).await?;
+                self.observations.touch();
+                let blocked = report
+                    .blocked
+                    .iter()
+                    .map(|(scope, block)| {
+                        Ok(TipPruneBlock {
+                            scope: serde_json::to_string(scope)?,
+                            reason: format!("{block:?}"),
+                        })
+                    })
+                    .collect::<Result<_, Failure>>()?;
+                return Ok(serde_json::to_value(
+                    self.compaction(scope, report.pruned, blocked).await?,
+                )?);
+            }
             "seal" => {
                 let close = match &request["close"] {
                     Value::Null => false,
@@ -187,6 +216,24 @@ impl Node {
                     })
                 })
                 .collect::<Result<_, Failure>>()?,
+        })
+    }
+
+    async fn compaction(
+        &self,
+        scope: Scope,
+        pruned: u64,
+        blocked: Vec<TipPruneBlock>,
+    ) -> Result<TipCompaction, Failure> {
+        let status = self.replica.compaction_status(scope).await?;
+        Ok(TipCompaction {
+            finalized: status.finalized.as_ref().map(hex),
+            compacted: status.compacted.as_ref().map(hex),
+            uncompacted: status.uncompacted.iter().map(hex).collect(),
+            waiting: status.waiting,
+            rebootstrap: status.rebootstrap.as_ref().map(hex),
+            pruned,
+            blocked,
         })
     }
 

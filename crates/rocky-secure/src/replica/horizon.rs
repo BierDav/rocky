@@ -240,6 +240,9 @@ impl<A: RowApplication> Inner<A> {
     async fn verify_horizon(&self, signed: &SignedHorizon) -> Result<(), Error> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
+        if self.graphs.contains_key(&statement.scope.domain) {
+            return Err(denied("a domain with a tip graph compacts at seals"));
+        }
         if statement.tip != self.tip {
             return Err(denied("horizon tip is not followed"));
         }
@@ -417,6 +420,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<HorizonStatement, Error> {
         if peers.len() > 64 {
             return Err(denied("horizon_participants_full: at most 64 participants"));
+        }
+        if self.inner.lock().await.graphs.contains_key(&scope.domain) {
+            return Err(denied("a domain with a tip graph compacts at seals"));
         }
         let inner = self.inner.lock().await;
         let time = now()?;

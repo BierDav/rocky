@@ -5,7 +5,7 @@ lose to a concurrent seal that arrives late
 ([races](tips-and-bookmarks.md)). A seal its tip's log committed as the
 terminal entry cannot: the coordinator commits one terminal per log. A
 *final* seal is one every member can verify was that terminal, without
-asking the coordinator. [Lazy compaction](../features_09/15-lazy-compaction.md)
+asking the coordinator. [Lazy compaction](lazy-compaction.md)
 compacts a final seal at once; other seals only within a device's count of
 seals left uncompacted.
 

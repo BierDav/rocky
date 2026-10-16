@@ -132,3 +132,28 @@ pub struct TipInspection {
     pub bookmarks: Vec<Bookmark>,
     pub nodes: Vec<TipNode>,
 }
+/// Where this device's compaction of the followed path stands. Seals are
+/// hex digests; see `docs/runtime/lazy-compaction.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TipCompaction {
+    /// The newest seal whose state this device finalized.
+    pub finalized: Option<String>,
+    /// The seal the replay base sits at.
+    pub compacted: Option<String>,
+    /// Finalized seals whose evidence is still retained, oldest first.
+    pub uncompacted: Vec<String>,
+    /// Why the next seal of the followed path is not finalized yet.
+    pub waiting: Option<String>,
+    /// The compacted seal lost a race; the base must be rebuilt at this one.
+    pub rebootstrap: Option<String>,
+    /// Operations this call released; zero for status.
+    pub pruned: u64,
+    /// What stopped releasing a scope's operations in this call.
+    pub blocked: Vec<TipPruneBlock>,
+}
+/// One resource scope, as its JSON encoding, and why it kept operations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TipPruneBlock {
+    pub scope: String,
+    pub reason: String,
+}

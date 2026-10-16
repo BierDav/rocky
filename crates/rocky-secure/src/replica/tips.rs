@@ -563,6 +563,9 @@ impl<A: RowApplication> Inner<A> {
         {
             self.switch_tip(scope, &name, target).await?;
         }
+        if changed && let Some((scope, _)) = self.followed.clone() {
+            self.revalidate_finalized(scope, true).await?;
+        }
         Ok(changed)
     }
     async fn store_followed(&self, scope: Scope, name: &str, tip: TipId) -> Result<(), Error> {
@@ -785,6 +788,18 @@ impl<A: RowApplication> Inner<A> {
     }
     async fn rebuild_tip_workspace(&mut self, domain: Scope) -> Result<(), Error> {
         self.index_inherited_held(domain).await?;
+        // Finalized seals off the new path are undone by the rebuild.
+        self.revalidate_finalized(domain, false).await?;
+        if self.compaction_lost(domain).await?.is_some() {
+            return Err(denied(
+                "switching tips needs a checkpoint at the winning seal: the compacted seal lost",
+            ));
+        }
+        let path = self
+            .path_seals(domain)?
+            .iter()
+            .map(|seal| seal.id().map_err(credential))
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let scopes = rows(&self.conn, "SELECT scope FROM secure_scope_state").await?;
         for record in scopes {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
@@ -794,16 +809,30 @@ impl<A: RowApplication> Inner<A> {
             if scope.domain != domain {
                 continue;
             }
-            if self.has_horizon(scope).await? {
+            let id = self.scope_id(scope).await?;
+            // A base at a seal the new tip's state passes through stays.
+            let kept = self
+                .checkpoint_record(id, true)
+                .await?
+                .and_then(|record| record.signed)
+                .and_then(|signed| signed.statement.seal)
+                .is_some_and(|seal| path.contains(&seal));
+            if !kept && self.has_horizon(scope).await? {
                 return Err(denied(
                     "switching tips needs retained history or a target checkpoint",
                 ));
             }
             self.rebuilding_tip = true;
+            self.tip_base = kept;
             let rebuilt = self.rebuild_rows(scope).await;
             self.rebuilding_tip = false;
+            self.tip_base = false;
             rebuilt?;
-            let id = self.scope_id(scope).await?;
+            if kept {
+                self.rebuild_tip_existence(scope).await?;
+                self.rebuild_constraints(Some(scope), None).await?;
+                continue;
+            }
             for table in [
                 "secure_checkpoints",
                 "secure_checkpoint_rows",
@@ -1003,6 +1032,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 && target != old_tip
             {
                 inner.switch_tip(scope, &name, target).await?;
+            }
+            // A finalized seal that lost a race is undone.
+            if let Some((scope, _)) = old_followed.clone() {
+                inner.revalidate_finalized(scope, true).await?;
             }
             Ok(())
         });

@@ -110,6 +110,43 @@ async fn a_close_seal_makes_the_bookmark_read_only() -> Result<(), Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    main(&a).await;
+    let none = ok(&a, "compaction", json!({})).await;
+    assert_eq!(
+        (none["compacted"].clone(), none["pruned"].clone()),
+        (Value::Null, json!(0))
+    );
+    a.add(1, "milk").await;
+    let eggs = a.add(2, "eggs").await;
+    a.set(3, &eggs, "completed", json!(true)).await;
+    let first = ok(&a, "seal", json!({})).await["tip"].clone();
+    a.add(4, "bread").await;
+    let second = ok(&a, "seal", json!({})).await["tip"].clone();
+    assert!(message(tips(&a, "compact", json!({"keep": -1})).await.unwrap_err()).contains("keep"));
+
+    let kept = ok(&a, "compact", json!({"keep": 1})).await;
+    assert_eq!(kept["finalized"], second);
+    assert_eq!(kept["compacted"], first);
+    assert_eq!(kept["uncompacted"], json!([second]));
+    assert_eq!(kept["rebootstrap"], Value::Null);
+    let all = ok(&a, "compact", json!({})).await;
+    assert_eq!(all["compacted"], second);
+    assert_eq!(all["uncompacted"], json!([]));
+    let items = ["bread/0", "eggs/1", "milk/0"];
+    assert_eq!(a.items().await, items);
+    a.close().await;
+
+    let a = Device::open(root.path(), None)?;
+    assert_eq!(a.items().await, items);
+    let reopened = ok(&a, "compaction", json!({})).await;
+    assert_eq!(reopened["compacted"], second);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn requests_and_authority_are_checked() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());

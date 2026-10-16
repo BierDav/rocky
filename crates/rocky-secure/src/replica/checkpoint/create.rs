@@ -329,6 +329,7 @@ impl<A: RowApplication> Inner<A> {
             let finalized = capture.finalized;
             let statement = CheckpointStatement {
                 format: CHECKPOINT_FORMAT,
+                seal: None,
                 finalized,
                 horizon,
                 partition: inner.partitions.get(&scope).cloned(),
@@ -517,6 +518,10 @@ impl<A: RowApplication> Inner<A> {
     async fn maintain_scope(&mut self, scope: ResourceScope) -> Result<bool, Error> {
         if self.scope_key(scope).is_err() || self.importing(scope).await? {
             return Ok(false);
+        }
+        // With a tip graph, the replay base sits only at seals.
+        if self.graphs.contains_key(&scope.domain) {
+            return Ok(self.finalize_ready(scope.domain).await?.0 > 0);
         }
         let Some(id) = self.find_scope_id(scope).await? else {
             return Ok(false);

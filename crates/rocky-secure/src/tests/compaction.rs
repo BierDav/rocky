@@ -1,0 +1,443 @@
+//! Lazy compaction at seals: finalizing drops what is dead at a seal's
+//! frontier on every device; compacting moves the replay base there.
+use super::generations::{Lineage, identity_insert, select, session, text};
+use super::*;
+use crate::TipStatement;
+use rocky_core::{SqlValue, TipId, TypedRows};
+use rocky_credentials::{
+    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedSeal,
+};
+
+type Replica = EncryptedReplica<TypedRows>;
+
+async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) -> Replica {
+    lineage
+        .open(
+            &dir.path().join(format!("{name}.db")),
+            key,
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap()
+}
+fn bookmark(lineage: &Lineage, from: Option<TipId>, to: TipId) -> TipStatement {
+    TipStatement::Bookmark(
+        SignedBookmarkMove::sign(
+            BookmarkMoveStatement {
+                format: BOOKMARK_MOVE_FORMAT,
+                scope: lineage.domain,
+                name: "main".into(),
+                from,
+                to: Some(to),
+            },
+            lineage.publisher(),
+        )
+        .unwrap(),
+    )
+}
+/// Creates `main` on the genesis tip and follows it.
+async fn follow_main(lineage: &Lineage, replica: &Replica) {
+    let genesis = replica.followed_tip().await;
+    replica
+        .publish_tip_statements(&[bookmark(lineage, None, genesis)])
+        .await
+        .unwrap();
+    replica
+        .follow_bookmark(lineage.domain, "main")
+        .await
+        .unwrap();
+}
+/// The owner seals the followed tip at what `replica` holds and moves
+/// `main` on; returns the seal.
+fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>) -> SignedSeal {
+    SignedSeal::sign(
+        SealStatement {
+            format: SEAL_FORMAT,
+            scope: lineage.domain,
+            tip,
+            frontier,
+            action: SealAction::Continue {
+                schema: lineage.definition(3).hash(),
+            },
+        },
+        lineage.publisher(),
+    )
+    .unwrap()
+}
+async fn seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
+    let tip = replica.followed_tip().await;
+    let frontier = replica.seal_frontier(lineage.domain, false).await.unwrap();
+    publish_seal(lineage, replica, sign_seal(lineage, tip, frontier)).await
+}
+async fn publish_seal(lineage: &Lineage, replica: &Replica, seal: SignedSeal) -> SignedSeal {
+    let tip = seal.statement.tip;
+    let next = seal.successor().unwrap().unwrap();
+    replica
+        .publish_tip_statements(&[
+            TipStatement::Seal(seal.clone()),
+            bookmark(lineage, Some(tip), next),
+        ])
+        .await
+        .unwrap();
+    seal
+}
+async fn insert(replica: &Replica, key: &str, title: &str) {
+    identity_insert(
+        &session(replica).await,
+        "INSERT INTO items(key,title) VALUES(?,?)",
+        vec![text(key), text(title)],
+    )
+    .await
+    .unwrap();
+}
+async fn delete(replica: &Replica, key: &str) {
+    session(replica)
+        .await
+        .run("DELETE FROM items WHERE key=?", vec![text(key)])
+        .await
+        .unwrap();
+}
+/// Inserts and deletes `cycles` rows.
+async fn churn(replica: &Replica, cycles: usize, prefix: &str) {
+    for cycle in 0..cycles {
+        let key = format!("{prefix}{cycle}");
+        insert(replica, &key, "churn").await;
+        delete(replica, &key).await;
+    }
+}
+async fn scalar(replica: &Replica, sql: &str) -> i64 {
+    let inner = replica.inner.lock().await;
+    match crate::storage::rows(&inner.conn, sql)
+        .await
+        .unwrap()
+        .first()
+        .map(Vec::as_slice)
+    {
+        Some([SqlValue::Integer(value)]) => *value,
+        other => panic!("{other:?}"),
+    }
+}
+/// Stored row records and how many are tombstones.
+async fn stored(replica: &Replica) -> (i64, i64) {
+    (
+        scalar(replica, "SELECT count(*) FROM secure_rows").await,
+        scalar(
+            replica,
+            "SELECT COALESCE(SUM(tombstones),0) FROM secure_scope_state",
+        )
+        .await,
+    )
+}
+async fn titles(replica: &Replica) -> Vec<Vec<SqlValue>> {
+    select(replica, "SELECT key,title FROM items ORDER BY key").await
+}
+
+#[tokio::test]
+async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "alice", &key).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "live", "kept").await;
+    churn(&replica, 8, "a").await;
+    assert_eq!(stored(&replica).await, (9, 8));
+    let first = seal(&lineage, &replica).await;
+    // Sealing alone changes no row; the next maintenance step finalizes.
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.waiting, None);
+    assert_eq!(report.finalized, Some(first.id().unwrap()));
+    assert_eq!(report.compacted, Some(first.id().unwrap()));
+    assert_eq!(stored(&replica).await, (1, 0));
+    assert_eq!(
+        titles(&replica).await,
+        vec![vec![text("live"), text("kept")]]
+    );
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_stubs").await,
+        1
+    );
+
+    // Writes after the seal: the next seal finalizes and compacts them too.
+    churn(&replica, 8, "b").await;
+    insert(&replica, "later", "after the seal").await;
+    let second = seal(&lineage, &replica).await;
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(second.id().unwrap()));
+    assert_eq!(stored(&replica).await, (2, 0));
+    let expected = vec![
+        vec![text("later"), text("after the seal")],
+        vec![text("live"), text("kept")],
+    ];
+    assert_eq!(titles(&replica).await, expected);
+    drop(replica);
+    let replica = open(&lineage, &dir, "alice", &key).await;
+    assert_eq!(titles(&replica).await, expected);
+    let status = replica.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.compacted, Some(second.id().unwrap()));
+    assert!(status.uncompacted.is_empty());
+}
+
+/// Hands `source`'s graph and the items frames `target` lacks to `target`,
+/// whose node key is `key`.
+async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
+    target
+        .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    let scope = lineage.scope("items");
+    let credentials = lineage.credentials(3, key);
+    source
+        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let mut after = None;
+    loop {
+        let frontier = target.frontier(scope).await.unwrap();
+        let page = source
+            .range_page(
+                key.public_key(),
+                &credentials,
+                &frontier,
+                after,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        for status in target.receive_voids(&page.voids).await {
+            status.unwrap();
+        }
+        for status in target.receive_all(page.frames).await {
+            status.unwrap();
+        }
+        after = page.next;
+        if after.is_none() {
+            return;
+        }
+    }
+}
+async fn update(replica: &Replica, key: &str, title: &str) {
+    session(replica)
+        .await
+        .run(
+            "UPDATE items SET title=? WHERE key=?",
+            vec![text(title), text(key)],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_alike() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    let c = open(&lineage, &dir, "c", &keys[2]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "x", "original").await;
+    insert(&a, "y", "doomed").await;
+    for (replica, key) in [(&b, &keys[1]), (&c, &keys[2])] {
+        sync(&lineage, &a, replica, key).await;
+        replica
+            .follow_bookmark(lineage.domain, "main")
+            .await
+            .unwrap();
+    }
+    // C writes offline on the genesis tip; none of it reaches the seals.
+    update(&c, "x", "late edit").await;
+    update(&c, "y", "edit of a deleted row").await;
+    insert(&c, "z", "late insert").await;
+    // A deletes y, seals, writes and seals again.
+    delete(&a, "y").await;
+    seal(&lineage, &a).await;
+    insert(&a, "w", "between the seals").await;
+    seal(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    let compacted = a.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(compacted.waiting, None);
+    assert!(compacted.compacted.is_some());
+    // B finalized both seals on its own but compacted nothing.
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.finalized, compacted.finalized);
+    assert_eq!(status.compacted, None);
+    assert_eq!(status.uncompacted.len(), 2);
+    // C comes online: it learns the seals and follows main on; its late
+    // frames walk both seals and apply alike on A and B.
+    c.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    sync(&lineage, &c, &a, &keys[0]).await;
+    sync(&lineage, &c, &b, &keys[1]).await;
+    let expected = vec![
+        vec![text("w"), text("between the seals")],
+        vec![text("x"), text("late edit")],
+        vec![text("z"), text("late insert")],
+    ];
+    assert_eq!(titles(&a).await, expected);
+    assert_eq!(titles(&b).await, expected);
+    // C, back online, follows main to the same rows.
+    sync(&lineage, &a, &c, &keys[2]).await;
+    assert_eq!(titles(&c).await, expected);
+}
+
+/// A seal of `seal`'s tip with a lower digest, and the move of `main` onto
+/// its continuation.
+/// A seal of `seal`'s tip with a lower digest that leaves out some of the
+/// sealer's latest frames, which then walk on as late frames.
+fn lower_rival(lineage: &Lineage, seal: &SignedSeal) -> Option<SignedSeal> {
+    let latest = seal.statement.frontier.last()?.sequence;
+    (1..=latest)
+        .map(|fewer| {
+            let mut statement = seal.statement.clone();
+            statement.frontier.last_mut().unwrap().sequence = latest - fewer;
+            SignedSeal::sign(statement, lineage.publisher()).unwrap()
+        })
+        .find(|rival| rival.id().unwrap() < seal.id().unwrap())
+}
+/// Seals the followed tip where a lower-digest rival exists; signatures are
+/// deterministic, so another write changes the digest until one does.
+async fn rivalled_seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
+    for attempt in 0.. {
+        let tip = replica.followed_tip().await;
+        let frontier = replica.seal_frontier(lineage.domain, false).await.unwrap();
+        let seal = sign_seal(lineage, tip, frontier);
+        if lower_rival(lineage, &seal).is_some() {
+            return publish_seal(lineage, replica, seal).await;
+        }
+        churn(replica, 1, &format!("rival{attempt}-")).await;
+    }
+    unreachable!()
+}
+fn rival(lineage: &Lineage, seal: &SignedSeal) -> (SignedSeal, Vec<TipStatement>) {
+    let rival = lower_rival(lineage, seal).expect("a rival with a lower digest");
+    let next = rival.successor().unwrap().unwrap();
+    let statements = vec![
+        TipStatement::Seal(rival.clone()),
+        bookmark(lineage, Some(seal.statement.tip), next),
+    ];
+    (rival, statements)
+}
+
+#[tokio::test]
+async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_needs_a_rebootstrap() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "keep", &key).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "a", "first").await;
+    // Enough frames that some rival frontier has a lower digest.
+    churn(&replica, 12, "c").await;
+    let first = seal(&lineage, &replica).await;
+    insert(&replica, "b", "second").await;
+    let second = rivalled_seal(&lineage, &replica).await;
+    let report = replica.compact(lineage.domain, 1).await.unwrap();
+    assert_eq!(report.finalized, Some(second.id().unwrap()));
+    assert_eq!(report.compacted, Some(first.id().unwrap()));
+    // A concurrent seal of the second's tip wins; the device rebuilds from
+    // its base at the first seal and ends on the winner.
+    let (winner, statements) = rival(&lineage, &second);
+    replica.receive_tip_statements(&statements).await.unwrap();
+    assert_eq!(
+        replica.followed_tip().await,
+        winner.successor().unwrap().unwrap()
+    );
+    let status = replica.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.rebootstrap, None);
+    assert_eq!(status.compacted, Some(first.id().unwrap()));
+    assert_eq!(
+        titles(&replica).await,
+        vec![
+            vec![text("a"), text("first")],
+            vec![text("b"), text("second")]
+        ]
+    );
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(winner.id().unwrap()));
+
+    // With nothing left uncompacted, a winning rival needs a rebootstrap.
+    insert(&replica, "c", "third").await;
+    churn(&replica, 12, "d").await;
+    let third = rivalled_seal(&lineage, &replica).await;
+    replica.compact(lineage.domain, 0).await.unwrap();
+    let (_, statements) = rival(&lineage, &third);
+    let refused = replica.receive_tip_statements(&statements).await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("winning seal")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let scope = lineage.scope("items");
+    let mut limits = a.retention_limits().await;
+    limits.handles = 4;
+    a.set_retention_limits(limits).await.unwrap();
+    a.set_retention_policy(
+        scope,
+        crate::RetentionPolicy {
+            required: BTreeSet::from([rocky_credentials::PeerId::of(keys[1].public_key())]),
+            behind: BTreeSet::new(),
+            copies: 1,
+            window: 0,
+        },
+    )
+    .await
+    .unwrap();
+    insert(&a, "live", "kept").await;
+    let mut plateau = None;
+    for cycle in 1..=64 {
+        churn(&a, 1, &format!("cycle{cycle}-")).await;
+        if ![16, 64].contains(&cycle) {
+            continue;
+        }
+        seal(&lineage, &a).await;
+        sync(&lineage, &a, &b, &keys[1]).await;
+        a.acknowledge_frontier(
+            keys[1].public_key(),
+            &lineage.credentials(3, &keys[1]),
+            &b.frontier(scope).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        let report = a.compact(lineage.domain, 0).await.unwrap();
+        assert_eq!(report.blocked, Vec::new());
+        assert!(report.pruned > 0);
+        let counts = (
+            stored(&a).await,
+            scalar(&a, "SELECT count(*) FROM secure_stubs").await,
+            scalar(&a, "SELECT count(*) FROM secure_operations").await,
+            scalar(&a, "SELECT count(*) FROM secure_applied").await,
+            scalar(&a, "SELECT count(*) FROM secure_handles").await,
+            scalar(&a, "SELECT count(*) FROM secure_finalized").await,
+            scalar(
+                &a,
+                "SELECT (SELECT count(*) FROM secure_seal_bounds)+(SELECT count(*) FROM secure_seal_drops)",
+            )
+            .await,
+        );
+        println!("seal compaction churn: cycles={cycle}; {counts:?}");
+        // One live row and its creation witness; nothing else retained.
+        assert_eq!(counts, ((1, 0), 1, 0, 0, 4, 1, 0));
+        if let Some(previous) = plateau {
+            assert_eq!(previous, counts);
+        }
+        plateau = Some(counts);
+    }
+    assert_eq!(titles(&a).await, vec![vec![text("live"), text("kept")]]);
+}

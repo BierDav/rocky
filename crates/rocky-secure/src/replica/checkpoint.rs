@@ -93,10 +93,13 @@ pub struct CoordinatedBinding {
     pub highest: u64,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 13;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 14;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
+    /// The seal whose finalized state this is, in a domain with a tip graph;
+    /// its frontier bounds the covered frames. None for another cut.
+    pub seal: Option<Commitment>,
     /// Most recently admitted issuer declaration.
     pub horizon: Option<Box<rocky_credentials::SignedHorizon>>,
     /// Last cut atomically finalized into the replay base.
@@ -488,6 +491,14 @@ impl Sets {
         self.digest.add(ROW_LABEL, &[row.as_slice(), new].concat());
         self.rows += 1;
         self.tombstones += u64::from(decode::<Materialized>(new)?.deleted);
+        Ok(())
+    }
+    /// Removes one stored row record.
+    pub(super) fn remove(&mut self, row: &Commitment, old: &[u8]) -> Result<(), Error> {
+        self.digest
+            .remove(ROW_LABEL, &[row.as_slice(), old].concat());
+        self.rows -= 1;
+        self.tombstones -= u64::from(decode::<Materialized>(old)?.deleted);
         Ok(())
     }
     /// Adds the rows of `delta`, stored rows disjoint from these.
@@ -1031,14 +1042,15 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("checkpoint needs the scope key"))
     }
     /// One stored row record from an overlay, else from the checkpoint rows.
-    async fn replay_row(
+    /// An empty overlay record marks a base row a finalized seal dropped.
+    pub(super) async fn replay_row(
         &self,
         overlay: Overlay,
         scope: i64,
         row: Commitment,
     ) -> Result<Option<Vec<u8>>, Error> {
         for table in [overlay.table(), "secure_checkpoint_rows"] {
-            if self.rebuilding_tip && table == "secure_checkpoint_rows" {
+            if self.ignores_base() && table == "secure_checkpoint_rows" {
                 continue;
             }
             let mut result = self
@@ -1049,7 +1061,8 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             if let Some(record) = result.next().await? {
-                return Ok(Some(record.get::<Vec<u8>>(0)?));
+                let fields = record.get::<Vec<u8>>(0)?;
+                return Ok((!fields.is_empty()).then_some(fields));
             }
         }
         Ok(None)
@@ -1083,7 +1096,7 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         let mut last = None;
         let basis = self.finalized_basis(scope).await?;
-        let finalized = basis.is_some();
+        let finalized = basis.is_some() || self.seal_finalized(scope).await?;
         for record in records {
             let [
                 SqlValue::Integer(position),

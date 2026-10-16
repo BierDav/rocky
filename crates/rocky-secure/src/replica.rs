@@ -5,6 +5,8 @@ mod backup;
 pub(super) mod bundle;
 mod chains;
 pub(crate) mod checkpoint;
+mod compaction;
+pub use compaction::{CompactReport, CompactionStatus};
 mod constraints;
 mod coordinated;
 mod evict;
@@ -347,6 +349,9 @@ pub(super) struct Inner<A> {
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
     rebuilding_tip: bool,
+    /// During a tip rebuild: the scope's replay base is a seal on the new
+    /// tip's path, so the rebuild starts from it.
+    tip_base: bool,
     /// Set while a staged publication authors its bundles: one atomic
     /// transaction of any size, so the retained-history bound cannot hold
     /// it back; later writes wait until it is delivered and pruned.
@@ -567,6 +572,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         partition::SCHEMA,
         checkpoint::SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
+        compaction::SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
         existence::SCHEMA,
@@ -782,6 +788,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             names: generation::Names::default(),
             strict_projection: false,
             rebuilding_tip: false,
+            tip_base: false,
             publishing: false,
             settling: Default::default(),
             local: Default::default(),

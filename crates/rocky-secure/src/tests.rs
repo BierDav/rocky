@@ -1342,6 +1342,7 @@ mod checkpoint;
 mod admission;
 mod bundles;
 mod chains;
+mod compaction;
 mod constraints;
 mod coordinated;
 mod delegation;

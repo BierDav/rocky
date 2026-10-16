@@ -42,8 +42,27 @@ impl<A: RowApplication> Inner<A> {
     /// its verified checkpoint rows and a replay of the operations after
     /// them, in application order. Nothing but one batch is held in memory.
     pub(super) async fn rebuild_rows(&self, scope: ResourceScope) -> Result<(), Error> {
+        self.restore_rows(scope, i64::MAX).await?;
+        self.reproject(scope).await?;
+        self.conn
+            .execute(
+                "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                (),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Replaces a scope's stored rows with its replay base and the applied
+    /// operations through position `through`, applying what each finalized
+    /// seal changed on the way, and stores their counts and digest. The
+    /// typed projection is the caller's to refresh.
+    pub(super) async fn restore_rows(
+        &self,
+        scope: ResourceScope,
+        through: i64,
+    ) -> Result<(), Error> {
         let id = self.scope_id(scope).await?;
-        let base = if self.rebuilding_tip {
+        let base = if self.ignores_base() {
             None
         } else {
             self.checkpoint_record(id, true).await?
@@ -59,11 +78,11 @@ impl<A: RowApplication> Inner<A> {
             .execute("DELETE FROM secure_checkpoint_scratch WHERE scope=?", [id])
             .await?;
         while let Some(last) = self
-            .replay(
+            .replay_sealed(
                 scope,
                 id,
                 checkpoint::Overlay::Scratch,
-                (cursor, i64::MAX),
+                (cursor, through),
                 checkpoint::STEP_OPERATIONS,
                 &mut sets,
             )
@@ -76,28 +95,28 @@ impl<A: RowApplication> Inner<A> {
             .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
             .await?;
         for table in ["secure_checkpoint_rows", "secure_checkpoint_scratch"] {
-            if self.rebuilding_tip && table == "secure_checkpoint_rows" {
+            if self.ignores_base() && table == "secure_checkpoint_rows" {
                 continue;
             }
             self.conn
                 .execute(
-                    format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=?"),
+                    format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=? AND fields<>X''"),
                     bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                 )
                 .await?;
         }
-        self.reproject(scope).await?;
+        // A row a finalized seal dropped from the base.
+        self.conn
+            .execute(
+                "DELETE FROM secure_rows WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
+                bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
+            )
+            .await?;
         self.conn
             .execute("DELETE FROM secure_checkpoint_scratch WHERE scope=?", [id])
             .await?;
         let applied = self.scope_state(id).await?.3;
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied)
-            .await?;
-        self.conn
-            .execute(
-                "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
-                (),
-            )
             .await?;
         Ok(())
     }

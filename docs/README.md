@@ -11,6 +11,7 @@ Select the guide for your task rather than reading every document.
 | Build a Kotlin app on a coordination service, from schema to custody | [Getting started](runtime/getting-started.md) |
 | Inspect phase-9 end-to-end and soak evidence | [End-to-end evidence](runtime/end-to-end-evidence.md) |
 | Seal tips, open branches, follow or move bookmarks and inspect the graph | [Seals, tips and bookmarks](runtime/tips-and-bookmarks.md) |
+| Release storage at seals and see when a seal is final | [Lazy compaction](runtime/lazy-compaction.md), [final seals](runtime/seal-finality.md) |
 | Upgrade schema/handlers or resume a projection plan | [Generations](runtime/generations.md) |
 | Review, re-author or drop local changes held by a removal | [Held changes](runtime/held-changes.md) |
 | Make writes that must not race, such as sequential numbers | [Coordinated writes](runtime/coordinated-writes.md) |

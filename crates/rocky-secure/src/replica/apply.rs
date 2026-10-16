@@ -44,7 +44,7 @@ impl<A: RowApplication> Inner<A> {
         let extension = &operation.header.extensions;
         let marks = self.identity_marks(scope).await?;
         let basis = self.finalized_basis(scope).await?;
-        let finalized = basis.is_some();
+        let finalized = basis.is_some() || self.seal_finalized(scope).await?;
         let payload = self.row_payload(frame)?;
         let ceiling = Stamp {
             clock: operation.header.timestamp,

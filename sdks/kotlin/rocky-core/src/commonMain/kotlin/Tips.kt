@@ -36,6 +36,15 @@ class Tips internal constructor(private val client: RockyClient) {
         return TipStatus.decode(call("genesis_minimum") { put("minimum_in_sync", minimumInSync.toLong()) })
     }
 
+    /**
+     * Finalizes ready seals of the followed path and compacts at the newest one that is final or has [keep] seals
+     * after it. A seal that is not final can still lose a race; keeping seals avoids a rebootstrap then.
+     */
+    suspend fun compact(keep: UInt = 0u): TipCompaction = TipCompaction.decode(call("compact") { put("keep", keep.toLong()) })
+
+    /** Where this device's compaction of the followed path stands; nothing is compacted. */
+    suspend fun compaction(): TipCompaction = TipCompaction.decode(call("compaction"))
+
     /** Creates [name] on [tip], or on the followed tip when omitted. */
     suspend fun createBookmark(name: String, tip: String? = null): TipStatus = TipStatus.decode(
         call("create") {
@@ -121,6 +130,36 @@ data class TipStatus(
                     },
                 )
             },
+        )
+    }
+}
+
+/** One resource scope, as its JSON encoding, and why it kept operations. */
+data class TipPruneBlock(val scope: String, val reason: String)
+
+/**
+ * This device's compaction of the followed path: the newest [finalized] seal, the seal the base sits at, finalized
+ * seals still [uncompacted], why the next seal [waiting] is not finalized, and a seal to [rebootstrap] at when the
+ * compacted one lost a race. [pruned] and [blocked] report what a `compact` call released; status reports none.
+ */
+data class TipCompaction(
+    val finalized: String?,
+    val compacted: String?,
+    val uncompacted: List<String>,
+    val waiting: String?,
+    val rebootstrap: String?,
+    val pruned: ULong,
+    val blocked: List<TipPruneBlock>,
+) {
+    internal companion object {
+        fun decode(value: JsonObject) = TipCompaction(
+            value.nullableText("finalized"),
+            value.nullableText("compacted"),
+            value.getValue("uncompacted").jsonArray.map { it.jsonPrimitive.content },
+            value.nullableText("waiting"),
+            value.nullableText("rebootstrap"),
+            value.unsigned("pruned"),
+            value.objects("blocked").map { TipPruneBlock(it.text("scope"), it.text("reason")) },
         )
     }
 }

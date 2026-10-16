@@ -147,6 +147,8 @@ order; their tips stay branches.
 | `deleteBookmark(name)` | `delete_bookmark` | `delete`, `name` | `TipStatus` |
 | `follow(name)` | `follow` | `follow`, `name` | `TipStatus` |
 | `drop(tip)` | `drop_tip` | `drop`, `tip` | `TipStatus` |
+| `compact(keep)` | `compact(keep)` | `compact`, `keep` | `TipCompaction` |
+| `compaction()` | `compaction()` | `compaction` | `TipCompaction` |
 | `trust(identity)` | `trust` | `trust`, `identity` | `TrustGrant` |
 | `installTrust(grant)` | `install_trust` | `install_trust`, `grant` | `TipStatus` |
 | `revokeTrust(capability)` | — | `{"type": "revoke", "trust": capability}` | `{}` |
@@ -159,7 +161,14 @@ unsigned.
 Status reports the followed `bookmark` and `tip`, `operations_since_seal`
 (writes held locally beyond the last seal) and, per peer, the tip its open
 link claims and its last reported per-scope frontiers. `evidence_releasable`
-stays null until lazy compaction exists.
+stays null; `compaction` reports what compacting would keep instead.
+
+`compact(keep)` moves the replay base to the newest finalized seal that is
+final or has `keep` seals after it and releases operations behind it; see
+[lazy compaction](lazy-compaction.md). `TipCompaction` reports `finalized`,
+`compacted`, `uncompacted` seals, why the next seal is `waiting`, a seal to
+`rebootstrap` at, and, for `compact`, `pruned` operations and `blocked`
+scopes.
 
 Inspection is for developers: the genesis tip and schema, every seal with its
 frontier, action, whether it won (`canonical`), its signer's `authority` and

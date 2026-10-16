@@ -73,6 +73,10 @@ rows but pulling confirmed command results failed, for instance because the
 coordinator no longer verifies a receipt. The pass is retried with the next
 sync. It is recorded when the error changes, not on every failed pass.
 
+`finality_failed` carries an error when this device could not acknowledge
+an ended tip log or publish a [finality record](seal-finality.md); the next
+publication, decided entry or sync pass retries.
+
 `registry_failed` carries an error when an issuer could not read or update
 its [issuer registry](issuer-registry.md) outside an answer, such as while the
 registry's rows wait for a rotated key. Sync admission does not read the

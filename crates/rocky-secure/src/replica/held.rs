@@ -662,8 +662,43 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Author counters include voids even when a checkpoint replaced the applied tip.
+    /// Author counters include voids and held frames of the log even when a
+    /// checkpoint replaced the applied tip.
     pub(super) async fn author_tip(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        author: PublicKey,
+    ) -> Result<Option<checkpoint::Log>, Error> {
+        let tip = self.consumed_tip(scope, id, author).await?;
+        let mut found = self
+            .conn
+            .query(
+                "SELECT header FROM secure_operations WHERE scope=? AND author=? AND status='held' ORDER BY sequence DESC LIMIT 1",
+                [encode(&scope)?, author.as_bytes().to_vec()],
+            )
+            .await?;
+        let held: Option<Header<Extensions>> = match found.next().await? {
+            Some(row) => Some(decode(&row.get::<Vec<u8>>(0)?)?),
+            None => None,
+        };
+        match held {
+            Some(held)
+                if tip
+                    .as_ref()
+                    .is_none_or(|tip| held.seq_num as i64 > tip.sequence) =>
+            {
+                Ok(Some(checkpoint::Log {
+                    sequence: held.seq_num as i64,
+                    hash: held.hash(),
+                    clock: held.timestamp,
+                    horizon: tip.map_or(-1, |tip| tip.horizon),
+                }))
+            }
+            _ => Ok(tip),
+        }
+    }
+    async fn consumed_tip(
         &self,
         scope: ResourceScope,
         id: i64,

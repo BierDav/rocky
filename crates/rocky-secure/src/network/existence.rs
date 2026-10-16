@@ -84,7 +84,9 @@ impl NativeSession {
         {
             return Err(denied("existence attachment differs from checkpoint"));
         }
-        if let Some(held) = replica.installed_existence_base(scope).await? {
+        if let Some(held) = replica.installed_existence_base(scope).await?
+            && !replica.existence_fold_off_path(scope).await?
+        {
             if held.id()? == attachment.id()? || (expected.is_some() && held.covers(&attachment)?) {
                 return Ok(true);
             }

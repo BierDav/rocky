@@ -6,7 +6,7 @@ pub(super) mod bundle;
 mod chains;
 pub(crate) mod checkpoint;
 mod compaction;
-pub use compaction::{CompactReport, CompactionStatus};
+pub use compaction::{CompactReport, CompactionStatus, FrameReplay, SealRebootstrap};
 mod constraints;
 mod coordinated;
 mod evict;

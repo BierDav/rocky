@@ -73,7 +73,9 @@ deleted row; only a [mergeable horizon](mergeable-horizon.md) removes them.
 
 SDK [join](sdk-bootstrapping.md#join) requests a checkpoint before ordinary
 catch-up, even when the source still retains its history. A writable source
-seals a current checkpoint on demand when offering it. The import verifies and
+seals a current checkpoint on demand when offering it; in a domain with a tip
+graph it offers only its base at a seal ([checkpoints at
+seals](lazy-compaction.md#checkpoints-at-seals)). The import verifies and
 stores the checkpoint's rows page by page and then switches to it; a scope that
 held nothing is readable as each page commits. See
 [importing a checkpoint](checkpoint-import.md) for the calls, signed pages,

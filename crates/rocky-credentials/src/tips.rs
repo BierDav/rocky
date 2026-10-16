@@ -1,7 +1,7 @@
 //! Domain-scoped seal, tip-opening and bookmark statements.
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
-    decode_bounded, denied, encode,
+    SignedCheckpointRecord, decode_bounded, denied, encode,
 };
 use rocky_core::{Commitment, Scope, TipId};
 use serde::{Deserialize, Serialize};
@@ -341,7 +341,8 @@ pub struct TipGraph {
     pub moves: Vec<SignedBookmarkMove>,
     pub genesis_lines: Vec<SignedGenesisLine>,
     pub finalities: Vec<SealFinality>,
-    /// Seals and moves a revocation ended the signer of, and finality
+    pub checkpoints: Vec<SignedCheckpointRecord>,
+    /// Seals, moves and checkpoint records a revocation ended the signer of, and finality
     /// records it left below their line's minimum: kept, inspectable, and
     /// left out of resolution. See [`Self::exclude_revoked`].
     #[serde(skip)]
@@ -357,11 +358,12 @@ impl TipGraph {
             moves: Vec::new(),
             genesis_lines: Vec::new(),
             finalities: Vec::new(),
+            checkpoints: Vec::new(),
             revoked: BTreeSet::new(),
         }
     }
-    /// Leaves out of resolution every seal and move whose signer's chain
-    /// `revocations` ends; the owner's never are. Returns whether the set
+    /// Leaves out of resolution every seal, move and checkpoint record whose
+    /// signer's chain `revocations` ends; the owner's never are. Returns whether the set
     /// changed, so callers resolve again.
     pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
         let mut revoked = BTreeSet::new();
@@ -373,6 +375,11 @@ impl TipGraph {
                 self.moves
                     .iter()
                     .map(|movement| (movement.id(), &movement.endorsement().chain)),
+            )
+            .chain(
+                self.checkpoints
+                    .iter()
+                    .map(|record| (record.id(), &record.endorsement().chain)),
             );
         for (id, chain) in signed {
             for link in &chain.0 {
@@ -414,6 +421,16 @@ impl TipGraph {
             }
         }
         Ok(false)
+    }
+    /// The checkpoints listed at `seal` that no revocation ended.
+    pub fn checkpoints_at(&self, seal: Commitment) -> Result<Vec<&SignedCheckpointRecord>, Error> {
+        let mut listed = Vec::new();
+        for record in &self.checkpoints {
+            if record.statement.seal == seal && !self.revoked.contains(&record.id()?) {
+                listed.push(record);
+            }
+        }
+        Ok(listed)
     }
     /// The minimum of distinct trusted nodes a seal of `tip` needs to be
     /// final: its line's opening's, or on the genesis line the largest the

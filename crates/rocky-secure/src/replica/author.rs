@@ -70,6 +70,11 @@ impl<A: RowApplication> Inner<A> {
             .change
             .scope;
         self.ensure_tip_writable(scope.domain)?;
+        if self.compaction_lost(scope.domain).await?.is_some() {
+            return Err(denied(
+                "the workspace waits for a rebootstrap at the winning seal",
+            ));
+        }
         self.ensure_tip_restored().await?;
         self.ensure_horizon_writable(scope).await?;
         let partition = self

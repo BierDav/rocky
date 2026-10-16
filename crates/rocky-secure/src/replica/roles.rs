@@ -834,11 +834,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await),
         }
     }
-    /// Ends the restoration of a resubscribed scope after a complete
-    /// catch-up from a peer, once the own log an eviction dropped is back.
+    /// Ends the restoration of a resubscribed or replayed scope after a
+    /// complete catch-up from a peer, once the own log it dropped is back.
     pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        if inner.holding(scope).await? != Some(Holding::Held) {
+        if !inner.holds(scope).await? {
             return Ok(());
         }
         let Some(guard) = inner.eviction_guard(scope).await? else {

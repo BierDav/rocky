@@ -65,6 +65,22 @@ pub struct TipSeal {
     /// acknowledged that: it beats every other seal of its tip.
     #[serde(rename = "final")]
     pub finalized: bool,
+    /// Checkpoints of this seal's state the graph lists, by digest.
+    pub checkpoints: Vec<TipCheckpoint>,
+}
+/// A checkpoint of one scope at a seal; its body moves only on request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TipCheckpoint {
+    /// The listing record's digest.
+    pub id: String,
+    pub scope: String,
+    pub checkpoint: String,
+    /// The node that signed the checkpoint.
+    pub signer: String,
+    /// Who listed it: `owner`, `trusted` or `issuer`.
+    pub authority: String,
+    /// Its size in stored rows.
+    pub rows: u64,
 }
 /// An opened tip; its id is the tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

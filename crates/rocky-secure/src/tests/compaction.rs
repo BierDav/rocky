@@ -3,10 +3,10 @@
 use super::generations::{Lineage, identity_insert, select, session, text};
 use super::*;
 use crate::TipStatement;
-use rocky_core::{SqlValue, TipId, TypedRows};
+use rocky_core::{Commitment, ResourceScope, SqlValue, TipId, TypedRows};
 use rocky_credentials::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction,
-    SealStatement, SignedBookmarkMove, SignedSeal,
+    SealStatement, SignedBookmarkMove, SignedCheckpointRecord, SignedSeal,
 };
 
 type Replica = EncryptedReplica<TypedRows>;
@@ -323,7 +323,7 @@ fn rival(lineage: &Lineage, seal: &SignedSeal) -> (SignedSeal, Vec<TipStatement>
 }
 
 #[tokio::test]
-async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_needs_a_rebootstrap() {
+async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_rebootstraps() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let key = PrivateKey::new();
@@ -359,18 +359,248 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_needs
     let report = replica.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.compacted, Some(winner.id().unwrap()));
 
-    // With nothing left uncompacted, a winning rival needs a rebootstrap.
+    // With nothing left uncompacted, a winning rival needs a rebootstrap:
+    // the device follows the winner, its rows wait and writes are refused.
     insert(&replica, "c", "third").await;
     churn(&replica, 12, "d").await;
     let third = rivalled_seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
-    let (_, statements) = rival(&lineage, &third);
-    let refused = replica.receive_tip_statements(&statements).await;
+    let (winner, statements) = rival(&lineage, &third);
+    replica.receive_tip_statements(&statements).await.unwrap();
+    assert_eq!(
+        replica.followed_tip().await,
+        winner.successor().unwrap().unwrap()
+    );
+    let status = replica.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.rebootstrap, Some(third.id().unwrap()));
+    let refused = session(&replica)
+        .await
+        .run("DELETE FROM items WHERE key=?", vec![text("a")])
+        .await;
     assert!(
         refused
             .as_ref()
-            .is_err_and(|error| error.to_string().contains("winning seal")),
+            .is_err_and(|error| error.to_string().contains("rebootstrap")),
         "{refused:?}"
+    );
+    // The graph lists no checkpoint at the winner; the device holds every
+    // frame, so it replays them.
+    let scope = lineage.scope("items");
+    let needs = replica.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert_eq!(
+        needs,
+        vec![crate::SealRebootstrap {
+            scope,
+            listed: Vec::new(),
+            replay: crate::FrameReplay::Local,
+            logged: false,
+        }]
+    );
+    replica.replay_at_seals(scope, false).await.unwrap();
+    let status = replica.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!((status.rebootstrap, status.compacted), (None, None));
+    let expected = vec![
+        vec![text("a"), text("first")],
+        vec![text("b"), text("second")],
+        vec![text("c"), text("third")],
+    ];
+    assert_eq!(titles(&replica).await, expected);
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(winner.id().unwrap()));
+    insert(&replica, "d", "after the rebootstrap").await;
+    assert_eq!(titles(&replica).await.len(), 4);
+}
+
+/// Imports `source`'s replay base of `scope` into `target`, whose node key
+/// is `key`, page by page.
+async fn import_checkpoint(
+    lineage: &Lineage,
+    source: &Replica,
+    target: &Replica,
+    key: &PrivateKey,
+    scope: ResourceScope,
+) -> Commitment {
+    let credentials = lineage.credentials(3, key);
+    source
+        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = source
+        .checkpoint_offer(key.public_key(), &credentials, scope)
+        .await
+        .unwrap()
+        .expect("a checkpoint at a seal");
+    let checkpoint = offered.id().unwrap();
+    target.begin_rebootstrap(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = source
+            .checkpoint_page(
+                key.public_key(),
+                &credentials,
+                scope,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        target.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    target.finish_rebootstrap(scope).await.unwrap();
+    checkpoint
+}
+/// The owner lists `replica`'s replay bases at seals in the graph.
+async fn list_checkpoints(lineage: &Lineage, replica: &Replica) -> Vec<TipStatement> {
+    let records: Vec<TipStatement> = replica
+        .unlisted_checkpoints(lineage.domain)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|statement| {
+            TipStatement::Checkpoint(Box::new(
+                SignedCheckpointRecord::sign(statement, lineage.publisher()).unwrap(),
+            ))
+        })
+        .collect();
+    replica.publish_tip_statements(&records).await.unwrap();
+    assert!(
+        replica
+            .unlisted_checkpoints(lineage.domain)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    records
+}
+
+#[tokio::test]
+async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_lists() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "x", "kept").await;
+    churn(&a, 12, "c").await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    // A compacts its seal at once; B receives the frames and then a rival
+    // seal that wins, compacts there and lists its checkpoint.
+    insert(&a, "y", "late").await;
+    let sealed = rivalled_seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    sync(&lineage, &a, &b, &keys[1]).await;
+    let (winner, statements) = rival(&lineage, &sealed);
+    b.receive_tip_statements(&statements).await.unwrap();
+    let report = b.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(winner.id().unwrap()));
+    let records = list_checkpoints(&lineage, &b).await;
+    assert_eq!(records.len(), 1);
+
+    // A learns the winner and the record: its compacted seal lost.
+    a.receive_tip_statements(&b.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    let status = a.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.rebootstrap, Some(sealed.id().unwrap()));
+    let graph = a.tip_graph(lineage.domain).await.unwrap();
+    let listed = graph.checkpoints_at(winner.id().unwrap()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].statement.signer, keys[1].public_key());
+    let scope = lineage.scope("items");
+    let needs = a.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert_eq!(needs.len(), 1);
+    assert_eq!(needs[0].listed, vec![listed[0].statement.checkpoint]);
+
+    // It imports the listed checkpoint; its frames the winner left out
+    // apply again on top as late frames.
+    let imported = import_checkpoint(&lineage, &b, &a, &keys[0], scope).await;
+    assert_eq!(imported, listed[0].statement.checkpoint);
+    assert!(a.finish_seal_rebootstrap(lineage.domain).await.unwrap());
+    let status = a.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.rebootstrap, None);
+    assert_eq!(titles(&a).await, titles(&b).await);
+    assert_eq!(
+        titles(&a).await,
+        vec![vec![text("x"), text("kept")], vec![text("y"), text("late")]]
+    );
+    // It finalizes from the imported base and compacts at the winner.
+    let report = a.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.waiting, None);
+    assert_eq!(report.compacted, Some(winner.id().unwrap()));
+    insert(&a, "z", "after").await;
+    assert_eq!(titles(&a).await.len(), 3);
+}
+
+#[tokio::test]
+async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let scope = lineage.scope("items");
+    a.set_retention_policy(
+        scope,
+        crate::RetentionPolicy {
+            required: BTreeSet::from([rocky_credentials::PeerId::of(keys[1].public_key())]),
+            behind: BTreeSet::new(),
+            copies: 1,
+            window: 0,
+        },
+    )
+    .await
+    .unwrap();
+    insert(&a, "x", "kept").await;
+    churn(&a, 12, "c").await;
+    insert(&a, "y", "late").await;
+    let sealed = rivalled_seal(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    a.acknowledge_frontier(
+        keys[1].public_key(),
+        &lineage.credentials(3, &keys[1]),
+        &b.frontier(scope).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let report = a.compact(lineage.domain, 0).await.unwrap();
+    assert!(report.pruned > 0);
+    // B, which compacts nothing and lists nothing, takes the winner.
+    let (_, statements) = rival(&lineage, &sealed);
+    b.receive_tip_statements(&statements).await.unwrap();
+    a.receive_tip_statements(&statements).await.unwrap();
+    let needs = a.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert_eq!(needs.len(), 1);
+    assert_eq!(needs[0].replay, crate::FrameReplay::Peers);
+    assert!(
+        a.replay_at_seals(scope, false)
+            .await
+            .is_err_and(|error| error.to_string().contains("peer"))
+    );
+    // A keeps what it holds and takes the pruned frames from B again.
+    a.replay_at_seals(scope, true).await.unwrap();
+    sync(&lineage, &b, &a, &keys[0]).await;
+    a.restored(scope).await.unwrap();
+    assert_eq!(
+        a.compaction_status(lineage.domain)
+            .await
+            .unwrap()
+            .rebootstrap,
+        None
+    );
+    assert_eq!(titles(&a).await, titles(&b).await);
+    assert_eq!(
+        titles(&a).await,
+        vec![vec![text("x"), text("kept")], vec![text("y"), text("late")]]
     );
 }
 

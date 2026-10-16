@@ -175,7 +175,8 @@ enum class TipAuthority { OWNER, TRUSTED, ISSUER }
 /**
  * A seal; [canonical] is false for a concurrent seal of the same tip that lost.
  * A [revoked] seal's signer was revoked; it takes part in no race. A [final] seal was committed by its tip's
- * coordinated log and acknowledged by enough trusted nodes; it beats every other seal of its tip.
+ * coordinated log and acknowledged by enough trusted nodes; it beats every other seal of its tip. [checkpoints]
+ * lists the checkpoints of its state a device may rebootstrap from.
  */
 data class TipSeal(
     val id: String,
@@ -186,6 +187,20 @@ data class TipSeal(
     val authority: TipAuthority,
     val revoked: Boolean,
     val final: Boolean,
+    val checkpoints: List<TipCheckpoint>,
+)
+
+/**
+ * A checkpoint of one [scope] at a seal, signed by the node [signer] and listed by [authority]; [rows] is its size.
+ * Its body moves only when a device asks for it.
+ */
+data class TipCheckpoint(
+    val id: String,
+    val scope: String,
+    val checkpoint: String,
+    val signer: String,
+    val authority: TipAuthority,
+    val rows: ULong,
 )
 data class TipOpening(val id: String, val seal: String, val minimumInSync: UInt)
 data class BookmarkMove(val id: String, val from: String?, val to: String?, val authority: TipAuthority, val revoked: Boolean)
@@ -227,6 +242,16 @@ data class TipInspection(
                     it.authority(),
                     it.getValue("revoked").jsonPrimitive.boolean,
                     it.getValue("final").jsonPrimitive.boolean,
+                    it.objects("checkpoints").map { checkpoint ->
+                        TipCheckpoint(
+                            checkpoint.text("id"),
+                            checkpoint.text("scope"),
+                            checkpoint.text("checkpoint"),
+                            checkpoint.text("signer"),
+                            checkpoint.authority(),
+                            checkpoint.unsigned("rows"),
+                        )
+                    },
                 )
             },
             value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },

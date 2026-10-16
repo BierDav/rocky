@@ -154,7 +154,8 @@ pub(crate) struct Planned {
 /// The peer's offers come first: populated scopes import smallest first,
 /// followed by empty scopes. The intent records each scope's rows for progress.
 /// `None` when the peer offers no checkpoint for some scope, as a keyless
-/// custody peer: the remaining intent waits for a peer that does.
+/// custody peer: the remaining intent waits for a peer that does. In a
+/// domain with a tip graph such a scope joins by frames instead.
 pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -173,6 +174,10 @@ pub(crate) async fn bootstrap(
         Some(session) => session,
         None => session(replica, upstream).await?,
     };
+    // With a tip graph a checkpoint exists only after a compaction; a scope
+    // the peer offers none of joins by frames.
+    planning.sync_tip_graph(replica).await?;
+    let graph = !replica.tip_statements(None, 1).await?.is_empty();
     let mut offered = planning.offered_rows(replica, scopes).await?;
     first = Some(planning);
     for (scope, offer) in scopes.iter().zip(offered.iter_mut()) {
@@ -219,7 +224,7 @@ pub(crate) async fn bootstrap(
             scopes
                 .iter()
                 .zip(&offered)
-                .filter(|(_, rows)| rows.is_none())
+                .filter(|(_, rows)| rows.is_none() && !graph)
                 .map(|(scope, _)| *scope),
         )
         .collect();
@@ -349,6 +354,12 @@ async fn rows(
             None => session(replica, upstream).await?,
         };
         session.sync_tip_graph(replica).await?;
+        // A compacted seal that lost, or a base at another cut, moves to a
+        // seal of the followed path before the scopes sync.
+        if !session.rebootstrap_at_seals(replica).await? {
+            session.close().await?;
+            continue;
+        }
         let mut exhausted = false;
         if !replica.tip_statements(None, 1).await?.is_empty() {
             for scope in scopes {

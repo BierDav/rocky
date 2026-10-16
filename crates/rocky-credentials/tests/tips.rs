@@ -837,3 +837,64 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
     assert!(!graph.is_final(committed.id().unwrap()).unwrap());
     assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
 }
+
+#[test]
+fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
+    use rocky_credentials::{
+        CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement, SignedCheckpointRecord,
+    };
+    let owner = PrivateKey::new();
+    let issuer = PrivateKey::new();
+    let mut graph = graph();
+    let sealed = seal(&graph, graph.genesis(), 3, &owner);
+    let statement = |seal: &SignedSeal, rows: u64| CheckpointRecordStatement {
+        format: CHECKPOINT_RECORD_FORMAT,
+        scope: graph.scope,
+        seal: seal.id().unwrap(),
+        table: rocky_core::ResourceScope {
+            domain: graph.scope,
+            encryption: [6; 32],
+            table: [7; 32],
+        },
+        checkpoint: [8; 32],
+        signer: PrivateKey::new().public_key(),
+        rows,
+    };
+    let record = SignedCheckpointRecord::endorse(
+        statement(&sealed, 4),
+        &issuer,
+        &issuer_chain(&owner, &issuer),
+    )
+    .unwrap();
+    // A record of a seal the graph does not hold, or of another domain, is refused.
+    let current = |record: &SignedCheckpointRecord, graph: &TipGraph| {
+        record.verify_current(owner.public_key(), graph, &RevocationSet::new(), 200)
+    };
+    assert!(current(&record, &graph).is_err());
+    graph.seals.push(sealed.clone());
+    current(&record, &graph).unwrap();
+    let mut other = statement(&sealed, 4);
+    other.table.domain.domain = DomainId([9; 16]);
+    assert!(SignedCheckpointRecord::sign(other, &owner).is_err());
+    let decoded = SignedCheckpointRecord::from_bytes(&record.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, record);
+
+    // Inspection lists it at its seal until its issuer is revoked; the
+    // owner's records stay.
+    let owners = SignedCheckpointRecord::sign(statement(&sealed, 5), &owner).unwrap();
+    graph.checkpoints = vec![record.clone(), owners.clone()];
+    assert_eq!(
+        graph.checkpoints_at(sealed.id().unwrap()).unwrap(),
+        vec![&record, &owners]
+    );
+    assert!(graph.checkpoints_at([0; 32]).unwrap().is_empty());
+    assert!(
+        graph
+            .exclude_revoked(&revoking(&owner, &[issuer.public_key()]))
+            .unwrap()
+    );
+    assert_eq!(
+        graph.checkpoints_at(sealed.id().unwrap()).unwrap(),
+        vec![&owners]
+    );
+}

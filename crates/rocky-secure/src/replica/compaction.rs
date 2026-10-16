@@ -10,6 +10,8 @@ use super::checkpoint::{
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::SignedSeal;
+mod rebootstrap;
+pub use rebootstrap::{FrameReplay, SealRebootstrap};
 
 pub(super) const SCHEMA: &[&str] = &[
     // Seals of the followed path this replica finalized, oldest first. The
@@ -310,6 +312,10 @@ impl<A: RowApplication> Inner<A> {
         if self.cut_pending(self.tip_log(domain)).await? {
             return Ok(Some("a cut of the tip's log is rolling back".into()));
         }
+        let at = self.path_index(domain, seal.id().map_err(credential)?)?;
+        // Scopes whose frames through the frontier this replica must hold:
+        // a base at this seal or a later one already holds its state.
+        let mut open = Vec::new();
         for (scope, id) in scopes {
             if self.direct.contains(scope) || self.importing(*scope).await? {
                 return Ok(Some("a scope is being imported".into()));
@@ -317,17 +323,20 @@ impl<A: RowApplication> Inner<A> {
             if self.staged_in(*scope).await? {
                 return Ok(Some("a coordinated entry is undecided".into()));
             }
-            let base_seal = self
-                .checkpoint_record(*id, true)
-                .await?
-                .and_then(|record| record.signed)
-                .and_then(|signed| signed.statement.seal);
-            if base_seal.is_none() && self.has_horizon(*scope).await? {
-                return Ok(Some(
-                    "history pruned before the seals; a checkpoint at a seal replaces it".into(),
-                ));
+            match self.base_seal(*id).await? {
+                Some(base) if self.path_index(domain, base)? >= at => continue,
+                Some(_) => {}
+                None if self.has_horizon(*scope).await? => {
+                    return Ok(Some(
+                        "history pruned before the seals; a checkpoint at a seal replaces it"
+                            .into(),
+                    ));
+                }
+                None => {}
             }
+            open.push((*scope, *id));
         }
+        let scopes = open.as_slice();
         // Positions of every node's frames and voids this replica holds.
         let mut held = BTreeMap::<u32, BTreeSet<u64>>::new();
         let mut last = BTreeMap::<(i64, u32), u64>::new();
@@ -398,7 +407,6 @@ impl<A: RowApplication> Inner<A> {
         }
         // Every existence record the frames through the frontier count,
         // unless a base at this seal or a later one folded them.
-        let at = self.path_index(domain, seal.id().map_err(credential)?)?;
         for scope in &logged {
             if let Some(base) = self.existence_base(*scope).await?
                 && let Some(folded) = base.seal()
@@ -874,6 +882,13 @@ impl<A: RowApplication> Inner<A> {
             valid += 1;
         }
         let Some(first) = finalized.get(valid) else {
+            // The compacted seal is on the path again.
+            self.conn
+                .execute(
+                    "DELETE FROM secure_compaction_lost WHERE domain=?",
+                    [encode(&domain)?],
+                )
+                .await?;
             return Ok(());
         };
         if let Some(compacted) = finalized[valid..]
@@ -962,7 +977,14 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         (target, seal): &(Finalized, SignedSeal),
     ) -> Result<(), Error> {
+        let at = self.path_index(domain, target.seal)?;
         for (scope, id) in self.domain_scopes(domain).await? {
+            // A base imported at a later seal stays.
+            if let Some(base) = self.base_seal(id).await?
+                && self.path_index(domain, base)? > at
+            {
+                continue;
+            }
             let logged = self.existence_table(scope);
             transaction!(self, |inner| {
                 inner.compact_scope(scope, id, target, seal).await?;
@@ -1081,6 +1103,17 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [id]).await?;
         }
+        // The base names the creations of the rows it stores, as an import
+        // rebuilds them; rows dropped at a seal take theirs along.
+        sets.creations = 0;
+        sets.creation_digest = checkpoint::Lt::new();
+        for creation in self.base_creations(id).await? {
+            let (_, clock) = self
+                .stub(creation)
+                .await?
+                .ok_or_else(|| Error::Corrupt("base row creation is unknown".into()))?;
+            sets.create(creation, clock);
+        }
         let tip = seal.statement.tip;
         let schema = self
             .generation_of(self.manifest_of_tip(tip)?, false)?
@@ -1154,13 +1187,24 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         // Stubs witness creations of stored rows and pruned dependencies;
-        // past the seal only the stored rows' creations are needed.
+        // past the seal only the creations of stored and base rows are needed.
         self.conn
             .execute(
                 "DELETE FROM secure_horizon_live_creations WHERE scope=?",
                 [id],
             )
             .await?;
+        for creation in self.base_creations(id).await? {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_horizon_live_creations VALUES(?,?)",
+                    bindings(vec![
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(creation.as_bytes().to_vec()),
+                    ]),
+                )
+                .await?;
+        }
         let blob = encode(&scope)?;
         let mut after = Vec::new();
         loop {
@@ -1210,6 +1254,39 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         Ok(())
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// The creation operations of scope `id`'s base rows.
+    async fn base_creations(&self, id: i64) -> Result<BTreeSet<Hash>, Error> {
+        let mut creations = BTreeSet::new();
+        let mut after = Vec::new();
+        loop {
+            let records = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(after.clone()),
+                            SqlValue::Integer(STEP_ROWS as i64),
+                        ]),
+                    )
+                    .await?,
+            )
+            .await?;
+            if records.is_empty() {
+                return Ok(creations);
+            }
+            for record in records {
+                let [SqlValue::Blob(key), SqlValue::Blob(fields)] = record.as_slice() else {
+                    return Err(Error::Corrupt("base row".into()));
+                };
+                after = key.clone();
+                creations.insert(decode::<Materialized>(fields)?.creation);
+            }
+        }
     }
 }
 

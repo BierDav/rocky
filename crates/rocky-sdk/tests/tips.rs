@@ -135,6 +135,29 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     let all = ok(&a, "compact", json!({})).await;
     assert_eq!(all["compacted"], second);
     assert_eq!(all["uncompacted"], json!([]));
+    // The owner lists each compaction's checkpoint beside its seal.
+    let inspected = ok(&a, "inspect", json!({})).await;
+    let listed = |seal: &Value| -> Vec<Value> {
+        inspected["seals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["id"] == *seal)
+            .unwrap()["checkpoints"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let at_second = listed(&second);
+    assert_eq!(at_second.len(), 1);
+    assert_eq!(at_second[0]["authority"], "owner");
+    assert_eq!(at_second[0]["rows"], json!(3));
+    assert!(
+        at_second[0]["signer"]
+            .as_str()
+            .is_some_and(|signer| signer.len() == 64)
+    );
+    assert_eq!(listed(&first).len(), 1);
     let items = ["bread/0", "eggs/1", "milk/0"];
     assert_eq!(a.items().await, items);
     a.close().await;

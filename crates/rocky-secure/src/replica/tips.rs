@@ -2,7 +2,8 @@
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::{
-    SealFinality, SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TipGraph,
+    SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedGenesisLine, SignedSeal,
+    SignedTipOpening, TipGraph,
 };
 
 /// Largest stored or exchanged tip statement: a finality record.
@@ -24,6 +25,7 @@ pub enum TipStatement {
     Bookmark(SignedBookmarkMove),
     GenesisLine(SignedGenesisLine),
     Finality(SealFinality),
+    Checkpoint(Box<SignedCheckpointRecord>),
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -33,6 +35,7 @@ impl TipStatement {
             Self::Bookmark(s) => s.id(),
             Self::GenesisLine(s) => s.id(),
             Self::Finality(s) => s.id(),
+            Self::Checkpoint(s) => s.id(),
         }
         .map_err(credential)
     }
@@ -43,6 +46,7 @@ impl TipStatement {
             Self::Bookmark(s) => s.statement.scope,
             Self::GenesisLine(s) => s.statement.scope,
             Self::Finality(s) => s.scope,
+            Self::Checkpoint(s) => s.statement.scope,
         }
     }
     pub fn append(&self, graph: &mut TipGraph) {
@@ -52,6 +56,7 @@ impl TipStatement {
             Self::Bookmark(s) => graph.moves.push(s.clone()),
             Self::GenesisLine(s) => graph.genesis_lines.push(s.clone()),
             Self::Finality(s) => graph.finalities.push(s.clone()),
+            Self::Checkpoint(s) => graph.checkpoints.push((**s).clone()),
         }
     }
     pub(in crate::replica) fn verify(
@@ -65,10 +70,12 @@ impl TipStatement {
             (Self::Opening(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Bookmark(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::GenesisLine(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
+            (Self::Checkpoint(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Seal(s), None) => s.verify(publisher, graph),
             (Self::Opening(s), None) => s.verify(publisher, graph),
             (Self::Bookmark(s), None) => s.verify(publisher, graph),
             (Self::GenesisLine(s), None) => s.verify(publisher, graph),
+            (Self::Checkpoint(s), None) => s.verify(publisher, graph),
             // Acknowledgments are checked against the signers' validity
             // when admitted; a stored record keeps counting until revoked.
             (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
@@ -786,14 +793,14 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    async fn rebuild_tip_workspace(&mut self, domain: Scope) -> Result<(), Error> {
+    pub(super) async fn rebuild_tip_workspace(&mut self, domain: Scope) -> Result<(), Error> {
         self.index_inherited_held(domain).await?;
         // Finalized seals off the new path are undone by the rebuild.
         self.revalidate_finalized(domain, false).await?;
+        // A compacted seal off the new path cannot be undone: the rows wait
+        // for a rebootstrap at a seal of the path.
         if self.compaction_lost(domain).await?.is_some() {
-            return Err(denied(
-                "switching tips needs a checkpoint at the winning seal: the compacted seal lost",
-            ));
+            return Ok(());
         }
         let path = self
             .path_seals(domain)?

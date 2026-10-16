@@ -52,7 +52,9 @@ asks its peer which checkpoint it offers for every granted collection, then
 imports populated scopes smallest first, followed by empty scopes, and pulls each
 ordinary tail. Each [verified page](checkpoint-import.md) of a collection the
 device held nothing of is readable as it commits. A writable source creates the
-checkpoint on demand, including an empty one. Interrupted transfers resume at
+checkpoint on demand, including an empty one; in a domain with a tip graph only
+a base at a seal is offered, and a collection without one joins by frames.
+Interrupted transfers resume at
 the next page on sync or reopen. Two peers that sign the same rows still offer
 different checkpoints, so a scope with staged pages keeps importing from their
 signer while that signer is linked. Another peer restarts the scope from its own

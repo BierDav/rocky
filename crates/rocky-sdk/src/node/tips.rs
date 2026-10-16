@@ -2,8 +2,9 @@
 //! graph. See `docs/runtime/tips-and-bookmarks.md`.
 use super::*;
 use crate::tips::{
-    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipCompaction, TipDevice, TipFrontierLog,
-    TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier, TipSeal, TipStatus,
+    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction, TipDevice,
+    TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier, TipSeal,
+    TipStatus,
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
@@ -67,6 +68,7 @@ impl Node {
                 };
                 let report = self.replica.compact(scope, keep).await?;
                 self.sign_existence_bases(scope).await?;
+                self.list_checkpoints(scope).await?;
                 self.observations.touch();
                 let blocked = report
                     .blocked
@@ -269,6 +271,20 @@ impl Node {
                     authority: authority(graph.authority(seal.endorsement())),
                     revoked: graph.revoked.contains(&seal.id()?),
                     finalized: graph.is_final(seal.id()?)?,
+                    checkpoints: graph
+                        .checkpoints_at(seal.id()?)?
+                        .into_iter()
+                        .map(|record| {
+                            Ok(TipCheckpoint {
+                                id: hex(&record.id()?),
+                                scope: serde_json::to_string(&record.statement.table)?,
+                                checkpoint: hex(&record.statement.checkpoint),
+                                signer: record.statement.signer.to_hex(),
+                                authority: authority(graph.authority(record.endorsement())),
+                                rows: record.statement.rows,
+                            })
+                        })
+                        .collect::<Result<_, Failure>>()?,
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -379,6 +395,34 @@ impl Node {
             )?;
             self.replica.install_signed_existence_base(signed).await?;
         }
+        Ok(())
+    }
+
+    /// Lists this device's checkpoints at seals in the graph when it may
+    /// sign tip statements, so devices whose compacted seal lost can
+    /// rebootstrap from them.
+    async fn list_checkpoints(&self, scope: Scope) -> Result<(), Failure> {
+        let unlisted = self.replica.unlisted_checkpoints(scope).await?;
+        if unlisted.is_empty() {
+            return Ok(());
+        }
+        let Ok(signer) = self.tip_signer(scope).await else {
+            return Ok(());
+        };
+        let records = unlisted
+            .into_iter()
+            .map(|statement| {
+                Ok(TipStatement::Checkpoint(Box::new(
+                    rocky_credentials::SignedCheckpointRecord::endorse(
+                        statement,
+                        &*signer.identity,
+                        &signer.links,
+                    )?,
+                )))
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        self.replica.publish_tip_statements(&records).await?;
+        self.wake_sync();
         Ok(())
     }
 

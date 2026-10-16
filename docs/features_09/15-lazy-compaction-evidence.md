@@ -98,11 +98,71 @@ whose base already covers its own.
 - `./scripts/check`: passed; 167 unit tests and 998 integration tests within
   their budgets.
 - `cargo test -p rocky-secure -p rocky-credentials -p rocky-sdk`: passed.
-- The Kotlin check and the shopping check were not rerun for this slice.
+- Rerun with slice 3 on top: `sdks/kotlin/gradlew -p sdks/kotlin check`
+  passed; `./examples/shoppinglist-app/check` ran 56 of 58 JVM tests green.
+  Besides `SchemaUpgradeTest`, `ApprovalsTest` failed once with
+  "coordinated write: Undecided" and passed on the slice 3 run.
 
 ### Open in slice 2
 
 - The SDK signs folds only in its `compact` action; no SDK test covers a
   domain with existence logs, since the SDK test schemas declare none.
 - An existence fold at a seal that later loses a race is not rebuilt; with
-  the rows' compaction it waits for slice 3's rebootstrap.
+  the rows' compaction it waits for slice 3's rebootstrap. Slice 3 replaces
+  it with a signed base at a seal of the path.
+
+## Slice 3: checkpoints at seals and rebootstrap
+
+See [checkpoints at seals](../runtime/lazy-compaction.md#checkpoints-at-seals)
+and [rebootstrap](../runtime/lazy-compaction.md#rebootstrap). A checkpoint
+record (`SignedCheckpointRecord`, format 1) is a tip statement naming a seal,
+a scope, the checkpoint's digest, its signing node and its rows; the SDK lists
+its bases after `compact`. With a tip graph, offers carry only bases at seals
+of the followed path. Admitting a winning rival no longer fails: the device
+follows it with its rows held still and writes refused until every scope has
+a base on the path, from a listed checkpoint, its own frames or a peer's.
+
+| Gate item | Test and result |
+| --- | --- |
+| With `keep = 0`, a winning rival rebootstraps by replaying frames | `a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_rebootstraps` (`rocky-secure` `tests::compaction`): the rival is admitted, `rebootstrap` names the lost seal and a delete is refused; `replay_at_seals` rebuilds the three rows, compaction resumes at the winner and writes continue |
+| ... and from a checkpoint listed in the graph | `a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_lists`: B compacts at the winner and the owner lists its base; A imports exactly that checkpoint, its frame the winner left out stays as on B, A finalizes from the imported base, compacts at the winner and authors without forking its log |
+| A pruned device replays frames from a peer | `a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer`: A pruned every frame; with none listed it resets and takes them again from B under an eviction guard |
+| Inspection shows each seal's checkpoints with their signers | `compact_keeps_the_requested_seals_and_every_row_across_reopen` (`rocky-sdk` tips): each compacted seal lists one owner-listed checkpoint with its node and rows; Kotlin `TipsTest` decodes `TipCheckpoint`; `checkpoint_records_name_a_held_seal_and_revocation_unlists_them` (`rocky-credentials`) |
+
+Fixed on the way:
+
+- A compaction base counted the creations of rows dropped at the seal, so no
+  device could import it; it now names those of its stored rows, and keeps
+  their stubs.
+- Importing a checkpoint reset the author tip below the device's own held
+  frames, and the next write forked its log; held frames now count.
+- `restored` cleared an eviction guard only for an explicit subscription; a
+  full replica's held scope clears it too.
+
+Formats: the statement set gains the checkpoint record. All of phase 15 is
+unpushed, so link `rocky.link.v9` and replica file
+`rocky.encrypted-replica.v25` stay; checkpoint format 14 is unchanged.
+
+### Verification, 2026-10-16
+
+- `./scripts/lint`: passed.
+- `./scripts/check`: passed; 167 unit tests and 1001 integration tests within
+  their budgets.
+- `cargo test -p rocky-secure -p rocky-credentials -p rocky-sdk`: passed.
+- `sdks/kotlin/gradlew -p sdks/kotlin check`: passed.
+- `./examples/shoppinglist-app/check`: 57 of 58 JVM tests passed; only
+  `SchemaUpgradeTest` fails, as recorded for slice 1, so the Android tests
+  and builds did not run.
+
+### Open in slice 3
+
+- A logged scope whose fold sits at the lost seal cannot replay frames; it
+  needs a listed checkpoint and a signed existence base.
+- Switching lines still refuses a scope pruned at another cut until the
+  rebootstrap above has given it a base at a seal of the new path
+  ([phase 14](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented)).
+- `NativeSession::rebootstrap_at_seals` runs in every SDK sync pass, but no
+  SDK test drives a lost race end to end across devices.
+- A scope pruned at another cut before the graph is found by
+  `seal_rebootstraps` and imports a listed checkpoint the same way; no test
+  covers that case or an SDK join of a graph domain by frames.

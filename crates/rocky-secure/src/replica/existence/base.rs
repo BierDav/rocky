@@ -641,6 +641,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("existence base rows differ from issuer signature"));
             }
             if let Some(previous) = inner.existence_base(scope).await?
+                && !inner.fold_off_path(scope).await?
                 && !base.covers(&previous)?
             {
                 return Err(denied("existence base would move backward"));

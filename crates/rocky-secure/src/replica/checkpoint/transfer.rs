@@ -597,6 +597,15 @@ impl<A: RowApplication> Inner<A> {
         if signed.statement.horizon != self.mergeable_horizon(scope).await? {
             return Ok(None);
         }
+        // With a tip graph only a base at a seal of the followed path.
+        if self.graphs.contains_key(&scope.domain)
+            && !signed.statement.seal.is_some_and(|seal| {
+                self.path_index(scope.domain, seal)
+                    .is_ok_and(|at| at.is_some())
+            })
+        {
+            return Ok(None);
+        }
         // A checkpoint of a generation this replica does not admit is
         // offered again once maintenance seals one of the current generation.
         if self
@@ -734,13 +743,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .filter(|(_, signed)| signed.signer() != peer)
                     .map(|(_, signed)| signed));
             }
-            inner.local_grants(now()?)?.iter().any(|grant| {
-                grant.scope == scope
-                    && grant.rows == RowSelection::All
-                    && [Right::Insert, Right::Update, Right::Delete]
-                        .iter()
-                        .any(|right| grant.rights.contains(right))
-            })
+            // With a tip graph a checkpoint exists only at a seal, after a
+            // compaction.
+            !inner.graphs.contains_key(&scope.domain)
+                && inner.local_grants(now()?)?.iter().any(|grant| {
+                    grant.scope == scope
+                        && grant.rows == RowSelection::All
+                        && [Right::Insert, Right::Update, Right::Delete]
+                            .iter()
+                            .any(|right| grant.rights.contains(right))
+                })
         };
         if may_sign {
             self.checkpoint(scope).await?;
@@ -1375,6 +1387,11 @@ impl<A: RowApplication> Inner<A> {
             && needed.id().map_err(credential)? < held.id().map_err(credential)?
         {
             // The publisher's lower sibling replaces the invalidated replay base.
+            return Ok(());
+        }
+        // A base at a seal off the followed path is replaced by one of the
+        // path; frames it pruned that the new base lacks come again as late frames.
+        if self.base_off_path(signed.statement.scope, id).await? {
             return Ok(());
         }
         for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {

@@ -146,9 +146,9 @@ class TipsTest {
         """{
           "scope":"domain","genesis":"genesis","schema":"schema","genesis_minimum":2,
           "seals":[
-            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true},
-            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false},
-            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false}
+            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true,"checkpoints":[{"id":"record","scope":"items","checkpoint":"body","signer":"node","authority":"issuer","rows":7}]},
+            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false,"checkpoints":[]},
+            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false,"checkpoints":[]}
           ],
           "openings":[{"id":"branch","seal":"continued","minimum_in_sync":3}],
           "bookmarks":[{"name":"main","tip":"continued","moves":[
@@ -169,9 +169,19 @@ class TipsTest {
         assertEquals(2u, value.genesisMinimum)
         assertEquals(
             listOf(
-                TipSeal("continued", "genesis", listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)), TipSealAction.Continue("schema"), true, TipAuthority.OWNER, false, true),
-                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true, false),
-                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false, false),
+                TipSeal(
+                    "continued",
+                    "genesis",
+                    listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)),
+                    TipSealAction.Continue("schema"),
+                    true,
+                    TipAuthority.OWNER,
+                    false,
+                    true,
+                    listOf(TipCheckpoint("record", "items", "body", "node", TipAuthority.ISSUER, 7uL)),
+                ),
+                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true, false, emptyList()),
+                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false, false, emptyList()),
             ),
             value.seals,
         )
@@ -196,6 +206,7 @@ class TipsTest {
             put("authority", "owner")
             put("revoked", false)
             put("final", false)
+            put("checkpoints", JsonArray(emptyList()))
         }
         val unknown = JsonObject(graph + ("seals" to JsonArray(listOf(seal))))
         assertFailsWith<IllegalArgumentException> { recordingTips { unknown }.second.inspect() }

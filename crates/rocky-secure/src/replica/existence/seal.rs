@@ -10,6 +10,21 @@ use rocky_credentials::{
 const LIVE: &str = "rocky.existence-base-live.v1";
 
 impl<A: RowApplication> Inner<A> {
+    /// Whether `scope`'s base is a fold at a seal off the followed path: a
+    /// base of a seal of the path replaces it, whatever it covers.
+    pub(in crate::replica) async fn fold_off_path(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        match self
+            .existence_base(scope)
+            .await?
+            .and_then(|base| base.seal())
+        {
+            Some(seal) => Ok(self.path_index(scope.domain, seal)?.is_none()),
+            None => Ok(false),
+        }
+    }
     /// Per author and author position, the records of `scope`'s logs held.
     pub(in crate::replica) async fn existence_positions(
         &self,
@@ -255,6 +270,11 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Whether `scope`'s existence base is a fold at a seal off the
+    /// followed path, which a base of the path replaces.
+    pub async fn existence_fold_off_path(&self, scope: ResourceScope) -> Result<bool, Error> {
+        self.inner.lock().await.fold_off_path(scope).await
+    }
     /// This replica's own folds at seals in `domain`, which the owner, a
     /// trusted identity or an issuer may sign for devices that fetch a base.
     pub async fn unsigned_existence_bases(

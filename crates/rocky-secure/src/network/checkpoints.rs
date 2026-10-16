@@ -185,6 +185,75 @@ impl NativeSession {
             .ok_or_else(|| denied("the peer offers no checkpoint"))?;
         self.import_within(replica, signed, quota).await
     }
+    /// Moves every held scope of the followed domain whose replay base left
+    /// the followed path, or was pruned at another cut, to a seal of the
+    /// path: it imports the peer's checkpoint when the graph lists it
+    /// there, else replays frames, from the peer when it pruned them and the
+    /// peer pruned none. A scope neither can rebuild waits. Returns false
+    /// once the session's budget runs low.
+    pub async fn rebootstrap_at_seals<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<bool, Error> {
+        let Some((domain, _)) = replica.followed_bookmark().await else {
+            return Ok(true);
+        };
+        let needs = replica.seal_rebootstraps(domain).await?;
+        if needs.is_empty()
+            && replica
+                .compaction_status(domain)
+                .await?
+                .rebootstrap
+                .is_none()
+        {
+            return Ok(true);
+        }
+        for need in needs {
+            let scope = need.scope;
+            if !need.listed.is_empty() {
+                self.ensure_holding(replica, &[scope]).await?;
+                if let Some(signed) = self.checkpoint_offer(replica, scope).await?
+                    && need.listed.contains(&signed.id()?)
+                {
+                    if self
+                        .import_within(replica, signed, CHECKPOINT_PAGE)
+                        .await?
+                        .is_none()
+                        || (need.logged && !self.pull_existence_base(replica, scope, None).await?)
+                    {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+            }
+            match need.replay {
+                FrameReplay::Local => replica.replay_at_seals(scope, false).await?,
+                FrameReplay::Peers if self.retains_history(replica, scope).await? => {
+                    replica.replay_at_seals(scope, true).await?
+                }
+                FrameReplay::Peers | FrameReplay::Unavailable => {}
+            }
+        }
+        replica.finish_seal_rebootstrap(domain).await?;
+        Ok(true)
+    }
+    /// Whether the peer pruned no frame of `scope`.
+    async fn retains_history<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        self.ensure_holding(replica, &[scope]).await?;
+        self.send(HorizonMessage::Horizon { scope, after: None })
+            .await?;
+        let HorizonMessage::HorizonLogs { page } = self.reply::<HorizonMessage>().await? else {
+            return Err(denied("unexpected horizon response"));
+        };
+        if page.scope != scope {
+            return Err(denied("horizon outside subscription"));
+        }
+        Ok(page.logs.is_empty())
+    }
     /// The checkpoint the peer offers for each scope, in order, with its
     /// stored rows; `None` where it offers none this replica may import:
     /// what a bootstrap plans with before it imports anything.

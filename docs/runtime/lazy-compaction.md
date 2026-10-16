@@ -43,6 +43,8 @@ newest finalized seal that is [final](seal-finality.md) or has at least
 stays recorded with the seals finalized after it; operations behind the
 base are released under the usual [retention](retention-holds.md) rules.
 `pruned` and `blocked` report what the call released and what stopped it.
+The base names the creations of the rows it stores only, so another device
+can [import it](#checkpoints-at-seals).
 
 `keep` trades storage against the chance of a rebootstrap: a seal that is
 not final can still lose a race. A final seal is compacted at `keep = 0`
@@ -73,14 +75,57 @@ after records were released, fetch that base through the existing base
 transfer: it is verified against the graph and must sit at a seal on their
 followed path. A base at a seal or later already counts as complete.
 
-## Races
+## Checkpoints at seals
+
+With a tip graph, a checkpoint exists only at a seal: a replay base that
+`compact` installed or a device imported. A peer offers its base only when it
+sits at a seal of the followed path, and never signs one at another cut.
+After `compact`, an SDK device that may sign tip statements lists each base
+this node signed as a checkpoint record (`SignedCheckpointRecord`, a
+`TipStatement::Checkpoint`): the seal, the scope, the checkpoint's digest,
+the node that signed it and its size in stored rows. Records sync with the
+graph to every device and need a seal the graph holds; a revoked lister's
+records are left out. The body moves only on request, through the usual
+[checkpoint import](checkpoint-import.md).
+
+`EncryptedReplica::unlisted_checkpoints` returns the bases still to list.
+Inspection shows each seal's `checkpoints` with their signer, lister
+authority and rows (`TipSeal.checkpoints`, Kotlin `TipCheckpoint`).
+
+An SDK join imports a checkpoint at a seal. In a domain with a tip graph, a
+scope whose peer offers none, because nobody compacted yet, joins by frames.
+
+## Rebootstrap
 
 After graph admission, a revocation or a bookmark move, finalized seals off
 the new path are undone and their scopes rebuilt. A compacted seal that left
-the path cannot be undone: the domain records it, `rebootstrap` names it,
-and switching tips is refused with "needs a checkpoint at the winning seal"
-until the base is rebuilt from a checkpoint at the winning seal or replayed
-frames. That rebootstrap is phase 15's slice 3.
+the path cannot be undone. The device still follows the bookmark, but its
+rows stay as they were, writes are refused and finalizing pauses;
+`rebootstrap` names the lost seal. Each held scope whose base left the path,
+or was pruned under a checkpoint at another cut before the graph existed,
+needs a base at a seal of the path (`EncryptedReplica::seal_rebootstraps`).
+In order, the device:
+
+1. imports a checkpoint the graph lists for the scope at a seal of the path,
+   the newest first, when the peer offers that one; a logged scope then
+   fetches the peer's signed existence base, which replaces a fold at a seal
+   off the path whatever it covers;
+2. otherwise, if it holds every frame it applied, rebuilds the scope from
+   them (`replay_at_seals(scope, false)`);
+3. otherwise, if the peer pruned no frame, keeps the frames it holds and
+   takes the rest again from the peer (`replay_at_seals(scope, true)`). Its
+   own log is guarded as after an [eviction](replica-roles.md#eviction): it
+   authors again once the log is whole;
+4. otherwise waits, for a listed checkpoint or the owner's
+   [recovery](../features_09/19-recovery-as-a-bookmark-move.md).
+
+Once no scope waits, `finish_seal_rebootstrap` forgets the finalized seals,
+rebuilds the rows at the followed tip and clears `rebootstrap`. The device
+finalizes again from the path's start; a seal at or before a scope's base
+needs none of that scope's frames. Frames the new base leaves out, its own
+too, apply on top as late frames or stay held, as on any device; Rocky never
+re-authors them. The SDK runs these steps at the start of every sync pass
+(`NativeSession::rebootstrap_at_seals`).
 
 ## Limits
 
@@ -89,10 +134,14 @@ frames. That rebootstrap is phase 15's slice 3.
 - A creation the frontier excludes whose id is below its author's mark in
   the base is refused as retired, as under a horizon: an id reserved before
   a seal and committed after a later one.
-- Scopes pruned under a checkpoint at an arbitrary cut before the graph
-  existed wait for a checkpoint at a seal.
-- Replicas finalize and compact only the scopes they hold; issuer
-  checkpoints at seals will serve joiners.
+- A logged scope whose fold sits at the lost seal cannot replay frames: its
+  records were released there. It waits for a listed checkpoint and a signed
+  existence base.
+- A device without a tip signer lists nothing; its bases still serve peers
+  that ask for them, but the graph does not name them.
+- A seal before an imported base waits while a frame of another held scope
+  may still be missing, as for scopes the replica does not hold.
+- Replicas finalize and compact only the scopes they hold.
 - Change detection is per table, not per partition.
 - A [mergeable horizon](mergeable-horizon.md) is refused in a domain with a
   tip graph.
@@ -105,6 +154,7 @@ frames. That rebootstrap is phase 15's slice 3.
 | Encrypted checkpoint | Format 14: names the seal it sits at, if any |
 | Row frame | 11: counts its existence records |
 | Existence base | Format 1, signed `rocky.existence-base.v1` |
+| Checkpoint record | Format 1, signed `rocky.checkpoint-record.v1` |
 | Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
 
 Seals and existence records do not change.

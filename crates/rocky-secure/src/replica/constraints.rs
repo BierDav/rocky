@@ -545,6 +545,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
             }
             let typed = self
                 .inner
+                .workspace
                 .typed
                 .as_ref()
                 .ok_or_else(|| corrupt("typed constraints"))?;
@@ -584,6 +585,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         }
         let typed = self
             .inner
+            .workspace
             .typed
             .as_ref()
             .ok_or_else(|| corrupt("typed constraints"))?;
@@ -628,6 +630,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         let parent = self.node(reference.parent);
         let typed = self
             .inner
+            .workspace
             .typed
             .as_ref()
             .ok_or_else(|| corrupt("typed constraints"))?;
@@ -848,7 +851,7 @@ fn stamps(node: &Node, record: &Materialized) -> Vec<Option<Stamp>> {
 
 impl<A: RowApplication> Inner<A> {
     fn constraints(&self) -> Option<Arc<Typed>> {
-        self.typed
+        self.workspace.typed
             .clone()
             .filter(|typed| typed.constraints.is_some())
     }

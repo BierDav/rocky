@@ -26,7 +26,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let graph = inner.scope_graph(scope)?;
             // The followed tip and the nearest ones its line came through:
             // a coordinator keeps that many ended logs.
-            let mut tips = vec![inner.tip];
+            let mut tips = vec![inner.workspace.tip];
             while tips.len() <= FINALIZED_TIPS {
                 match Inner::<A>::tip_parent(&graph, tips[tips.len() - 1])? {
                     Some((parent, _)) => tips.push(parent),

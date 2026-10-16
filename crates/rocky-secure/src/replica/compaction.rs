@@ -72,14 +72,14 @@ impl<A: RowApplication> Inner<A> {
         let Some(graph) = self.graphs.get(&domain) else {
             return Ok(Vec::new());
         };
-        if self.followed.as_ref().map(|(scope, _)| *scope) != Some(domain) {
+        if self.workspace.followed.as_ref().map(|(scope, _)| *scope) != Some(domain) {
             return Ok(Vec::new());
         }
         let mut seals = Vec::new();
-        if let Some(own) = graph.seal(self.tip).map_err(credential)? {
+        if let Some(own) = graph.seal(self.workspace.tip).map_err(credential)? {
             seals.push(own.clone());
         }
-        let mut cursor = self.tip;
+        let mut cursor = self.workspace.tip;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
             let mut parent = None;
@@ -451,7 +451,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<(Commitment, Option<Vec<u8>>)>, Error> {
-        let typed = self.typed.clone();
+        let typed = self.workspace.typed.clone();
         let table = typed.as_ref().and_then(|typed| typed.by_scope(scope));
         let id_column = match (&typed, table) {
             (Some(typed), Some(table)) => typed
@@ -563,7 +563,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<SealChange>, Error> {
         let graph = self.graph_for(domain)?;
         let constrained = |scope: ResourceScope| {
-            self.typed
+            self.workspace.typed
                 .as_ref()
                 .and_then(|typed| typed.constraints.as_ref())
                 .and_then(|constraints| constraints.node(scope))

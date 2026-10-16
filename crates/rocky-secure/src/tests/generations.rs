@@ -520,7 +520,7 @@ async fn frames(
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
-            inner.tip,
+            inner.workspace.tip,
         )
     };
     // As the target's session hello declares its followed tip.

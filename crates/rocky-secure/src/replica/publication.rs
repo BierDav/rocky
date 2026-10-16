@@ -153,6 +153,7 @@ impl<A: RowApplication> Inner<A> {
     /// references, new identities ascending, then deletions children first.
     fn publication_order(&self, writes: Vec<RowWrite>) -> Result<Vec<RowWrite>, Error> {
         let typed = self
+            .workspace
             .typed
             .as_ref()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;

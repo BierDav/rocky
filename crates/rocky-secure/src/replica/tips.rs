@@ -121,7 +121,7 @@ impl<A: RowApplication> Inner<A> {
     /// workspace when it was stamped before the signed transition out of
     /// its generation. Later frames of that tip are a peer that stayed.
     pub(crate) fn explicit_frame(&self, tip: TipId, timestamp: u64) -> bool {
-        tip == self.tip
+        tip == self.workspace.tip
             || self.previous.iter().any(|previous| {
                 rocky_credentials::genesis_tip(previous.manifest) == tip
                     && timestamp < previous.ended
@@ -135,7 +135,7 @@ impl<A: RowApplication> Inner<A> {
         header: &p2panda_core::Header<Extensions>,
     ) -> Result<bool, Error> {
         let e = &header.extensions;
-        if e.tip == self.tip || self.graphs.contains_key(&e.scope.domain) {
+        if e.tip == self.workspace.tip || self.graphs.contains_key(&e.scope.domain) {
             return Ok(true);
         }
         let last = collect_rows(
@@ -151,12 +151,12 @@ impl<A: RowApplication> Inner<A> {
             Some([SqlValue::Blob(bytes)]) => Ok(decode::<p2panda_core::Header<Extensions>>(bytes)?
                 .extensions
                 .tip
-                == self.tip),
+                == self.workspace.tip),
             _ => Ok(false),
         }
     }
     pub(crate) fn same_tip_peer(&self, peer: PublicKey) -> Result<(), Error> {
-        if self.peer_tip(peer) != Some(self.tip) {
+        if self.peer_tip(peer) != Some(self.workspace.tip) {
             return Err(denied("peer follows another tip"));
         }
         Ok(())
@@ -189,13 +189,13 @@ impl<A: RowApplication> Inner<A> {
         if graph.schema(tip).is_err() && graph.schema_any(tip).is_ok() {
             return Ok(FrameReach::Held);
         }
-        if !self.visible_frame(graph, tip, author, sequence, self.tip)?
+        if !self.visible_frame(graph, tip, author, sequence, self.workspace.tip)?
             && self.abandoned_frame(scope, graph, tip, author, sequence)?
         {
             return Ok(FrameReach::Held);
         }
         // The active tip can be sealed while its bookmark waits for a move.
-        if tip == self.tip {
+        if tip == self.workspace.tip {
             return Ok(match graph.seal(tip).map_err(credential)? {
                 None => FrameReach::Live,
                 Some(seal)
@@ -219,7 +219,7 @@ impl<A: RowApplication> Inner<A> {
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
             let Some(seal) = graph.seal(cursor).map_err(credential)? else {
-                return Ok(if cursor == self.tip {
+                return Ok(if cursor == self.workspace.tip {
                     FrameReach::Live
                 } else {
                     FrameReach::Unfollowed
@@ -230,7 +230,7 @@ impl<A: RowApplication> Inner<A> {
                 .frontier
                 .iter()
                 .any(|m| m.author == author && sequence <= m.sequence);
-            if included && self.visible_frame(graph, tip, author, sequence, self.tip)? {
+            if included && self.visible_frame(graph, tip, author, sequence, self.workspace.tip)? {
                 return Ok(FrameReach::Sealed);
             }
             match seal.successor().map_err(credential)? {
@@ -366,16 +366,16 @@ impl<A: RowApplication> Inner<A> {
         Err(denied("cyclic tip graph"))
     }
     pub(super) fn ensure_tip_writable(&self, scope: Scope) -> Result<(), Error> {
-        if let Some((followed, name)) = &self.followed
+        if let Some((followed, name)) = &self.workspace.followed
             && *followed == scope
-            && self.graph_for(scope)?.bookmark(name).map_err(credential)? != Some(self.tip)
+            && self.graph_for(scope)?.bookmark(name).map_err(credential)? != Some(self.workspace.tip)
         {
             return Err(denied(
                 "followed bookmark moved or was deleted; workspace is read-only",
             ));
         }
         if let Some(graph) = self.graphs.get(&scope)
-            && graph.seal(self.tip).map_err(credential)?.is_some()
+            && graph.seal(self.workspace.tip).map_err(credential)?.is_some()
         {
             return Err(denied("followed bookmark points to a sealed tip"));
         }
@@ -411,12 +411,12 @@ impl<A: RowApplication> Inner<A> {
                     e.tip,
                     e.author.ok_or_else(|| denied("node author missing"))?,
                     e.author_sequence,
-                    self.tip,
+                    self.workspace.tip,
                 )?,
                 None => {
                     self.explicit_frame(e.tip, header.timestamp)
-                        && (e.tip == self.tip
-                            || last.get(&header.public_key).map(|(_, tip)| *tip) == Some(self.tip))
+                        && (e.tip == self.workspace.tip
+                            || last.get(&header.public_key).map(|(_, tip)| *tip) == Some(self.workspace.tip))
                 }
             };
             if visible && (status != "held" || self.graphs.contains_key(&scope.domain)) {
@@ -512,8 +512,8 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(credential)?;
         }
         self.graphs = graphs;
-        self.followed = None;
-        self.tip = rocky_credentials::genesis_tip(self.manifest);
+        self.workspace.followed = None;
+        self.workspace.tip = rocky_credentials::genesis_tip(self.manifest);
         if let Some(record) = rows(
             &self.conn,
             "SELECT scope,bookmark,tip FROM secure_followed_tip WHERE id=1",
@@ -532,8 +532,8 @@ impl<A: RowApplication> Inner<A> {
             let scope: Scope = decode(scope)?;
             let tip: TipId = decode(tip)?;
             self.graph_for(scope)?.schema(tip).map_err(credential)?;
-            self.followed = Some((scope, name.clone()));
-            self.tip = tip;
+            self.workspace.followed = Some((scope, name.clone()));
+            self.workspace.tip = tip;
         }
         let genesis = rocky_credentials::genesis_tip(self.manifest);
         let original = identity::NodeAuthor::new(&self.config)?;
@@ -547,8 +547,8 @@ impl<A: RowApplication> Inner<A> {
                 ],
             )
             .await?;
-        if let Some((scope, _)) = self.followed.clone() {
-            self.select_line(scope, self.tip).await?;
+        if let Some((scope, _)) = self.workspace.followed.clone() {
+            self.select_line(scope, self.workspace.tip).await?;
         }
         Ok(())
     }
@@ -564,13 +564,13 @@ impl<A: RowApplication> Inner<A> {
             changed |= graph.exclude_revoked(revocations).map_err(credential)?;
         }
         if changed
-            && let Some((scope, name)) = self.followed.clone()
+            && let Some((scope, name)) = self.workspace.followed.clone()
             && let Some(target) = self.graph_for(scope)?.bookmark(&name).map_err(credential)?
-            && target != self.tip
+            && target != self.workspace.tip
         {
             self.switch_tip(scope, &name, target).await?;
         }
-        if changed && let Some((scope, _)) = self.followed.clone() {
+        if changed && let Some((scope, _)) = self.workspace.followed.clone() {
             self.revalidate_finalized(scope, true).await?;
         }
         Ok(changed)
@@ -666,22 +666,22 @@ impl<A: RowApplication> Inner<A> {
         name: &str,
         target: TipId,
     ) -> Result<(), Error> {
-        let tip = self.tip;
+        let tip = self.workspace.tip;
         let author = self.node_author.clone();
         let nodes = self.line_nodes.clone();
         let result = transaction!(self, |inner| {
-            inner.tip = tip;
+            inner.workspace.tip = tip;
             inner.node_author = author.clone();
             inner.line_nodes = nodes.clone();
             inner.switch_tip(scope, name, target).await
         });
         if let Err(error) = result {
-            self.tip = tip;
+            self.workspace.tip = tip;
             self.node_author = author;
             self.line_nodes = nodes;
             return Err(error);
         }
-        self.followed = Some((scope, name.into()));
+        self.workspace.followed = Some((scope, name.into()));
         self.publish_revision().await?;
         Ok(())
     }
@@ -693,22 +693,23 @@ impl<A: RowApplication> Inner<A> {
                 "followed tip schema is not installed".into(),
             ));
         }
-        let forward = target == self.tip
+        let forward = target == self.workspace.tip
             || graph
-                .continues(self.tip, target)
+                .continues(self.workspace.tip, target)
                 .is_ok_and(|continues| continues);
-        let old_tip = self.tip;
+        let old_tip = self.workspace.tip;
         let old_author = self.node_author.clone();
         let old_nodes = self.line_nodes.clone();
         let leaving_line = !forward
             && self
+                .workspace
                 .followed
                 .as_ref()
                 .is_some_and(|(followed, bookmark)| *followed == scope && bookmark == name);
         if leaving_line {
-            let common = self.common_frontier(scope, self.tip, target)?;
+            let common = self.common_frontier(scope, self.workspace.tip, target)?;
             let mut tips = Vec::new();
-            let mut cursor = self.tip;
+            let mut cursor = self.workspace.tip;
             let mut visited = BTreeSet::new();
             while visited.insert(cursor) {
                 tips.push(cursor);
@@ -721,7 +722,7 @@ impl<A: RowApplication> Inner<A> {
                 self.hold_line_writes(scope, tip, &common).await?;
             }
         }
-        self.tip = target;
+        self.workspace.tip = target;
         let result = async {
             self.select_line(scope, target).await?;
             if !forward {
@@ -731,7 +732,7 @@ impl<A: RowApplication> Inner<A> {
         }
         .await;
         if result.is_err() {
-            self.tip = old_tip;
+            self.workspace.tip = old_tip;
             self.node_author = old_author;
             self.line_nodes = old_nodes;
         }
@@ -903,7 +904,7 @@ impl<A: RowApplication> Inner<A> {
                 e.tip,
                 e.author.ok_or_else(|| denied("node author missing"))?,
                 e.author_sequence,
-                self.tip,
+                self.workspace.tip,
             ),
             None => Ok(self.explicit_frame(e.tip, operation.header.timestamp)),
         }
@@ -921,10 +922,10 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn followed_tip(&self) -> TipId {
-        self.inner.lock().await.tip
+        self.inner.lock().await.workspace.tip
     }
     pub async fn followed_bookmark(&self) -> Option<(Scope, String)> {
-        self.inner.lock().await.followed.clone()
+        self.inner.lock().await.workspace.followed.clone()
     }
     pub async fn tip_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
         self.inner.lock().await.scope_graph(scope)
@@ -1003,16 +1004,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         let old_graphs = inner.graphs.clone();
-        let old_tip = inner.tip;
+        let old_tip = inner.workspace.tip;
         let old_author = inner.node_author.clone();
         let old_nodes = inner.line_nodes.clone();
-        let old_followed = inner.followed.clone();
+        let old_followed = inner.workspace.followed.clone();
         let result = transaction!(inner, |inner| {
             inner.graphs = graphs.clone();
-            inner.tip = old_tip;
+            inner.workspace.tip = old_tip;
             inner.node_author = old_author.clone();
             inner.line_nodes = old_nodes.clone();
-            inner.followed = old_followed.clone();
+            inner.workspace.followed = old_followed.clone();
             for (scope, graph) in &graphs {
                 inner
                     .conn
@@ -1048,10 +1049,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         });
         if let Err(error) = result {
             inner.graphs = old_graphs;
-            inner.tip = old_tip;
+            inner.workspace.tip = old_tip;
             inner.node_author = old_author;
             inner.line_nodes = old_nodes;
-            inner.followed = old_followed;
+            inner.workspace.followed = old_followed;
             return Err(error);
         }
         inner.bump_authority();
@@ -1121,11 +1122,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn register_line_node(&self, node: LineNode) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         let (scope, _) = inner
+            .workspace
             .followed
             .as_ref()
             .ok_or_else(|| denied("follow a bookmark first"))?;
         if !inner
-            .node_continues(*scope, inner.tip, node.key.public_key())
+            .node_continues(*scope, inner.workspace.tip, node.key.public_key())
             .await?
         {
             return Err(denied(
@@ -1134,7 +1136,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let root = inner
             .graph_for(*scope)?
-            .line_root(inner.tip)
+            .line_root(inner.workspace.tip)
             .map_err(credential)?;
         let owner = inner
             .config

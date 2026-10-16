@@ -152,7 +152,7 @@ pub struct ExistencePage {
 impl<A: RowApplication> Inner<A> {
     /// The installed scope of a table with an existence log.
     pub(super) fn existence_table(&self, scope: ResourceScope) -> bool {
-        self.typed.as_ref().is_some_and(|typed| {
+        self.workspace.typed.as_ref().is_some_and(|typed| {
             typed.declared_by_scope(scope).is_some_and(|projected| {
                 typed
                     .rows
@@ -198,7 +198,7 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(|error| denied(&error))?;
             let statement = Statement {
                 version: EXISTENCE_FORMAT,
-                tip: self.tip,
+                tip: self.workspace.tip,
                 scope,
                 id,
                 event,
@@ -271,11 +271,11 @@ impl<A: RowApplication> Inner<A> {
                 statement.tip,
                 statement.author,
                 statement.author_sequence,
-                self.tip,
+                self.workspace.tip,
             )? {
                 return Err(denied("existence record belongs to an unfollowed tip"));
             }
-        } else if statement.tip != self.tip {
+        } else if statement.tip != self.workspace.tip {
             return Err(denied("existence record belongs to an unfollowed tip"));
         }
 
@@ -490,7 +490,7 @@ impl<A: RowApplication> Inner<A> {
                     statement.tip,
                     statement.author,
                     statement.author_sequence,
-                    self.tip,
+                    self.workspace.tip,
                 )?
             {
                 continue;
@@ -597,7 +597,7 @@ impl<A: RowApplication> Inner<A> {
                     statement.tip,
                     statement.author,
                     statement.author_sequence,
-                    self.tip,
+                    self.workspace.tip,
                 )? {
                     frontier
                         .entry(record.signer)
@@ -644,7 +644,7 @@ impl<A: RowApplication> Inner<A> {
                         record.statement.tip,
                         record.statement.author,
                         record.statement.author_sequence,
-                        self.tip,
+                        self.workspace.tip,
                     )?
                 {
                     continue;
@@ -808,7 +808,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// grant on, read or custody, and of tables such tables reference.
     pub async fn existence_scopes(&self) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock().await;
-        let Some(typed) = &inner.typed else {
+        let Some(typed) = &inner.workspace.typed else {
             return Ok(Vec::new());
         };
         let grants = inner.local_grants(now()?)?;
@@ -875,6 +875,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<u64, Error> {
         let inner = self.inner.lock().await;
         let typed = inner
+            .workspace
             .typed
             .clone()
             .ok_or_else(|| denied("no typed tables"))?;

@@ -269,6 +269,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // the children of this partition that were hidden without it.
         if opens
             && inner
+                .workspace
                 .typed
                 .as_ref()
                 .and_then(|typed| typed.constraints.as_ref())

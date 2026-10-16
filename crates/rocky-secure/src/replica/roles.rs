@@ -463,7 +463,7 @@ impl<A: RowApplication> Inner<A> {
         if peer == self.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        if self.peer_tip(peer) != Some(self.tip) {
+        if self.peer_tip(peer) != Some(self.workspace.tip) {
             return Ok(());
         }
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
@@ -1171,7 +1171,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock().await;
-        if inner.peer_tip(peer) != Some(inner.tip) {
+        if inner.peer_tip(peer) != Some(inner.workspace.tip) {
             return Ok(Vec::new());
         }
         let grants = inner.verify_chain_scopes(credentials, peer, now()?, scopes)?;

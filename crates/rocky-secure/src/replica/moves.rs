@@ -436,6 +436,7 @@ impl<A: RowApplication> Inner<A> {
             return previous.map_err(|_| denied("move handle is behind pruned prefix"));
         }
         let typed = self
+            .workspace
             .typed
             .clone()
             .ok_or_else(|| denied("move requires typed tables"))?;

@@ -194,7 +194,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         // It names the generation that removed the items.
         let mut statement = previous.statement.clone();
-        statement.tip = self.tip;
+        statement.tip = self.workspace.tip;
         let generation = self.generation_of(self.manifest_of_tip(statement.tip)?, false)?;
         statement.schema = generation.schema;
         statement.sequence = statement
@@ -288,6 +288,7 @@ impl<A: RowApplication> Inner<A> {
     /// observers it changed.
     fn touch_scope(&self, scope: ResourceScope) {
         if let Some(table) = self
+            .workspace
             .typed
             .as_ref()
             .and_then(|typed| typed.rows.table(&scope.table))

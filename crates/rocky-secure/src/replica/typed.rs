@@ -387,7 +387,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         verify_constraint_indexes(&inner.conn, &typed).await?;
         let constrained = typed.constraints.is_some();
-        inner.typed = Some(Arc::new(typed));
+        inner.workspace.typed = Some(Arc::new(typed));
         if constrained {
             transaction!(inner, |inner| Box::pin(
                 inner.rebuild_constraints(None, None)
@@ -537,7 +537,7 @@ impl<A: RowApplication> Inner<A> {
             .authorized_projection(Typed::new(schema, decode(domain)?, &decode(readers)?)?)
             .await?;
         verify_constraint_indexes(&self.conn, &typed).await?;
-        self.typed = Some(Arc::new(typed));
+        self.workspace.typed = Some(Arc::new(typed));
         self.start_events();
         Ok(())
     }
@@ -551,13 +551,13 @@ impl<A: RowApplication> Inner<A> {
         old: Option<&Materialized>,
         new: &Materialized,
     ) -> Result<(), Error> {
-        if let Some(shadow) = self.shadow.clone()
+        if let Some(shadow) = self.workspace.shadow.clone()
             && let Some(table) = shadow.by_scope(scope)
         {
             self.project_into(&shadow, table, scope, old, new, false)
                 .await?;
         }
-        let Some(typed) = self.typed.clone() else {
+        let Some(typed) = self.workspace.typed.clone() else {
             return Ok(());
         };
         // Candidates follow every write; `resolve` settles them once the
@@ -579,6 +579,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let typed = self
+            .workspace
             .typed
             .clone()
             .ok_or_else(|| Error::Corrupt("missing SQL projection".into()))?;
@@ -683,13 +684,14 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) async fn clear_typed(&self, scope: ResourceScope) -> Result<(), Error> {
         self.restart_plan(scope).await?;
         if self
+            .workspace
             .typed
             .as_ref()
             .is_some_and(|typed| typed.declared_by_scope(scope).is_none())
         {
             return Err(Error::Corrupt("missing typed scope for eviction".into()));
         }
-        if let Some(typed) = &self.typed
+        if let Some(typed) = &self.workspace.typed
             && typed
                 .constraints
                 .as_ref()
@@ -699,11 +701,11 @@ impl<A: RowApplication> Inner<A> {
             // Children elsewhere lose their parents with it.
             return Box::pin(self.rebuild_constraints(Some(scope), Some(scope))).await;
         }
-        if let Some(table) = self.typed.as_ref().and_then(|typed| typed.by_scope(scope)) {
+        if let Some(table) = self.workspace.typed.as_ref().and_then(|typed| typed.by_scope(scope)) {
             self.touch(&table.table.sql_name);
             reproject(
                 &self.conn,
-                self.typed
+                self.workspace.typed
                     .as_ref()
                     .ok_or_else(|| denied("missing typed schema"))?,
                 table,
@@ -718,7 +720,7 @@ impl<A: RowApplication> Inner<A> {
         self.index_row_keys().await?;
         self.reindex_move_scope(scope).await?;
         self.restart_plan(scope).await?;
-        let Some(typed) = self.typed.clone() else {
+        let Some(typed) = self.workspace.typed.clone() else {
             return Ok(());
         };
         if typed

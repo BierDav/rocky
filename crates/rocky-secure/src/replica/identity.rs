@@ -109,7 +109,7 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         key: Commitment,
     ) -> Result<Option<Materialized>, Error> {
-        if self.typed.is_some() {
+        if self.workspace.typed.is_some() {
             self.winner(scope, key).await
         } else {
             self.row(scope, key).await
@@ -206,7 +206,7 @@ impl<A: RowApplication> Inner<A> {
     /// Creation records outlive operation pruning, including deleted rows.
     /// This is a summary of the own creation log, not an allocation counter.
     pub(super) fn identity_allocation_scope(&self, scope: ResourceScope) -> ResourceScope {
-        self.typed
+        self.workspace.typed
             .as_ref()
             .and_then(|typed| {
                 typed.declared_by_scope(scope).and_then(|table| {

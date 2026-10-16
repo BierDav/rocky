@@ -17,7 +17,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .find(|g| g.schema_any(tip).is_ok())
             .ok_or_else(|| denied("unknown tip"))?;
         let canonical = graph.canonical_tip(tip).map_err(credential)?;
-        let mut cursor = inner.tip;
+        let mut cursor = inner.workspace.tip;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
             if cursor == tip || cursor == canonical {
@@ -258,12 +258,12 @@ impl<A: RowApplication> Inner<A> {
         let graph = self
             .graphs
             .values()
-            .find(|graph| graph.schema_any(self.tip).is_ok());
+            .find(|graph| graph.schema_any(self.workspace.tip).is_ok());
         let mut missing = self.conn.query(
             "SELECT tip FROM secure_dropped_tip_frames d WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=d.hash)", ()).await?;
         while let Some(row) = missing.next().await? {
             let dropped: TipId = decode(&row.get::<Vec<u8>>(0)?)?;
-            let mut cursor = self.tip;
+            let mut cursor = self.workspace.tip;
             let mut visited = BTreeSet::new();
             while visited.insert(cursor) {
                 if dropped == cursor {

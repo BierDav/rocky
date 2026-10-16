@@ -222,7 +222,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// A bulk change of a scope's stored rows: its shadow fills again.
     pub(super) async fn restart_plan(&self, scope: ResourceScope) -> Result<(), Error> {
-        let Some(shadow) = &self.shadow else {
+        let Some(shadow) = &self.workspace.shadow else {
             return Ok(());
         };
         let Some(index) = shadow.tables.iter().position(|table| table.scope == scope) else {
@@ -325,8 +325,8 @@ impl<A: RowApplication> Inner<A> {
             }
         })?;
         if switched {
-            self.shadow = None;
-            self.typed = Some(Arc::new(
+            self.workspace.shadow = None;
+            self.workspace.typed = Some(Arc::new(
                 self.authorized_projection(Typed::new(
                     record.schema,
                     record.domain,
@@ -340,8 +340,8 @@ impl<A: RowApplication> Inner<A> {
             self.publish_revision().await?;
             return Ok(false);
         }
-        if self.shadow.is_none() {
-            self.shadow = Some(shadow);
+        if self.workspace.shadow.is_none() {
+            self.workspace.shadow = Some(shadow);
         }
         Ok(true)
     }
@@ -364,7 +364,7 @@ impl<A: RowApplication> Inner<A> {
             .await?,
         );
         // Resolution reads the installed projection.
-        let previous = self.typed.replace(projected.clone());
+        let previous = self.workspace.typed.replace(projected.clone());
         let switched = transaction!(self, |inner| {
             for table in installed.mergeable() {
                 inner.touch(&table.sql_name);
@@ -415,7 +415,7 @@ impl<A: RowApplication> Inner<A> {
             inner.finish_switch(record).await
         });
         if let Err(error) = switched {
-            self.typed = previous;
+            self.workspace.typed = previous;
             return Err(error);
         }
         self.start_events();

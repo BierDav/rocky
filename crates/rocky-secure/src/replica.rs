@@ -38,6 +38,7 @@ pub use tip_observation::{PeerScopeFrontier, TipDevice, TipNodeObservation, TipO
 pub(crate) mod tips;
 pub use tips::{LineNode, TipStatement};
 mod typed;
+mod workspace;
 use super::store::{SCHEMA, TransactionStore};
 use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
 use super::*;
@@ -317,9 +318,9 @@ pub(super) struct Inner<A> {
     /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
-    pub(super) tip: TipId,
     pub(super) graphs: BTreeMap<rocky_core::Scope, rocky_credentials::TipGraph>,
-    followed: Option<(rocky_core::Scope, String)>,
+    /// The live tables, the tip they hold and their observers.
+    pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
     pub(super) definition: rocky_core::ApplicationManifest,
     pub(super) tables: HashSet<Commitment>,
@@ -331,11 +332,6 @@ pub(super) struct Inner<A> {
     /// under an earlier value are refused.
     pub(super) authority: u64,
     pub(super) authority_events: watch::Sender<u64>,
-    /// Installed typed tables that stored rows project into.
-    typed: Option<Arc<typed::Typed>>,
-    /// The shadow tables of a pending projection plan, which rows also
-    /// project into.
-    shadow: Option<Arc<typed::Typed>>,
     /// Earlier definition generations, all admitted.
     previous: Vec<generation::Previous>,
     /// Removed and re-added tables and fields of the recorded lineage.
@@ -368,8 +364,6 @@ pub(super) struct Inner<A> {
     /// This device's verified partition selectors for an authority and
     /// second: every statement of a partitioned schema asks for them.
     local_selectors: std::sync::Mutex<Option<LocalSelectors>>,
-    /// Cursors, table events and the authority mirror of this replica.
-    pub(super) queries: queries::Queries,
     pub(super) notifications: watch::Sender<u64>,
     pub(super) frames: watch::Sender<()>,
     /// Checkpoint pages stored since open, by any import.
@@ -762,9 +756,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             partitions: BTreeMap::new(),
             history,
             manifest: manifest.hash(),
-            tip: rocky_credentials::genesis_tip(manifest.hash()),
+            workspace: workspace::Workspace::new(rocky_credentials::genesis_tip(manifest.hash())),
             graphs: BTreeMap::new(),
-            followed: None,
             line_nodes: BTreeMap::new(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
@@ -773,8 +766,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             revision: 0,
             authority: 1,
             authority_events: watch::channel(1).0,
-            typed: None,
-            shadow: None,
             previous: Vec::new(),
             names: generation::Names::default(),
             strict_projection: false,
@@ -787,7 +778,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             deferred_maintenance: BTreeSet::new(),
             importing: BTreeSet::new(),
             direct: BTreeSet::new(),
-            queries: Default::default(),
             notifications,
             frames: watch::channel(()).0,
             imported: watch::channel(0).0,
@@ -866,10 +856,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.load_generations().await?;
                 inner.load_tip_graphs().await?;
                 let stored = inner.stored_identity().await?;
-                if inner.followed.is_some() {
-                    identity = generation::identity(inner.tip, inner.config.node.public_key())?;
+                if inner.workspace.followed.is_some() {
+                    identity = generation::identity(inner.workspace.tip, inner.config.node.public_key())?;
                 }
-                let activated = if inner.followed.is_some() {
+                let activated = if inner.workspace.followed.is_some() {
                     false
                 } else {
                     inner.activate(&stored, upgrade.as_ref()).await?
@@ -1188,16 +1178,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // Seals and moves of a revoked signer leave resolution with the
         // set, and the followed bookmark moves in the same commit.
         let old_graphs = inner.graphs.clone();
-        let old_tip = inner.tip;
+        let old_tip = inner.workspace.tip;
         let old_author = inner.node_author.clone();
         let old_nodes = inner.line_nodes.clone();
-        let old_followed = inner.followed.clone();
+        let old_followed = inner.workspace.followed.clone();
         let result = transaction!(inner, |inner| {
             inner.graphs = old_graphs.clone();
-            inner.tip = old_tip;
+            inner.workspace.tip = old_tip;
             inner.node_author = old_author.clone();
             inner.line_nodes = old_nodes.clone();
-            inner.followed = old_followed.clone();
+            inner.workspace.followed = old_followed.clone();
             inner
                 .conn
                 .execute(
@@ -1210,10 +1200,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         });
         if let Err(error) = result {
             inner.graphs = old_graphs;
-            inner.tip = old_tip;
+            inner.workspace.tip = old_tip;
             inner.node_author = old_author;
             inner.line_nodes = old_nodes;
-            inner.followed = old_followed;
+            inner.workspace.followed = old_followed;
             return Err(error);
         }
         inner.config.revocations = merged;

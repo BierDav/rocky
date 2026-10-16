@@ -81,7 +81,7 @@ impl<A> Definition<A> {
         std::mem::swap(&mut self.node_author, &mut inner.node_author);
         std::mem::swap(&mut self.history, &mut inner.history);
         std::mem::swap(&mut self.manifest, &mut inner.manifest);
-        std::mem::swap(&mut self.tip, &mut inner.tip);
+        std::mem::swap(&mut self.tip, &mut inner.workspace.tip);
         std::mem::swap(&mut self.definition, &mut inner.definition);
         std::mem::swap(&mut self.tables, &mut inner.tables);
         std::mem::swap(&mut self.fields, &mut inner.fields);

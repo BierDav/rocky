@@ -9,7 +9,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.partitioned(scope) {
             return true;
         }
-        if let Some(typed) = &inner.typed {
+        if let Some(typed) = &inner.workspace.typed {
             return !typed.declarations.iter().any(|table| table.scope == scope);
         }
         !inner.tables.contains(&scope.table)

@@ -60,7 +60,7 @@ impl<A: RowApplication> Inner<A> {
     }
     fn visible_header(&self, graph: &TipGraph, header: &Extensions) -> Result<bool, Error> {
         let author = header.author.ok_or_else(|| denied("node author missing"))?;
-        self.visible_frame(graph, header.tip, author, header.author_sequence, self.tip)
+        self.visible_frame(graph, header.tip, author, header.author_sequence, self.workspace.tip)
     }
     async fn observed_devices(&self, scope: Scope) -> Result<Vec<TipDevice>, Error> {
         let mut peers = BTreeMap::<PeerId, BTreeMap<ResourceScope, Vec<FrontierLog>>>::new();
@@ -146,7 +146,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         let mut marks = BTreeMap::<u32, u64>::new();
-        if let Some((_, inherited)) = Inner::<A>::tip_parent(&graph, inner.tip)? {
+        if let Some((_, inherited)) = Inner::<A>::tip_parent(&graph, inner.workspace.tip)? {
             marks.extend(inherited.iter().map(|mark| (mark.author, mark.sequence)));
         }
         for header in inner.domain_headers(scope).await? {
@@ -164,9 +164,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn tip_observation(&self, scope: Scope) -> Result<TipObservation, Error> {
         let inner = self.inner.lock().await;
         let graph = inner.scope_graph(scope)?;
-        let baseline = match graph.seal(inner.tip).map_err(credential)? {
+        let baseline = match graph.seal(inner.workspace.tip).map_err(credential)? {
             Some(seal) => seal.statement.frontier.clone(),
-            None => Inner::<A>::tip_parent(&graph, inner.tip)?
+            None => Inner::<A>::tip_parent(&graph, inner.workspace.tip)?
                 .map(|(_, frontier)| frontier)
                 .unwrap_or_default(),
         };
@@ -182,11 +182,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(TipObservation {
             bookmark: inner
+                .workspace
                 .followed
                 .as_ref()
                 .filter(|(domain, _)| *domain == scope)
                 .map(|(_, name)| name.clone()),
-            tip: inner.tip,
+            tip: inner.workspace.tip,
             operations_since_seal,
             devices: inner.observed_devices(scope).await?,
         })
@@ -197,13 +198,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         inner.scope_graph(scope)?;
         let local = PeerId::of(inner.config.node.public_key());
-        let mut tips = BTreeSet::from([inner.tip]);
+        let mut tips = BTreeSet::from([inner.workspace.tip]);
         for header in inner.domain_headers(scope).await? {
             tips.insert(header.tip);
         }
         let mut nodes = vec![TipNodeObservation {
             node: local,
-            followed_tip: Some(inner.tip),
+            followed_tip: Some(inner.workspace.tip),
             kept_tips: Some(tips.into_iter().collect()),
             kept_seals: Some(Vec::new()),
         }];
@@ -223,6 +224,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// writes wait for `register_line_node`.
     pub async fn line_node_needed(&self) -> bool {
         let inner = self.inner.lock().await;
-        inner.followed.is_some() && inner.node_author.is_none()
+        inner.workspace.followed.is_some() && inner.node_author.is_none()
     }
 }

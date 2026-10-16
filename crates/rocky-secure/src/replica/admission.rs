@@ -59,7 +59,7 @@ impl<A: RowApplication> Inner<A> {
         self.peer_tips
             .get(&PeerId::of(peer))
             .copied()
-            .or_else(|| self.graphs.is_empty().then_some(self.tip))
+            .or_else(|| self.graphs.is_empty().then_some(self.workspace.tip))
     }
     /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {

@@ -42,7 +42,7 @@ impl Drop for Queries {
 impl<A: RowApplication> Inner<A> {
     /// Starts the table events of the installed typed tables.
     pub(super) fn start_events(&mut self) {
-        if let Some(typed) = &self.typed {
+        if let Some(typed) = &self.workspace.typed {
             let tables = typed
                 .rows
                 .schema()
@@ -50,7 +50,7 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .map(|table| table.sql_name.clone());
             // Observers of the same domain stay registered across a switch.
-            self.queries.events = Some(match &self.queries.events {
+            self.workspace.queries.events = Some(match &self.workspace.queries.events {
                 Some(events) if events.scope() == typed.domain => events.follow(tables),
                 _ => TableEvents::new(typed.domain, tables),
             });
@@ -61,40 +61,40 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn bump_authority(&mut self) {
         self.authority += 1;
         self.authority_events.send_replace(self.authority);
-        self.queries
+        self.workspace.queries
             .authority
             .store(self.authority, Ordering::SeqCst);
-        if let Some(events) = &self.queries.events {
+        if let Some(events) = &self.workspace.queries.events {
             events.publish(None, self.revision, &[Cause::Authority]);
         }
     }
     /// A typed table changes inside the open write transaction.
     pub(super) fn touch(&self, table: &str) {
-        if let Ok(mut touched) = self.queries.touched.lock() {
+        if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.tables.insert(table.to_ascii_lowercase());
         }
     }
     /// Why the open write transaction changes typed tables.
     pub(crate) fn cause(&self, cause: Cause) {
-        if let Ok(mut touched) = self.queries.touched.lock() {
+        if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.causes.insert(cause);
         }
     }
     /// Forgets what a transaction that did not commit recorded.
     pub(crate) fn untouch(&self) {
-        if let Ok(mut touched) = self.queries.touched.lock() {
+        if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             *touched = Touched::default();
         }
     }
     pub(crate) fn touched(&self) -> bool {
-        self.queries
+        self.workspace.queries
             .touched
             .lock()
             .is_ok_and(|touched| !touched.tables.is_empty())
     }
     /// Announces what the committed transaction changed, at `self.revision`.
     pub(super) fn announce(&self) {
-        let Ok(mut touched) = self.queries.touched.lock() else {
+        let Ok(mut touched) = self.workspace.queries.touched.lock() else {
             return;
         };
         let Touched { tables, mut causes } = std::mem::take(&mut *touched);
@@ -104,7 +104,7 @@ impl<A: RowApplication> Inner<A> {
         if causes.is_empty() {
             causes.insert(Cause::Rebuild);
         }
-        if let Some(events) = &self.queries.events {
+        if let Some(events) = &self.workspace.queries.events {
             let causes: Vec<_> = causes.into_iter().collect();
             events.publish(Some(&tables), self.revision, &causes);
         }
@@ -117,7 +117,7 @@ impl<A: RowApplication> Inner<A> {
         tables: &BTreeSet<String>,
         status: &SessionStatus,
     ) -> Result<(), Error> {
-        let Some(typed) = &self.typed else {
+        let Some(typed) = &self.workspace.typed else {
             return Ok(());
         };
         for name in tables {
@@ -164,6 +164,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn observe_tables(&self, tables: Option<&[&str]>) -> Result<TableObserver, Error> {
         let inner = self.inner.lock().await;
         let events = inner
+            .workspace
             .queries
             .events
             .as_ref()
@@ -268,7 +269,7 @@ impl<A: RowApplication> SecureSql<A> {
             inner.check_authority(Some(self.session.authority))?;
             inner.local_grants(now()?)?;
             inner.availability(tables, &self.session.status).await?;
-            let authority = inner.queries.authority.clone();
+            let authority = inner.workspace.queries.authority.clone();
             let (opened, expires) = (self.session.authority, self.session.status.expires);
             CursorPlan {
                 path: inner.path().to_path_buf(),
@@ -301,6 +302,7 @@ impl<A: RowApplication> SecureSql<A> {
             .inner
             .lock()
             .await
+            .workspace
             .queries
             .cursors
             .clone();
@@ -394,6 +396,7 @@ impl<A: RowApplication> SecureSql<A> {
             // References may share a column, such as a partition column, so
             // each is named by its parent and its whole column set.
             let actions: BTreeMap<(String, BTreeSet<String>), String> = inner
+                .workspace
                 .typed
                 .as_ref()
                 .and_then(|typed| typed.rows.schema().table(&found).cloned())

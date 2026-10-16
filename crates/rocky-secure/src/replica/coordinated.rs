@@ -242,7 +242,7 @@ impl<A: RowApplication> Inner<A> {
     pub(in crate::replica) fn tip_log(&self, domain: Scope) -> TipLog {
         TipLog {
             scope: domain,
-            tip: self.tip,
+            tip: self.workspace.tip,
         }
     }
     /// Position, running hash, genesis and last sequence of `log`.

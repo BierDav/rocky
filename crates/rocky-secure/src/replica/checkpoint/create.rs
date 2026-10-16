@@ -311,7 +311,7 @@ impl<A: RowApplication> Inner<A> {
                 partition: inner.partitions.get(&scope).cloned(),
                 identities: capture.identities,
                 moves: inner.checkpoint_moves(id).await?,
-                tip: inner.tip,
+                tip: inner.workspace.tip,
                 schema: manifest.schema,
                 revocations: inner.revocation_digest()?,
                 scope,

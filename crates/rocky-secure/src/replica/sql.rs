@@ -129,6 +129,7 @@ impl<A: RowApplication> SecureSession<A> {
         let inner = self.replica.inner.lock().await;
         inner.check_authority(Some(self.authority))?;
         let typed = inner
+            .workspace
             .typed
             .clone()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
@@ -214,6 +215,7 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &held.0;
         admit(inner, &self.session)?;
         let typed = inner
+            .workspace
             .typed
             .as_ref()
             .ok_or_else(|| refused("no typed tables"))?;
@@ -919,6 +921,7 @@ impl<A: RowApplication> SecureSql<A> {
             touched
         };
         let typed = inner
+            .workspace
             .typed
             .clone()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;

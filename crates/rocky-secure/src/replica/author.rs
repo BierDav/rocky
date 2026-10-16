@@ -197,7 +197,7 @@ impl<A: RowApplication> Inner<A> {
             let equal = if held == change.before {
                 true
             } else if let (Some(typed), Some(held), Some(before)) =
-                (&self.typed, &held, &change.before)
+                (&self.workspace.typed, &held, &change.before)
             {
                 let table = typed
                     .rows
@@ -311,7 +311,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
                 row_format: ROW_FORMAT,
                 partition,
-                tip: self.tip,
+                tip: self.workspace.tip,
                 scope,
                 generation: key.generation,
                 chain: chain.digest(),
@@ -368,7 +368,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         self.record_unoffered(operation.hash, writes).await?;
-        self.conn.execute("INSERT INTO secure_node_tips VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET tip=excluded.tip", [encode(&scope.domain)?, signing_key.public_key().as_bytes().to_vec(), encode(&self.tip)?]).await?;
+        self.conn.execute("INSERT INTO secure_node_tips VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET tip=excluded.tip", [encode(&scope.domain)?, signing_key.public_key().as_bytes().to_vec(), encode(&self.workspace.tip)?]).await?;
         self.record_key(key).await?;
         Ok(frame)
     }

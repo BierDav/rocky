@@ -82,7 +82,7 @@ impl<A: RowApplication> Inner<A> {
     /// Whether `scope` names a partitioned table; its rows live only in
     /// the scopes of its partitions, never in the table's own scope.
     pub(super) fn partitioned(&self, scope: ResourceScope) -> bool {
-        self.typed.as_ref().is_some_and(|typed| {
+        self.workspace.typed.as_ref().is_some_and(|typed| {
             typed.rows.table(&scope.table).is_some_and(|table| {
                 typed
                     .rows
@@ -107,7 +107,7 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("invalid partition address"));
         }
-        if let Some(typed) = &self.typed {
+        if let Some(typed) = &self.workspace.typed {
             let table = typed
                 .rows
                 .table(&scope.table)
@@ -186,6 +186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<rocky_core::RowIdentity, Error> {
         let inner = self.inner.lock().await;
         let typed = inner
+            .workspace
             .typed
             .as_ref()
             .ok_or_else(|| denied("no typed tables"))?;
@@ -287,7 +288,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
         let selectors = self.local_selectors(now()?)?;
-        let Some(typed) = &self.typed else {
+        let Some(typed) = &self.workspace.typed else {
             return Ok(false);
         };
         let Some(projected) = typed
@@ -341,7 +342,7 @@ impl<A: RowApplication> Inner<A> {
         params: &[SqlValue],
         status: &SessionStatus,
     ) -> Result<String, Error> {
-        let Some(typed) = &self.typed else {
+        let Some(typed) = &self.workspace.typed else {
             return Ok(sql.into());
         };
         let mut rules = BTreeMap::new();
@@ -458,7 +459,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut groups = BTreeMap::<(rocky_core::Scope, Commitment), Vec<ResourceScope>>::new();
         for scope in scopes {
             let address =
-                if let (Some(typed), Some(tuple)) = (&inner.typed, inner.partitions.get(scope)) {
+                if let (Some(typed), Some(tuple)) = (&inner.workspace.typed, inner.partitions.get(scope)) {
                     let table = typed
                         .rows
                         .table(&scope.table)

@@ -10,6 +10,7 @@ mod delivery;
 mod discovery;
 mod enroll;
 mod extension;
+mod finality;
 mod group;
 mod horizon;
 mod identity;
@@ -34,6 +35,10 @@ pub use enroll::{
     Renewal, open_enrollment, seal_enrollment,
 };
 pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
+pub use finality::{
+    MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
+    SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
+};
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
 pub use horizon::{
     ExistenceBase, ExistenceIdentity, HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonCut,
@@ -59,9 +64,10 @@ pub use signed::{
 };
 
 pub use tips::{
-    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, MAX_BOOKMARK_NAME, SEAL_FORMAT,
-    SealAction, SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
+    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, GENESIS_LINE_FORMAT,
+    GenesisLineStatement, MAX_BOOKMARK_NAME, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
+    TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

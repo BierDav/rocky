@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
 /// The storage format this build reads; older images are refused.
-const FORMAT: u32 = 8;
+const FORMAT: u32 = 9;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;

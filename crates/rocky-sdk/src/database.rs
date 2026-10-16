@@ -577,6 +577,15 @@ impl Session {
     pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"seal","close":close})).await
     }
+    /// The owner signs the minimum of trusted acknowledgments that makes a
+    /// seal on the genesis line final.
+    pub async fn set_genesis_minimum(
+        &self,
+        minimum_in_sync: u32,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}))
+            .await
+    }
     /// Opens a tip on `seal` and returns it.
     pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
         let opened: Value = self

@@ -61,6 +61,12 @@ pub enum Action {
     Seal {
         terminal: LogTerminal,
     },
+    /// A trusted node's signed `rocky_credentials::TerminalAck` of the
+    /// terminal entry, kept with it for devices to verify.
+    AcknowledgeTerminal {
+        #[serde(with = "bytes")]
+        acknowledgment: Vec<u8>,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pending {
@@ -93,6 +99,14 @@ pub struct Head {
     pub cut: Option<Box<Cut>>,
     /// The entry at `commit` that ended the log.
     pub terminal: Option<LogTerminal>,
+    /// Encoded terminal acknowledgments, one per node, in arrival order.
+    pub acknowledgments: Vec<Acknowledgment>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Acknowledgment {
+    pub key: PublicKey,
+    #[serde(with = "bytes")]
+    pub record: Vec<u8>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Cut {
@@ -125,6 +139,7 @@ pub enum Result {
         position: u64,
         running_hash: Commitment,
     },
+    TerminalAcknowledged,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Retry {
@@ -156,6 +171,7 @@ impl Log {
                 hashes: VecDeque::new(),
                 cut: None,
                 terminal: None,
+                acknowledgments: Vec::new(),
             },
             retries: Vec::new(),
             minute: 0,
@@ -180,10 +196,16 @@ impl Log {
             .cut
             .as_ref()
             .map_or(0, |cut| 256 + cut.record.len() + cut.authority.len());
-        if self.retries.is_empty() && cut == 0 {
+        let acknowledgments: usize = self
+            .head
+            .acknowledgments
+            .iter()
+            .map(|ack| 64 + ack.record.len())
+            .sum();
+        if self.retries.is_empty() && cut == 0 && acknowledgments == 0 {
             0
         } else {
-            1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + cut
+            1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + cut + acknowledgments
         }
     }
     /// Admits an owner-signed cut of the exact head; the caller has checked
@@ -307,6 +329,45 @@ impl Log {
             position,
             running_hash,
         })
+    }
+    /// Keeps `key`'s acknowledgment of the terminal entry: it names this
+    /// log, the terminal's position, running hash, seal and continuation,
+    /// and is signed by `key`. The signer's chain is the devices' to verify.
+    /// A retry of the kept record succeeds; a different one is refused.
+    pub fn acknowledge_terminal(
+        &mut self,
+        log: TipLog,
+        key: PublicKey,
+        record: &[u8],
+    ) -> std::result::Result<Result, CoordinationError> {
+        let terminal = self.head.terminal.ok_or(CoordinationError::StaleHead)?;
+        if let Some(kept) = self.head.acknowledgments.iter().find(|ack| ack.key == key) {
+            return match kept.record == record {
+                true => Ok(Result::TerminalAcknowledged),
+                false => Err(CoordinationError::RequestConflict),
+            };
+        }
+        let ack = rocky_credentials::TerminalAck::from_bytes(record)
+            .map_err(|_| CoordinationError::Denied)?;
+        let statement = &ack.statement;
+        if ack.signer.as_bytes() != key.as_bytes()
+            || statement.scope != log.scope
+            || statement.tip != log.tip
+            || statement.position != self.head.commit
+            || statement.running != self.head.running_hash
+            || statement.seal != terminal.digest
+            || statement.continuation != terminal.continuation
+        {
+            return Err(CoordinationError::Denied);
+        }
+        if self.head.acknowledgments.len() >= TRUSTED_NODES {
+            return Err(CoordinationError::Backpressure);
+        }
+        self.head.acknowledgments.push(Acknowledgment {
+            key,
+            record: record.to_vec(),
+        });
+        Ok(Result::TerminalAcknowledged)
     }
     /// Whether `verified` is the genesis anchor or chains through the window
     /// to the commit, and `retained` follows from it where the window
@@ -822,6 +883,11 @@ impl Head {
                 authority: cut.authority.clone(),
             }),
             terminal: self.terminal,
+            acknowledgments: self
+                .acknowledgments
+                .iter()
+                .map(|ack| ack.record.clone())
+                .collect(),
         }
     }
 }
@@ -1114,6 +1180,23 @@ impl rocky_core::DomainLog for MemoryLogClient {
                     _ => Err(CoordinationError::Corrupt),
                 },
             )
+        })
+    }
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> rocky_core::CoordinationFuture<'_, ()> {
+        Box::pin(async move {
+            let action = Action::AcknowledgeTerminal { acknowledgment };
+            let Action::AcknowledgeTerminal { acknowledgment } = &action else {
+                return Err(CoordinationError::Corrupt);
+            };
+            self.logs.with(log, self.key, &action, |working, _, _, _| {
+                working
+                    .acknowledge_terminal(log, self.key, acknowledgment)
+                    .map(|_| ())
+            })
         })
     }
 }

@@ -327,3 +327,105 @@ fn ended_logs_are_retained_up_to_their_bound_and_open_none() {
             .unwrap();
     }
 }
+
+fn terminal_ack(
+    key: &PrivateKey,
+    log: TipLog,
+    head: &crate::coordinated::Head,
+    seal: u8,
+) -> Vec<u8> {
+    rocky_credentials::TerminalAck::sign(
+        rocky_credentials::TerminalAckStatement {
+            format: rocky_credentials::TERMINAL_ACK_FORMAT,
+            scope: log.scope,
+            tip: log.tip,
+            position: head.commit,
+            running: head.running_hash,
+            seal: [seal; 32],
+            continuation: Some(dev()),
+        },
+        key,
+        Default::default(),
+    )
+    .unwrap()
+    .to_bytes()
+    .unwrap()
+}
+
+#[test]
+fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
+    let mut f = Fixture::new(1, Limits::default());
+    let main = tip_log(f.scope);
+    let nodes = f.nodes.clone();
+    let open = f.state.log_head(main).unwrap();
+    // An open log has no terminal to acknowledge.
+    assert_eq!(
+        f.apply_on(
+            &nodes[0],
+            main,
+            Action::AcknowledgeTerminal {
+                acknowledgment: terminal_ack(&nodes[0], main, &open, 9),
+            },
+        ),
+        Err(CoordinationError::StaleHead)
+    );
+    f.apply_on(&nodes[0], main, sealing(9, Some(dev())))
+        .unwrap();
+    let head = f.state.log_head(main).unwrap();
+    let mine = terminal_ack(&nodes[0], main, &head, 9);
+    for _ in 0..2 {
+        assert_eq!(
+            f.apply_on(
+                &nodes[0],
+                main,
+                Action::AcknowledgeTerminal {
+                    acknowledgment: mine.clone(),
+                },
+            ),
+            Ok(Outcome::Coordinated(LogResult::TerminalAcknowledged))
+        );
+    }
+    // Another seal's digest, another node's signature or a second record
+    // of the same node are refused.
+    for (key, record, refusal) in [
+        (
+            &nodes[1],
+            terminal_ack(&nodes[1], main, &head, 8),
+            CoordinationError::Denied,
+        ),
+        (
+            &nodes[1],
+            terminal_ack(&nodes[0], main, &head, 9),
+            CoordinationError::Denied,
+        ),
+        (
+            &nodes[0],
+            terminal_ack(&nodes[0], main, &open, 9),
+            CoordinationError::RequestConflict,
+        ),
+    ] {
+        assert_eq!(
+            f.apply_on(
+                key,
+                main,
+                Action::AcknowledgeTerminal {
+                    acknowledgment: record,
+                },
+            ),
+            Err(refusal)
+        );
+    }
+    let theirs = terminal_ack(&nodes[1], main, &head, 9);
+    f.apply_on(
+        &nodes[1],
+        main,
+        Action::AcknowledgeTerminal {
+            acknowledgment: theirs.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        f.state.log_head(main).unwrap().port().acknowledgments,
+        vec![mine, theirs]
+    );
+}

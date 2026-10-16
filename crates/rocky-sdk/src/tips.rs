@@ -61,6 +61,10 @@ pub struct TipSeal {
     pub authority: String,
     /// A revocation ended its signer; it takes part in no race.
     pub revoked: bool,
+    /// Its tip's coordinated log committed it and enough trusted nodes
+    /// acknowledged that: it beats every other seal of its tip.
+    #[serde(rename = "final")]
+    pub finalized: bool,
 }
 /// An opened tip; its id is the tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +124,9 @@ pub struct TipInspection {
     pub genesis: String,
     /// The genesis tip's schema digest.
     pub schema: String,
+    /// The owner's minimum of trusted acknowledgments that makes a seal on
+    /// the genesis line final; none while unsigned.
+    pub genesis_minimum: Option<u32>,
     pub seals: Vec<TipSeal>,
     pub openings: Vec<TipOpening>,
     pub bookmarks: Vec<Bookmark>,

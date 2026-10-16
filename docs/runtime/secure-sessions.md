@@ -119,7 +119,7 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v7`; any other version is refused. Each hello declares the
+`rocky.link.v8`; any other version is refused. Each hello declares the
 generation its sender runs, since a credential chain names none: a replica
 sends a peer only frames of generations it admits, and a sync that meets a
 newer one [adopts it](adopting-generations.md). Every request runs as a

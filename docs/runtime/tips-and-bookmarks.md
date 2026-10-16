@@ -121,12 +121,15 @@ instead of published.
 
 Concurrent seals of one tip, and moves of one bookmark from one tip, resolve
 to the owner's statement, then a trusted identity's, then an issuer's; only
-among equals does the lower digest win. An issuer cannot outbid an owner's
+among equals does the lower digest win. A [final seal](seal-finality.md),
+one its tip's coordinated log committed and enough trusted nodes
+acknowledged, beats every other seal of its tip, the owner's included. An issuer cannot outbid an owner's
 rollback by varying its statement. Revoking an identity leaves its seals and
 moves in the graph but out of resolution; every device resolves again in the
 commit that learns the revocation, and writes on a tip that loses this way
 return as held changes. `inspect` reports each seal's and move's `authority`
-(`owner`, `trusted` or `issuer`) and `revoked`, and lists a bookmark's
+(`owner`, `trusted` or `issuer`) and `revoked`, each seal's `final` and the
+genesis line's `genesis_minimum`, and lists a bookmark's
 losing moves and their tips as `losers` named `main/1`, `main/2`, in path
 order; their tips stay branches.
 
@@ -138,6 +141,7 @@ order; their tips stay branches.
 | `inspect()` | `inspect_tips()` | `inspect` | `TipInspection` |
 | `seal(close)` | `seal(close)` | `seal`, `close` | `TipStatus` |
 | `open(seal, minimumInSync)` | `open_tip` | `open`, `seal`, `minimum_in_sync` | `{tip}` |
+| `setGenesisMinimum(minimumInSync)` | `set_genesis_minimum` | `genesis_minimum`, `minimum_in_sync` | `TipStatus` |
 | `createBookmark(name, tip?)` | `create_bookmark` | `create`, `name`, `tip` | `TipStatus` |
 | `moveBookmark(name, tip)` | `move_bookmark` | `move`, `name`, `tip` | `TipStatus` |
 | `deleteBookmark(name)` | `delete_bookmark` | `delete`, `name` | `TipStatus` |

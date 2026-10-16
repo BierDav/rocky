@@ -11,6 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub(super) mod cut;
+mod finality;
 pub(super) mod proposal;
 mod recovery;
 mod statements;

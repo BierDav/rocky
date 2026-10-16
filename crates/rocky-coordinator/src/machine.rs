@@ -913,6 +913,9 @@ impl Metadata {
             }
             Action::Cut { record, authority } => next.cut(log, record, authority),
             Action::Seal { terminal } => next.seal(*terminal),
+            Action::AcknowledgeTerminal { acknowledgment } => {
+                next.acknowledge_terminal(log, request.key, acknowledgment)
+            }
             Action::Join { .. } => {
                 let joined = next.apply(request.key, action, self.state.time, true);
                 // The in-sync set counts nodes and remembers whose they are.

@@ -694,3 +694,146 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
     assert_eq!(graph.bookmark("main").unwrap(), Some(graph.genesis()));
     assert!(graph.losing_moves("main").unwrap().is_empty());
 }
+
+/// A node of a fresh trusted identity, with its two-link chain.
+fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, CredentialChain) {
+    let identity = PrivateKey::new();
+    let node = PrivateKey::new();
+    let root = Authority::owner(owner)
+        .issue_trusted(
+            identity.public_key(),
+            graph.scope,
+            vec![rocky_core::ResourceGrant {
+                scope: rocky_core::ResourceScope {
+                    domain: graph.scope,
+                    table: [9; 32],
+                    encryption: [8; 32],
+                },
+                rows: rocky_core::RowSelection::All,
+                fields: rocky_core::FieldSelection::All,
+                rights: [rocky_core::Right::Read].into(),
+            }],
+            AuthorRange::ALL,
+            (100, 1000, 0),
+        )
+        .unwrap();
+    let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
+    (node, chain)
+}
+fn ack(
+    graph: &TipGraph,
+    seal: &SignedSeal,
+    (node, chain): &(PrivateKey, CredentialChain),
+) -> rocky_credentials::TerminalAck {
+    rocky_credentials::TerminalAck::sign(
+        rocky_credentials::TerminalAckStatement {
+            format: rocky_credentials::TERMINAL_ACK_FORMAT,
+            scope: graph.scope,
+            tip: seal.statement.tip,
+            position: 4,
+            running: [9; 32],
+            seal: seal.id().unwrap(),
+            continuation: seal.successor().unwrap(),
+        },
+        node,
+        chain.clone(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again() {
+    let owner = PrivateKey::new();
+    let issuer = PrivateKey::new();
+    let mut graph = graph();
+    let tip = graph.genesis();
+    let committed = endorsed(
+        &graph,
+        &owner,
+        tip,
+        1,
+        &issuer,
+        &issuer_chain(&owner, &issuer),
+    );
+    let owner_seal = seal(&graph, tip, 2, &owner);
+    graph.seals = vec![committed.clone(), owner_seal.clone()];
+    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+
+    let nodes = [trusted_node(&graph, &owner), trusted_node(&graph, &owner)];
+    let record = rocky_credentials::SealFinality::new(
+        graph.scope,
+        committed.id().unwrap(),
+        nodes
+            .iter()
+            .map(|node| ack(&graph, &committed, node))
+            .collect(),
+    );
+    let current = RevocationSet::new();
+    // Without the owner's signed minimum the genesis line has no final seal.
+    assert!(
+        graph
+            .verify_finality(&record, owner.public_key(), Some((&current, 200)))
+            .is_err()
+    );
+    let line = |minimum| {
+        rocky_credentials::SignedGenesisLine::sign(
+            rocky_credentials::GenesisLineStatement {
+                format: rocky_credentials::GENESIS_LINE_FORMAT,
+                scope: graph.scope,
+                minimum_in_sync: minimum,
+            },
+            &owner,
+        )
+        .unwrap()
+    };
+    graph.genesis_lines.push(line(3));
+    assert!(
+        graph
+            .verify_finality(&record, owner.public_key(), Some((&current, 200)))
+            .is_err()
+    );
+    graph.genesis_lines = vec![line(2)];
+    graph
+        .verify_finality(&record, owner.public_key(), Some((&current, 200)))
+        .unwrap();
+    // An issuer cannot sign the genesis line's minimum.
+    assert!(
+        rocky_credentials::SignedGenesisLine::endorse(
+            line(1).statement,
+            &issuer,
+            &issuer_chain(&owner, &issuer)
+        )
+        .unwrap()
+        .verify(owner.public_key(), &graph)
+        .is_err()
+    );
+    // Acknowledgments of another seal do not make this one final.
+    let mut forged = record.clone();
+    forged.seal = owner_seal.id().unwrap();
+    assert!(
+        graph
+            .verify_finality(&forged, owner.public_key(), Some((&current, 200)))
+            .is_err()
+    );
+
+    graph.finalities.push(record.clone());
+    assert!(graph.is_final(committed.id().unwrap()).unwrap());
+    assert_eq!(graph.seal(tip).unwrap(), Some(&committed));
+    assert_eq!(
+        graph
+            .canonical_tip(owner_seal.successor().unwrap().unwrap())
+            .unwrap(),
+        committed.successor().unwrap().unwrap()
+    );
+
+    // Revoking one acknowledger's identity leaves the record below the
+    // minimum: the owner's seal wins again.
+    let identity = nodes[0].1.0[0].capability.subject;
+    assert!(
+        graph
+            .exclude_revoked(&revoking(&owner, &[identity]))
+            .unwrap()
+    );
+    assert!(!graph.is_final(committed.id().unwrap()).unwrap());
+    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+}

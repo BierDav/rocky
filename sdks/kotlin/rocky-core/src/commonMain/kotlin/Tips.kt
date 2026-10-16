@@ -30,6 +30,12 @@ class Tips internal constructor(private val client: RockyClient) {
         }.getValue("tip").jsonPrimitive.content
     }
 
+    /** The owner signs how many trusted nodes must acknowledge a genesis-line seal its log committed for it to be final. */
+    suspend fun setGenesisMinimum(minimumInSync: UInt): TipStatus {
+        require(minimumInSync > 0u) { "minimumInSync must be positive" }
+        return TipStatus.decode(call("genesis_minimum") { put("minimum_in_sync", minimumInSync.toLong()) })
+    }
+
     /** Creates [name] on [tip], or on the followed tip when omitted. */
     suspend fun createBookmark(name: String, tip: String? = null): TipStatus = TipStatus.decode(
         call("create") {
@@ -124,12 +130,13 @@ sealed interface TipSealAction {
     data object Close : TipSealAction
 }
 
-/** Who signed a seal or move; races resolve to the owner, then trusted, then issuer, then the lower digest. */
+/** Who signed a seal or move; races resolve to a final seal, then the owner, trusted, issuer, then the lower digest. */
 enum class TipAuthority { OWNER, TRUSTED, ISSUER }
 
 /**
  * A seal; [canonical] is false for a concurrent seal of the same tip that lost.
- * A [revoked] seal's signer was revoked; it takes part in no race.
+ * A [revoked] seal's signer was revoked; it takes part in no race. A [final] seal was committed by its tip's
+ * coordinated log and acknowledged by enough trusted nodes; it beats every other seal of its tip.
  */
 data class TipSeal(
     val id: String,
@@ -139,6 +146,7 @@ data class TipSeal(
     val canonical: Boolean,
     val authority: TipAuthority,
     val revoked: Boolean,
+    val final: Boolean,
 )
 data class TipOpening(val id: String, val seal: String, val minimumInSync: UInt)
 data class BookmarkMove(val id: String, val from: String?, val to: String?, val authority: TipAuthority, val revoked: Boolean)
@@ -153,6 +161,8 @@ data class TipInspection(
     val scope: String,
     val genesis: String,
     val schema: String,
+    /** Trusted acknowledgments that make a genesis-line seal final; null until the owner signs one. */
+    val genesisMinimum: UInt?,
     val seals: List<TipSeal>,
     val openings: List<TipOpening>,
     val bookmarks: List<TipBookmark>,
@@ -163,6 +173,7 @@ data class TipInspection(
             value.text("scope"),
             value.text("genesis"),
             value.text("schema"),
+            value.getValue("genesis_minimum").jsonPrimitive.contentOrNull?.toUInt(),
             value.objects("seals").map {
                 TipSeal(
                     it.text("id"),
@@ -176,6 +187,7 @@ data class TipInspection(
                     it.getValue("canonical").jsonPrimitive.boolean,
                     it.authority(),
                     it.getValue("revoked").jsonPrimitive.boolean,
+                    it.getValue("final").jsonPrimitive.boolean,
                 )
             },
             value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },

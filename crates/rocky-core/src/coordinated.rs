@@ -57,6 +57,9 @@ pub struct LogHead {
     pub cut: Option<LogCut>,
     /// The committed entry at `commit` that ended the log; none while open.
     pub terminal: Option<LogTerminal>,
+    /// Encoded `rocky_credentials::TerminalAck`s of the terminal entry, one
+    /// per trusted node, as the coordinator keeps them; devices verify them.
+    pub acknowledgments: Vec<Vec<u8>>,
 }
 /// An owner-signed cut as the coordinator retains it: the encoded signed
 /// record, whose digest is its entry hash, and the owner's credential chain
@@ -118,6 +121,13 @@ pub trait DomainLog: Send + Sync {
     /// entry. A retry of the committed terminal returns the same commit;
     /// another one is refused with `Sealed`.
     fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult>;
+    /// Keeps this node's signed acknowledgment of the terminal entry that
+    /// ended `log`. A retry of the same one succeeds; another is refused.
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> CoordinationFuture<'_, ()>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Append {

@@ -136,8 +136,9 @@ RSS or actual encoded size. Commits cannot need more accounted capacity after an
 append. The newest 1,024 hashes occupy a 32,768-byte string; their positions are
 `commit - hashes.len() + 1` through `commit`. The running hash persists after
 older entry hashes are dropped. A retained cut adds its record and authority
-bytes plus 256. Store and snapshot format 8 holds the tip logs, cuts and
-terminal entries, and requests sign as `rocky.coordination-request.v6`; every
+bytes plus 256, and each kept terminal acknowledgment its record plus 64.
+Store and snapshot format 9 holds the tip logs, cuts, terminal entries and
+their [acknowledgments](seal-finality.md), and requests sign as `rocky.coordination-request.v6`; every
 other format is refused before writes. See [retention](coordinator-retention.md).
 
 ## Evidence

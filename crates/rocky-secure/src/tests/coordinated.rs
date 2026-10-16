@@ -14,6 +14,7 @@ use rocky_core::{
 use std::sync::{Arc, Mutex as StdMutex};
 
 mod cuts;
+mod finality;
 mod seals;
 mod tips;
 
@@ -146,6 +147,13 @@ impl DomainLog for Client {
     }
     fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
         self.inner.cut(log, cut)
+    }
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> CoordinationFuture<'_, ()> {
+        self.inner.acknowledge_terminal(log, acknowledgment)
     }
 }
 struct Peers {
@@ -504,6 +512,13 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
         }
         fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
             self.0.cut(log, cut)
+        }
+        fn acknowledge_terminal(
+            &self,
+            log: TipLog,
+            acknowledgment: Vec<u8>,
+        ) -> CoordinationFuture<'_, ()> {
+            self.0.acknowledge_terminal(log, acknowledgment)
         }
     }
     fixture.mesh.add(&member_key, &member);

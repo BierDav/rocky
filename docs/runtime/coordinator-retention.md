@@ -53,7 +53,7 @@ history. Lost in-sync sets recover by collection or an owner-signed cut
 
 Controls, log transitions and resolved outcomes are Raft-replicated. Partial
 storage acknowledgments are leader memory and are collected again after election;
-resolution entries carry the proofs voters verify. Files/snapshots use format 8,
+resolution entries carry the proofs voters verify. Files/snapshots use format 9,
 controls `rocky.control.v3`, bootstrap signatures `rocky.genesis.v2`, and service
 bundles format 2. Other formats are refused, without migrations or alternate readers.
 

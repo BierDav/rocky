@@ -127,11 +127,11 @@ class TipsTest {
 
     private val graph = Json.parseToJsonElement(
         """{
-          "scope":"domain","genesis":"genesis","schema":"schema",
+          "scope":"domain","genesis":"genesis","schema":"schema","genesis_minimum":2,
           "seals":[
-            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false},
-            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true},
-            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false}
+            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true},
+            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false},
+            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false}
           ],
           "openings":[{"id":"branch","seal":"continued","minimum_in_sync":3}],
           "bookmarks":[{"name":"main","tip":"continued","moves":[
@@ -149,11 +149,12 @@ class TipsTest {
     fun inspectionDecodesSealsOpeningsBookmarksAndUnknownHoldings() = runBlocking {
         val value = recordingTips { graph }.second.inspect()
         assertEquals(Triple("domain", "genesis", "schema"), Triple(value.scope, value.genesis, value.schema))
+        assertEquals(2u, value.genesisMinimum)
         assertEquals(
             listOf(
-                TipSeal("continued", "genesis", listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)), TipSealAction.Continue("schema"), true, TipAuthority.OWNER, false),
-                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true),
-                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false),
+                TipSeal("continued", "genesis", listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)), TipSealAction.Continue("schema"), true, TipAuthority.OWNER, false, true),
+                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true, false),
+                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false, false),
             ),
             value.seals,
         )
@@ -177,6 +178,7 @@ class TipsTest {
             put("canonical", true)
             put("authority", "owner")
             put("revoked", false)
+            put("final", false)
         }
         val unknown = JsonObject(graph + ("seals" to JsonArray(listOf(seal))))
         assertFailsWith<IllegalArgumentException> { recordingTips { unknown }.second.inspect() }

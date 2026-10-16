@@ -7,9 +7,10 @@ use crate::tips::{
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
-    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, IdentityProvider, SEAL_FORMAT,
-    SealAction, SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement,
+    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, GENESIS_LINE_FORMAT,
+    GenesisLineStatement, IdentityProvider, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
+    TipGraph, TipOpeningStatement,
 };
 use rocky_secure::TipStatement;
 
@@ -68,6 +69,13 @@ impl Node {
                     .open_tip(scope, digest(request, "seal")?, minimum)
                     .await?;
                 return Ok(json!({"tip": hex(&tip.0)}));
+            }
+            "genesis_minimum" => {
+                let minimum = request["minimum_in_sync"]
+                    .as_u64()
+                    .and_then(|minimum| u32::try_from(minimum).ok())
+                    .ok_or_else(|| refused("minimum_in_sync must be a positive number"))?;
+                self.sign_genesis_minimum(scope, minimum).await?;
             }
             "create" => {
                 let tip = match request.get("tip") {
@@ -212,6 +220,7 @@ impl Node {
                     canonical: graph.seal(statement.tip)? == Some(seal),
                     authority: authority(graph.authority(seal.endorsement())),
                     revoked: graph.revoked.contains(&seal.id()?),
+                    finalized: graph.is_final(seal.id()?)?,
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -284,6 +293,9 @@ impl Node {
             scope: serde_json::to_string(&scope)?,
             genesis: hex(&graph.genesis().0),
             schema: hex(&graph.genesis_schema),
+            genesis_minimum: graph
+                .line_minimum(graph.genesis())?
+                .and_then(|minimum| u32::try_from(minimum).ok()),
             seals,
             openings,
             bookmarks,
@@ -334,16 +346,13 @@ impl Node {
     ) -> Result<(), Failure> {
         let mut graph = self.replica.tip_graph(scope).await?;
         for statement in &statements {
-            match statement {
-                TipStatement::Seal(seal) => graph.seals.push(seal.clone()),
-                TipStatement::Opening(opening) => graph.openings.push(opening.clone()),
-                TipStatement::Bookmark(movement) => graph.moves.push(movement.clone()),
-            }
+            statement.append(&mut graph);
         }
         expected(&graph)?;
         // The replica's codes stay: `sealed`, `coordinator_unavailable`.
         let before = self.replica.followed_tip().await;
         self.replica.publish_tip_statements(&statements).await?;
+        self.finalize_seals().await;
         self.followed_tip_changed(before).await;
         // A move of the followed bookmark may have switched lines.
         self.ensure_tip_node().await?;
@@ -449,6 +458,43 @@ impl Node {
             Ok(())
         })
         .await
+    }
+
+    /// The owner signs the minimum of trusted acknowledgments that makes a
+    /// seal on the genesis line final.
+    async fn sign_genesis_minimum(&self, scope: Scope, minimum: u32) -> Result<(), Failure> {
+        let settings = self.settings.lock().await.clone();
+        if !settings.owner() {
+            return Err(refused("only the owner signs the genesis line's minimum"));
+        }
+        let identity = settings.identity(&self.vault)?;
+        let line = SignedGenesisLine::sign(
+            GenesisLineStatement {
+                format: GENESIS_LINE_FORMAT,
+                scope,
+                minimum_in_sync: minimum,
+            },
+            &*identity,
+        )?;
+        self.publish_tips(scope, vec![TipStatement::GenesisLine(line)], |_| Ok(()))
+            .await
+    }
+
+    /// On a trusted node with a composed log, acknowledges the terminal
+    /// entries of its line and publishes the finality records they reach.
+    /// A failure leaves the seals to the next call.
+    pub(super) async fn finalize_seals(&self) {
+        if self.replica.domain_log().is_none() {
+            return;
+        }
+        match self.replica.finalize_seals(self.domain().scope).await {
+            Ok(0) => {}
+            Ok(_) => self.observations.touch(),
+            Err(error) => {
+                self.activity
+                    .record("finality_failed", json!({"error": error.to_string()}));
+            }
+        }
     }
 
     /// Opens a tip on `seal`; only the owner and trusted identities may.

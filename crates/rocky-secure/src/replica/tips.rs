@@ -1,7 +1,12 @@
 //! Durable, domain-scoped tip graph and the selected live workspace.
 use super::*;
 use rocky_core::Scope;
-use rocky_credentials::{SignedBookmarkMove, SignedSeal, SignedTipOpening, TipGraph};
+use rocky_credentials::{
+    SealFinality, SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TipGraph,
+};
+
+/// Largest stored or exchanged tip statement: a finality record.
+pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = rocky_credentials::MAX_FINALITY_BYTES + 64;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tip_graphs(scope BLOB PRIMARY KEY,genesis BLOB NOT NULL) WITHOUT ROWID",
@@ -17,6 +22,8 @@ pub enum TipStatement {
     Seal(SignedSeal),
     Opening(SignedTipOpening),
     Bookmark(SignedBookmarkMove),
+    GenesisLine(SignedGenesisLine),
+    Finality(SealFinality),
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -24,6 +31,8 @@ impl TipStatement {
             Self::Seal(s) => s.id(),
             Self::Opening(s) => s.id(),
             Self::Bookmark(s) => s.id(),
+            Self::GenesisLine(s) => s.id(),
+            Self::Finality(s) => s.id(),
         }
         .map_err(credential)
     }
@@ -32,13 +41,17 @@ impl TipStatement {
             Self::Seal(s) => s.statement.scope,
             Self::Opening(s) => s.statement.scope,
             Self::Bookmark(s) => s.statement.scope,
+            Self::GenesisLine(s) => s.statement.scope,
+            Self::Finality(s) => s.scope,
         }
     }
-    pub(in crate::replica) fn append(&self, graph: &mut TipGraph) {
+    pub fn append(&self, graph: &mut TipGraph) {
         match self {
             Self::Seal(s) => graph.seals.push(s.clone()),
             Self::Opening(s) => graph.openings.push(s.clone()),
             Self::Bookmark(s) => graph.moves.push(s.clone()),
+            Self::GenesisLine(s) => graph.genesis_lines.push(s.clone()),
+            Self::Finality(s) => graph.finalities.push(s.clone()),
         }
     }
     pub(in crate::replica) fn verify(
@@ -51,9 +64,14 @@ impl TipStatement {
             (Self::Seal(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Opening(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Bookmark(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
+            (Self::GenesisLine(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Seal(s), None) => s.verify(publisher, graph),
             (Self::Opening(s), None) => s.verify(publisher, graph),
             (Self::Bookmark(s), None) => s.verify(publisher, graph),
+            (Self::GenesisLine(s), None) => s.verify(publisher, graph),
+            // Acknowledgments are checked against the signers' validity
+            // when admitted; a stored record keeps counting until revoked.
+            (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
         }
         .map_err(credential)
     }
@@ -467,8 +485,7 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(digest), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("tip statement".into()));
             };
-            let statement: TipStatement =
-                decode_bounded(bytes, rocky_credentials::MAX_CREDENTIAL_BYTES + 64)?;
+            let statement: TipStatement = decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES)?;
             if statement.id()?.as_slice() != digest {
                 return Err(Error::Corrupt("tip statement digest".into()));
             }
@@ -886,7 +903,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let statements = self.coordinate_tip_statements(statements, false).await?;
         self.admit_tip_statements(&statements).await
     }
-    async fn admit_tip_statements(&self, statements: &[TipStatement]) -> Result<usize, Error> {
+    pub(in crate::replica) async fn admit_tip_statements(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<usize, Error> {
         let mut inner = self.inner.lock().await;
         let mut graphs = inner.graphs.clone();
         let mut new = Vec::new();
@@ -918,6 +938,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         if new.is_empty() {
             return Ok(0);
+        }
+        // A finality record or a raised genesis minimum resolves again.
+        for graph in graphs.values_mut() {
+            graph
+                .exclude_revoked(&inner.config.revocations)
+                .map_err(credential)?;
         }
         for (_, statement) in &new {
             statement.verify(
@@ -1007,9 +1033,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         records
             .into_iter()
             .map(|record| match record.as_slice() {
-                [SqlValue::Blob(bytes)] => {
-                    decode_bounded(bytes, rocky_credentials::MAX_CREDENTIAL_BYTES + 64)
-                }
+                [SqlValue::Blob(bytes)] => decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES),
                 _ => Err(Error::Corrupt("tip statement".into())),
             })
             .collect()

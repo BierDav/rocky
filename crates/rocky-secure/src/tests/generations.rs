@@ -272,6 +272,24 @@ impl Lineage {
         user: &PrivateKey,
         node: &PrivateKey,
     ) -> CredentialChain {
+        self.certified_as(generation, user, node, None)
+    }
+    /// `certified` under an owner-direct trusted grant for the domain.
+    pub(super) fn trusted(
+        &self,
+        generation: u32,
+        user: &PrivateKey,
+        node: &PrivateKey,
+    ) -> CredentialChain {
+        self.certified_as(generation, user, node, Some(self.domain))
+    }
+    fn certified_as(
+        &self,
+        generation: u32,
+        user: &PrivateKey,
+        node: &PrivateKey,
+        trusted: Option<rocky_core::Scope>,
+    ) -> CredentialChain {
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -291,6 +309,7 @@ impl Lineage {
                     rocky_credentials::AuthorRange::ALL
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                trusted: trusted.filter(|_| kind == PrincipalKind::User),
                 ..Default::default()
             })
             .unwrap(),
@@ -366,6 +385,18 @@ impl Lineage {
     ) -> Result<EncryptedReplica<TypedRows>, Error> {
         let mut config = self.config(generation, node);
         config.credentials = self.certified(generation, identity, node);
+        self.open_with(path, config, generation, upgrade).await
+    }
+    /// `open_certified` as a node of a trusted identity.
+    pub(super) async fn open_trusted(
+        &self,
+        path: &std::path::Path,
+        (identity, node): (&PrivateKey, &PrivateKey),
+        generation: u32,
+        upgrade: Option<Upgrade>,
+    ) -> Result<EncryptedReplica<TypedRows>, Error> {
+        let mut config = self.config(generation, node);
+        config.credentials = self.trusted(generation, identity, node);
         self.open_with(path, config, generation, upgrade).await
     }
     async fn open_with(

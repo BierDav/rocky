@@ -143,6 +143,7 @@ impl Node {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(1));
         }
+        self.finalize_seals().await;
         self.observations.touch();
     }
     /// The position the next coordinated write is staged at; decides

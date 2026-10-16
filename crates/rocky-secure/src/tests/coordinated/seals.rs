@@ -14,7 +14,12 @@ use std::collections::BTreeMap;
 
 type Node = (PrivateKey, Replica);
 
-fn bookmark(lineage: &Lineage, name: &str, from: Option<TipId>, to: Option<TipId>) -> TipStatement {
+pub(super) fn bookmark(
+    lineage: &Lineage,
+    name: &str,
+    from: Option<TipId>,
+    to: Option<TipId>,
+) -> TipStatement {
     TipStatement::Bookmark(
         SignedBookmarkMove::sign(
             BookmarkMoveStatement {
@@ -30,7 +35,7 @@ fn bookmark(lineage: &Lineage, name: &str, from: Option<TipId>, to: Option<TipId
     )
 }
 /// A `continue` seal of `tip` at the frontier of `tip`'s frames `node` holds.
-async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> SignedSeal {
+pub(super) async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> SignedSeal {
     let mut authors = BTreeMap::<u32, u64>::new();
     for frame in stored_frames(node, "SELECT header,body FROM secure_operations").await {
         let operation = frame.operation().unwrap();
@@ -76,7 +81,7 @@ fn compose(fixture: &Fixture, node: &Node) {
 }
 /// Composes alice and bob, creates `main` on the genesis tip and has both
 /// follow it.
-async fn follow_main(fixture: &Fixture) {
+pub(super) async fn follow_main(fixture: &Fixture) {
     let (alice, bob) = (&fixture.alice, &fixture.bob);
     let main = bookmark(
         &fixture.lineage,
@@ -100,7 +105,7 @@ async fn follow_main(fixture: &Fixture) {
 }
 /// A trusted node `node` that joins later, learns the graph from alice and
 /// follows `main`.
-async fn join_main(fixture: &Fixture, node: &Node) {
+pub(super) async fn join_main(fixture: &Fixture, node: &Node) {
     fixture.mesh.add(&node.0, &node.1);
     compose(fixture, node);
     share(&fixture.alice.1, &node.1).await;
@@ -110,7 +115,7 @@ async fn join_main(fixture: &Fixture, node: &Node) {
         .unwrap();
 }
 /// Hands every graph statement `from` holds to `to`; returns those admitted.
-async fn share(from: &Replica, to: &Replica) -> usize {
+pub(super) async fn share(from: &Replica, to: &Replica) -> usize {
     to.receive_tip_statements(&from.tip_statements(None, 32).await.unwrap())
         .await
         .unwrap()

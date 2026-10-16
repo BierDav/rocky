@@ -392,4 +392,17 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> CoordinationFuture<'_, ()> {
+        Box::pin(async move {
+            let action = crate::coordinated::Action::AcknowledgeTerminal { acknowledgment };
+            match self.coordinated(log, action).await? {
+                Outcome::Coordinated(crate::coordinated::Result::TerminalAcknowledged) => Ok(()),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
 }

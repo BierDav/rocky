@@ -126,8 +126,8 @@ serves it to read-only participants; see
 | Horizon statement | Format 7, bound to the followed `TipId`, with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v2`; acknowledgments `rocky.horizon-ack.v2` bind statement, node reference and credential alias |
 | Checkpoint | Format 13 carries independent optional admitted and finalized declarations and bases, a required `moves` summary and the [coordinated binding](stuck-recovery.md#checkpoint-binding); an admitted cut is never treated as finalized |
 | Row frame | 10, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v23` |
-| Live link handshake | `rocky.link.v7` |
+| File identity | `rocky.encrypted-replica.v24` |
+| Live link handshake | `rocky.link.v8` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 7, with an explicit existence-base list.

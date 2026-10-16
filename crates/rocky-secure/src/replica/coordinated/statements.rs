@@ -244,7 +244,9 @@ fn dependents(
                 TipStatement::Opening(opening) => {
                     tips.insert(opening.tip().map_err(credential)?);
                 }
-                TipStatement::Bookmark(_) => {}
+                TipStatement::Bookmark(_)
+                | TipStatement::GenesisLine(_)
+                | TipStatement::Finality(_) => {}
             }
         }
         let before = refused.len();
@@ -252,6 +254,8 @@ fn dependents(
             let depends = match statement {
                 TipStatement::Seal(seal) => tips.contains(&seal.statement.tip),
                 TipStatement::Opening(opening) => refused.contains(&opening.statement.seal),
+                TipStatement::Finality(record) => refused.contains(&record.seal),
+                TipStatement::GenesisLine(_) => false,
                 TipStatement::Bookmark(movement) => {
                     movement
                         .statement

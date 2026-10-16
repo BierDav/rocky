@@ -2242,6 +2242,8 @@ impl Node {
         }
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace("syncing");
+        // Finality records reach peers in this pass's graph exchange.
+        self.finalize_seals().await;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         let saved = self.settings.lock().await.clone();
         if !automatic && self.dialed(&saved).is_empty() && !saved.unresolved_contacts().is_empty() {

@@ -389,6 +389,13 @@ mod coordinated {
         fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
             self.inner.cut(log, cut)
         }
+        fn acknowledge_terminal(
+            &self,
+            log: TipLog,
+            acknowledgment: Vec<u8>,
+        ) -> CoordinationFuture<'_, ()> {
+            self.inner.acknowledge_terminal(log, acknowledgment)
+        }
         fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult> {
             Box::pin(async move {
                 if self.armed.swap(false, Ordering::SeqCst) {

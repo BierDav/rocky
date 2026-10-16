@@ -1,6 +1,6 @@
 //! Domain-scoped seal, tip-opening and bookmark statements.
 use crate::{
-    CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet,
+    CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
     decode_bounded, denied, encode,
 };
 use rocky_core::{Commitment, Scope, TipId};
@@ -10,6 +10,7 @@ use std::{cmp::Reverse, collections::BTreeSet};
 pub const SEAL_FORMAT: u32 = 1;
 pub const TIP_OPENING_FORMAT: u32 = 1;
 pub const BOOKMARK_MOVE_FORMAT: u32 = 1;
+pub const GENESIS_LINE_FORMAT: u32 = 1;
 pub const MAX_BOOKMARK_NAME: usize = 128;
 
 /// Genesis uses the current schema digest; its domain is the graph's scope.
@@ -94,6 +95,26 @@ impl BookmarkMoveStatement {
             || self.from == self.to
         {
             return Err(denied("invalid bookmark move"));
+        }
+        Ok(())
+    }
+}
+
+/// The owner's minimum of distinct trusted nodes whose acknowledgments make
+/// a seal on the genesis line final. Several resolve to the largest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisLineStatement {
+    pub format: u32,
+    pub scope: Scope,
+    pub minimum_in_sync: u32,
+}
+impl GenesisLineStatement {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.format != GENESIS_LINE_FORMAT {
+            return Err(denied("unsupported genesis line format"));
+        }
+        if self.minimum_in_sync == 0 || self.minimum_in_sync as usize > crate::MAX_FINALITY_ACKS {
+            return Err(denied("genesis line minimum out of range"));
         }
         Ok(())
     }
@@ -207,6 +228,13 @@ signed_statement!(
     "rocky.tip-opening.id.v1"
 );
 signed_statement!(
+    SignedGenesisLine,
+    GenesisLineStatement,
+    GENESIS_LINE_FORMAT,
+    "rocky.genesis-line.v1",
+    "rocky.genesis-line.id.v1"
+);
+signed_statement!(
     SignedBookmarkMove,
     BookmarkMoveStatement,
     BOOKMARK_MOVE_FORMAT,
@@ -240,6 +268,14 @@ impl SignedTipOpening {
     }
     pub fn tip(&self) -> Result<TipId, Error> {
         Ok(TipId(self.id()?))
+    }
+}
+impl SignedGenesisLine {
+    fn check_graph(&self, _graph: &TipGraph, _trusted: bool) -> Result<(), Error> {
+        if !self.endorsement.chain.0.is_empty() {
+            return Err(denied("only the owner signs the genesis line's minimum"));
+        }
+        Ok(())
     }
 }
 impl SignedBookmarkMove {
@@ -302,8 +338,11 @@ pub struct TipGraph {
     pub seals: Vec<SignedSeal>,
     pub openings: Vec<SignedTipOpening>,
     pub moves: Vec<SignedBookmarkMove>,
-    /// Seals and moves a revocation ended the signer of: kept, inspectable,
-    /// and left out of resolution. See [`Self::exclude_revoked`].
+    pub genesis_lines: Vec<SignedGenesisLine>,
+    pub finalities: Vec<SealFinality>,
+    /// Seals and moves a revocation ended the signer of, and finality
+    /// records it left below their line's minimum: kept, inspectable, and
+    /// left out of resolution. See [`Self::exclude_revoked`].
     #[serde(skip)]
     pub revoked: BTreeSet<Commitment>,
 }
@@ -315,6 +354,8 @@ impl TipGraph {
             seals: Vec::new(),
             openings: Vec::new(),
             moves: Vec::new(),
+            genesis_lines: Vec::new(),
+            finalities: Vec::new(),
             revoked: BTreeSet::new(),
         }
     }
@@ -340,6 +381,16 @@ impl TipGraph {
                 }
             }
         }
+        // Revoked acknowledgments no longer count toward a seal's finality.
+        for record in &self.finalities {
+            let minimum = match self.finality_minimum(record) {
+                Ok(minimum) => minimum,
+                Err(_) => continue,
+            };
+            if record.acknowledgments.len() - record.revoked(revocations)? < minimum {
+                revoked.insert(record.id()?);
+            }
+        }
         let changed = revoked != self.revoked;
         self.revoked = revoked;
         Ok(changed)
@@ -353,6 +404,61 @@ impl TipGraph {
     ) -> (Reverse<TipAuthority>, Commitment) {
         (Reverse(TipAuthority::of(endorsement, self.scope)), id)
     }
+    /// Whether a finality record that revocation left whole names `seal`.
+    /// Admission verified the record against its line's minimum.
+    pub fn is_final(&self, seal: Commitment) -> Result<bool, Error> {
+        for record in &self.finalities {
+            if record.seal == seal && !self.revoked.contains(&record.id()?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// The minimum of distinct trusted nodes a seal of `tip` needs to be
+    /// final: its line's opening's, or on the genesis line the largest the
+    /// owner signed; none while the owner signed none.
+    pub fn line_minimum(&self, tip: TipId) -> Result<Option<usize>, Error> {
+        let root = self.line_root_any(tip)?;
+        if root == self.genesis() {
+            return Ok(self
+                .genesis_lines
+                .iter()
+                .filter(|line| line.statement.scope == self.scope)
+                .map(|line| line.statement.minimum_in_sync as usize)
+                .max());
+        }
+        for opening in &self.openings {
+            if opening.statement.scope == self.scope && opening.tip()? == root {
+                return Ok(Some(opening.statement.minimum_in_sync as usize));
+            }
+        }
+        Err(denied("unknown tip"))
+    }
+    fn finality_minimum(&self, record: &SealFinality) -> Result<usize, Error> {
+        let seal = self.seal_by_id(record.seal)?;
+        self.line_minimum(seal.statement.tip)?
+            .ok_or_else(|| denied("the genesis line has no signed minimum"))
+    }
+    /// Verifies a finality record against the graph: it names a held seal,
+    /// its acknowledgments name that seal's tip and continuation, and
+    /// enough distinct trusted nodes signed them.
+    pub fn verify_finality(
+        &self,
+        record: &SealFinality,
+        publisher: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<(), Error> {
+        record.validate()?;
+        self.check_scope(record.scope)?;
+        let seal = self.seal_by_id(record.seal)?;
+        if record.terminal() != Some((seal.statement.tip, seal.successor()?)) {
+            return Err(denied("seal finality names another terminal"));
+        }
+        if record.verified_nodes(publisher, current)? < self.finality_minimum(record)? {
+            return Err(denied("seal finality below its line's minimum"));
+        }
+        Ok(())
+    }
     pub fn genesis(&self) -> TipId {
         genesis_tip(self.genesis_schema)
     }
@@ -362,10 +468,12 @@ impl TipGraph {
         }
         Ok(())
     }
-    /// Concurrent seals have one winner, independent of receipt order: the
-    /// highest authority, then the lower digest. Revoked seals never win.
+    /// Concurrent seals have one winner, independent of receipt order: a
+    /// final seal, then the highest authority, then the lower digest.
+    /// Revoked seals never win.
     pub fn seal(&self, tip: TipId) -> Result<Option<&SignedSeal>, Error> {
-        let mut winner: Option<((Reverse<TipAuthority>, Commitment), &SignedSeal)> = None;
+        type Key = (Reverse<bool>, (Reverse<TipAuthority>, Commitment));
+        let mut winner: Option<(Key, &SignedSeal)> = None;
         for seal in self
             .seals
             .iter()
@@ -375,7 +483,10 @@ impl TipGraph {
             if self.revoked.contains(&id) {
                 continue;
             }
-            let key = self.precedence(seal.endorsement(), id);
+            let key = (
+                Reverse(self.is_final(id)?),
+                self.precedence(seal.endorsement(), id),
+            );
             if winner.as_ref().is_none_or(|(current, _)| key < *current) {
                 winner = Some((key, seal));
             }
@@ -514,6 +625,26 @@ impl TipGraph {
     /// A line starts at genesis or at an explicit opening, not at a continue.
     pub fn line_root(&self, tip: TipId) -> Result<TipId, Error> {
         self.schema(tip)?;
+        let mut cursor = tip;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(cursor) {
+            let mut parent = None;
+            for seal in &self.seals {
+                if seal.statement.scope == self.scope && seal.successor()? == Some(cursor) {
+                    parent = Some(seal.statement.tip);
+                    break;
+                }
+            }
+            match parent {
+                Some(tip) => cursor = tip,
+                None => return Ok(cursor),
+            }
+        }
+        Err(denied("cyclic tip graph"))
+    }
+    /// The tip a line starts at, through seals whatever their resolution.
+    fn line_root_any(&self, tip: TipId) -> Result<TipId, Error> {
+        self.schema_any(tip)?;
         let mut cursor = tip;
         let mut visited = std::collections::BTreeSet::new();
         while visited.insert(cursor) {

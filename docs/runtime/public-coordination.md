@@ -64,7 +64,7 @@ quota/backpressure/expiry errors. See [coordinator retention](coordinator-retent
 
 Trust bundles use format 2 and bootstrap signatures `rocky.genesis.v2`.
 The earlier provider certificate is retired and not composed by default; a
-deployment supplies its new bundle explicitly. Domain controls use `rocky.control.v3`, naming trusted identities; requests use `rocky.coordination-request.v6`, carrying the node certificate and naming a tip's log; Raft stores/snapshots use format 8, holding per-tip logs whose in-sync members record the identity that certified them.
+deployment supplies its new bundle explicitly. Domain controls use `rocky.control.v3`, naming trusted identities; requests use `rocky.coordination-request.v6`, carrying the node certificate and naming a tip's log; Raft stores/snapshots use format 9, holding per-tip logs whose in-sync members record the identity that certified them and ended logs' terminal acknowledgments.
 The removed executor/invoker controls and command operations are not interpreted.
 There are no command heads, preparations, receipts or result-forwarding lanes.
 

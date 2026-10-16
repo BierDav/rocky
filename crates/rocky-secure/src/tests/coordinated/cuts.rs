@@ -408,6 +408,13 @@ impl DomainLog for Trimmed {
     fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
         self.0.cut(log, cut)
     }
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> CoordinationFuture<'_, ()> {
+        self.0.acknowledge_terminal(log, acknowledgment)
+    }
 }
 
 #[tokio::test]
@@ -737,6 +744,13 @@ impl DomainLog for LostReply {
             self.0.cut(log, cut).await?;
             Err(CoordinationError::Unavailable)
         })
+    }
+    fn acknowledge_terminal(
+        &self,
+        log: TipLog,
+        acknowledgment: Vec<u8>,
+    ) -> CoordinationFuture<'_, ()> {
+        self.0.acknowledge_terminal(log, acknowledgment)
     }
 }
 

@@ -14,7 +14,6 @@ mod existence_base;
 mod extension;
 mod finality;
 mod group;
-mod horizon;
 mod identity;
 mod issue;
 mod keys;
@@ -40,8 +39,8 @@ pub use enroll::{
     Renewal, open_enrollment, seal_enrollment,
 };
 pub use existence_base::{
-    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceIdentity, HorizonCut,
-    HorizonLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
+    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
+    ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
 };
 pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
 pub use finality::{
@@ -49,9 +48,6 @@ pub use finality::{
     SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
 };
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
-pub use horizon::{
-    HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonPeer, HorizonStatement, SignedHorizon,
-};
 pub use identity::{
     CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
     LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,

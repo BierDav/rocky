@@ -6,7 +6,6 @@ mod coordinated;
 mod delivery;
 mod discovery;
 mod held;
-mod horizon;
 mod live_links;
 mod mesh;
 mod partition;
@@ -831,7 +830,6 @@ impl Node {
             "coordinated" => self.coordinated_status().await,
             "drop_held" => self.drop_held(request).await,
             "retention" => self.retention(request).await,
-            "horizon" => self.horizon(request).await,
             "retention_limits" => {
                 if let Some(limits) = request.get("limits") {
                     self.replica
@@ -1320,133 +1318,6 @@ impl Node {
             .map(|link| link.transport.kind().to_owned())
             .unwrap_or_default()
     }
-    async fn horizon(&self, request: &Value) -> Result<Value, Failure> {
-        let collection = request["collection"]
-            .as_str()
-            .ok_or("collection must be a table name")?;
-        let scope = if request.get("values").is_some() {
-            let mut address = request.clone();
-            address["table"] = collection.into();
-            self.partition_address(&address)?.0
-        } else {
-            self.domain()
-                .scopes()
-                .find(|(name, _)| *name == collection)
-                .map(|(_, scope)| scope)
-                .filter(|scope| self.scopes().contains(scope))
-                .ok_or_else(|| refused("horizon scope is not granted"))?
-        };
-        let action = request["action"].as_str().unwrap_or("status");
-        let mut declare = action == "declare";
-        if action == "maintain" {
-            let limit = request["max_operations"].as_u64().unwrap_or(1024);
-            if limit == 0 {
-                return Err(refused("horizon operation cadence must be positive"));
-            }
-            let current = self.replica.admitted_horizon(scope).await?;
-            let finalized = self.replica.finalized_horizon(scope).await?;
-            if current.is_some() && current != finalized {
-                if !self.replica.horizon_rebootstrap_required(scope).await?
-                    && self
-                        .replica
-                        .horizon_progress(scope)
-                        .await?
-                        .waiting
-                        .is_empty()
-                    && !self.replica.horizon_dependents_pending(scope).await?
-                {
-                    self.replica.finalize_horizon(scope).await?;
-                    self.replica.prune(scope).await?;
-                    self.forget_generations().await?;
-                }
-            } else {
-                declare = self
-                    .replica
-                    .horizon_operations_since_finalization(scope)
-                    .await?
-                    >= limit;
-            }
-        }
-        match if declare { "declare" } else { action } {
-            "declare" => {
-                if !self.settings.lock().await.issuer() {
-                    return Err(refused("only an issuer declares a horizon"));
-                }
-                let mut statement = self
-                    .replica
-                    .horizon_statement_for_participants(scope, &[])
-                    .await?;
-                let scopes = std::iter::once(scope)
-                    .chain(statement.related.iter().map(|cut| cut.scope))
-                    .collect::<Vec<_>>();
-                statement.peers = self.horizon_participants(request, &scopes).await?;
-                let (identity, links) = {
-                    let settings = self.settings.lock().await;
-                    (settings.identity(&self.vault)?, settings.issuer_links())
-                };
-                let signed =
-                    rocky_credentials::SignedHorizon::endorse(statement, &*identity, &links)?;
-                let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-                let participates = signed
-                    .statement
-                    .peers
-                    .iter()
-                    .any(|peer| peer.node == rocky_credentials::PeerId::of(own));
-                self.replica.receive_horizon(signed).await?;
-                if participates {
-                    self.replica.acknowledge_horizon(scope).await?;
-                }
-                self.wake_sync();
-            }
-            "admit" => {
-                let bytes = HEXLOWER.decode(
-                    request["statement"]
-                        .as_str()
-                        .ok_or("statement must be canonical CBOR in hex")?
-                        .as_bytes(),
-                )?;
-                let signed = rocky_credentials::SignedHorizon::from_bytes(&bytes)?;
-                if signed.statement.scope != scope {
-                    return Err(refused("declaration differs from requested scope"));
-                }
-                self.replica.receive_horizon(signed).await?;
-            }
-            "finalize" => {
-                self.replica.finalize_horizon(scope).await?;
-                self.replica.prune(scope).await?;
-                self.forget_generations().await?;
-                self.wake_sync();
-            }
-            "status" | "maintain" => {}
-            _ => return Err(refused("unknown horizon action")),
-        }
-        let signed = self.replica.admitted_horizon(scope).await?;
-        let progress = if signed.is_some() {
-            Some(self.replica.horizon_progress(scope).await?)
-        } else {
-            None
-        };
-        Ok(
-            json!({"statement": signed.as_ref().map(|signed| signed.to_bytes().map(|bytes| HEXLOWER.encode(&bytes))).transpose()?,
-            "sequence": signed.as_ref().map(|signed| signed.statement.sequence),
-            "acknowledged": progress.as_ref().map(|progress| &progress.acknowledged),
-            "waiting": progress.as_ref().map(|progress| &progress.waiting),
-            "behind": progress.as_ref().map(|progress| &progress.behind),
-            "issued": signed.as_ref().map(|signed| signed.statement.issued),
-            // When finalization stops waiting, at the latest: each waiting
-            // participant becomes behind at its deadline.
-            "deadline": signed.as_ref().zip(progress.as_ref()).and_then(|(signed, progress)| signed
-                .statement
-                .peers
-                .iter()
-                .filter(|peer| progress.waiting.contains(&peer.node))
-                .map(|peer| peer.deadline(signed.statement.issued))
-                .max()),
-            "rebootstrap_required": self.replica.horizon_rebootstrap_required(scope).await?,
-            "finalized": self.replica.finalized_horizon(scope).await?.as_ref() == signed.as_ref() && signed.is_some(),
-            "operations_since_finalization": self.replica.horizon_operations_since_finalization(scope).await?}),
-        )
-    }
     async fn retention(&self, request: &Value) -> Result<Value, Failure> {
         let collection = request["collection"]
             .as_str()
@@ -1471,7 +1342,7 @@ impl Node {
         Ok(
             json!({"policy": self.replica.retention_policy(scope).await?,
             "covered": status.covered, "uncovered": status.uncovered,
-            "horizon": status.horizon, "maintenance_error": status.maintenance_error}),
+            "pruned_prefix": status.pruned_prefix, "maintenance_error": status.maintenance_error}),
         )
     }
     async fn status(&self, client: &Client) -> Result<Value, Failure> {
@@ -1977,10 +1848,6 @@ impl Node {
                         event["superseded"] = json!(superseded);
                         self.activity.record("checkpoint_imported", event);
                     }
-                    if moved.finalized {
-                        self.activity
-                            .record("horizon_finalized", self.scope_label(scope));
-                    }
                 }
             }
         }
@@ -2460,12 +2327,6 @@ impl Node {
                         covered.extend(transfer.held.iter().copied());
                     }
                     self.record_reach(peer, before, &result);
-                    // A finalized horizon may leave an earlier manifest unnamed.
-                    if result.as_ref().is_ok_and(|(_, transfer)| {
-                        transfer.scopes.iter().any(|(_, moved)| moved.finalized)
-                    }) {
-                        self.forget_generations().await?;
-                    }
                     results.push((peer, contact, generation, result));
                 }
             }
@@ -3697,12 +3558,6 @@ fn cut_refusal(error: &Failure) -> Option<&rocky_secure::CutRefusal> {
         _ => None,
     }
 }
-fn horizon_pending(error: &Failure) -> Option<&rocky_secure::HorizonPending> {
-    match error.downcast_ref::<Error>()? {
-        Error::Application(error) => error.downcast_ref(),
-        _ => None,
-    }
-}
 fn is_authority(error: &Failure) -> bool {
     error.to_string().contains("session authority changed")
 }
@@ -3720,8 +3575,6 @@ pub fn error(error: &Failure) -> Value {
         ("rejected", false)
     } else if let Some(refusal) = cut_refusal(error) {
         (refusal.code, refusal.code == "coordinator_unavailable")
-    } else if let Some(pending) = horizon_pending(error) {
-        return json!({"code": "horizon_pending", "retryable": true, "message": pending.to_string()});
     } else if let Some(coordinated) = error.downcast_ref::<coordinated::Coordinated>() {
         coordinated.code()
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {

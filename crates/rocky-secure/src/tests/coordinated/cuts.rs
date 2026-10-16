@@ -233,81 +233,6 @@ async fn a_member_returning_with_an_abandoned_entry_reverts_it_and_every_device_
 }
 
 #[tokio::test]
-async fn a_tainted_checkpoint_guards_its_scope_until_a_clean_base_is_imported() {
-    let stuck = Stuck::new().await;
-    let f = &stuck.fixture;
-    let carol = &stuck.carol;
-    let scope = f.lineage.scope("items");
-    // Carol's base covers the abandoned entry; so does another member's.
-    carol.1.checkpoint(scope).await.unwrap();
-    let erin_key = PrivateKey::new();
-    let erin = open(&f.lineage, &f.dir, "erin", &erin_key).await;
-    sync(&f.lineage, &carol.1, &erin, &erin_key).await;
-    let tainted = erin.checkpoint(scope).await.unwrap();
-    assert_eq!(tainted.statement.coordinated.highest, 2);
-    stuck.continue_past_the_cut().await;
-    carol
-        .1
-        .receive_cuts(std::slice::from_ref(&stuck.cut))
-        .await
-        .unwrap();
-    assert_eq!(carol.1.cut_guarded_scopes().await.unwrap(), [scope]);
-    // Writes and sync stop with `cut_base_missing`; no tainted base helps.
-    let sql = session(&carol.1).await;
-    let write = identity_insert(
-        &sql,
-        "INSERT INTO items(key,title) VALUES(?,?)",
-        vec![text("0009"), text("refused")],
-    )
-    .await;
-    let error = match write {
-        Err(error) => error,
-        Ok(_) => sql.run("COMMIT", vec![]).await.unwrap_err(),
-    };
-    assert!(error.to_string().contains("cut_base_missing"), "{error}");
-    drop(sql);
-    assert!(carol.1.horizon_rebootstrap_required(scope).await.unwrap());
-    let error = carol.1.begin_rebootstrap(tainted).await.unwrap_err();
-    assert!(
-        error.to_string().contains("abandoned coordinated effects"),
-        "{error}"
-    );
-    assert!(carol.1.checkpoint(scope).await.is_err());
-    // A clean base from the fresh node ends the guard.
-    let clean = f.alice.1.checkpoint(scope).await.unwrap();
-    assert_eq!(clean.statement.coordinated.cuts, 1);
-    let credentials = f.lineage.credentials(3, &carol.0);
-    carol.1.begin_rebootstrap(clean.clone()).await.unwrap();
-    let mut cursor = None;
-    loop {
-        let page = f
-            .alice
-            .1
-            .checkpoint_page(
-                carol.0.public_key(),
-                &credentials,
-                scope,
-                clean.id().unwrap(),
-                cursor,
-                MAX_SECURE_FRAME,
-            )
-            .await
-            .unwrap();
-        cursor = page.next;
-        carol.1.stage_checkpoint_page(page).await.unwrap();
-        if cursor.is_none() {
-            break;
-        }
-    }
-    carol.1.finish_rebootstrap(scope).await.unwrap();
-    assert!(carol.1.cut_guarded_scopes().await.unwrap().is_empty());
-    sync(&f.lineage, &f.alice.1, &carol.1, &carol.0).await;
-    let expected = [row("0001", "kept"), row("0002", "continued")];
-    assert_eq!(rows(&carol.1).await, expected);
-    assert_eq!(rows(&f.alice.1).await, expected);
-}
-
-#[tokio::test]
 async fn a_crash_after_any_rollback_step_resumes_on_reopen_to_the_same_rows() {
     let stuck = Stuck::new().await;
     let f = &stuck.fixture;
@@ -467,41 +392,6 @@ async fn a_gap_before_the_window_is_endorsed_by_the_cut_and_a_tampered_entry_is_
     assert_eq!(
         rows(&fresh).await,
         [row("0001", "first"), row("0002", "second")]
-    );
-}
-
-#[tokio::test]
-async fn a_base_finalized_by_a_mergeable_horizon_over_abandoned_effects_fails_closed() {
-    let stuck = Stuck::new().await;
-    let f = &stuck.fixture;
-    let carol = &stuck.carol;
-    let scope = f.lineage.scope("items");
-    let statement = carol.1.horizon_statement(scope, &[]).await.unwrap();
-    let signed = rocky_credentials::SignedHorizon::sign(statement, f.lineage.publisher()).unwrap();
-    carol.1.receive_horizon(signed).await.unwrap();
-    let finalized = carol.1.finalize_horizon(scope).await.unwrap();
-    assert!(finalized.statement.finalized.is_some());
-    assert_eq!(finalized.statement.coordinated.highest, 2);
-    stuck.continue_past_the_cut().await;
-    carol
-        .1
-        .receive_cuts(std::slice::from_ref(&stuck.cut))
-        .await
-        .unwrap();
-    // No replay from an earlier base: the scope stays guarded, its rows as
-    // they were, until a clean checkpoint is imported.
-    assert_eq!(carol.1.cut_guarded_scopes().await.unwrap(), [scope]);
-    assert_eq!(
-        rows(&carol.1).await,
-        [row("0001", "kept"), row("0002", "abandoned")]
-    );
-    let error = carol.1.checkpoint(scope).await.unwrap_err();
-    assert!(error.to_string().contains("cut_base_missing"), "{error}");
-    // The finalized base is no base for another holder of the cut either.
-    let error = f.alice.1.begin_rebootstrap(finalized).await.unwrap_err();
-    assert!(
-        error.to_string().contains("abandoned coordinated effects"),
-        "{error}"
     );
 }
 
@@ -783,4 +673,93 @@ async fn a_cut_whose_reply_is_lost_is_admitted_once_on_the_next_resolution() {
     assert_eq!(submissions(fresh).await, 0);
     f.invoice(&f.alice, "continued").await;
     assert_eq!(domain_head(&f.mesh, &f.lineage).commit, 4);
+}
+
+#[tokio::test]
+async fn a_tainted_checkpoint_guards_its_scope_until_a_clean_base_is_imported() {
+    let stuck = Stuck::new().await;
+    let f = &stuck.fixture;
+    let carol = &stuck.carol;
+    let scope = f.lineage.scope("items");
+    // Carol's base covers the abandoned entry; so does another member's.
+    carol.1.checkpoint(scope).await.unwrap();
+    let erin_key = PrivateKey::new();
+    let erin = open(&f.lineage, &f.dir, "erin", &erin_key).await;
+    sync(&f.lineage, &carol.1, &erin, &erin_key).await;
+    let tainted = erin.checkpoint(scope).await.unwrap();
+    assert_eq!(tainted.statement.coordinated.highest, 2);
+    stuck.continue_past_the_cut().await;
+    carol
+        .1
+        .receive_cuts(std::slice::from_ref(&stuck.cut))
+        .await
+        .unwrap();
+    assert_eq!(carol.1.cut_guarded_scopes().await.unwrap(), [scope]);
+    // Writes and sync stop with `cut_base_missing`; no tainted base helps.
+    let sql = session(&carol.1).await;
+    let write = identity_insert(
+        &sql,
+        "INSERT INTO items(key,title) VALUES(?,?)",
+        vec![text("0009"), text("refused")],
+    )
+    .await;
+    let error = match write {
+        Err(error) => error,
+        Ok(_) => sql.run("COMMIT", vec![]).await.unwrap_err(),
+    };
+    assert!(error.to_string().contains("cut_base_missing"), "{error}");
+    drop(sql);
+    let peer = f.alice.0.public_key();
+    let credentials = f.lineage.credentials(3, &f.alice.0);
+    let frontier = f.alice.1.frontier(scope).await.unwrap();
+    let error = carol
+        .1
+        .range_page(peer, &credentials, &frontier, None, MAX_SECURE_FRAME)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cut_base_missing"), "{error}");
+    let error = carol
+        .1
+        .transfer_page(peer, &credentials, &[scope], None, MAX_SECURE_FRAME)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("cut_base_missing"), "{error}");
+    let error = carol.1.begin_rebootstrap(tainted).await.unwrap_err();
+    assert!(
+        error.to_string().contains("abandoned coordinated effects"),
+        "{error}"
+    );
+    assert!(carol.1.checkpoint(scope).await.is_err());
+    // A clean base from the fresh node ends the guard.
+    let clean = f.alice.1.checkpoint(scope).await.unwrap();
+    assert_eq!(clean.statement.coordinated.cuts, 1);
+    let credentials = f.lineage.credentials(3, &carol.0);
+    carol.1.begin_rebootstrap(clean.clone()).await.unwrap();
+    let mut cursor = None;
+    loop {
+        let page = f
+            .alice
+            .1
+            .checkpoint_page(
+                carol.0.public_key(),
+                &credentials,
+                scope,
+                clean.id().unwrap(),
+                cursor,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        cursor = page.next;
+        carol.1.stage_checkpoint_page(page).await.unwrap();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    carol.1.finish_rebootstrap(scope).await.unwrap();
+    assert!(carol.1.cut_guarded_scopes().await.unwrap().is_empty());
+    sync(&f.lineage, &f.alice.1, &carol.1, &carol.0).await;
+    let expected = [row("0001", "kept"), row("0002", "continued")];
+    assert_eq!(rows(&carol.1).await, expected);
+    assert_eq!(rows(&f.alice.1).await, expected);
 }

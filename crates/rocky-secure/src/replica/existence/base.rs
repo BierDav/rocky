@@ -1,15 +1,11 @@
 //! Issuer-authenticated live existence bases and bounded, resumable transfer.
 use super::*;
-use rocky_credentials::{
-    ExistenceBase, ExistenceBaseStatement, ExistenceIdentity, HorizonCut, SignedExistenceBase,
-    SignedHorizon,
-};
+use rocky_credentials::{ExistenceBase, ExistenceBaseStatement, ExistenceCut, SignedExistenceBase};
 const LIVE: &str = "rocky.existence-base-live.v1";
 
 /// What authenticates an existence base.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExistenceBasis {
-    Horizon(Box<SignedHorizon>),
     /// This replica's own fold at a seal; never offered to peers.
     Local(Box<ExistenceBaseStatement>),
     /// A fold at a seal signed by the owner, a trusted identity or an issuer.
@@ -25,7 +21,6 @@ impl ExistenceBaseAttachment {
     /// The fold at a seal, if this base is one.
     pub fn statement(&self) -> Option<&ExistenceBaseStatement> {
         match &self.basis {
-            ExistenceBasis::Horizon(_) => None,
             ExistenceBasis::Local(statement) => Some(statement),
             ExistenceBasis::Signed(signed) => Some(&signed.statement),
         }
@@ -36,24 +31,12 @@ impl ExistenceBaseAttachment {
     }
     pub fn descriptor(&self) -> Result<&ExistenceBase, Error> {
         match (&self.basis, self.statement()) {
-            (ExistenceBasis::Horizon(horizon), _) => horizon
-                .statement
-                .bases
-                .iter()
-                .find(|base| base.scope == self.scope)
-                .ok_or_else(|| denied("horizon has no authenticated existence base")),
             (_, Some(statement)) if statement.base.scope == self.scope => Ok(&statement.base),
             _ => Err(denied("existence base names another scope")),
         }
     }
-    pub fn cut(&self) -> Result<&HorizonCut, Error> {
+    pub fn cut(&self) -> Result<&ExistenceCut, Error> {
         match (&self.basis, self.statement()) {
-            (ExistenceBasis::Horizon(horizon), _) => horizon
-                .statement
-                .existence
-                .iter()
-                .find(|cut| cut.scope == self.scope)
-                .ok_or_else(|| denied("horizon has no existence cut")),
             (_, Some(statement)) if statement.cut.scope == self.scope => Ok(&statement.cut),
             _ => Err(denied("existence base names another scope")),
         }
@@ -62,15 +45,7 @@ impl ExistenceBaseAttachment {
         if self.cut()?.logs == previous.cut()?.logs {
             let same = self.descriptor()? == previous.descriptor()?
                 && self.cut()?.state == previous.cut()?.state;
-            let authoritative = match (&self.basis, &previous.basis) {
-                (ExistenceBasis::Horizon(new), ExistenceBasis::Horizon(old)) => {
-                    new.statement.scope == self.scope
-                        && (old.statement.scope != self.scope
-                            || new.statement.sequence > old.statement.sequence)
-                }
-                _ => false,
-            };
-            if !same && !authoritative {
+            if !same {
                 return Ok(false);
             }
         }
@@ -97,15 +72,6 @@ impl ExistenceBaseAttachment {
     /// Equal for a local fold and its signed copy.
     pub fn id(&self) -> Result<Commitment, Error> {
         match (&self.basis, self.statement()) {
-            (ExistenceBasis::Horizon(horizon), _) => Ok(rocky_core::commitment(
-                "rocky.existence-base.id.v1",
-                &encode(&(
-                    horizon.statement.tip,
-                    horizon.statement.revocations,
-                    self.cut()?,
-                    self.descriptor()?,
-                ))?,
-            )),
             (_, Some(statement)) => Ok(rocky_core::commitment(
                 "rocky.existence-base.id.v2",
                 &encode(statement)?,
@@ -159,10 +125,6 @@ impl<A: RowApplication> Inner<A> {
         base: &ExistenceBaseAttachment,
     ) -> Result<(), Error> {
         let tip = match &base.basis {
-            ExistenceBasis::Horizon(horizon) => {
-                horizon.verify(self.config.publisher).map_err(credential)?;
-                horizon.statement.tip
-            }
             ExistenceBasis::Local(_) => {
                 return Err(denied("a local existence base is never imported"));
             }
@@ -188,262 +150,14 @@ impl<A: RowApplication> Inner<A> {
         base.cut()?;
         Ok(())
     }
-    pub(in crate::replica) async fn horizon_existence_rows(
-        &self,
-        scope: ResourceScope,
-        finalizing: Option<ResourceScope>,
-        after: i64,
-    ) -> Result<Vec<(i64, Option<Commitment>, Option<Commitment>)>, Error> {
-        let found = rows_with(&self.conn, "SELECT id,created,deleted FROM secure_existence WHERE scope=? AND (deleted IS NULL OR created IS NULL) AND id>? ORDER BY id LIMIT ?", vec![SqlValue::Blob(encode(&scope)?),SqlValue::Integer(after),SqlValue::Integer(MAX_EXISTENCE_PAGE as i64)]).await?;
-        let mut rows = Vec::new();
-        for row in found {
-            let [SqlValue::Integer(id), created, deleted] = row.as_slice() else {
-                return Err(corrupt());
-            };
-            rows.push((*id, nullable_hash(created)?, nullable_hash(deleted)?));
-        }
-        // Keep the scan cursor independent of the survivor count.
-        if finalizing == Some(scope) {
-            for (id, created, _) in &mut rows {
-                if created.is_some() && !self.horizon_row_survives(scope, *id).await? {
-                    *created = None;
-                }
-            }
-        }
-        Ok(rows)
-    }
-    async fn horizon_row_survives(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
-        let key = rocky_core::commitment("rocky.row-incarnation.v2", &id.to_le_bytes());
-        let Some(record) = self.row(scope, key).await? else {
-            let identity = rocky_core::RowIdentity::from_integer(id)
-                .map_err(|error| denied(&error.to_string()))?;
-            if self.identity_marks(scope).await?.iter().any(|mark| {
-                mark.author == identity.author() && mark.sequence >= identity.sequence()
-            }) {
-                return Ok(false);
-            }
-            return Err(denied(
-                "sync row creations before declaring a logged horizon",
-            ));
-        };
-        if record.deleted {
-            return Ok(false);
-        }
-        let typed = self
-            .typed
-            .as_ref()
-            .ok_or_else(|| denied("horizon requires typed rows"))?;
-        let table = typed
-            .by_scope(scope)
-            .ok_or_else(|| denied("horizon table missing"))?;
-        let values = typed
-            .rows
-            .values(&table.table, &record.fields)
-            .map_err(Error::Corrupt)?;
-        let parameters = table
-            .table
-            .key
-            .iter()
-            .map(|index| values[*index].clone())
-            .collect();
-        let id_column = typed
-            .rows
-            .schema()
-            .table(&table.table.sql_name)
-            .ok_or_else(|| denied("horizon table missing"))?
-            .columns
-            .iter()
-            .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
-            .ok_or_else(|| denied("horizon requires row incarnations"))?;
-        let select = format!("{} AND row_kind=0", table.select);
-        Ok(
-            collect_rows(self.conn.query(select, bindings(parameters)).await?)
-                .await?
-                .iter()
-                .any(|values| values.get(id_column) == Some(&SqlValue::Integer(id))),
-        )
-    }
-    pub(in crate::replica) async fn capture_horizon_existence_base(
-        &self,
-        scope: ResourceScope,
-        finalizing: Option<ResourceScope>,
-    ) -> Result<ExistenceBase, Error> {
-        let mut marks: BTreeMap<u32, ExistenceIdentity> = self
-            .existence_base(scope)
-            .await?
-            .map(|base| {
-                base.descriptor().map(|descriptor| {
-                    descriptor
-                        .identities
-                        .iter()
-                        .map(|mark| (mark.author, mark.clone()))
-                        .collect()
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let mut after = None;
-        loop {
-            let page = self
-                .existence_scan(scope, after, MAX_EXISTENCE_PAGE)
-                .await?;
-            for record in page.records {
-                if record.event() == ExistenceEvent::Created {
-                    let identity = record.statement.id;
-                    match marks.get_mut(&identity.author()) {
-                        Some(mark) if mark.signer != record.signer => {
-                            return Err(denied("existence author changed signer"));
-                        }
-                        Some(mark) => mark.sequence = mark.sequence.max(identity.sequence()),
-                        None => {
-                            marks.insert(
-                                identity.author(),
-                                ExistenceIdentity {
-                                    author: identity.author(),
-                                    signer: record.signer,
-                                    sequence: identity.sequence(),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-            after = page.next;
-            if after.is_none() {
-                break;
-            }
-        }
-        if finalizing == Some(scope) {
-            for held in self.identity_marks(scope).await? {
-                match marks.get_mut(&held.author) {
-                    Some(mark) if mark.signer != held.signer => {
-                        return Err(denied("row and existence authors disagree"));
-                    }
-                    Some(mark) => mark.sequence = mark.sequence.max(held.sequence),
-                    None => {
-                        marks.insert(
-                            held.author,
-                            ExistenceIdentity {
-                                author: held.author,
-                                signer: held.signer,
-                                sequence: held.sequence,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        if marks.len() > MAX_CHECKPOINT_LOGS {
-            return Err(denied("existence base author quota"));
-        }
-        let (mut count, mut digest, mut cursor) = (0, checkpoint::Lt::new(), 0i64);
-        loop {
-            let rows = self
-                .horizon_existence_rows(scope, finalizing, cursor)
-                .await?;
-            if rows.is_empty() {
-                break;
-            }
-            for (id, created, deleted) in rows {
-                cursor = id;
-                if created.is_none() && deleted.is_none() {
-                    continue;
-                }
-                digest.add(LIVE, &item(id, &created, &deleted)?);
-                count += 1;
-            }
-        }
-        Ok(ExistenceBase {
-            scope,
-            rows: count,
-            digest: digest.digest(),
-            identities: marks.into_values().collect(),
-        })
-    }
-    /// Captured roots are rechecked in the row-finalization transaction.
-    pub(in crate::replica) async fn seal_existence_bases(
-        &self,
-        horizon: &SignedHorizon,
-    ) -> Result<(), Error> {
-        for cut in &horizon.statement.existence {
-            let attachment = ExistenceBaseAttachment {
-                basis: ExistenceBasis::Horizon(Box::new(horizon.clone())),
-                scope: cut.scope,
-            };
-            self.verify_existence_base(&attachment)?;
-            if self
-                .capture_horizon_existence_base(cut.scope, Some(horizon.statement.scope))
-                .await?
-                != *attachment.descriptor()?
-            {
-                return Err(denied("existence base does not reproduce the declared cut"));
-            }
-            let blob = encode(&cut.scope)?;
-            self.conn
-                .execute(
-                    "DELETE FROM secure_existence_base_rows WHERE scope=?",
-                    [blob.clone()],
-                )
-                .await?;
-            let mut cursor = 0;
-            loop {
-                let rows = self
-                    .horizon_existence_rows(cut.scope, Some(horizon.statement.scope), cursor)
-                    .await?;
-                if rows.is_empty() {
-                    break;
-                }
-                for (id, created, deleted) in rows {
-                    cursor = id;
-                    if created.is_none() && deleted.is_none() {
-                        continue;
-                    }
-                    self.conn
-                        .execute(
-                            "INSERT INTO secure_existence_base_rows VALUES(?,?,?,?)",
-                            bindings(vec![
-                                SqlValue::Blob(blob.clone()),
-                                SqlValue::Integer(id),
-                                hash_value(&created),
-                                hash_value(&deleted),
-                            ]),
-                        )
-                        .await?;
-                }
-            }
-            if cut.scope == horizon.statement.scope {
-                self.conn.execute("DELETE FROM secure_existence WHERE scope=? AND created IS NOT NULL AND NOT EXISTS(SELECT 1 FROM secure_existence_base_rows b WHERE b.scope=secure_existence.scope AND b.id=secure_existence.id)", [blob.clone()]).await?;
-            }
-            self.conn.execute("INSERT INTO secure_existence_base VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET attachment=excluded.attachment", [blob, encode(&attachment)?]).await?;
-        }
-        self.archive_existence_bases().await?;
-        Ok(())
-    }
-    pub(in crate::replica) async fn compact_existence_base(
-        &self,
-        scope: ResourceScope,
-    ) -> Result<(), Error> {
-        let base = self
-            .existence_base(scope)
-            .await?
-            .ok_or_else(|| denied("no signed existence base"))?;
-        for log in &base.cut()?.logs {
-            self.conn
-                .execute(
-                    "DELETE FROM secure_existence_log WHERE scope=? AND signer=? AND sequence<=?",
-                    bindings(vec![
-                        SqlValue::Blob(encode(&scope)?),
-                        SqlValue::Blob(log.signer.as_bytes().to_vec()),
-                        SqlValue::Integer(log.sequence as i64),
-                    ]),
-                )
-                .await?;
-        }
-        self.conn.execute("DELETE FROM secure_existence WHERE scope=? AND created IS NOT NULL AND deleted IS NOT NULL", [encode(&scope)?]).await?;
-        Ok(())
-    }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
+    pub async fn installed_existence_base(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<ExistenceBaseAttachment>, Error> {
+        self.inner.lock().await.existence_base(scope).await
+    }
     pub async fn existence_base_offer(
         &self,
         peer: PublicKey,

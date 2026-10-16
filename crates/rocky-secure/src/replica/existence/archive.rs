@@ -47,36 +47,11 @@ impl<A: RowApplication> Inner<A> {
             };
             keep.insert(decode::<ExistenceBaseAttachment>(bytes)?.id()?);
         }
-        for row in rows(&self.conn, "SELECT signed FROM secure_checkpoints WHERE signed IS NOT NULL UNION ALL SELECT signed FROM secure_rebootstrap").await? {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else { return Err(corrupt()); };
-            let signed = SignedCheckpoint::from_bytes(bytes)?;
-            if let Some(horizon) = signed.statement.finalized {
-                for descriptor in &horizon.statement.bases {
-                    keep.insert(ExistenceBaseAttachment { basis: ExistenceBasis::Horizon(horizon.clone()), scope: descriptor.scope }.id()?);
-                }
-            }
-        }
         for row in rows(&self.conn, "SELECT attachment FROM secure_existence_stage").await? {
             let [SqlValue::Blob(bytes)] = row.as_slice() else {
                 return Err(corrupt());
             };
             keep.insert(decode::<ExistenceBaseAttachment>(bytes)?.id()?);
-        }
-        for row in rows(&self.conn, "SELECT statement FROM secure_mergeable_horizon").await? {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                return Err(corrupt());
-            };
-            let horizon =
-                rocky_credentials::SignedHorizon::from_bytes(bytes).map_err(credential)?;
-            for descriptor in &horizon.statement.bases {
-                keep.insert(
-                    ExistenceBaseAttachment {
-                        basis: ExistenceBasis::Horizon(Box::new(horizon.clone())),
-                        scope: descriptor.scope,
-                    }
-                    .id()?,
-                );
-            }
         }
         for row in rows(&self.conn, "SELECT base FROM secure_existence_archive").await? {
             let [SqlValue::Blob(bytes)] = row.as_slice() else {

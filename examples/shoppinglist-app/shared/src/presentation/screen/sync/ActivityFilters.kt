@@ -22,7 +22,7 @@ enum class ActivityFilter(val label: String) {
         Keys -> entry.kind == EntryKind.Key
         Access -> entry.kind in setOf(EntryKind.Credentials, EntryKind.Author)
         Devices -> entry.kind == EntryKind.Device
-        History -> entry.kind in setOf(EntryKind.Checkpoint, EntryKind.Horizon)
+        History -> entry.kind == EntryKind.Checkpoint
     }
 }
 

@@ -1,4 +1,4 @@
-//! Bounded group frontier exchange; data and horizon repair retain their scope APIs.
+//! Bounded group frontier exchange; data and checkpoint repair retain their scope APIs.
 use super::*;
 
 use crate::replica::roles::{FrontierReply, MAX_FRONTIER_SCOPES, validate_frontiers};
@@ -19,7 +19,7 @@ pub(super) enum FrontierMessage {
 /// The outcome of one frontier exchange, each list in input order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrontierExchange {
-    /// Scopes needing ordinary pull/push or horizon repair.
+    /// Scopes needing ordinary pull/push or checkpoint repair.
     pub changed: Vec<ResourceScope>,
     /// Scopes skipped this session: this replica's view of the peer's
     /// credentials, or the peer's view of this replica's, grants no whole-scope
@@ -32,7 +32,7 @@ pub struct FrontierExchange {
 
 impl NativeSession {
     /// Exchanges all selected member frontiers of each group partition together.
-    /// Equal, fully applied frontiers with equal horizons need no row transfer
+    /// Equal, fully applied frontiers need no row transfer
     /// this round. A refused member is skipped alone; the session goes on.
     pub async fn changed_scopes<A: RowApplication>(
         &mut self,
@@ -73,13 +73,10 @@ impl NativeSession {
                 return Err(denied("unexpected frontier batch response"));
             };
             if states.len() != batch.len()
-                || states.iter().zip(&batch).any(|(reply, scope)| {
-                    reply.scope() != *scope
-                        || matches!(reply, FrontierReply::Held(state) if state
-                            .signed
-                            .as_ref()
-                            .is_some_and(|signed| signed.statement.scope != *scope))
-                })
+                || states
+                    .iter()
+                    .zip(&batch)
+                    .any(|(reply, scope)| reply.scope() != *scope)
             {
                 return Err(denied("frontier batch outside request"));
             }
@@ -115,9 +112,6 @@ impl NativeSession {
                     importing.push(local.scope);
                 } else if local != &state.frontier
                     || local.logs.iter().any(|log| log.held != log.applied)
-                    || state.behind
-                    || replica.horizon_rebootstrap_required(local.scope).await?
-                    || replica.admitted_horizon(local.scope).await? != state.signed
                 {
                     changed.push(local.scope);
                 } else {

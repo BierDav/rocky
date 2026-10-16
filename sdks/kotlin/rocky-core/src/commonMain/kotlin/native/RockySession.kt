@@ -16,7 +16,6 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     private var closed = false
     val credentials: Credentials get() = Credentials(this)
     val partitions: Partitions get() = client.partitions
-    val horizons: Horizons get() = client.horizons
     val tips: Tips get() = client.tips
     suspend fun status(): DatabaseStatus = nativeCall { nativeSession.status() }
     suspend fun statusAfter(token: String): DatabaseStatus = nativeCall { nativeSession.statusAfter(token) }

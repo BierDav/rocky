@@ -8,8 +8,6 @@ pub enum PruneBlock {
     NoCheckpoint,
     /// No retention policy names the peers that must hold copies.
     NoPolicy,
-    /// The authenticated existence base needs another durable holder.
-    HorizonCustody { held: usize, needed: usize },
     /// A required peer has not acknowledged this operation.
     Unacknowledged {
         peer: rocky_credentials::PeerId,
@@ -61,38 +59,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             report.pruned += step.pruned;
             report.blocked = step.blocked;
             if !step.more {
-                if report.blocked.is_none()
-                    && inner.retention_policy(scope).await?.is_some()
-                    && let Some(id) = inner.find_scope_id(scope).await?
-                    && let Some(signed) = inner
-                        .checkpoint_record(id, true)
-                        .await?
-                        .and_then(|record| record.signed)
-                    && let Some(finalized) = &signed.statement.finalized
-                {
-                    inner.flush()?;
-                    transaction!(inner, |inner| {
-                        for descriptor in &finalized.statement.bases {
-                            let expected = super::super::existence::ExistenceBaseAttachment {
-                                basis: super::super::existence::ExistenceBasis::Horizon(
-                                    finalized.clone(),
-                                ),
-                                scope: descriptor.scope,
-                            };
-                            if inner
-                                .existence_base(descriptor.scope)
-                                .await?
-                                .map(|base| base.id())
-                                .transpose()?
-                                == Some(expected.id()?)
-                            {
-                                inner.compact_existence_base(descriptor.scope).await?;
-                            }
-                        }
-                        inner.collect_existence_archives().await?;
-                        Ok(())
-                    })?;
-                }
                 return Ok(report);
             }
         }
@@ -128,33 +94,9 @@ impl<A: RowApplication> Inner<A> {
         };
         // An unverifiable checkpoint blocks pruning with its error.
         self.verify_record(scope, &record)?;
-        let Some(mut policy) = self.retention_policy(scope).await? else {
+        let Some(policy) = self.retention_policy(scope).await? else {
             return Ok(PruneStep::blocked(PruneBlock::NoPolicy));
         };
-        if let Some(finalized) = self.verify_record(scope, &record)?.statement.finalized
-            && !finalized.statement.bases.is_empty()
-        {
-            let held = self.horizon_copies(&finalized).await?;
-            let needed = policy.copies.max(1);
-            if held < needed {
-                return Ok(PruneStep::blocked(PruneBlock::HorizonCustody {
-                    held,
-                    needed,
-                }));
-            }
-        }
-        if self
-            .verify_record(scope, &record)?
-            .statement
-            .finalized
-            .is_some()
-        {
-            for peer in &policy.required {
-                if self.horizon_reference_behind(scope, *peer).await? {
-                    policy.behind.insert(*peer);
-                }
-            }
-        }
         // The checkpoint must survive power loss before anything it covers goes.
         if self
             .verified_at
@@ -276,7 +218,7 @@ impl<A: RowApplication> Inner<A> {
                 inner
                     .conn
                     .execute(
-                        "UPDATE secure_logs SET horizon=MAX(horizon,?) WHERE scope=? AND author=?",
+                        "UPDATE secure_logs SET pruned_prefix=MAX(pruned_prefix,?) WHERE scope=? AND author=?",
                         bindings(vec![
                             SqlValue::Integer(header.seq_num as i64),
                             SqlValue::Integer(id),

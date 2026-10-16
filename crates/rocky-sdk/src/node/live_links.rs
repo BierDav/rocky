@@ -795,10 +795,14 @@ impl Node {
     async fn link_auxiliary(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {
         Ok(commitment(
             "rocky.link-auxiliary.v1",
-            &rocky_credentials::encode(&(
-                self.replica.admitted_horizon(scope).await?,
-                self.replica.finalized_horizon(scope).await?,
-            ))?,
+            &rocky_credentials::encode(
+                &self
+                    .replica
+                    .installed_existence_base(scope)
+                    .await?
+                    .map(|base| base.id())
+                    .transpose()?,
+            )?,
         ))
     }
     async fn link_scope_state(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {

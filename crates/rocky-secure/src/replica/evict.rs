@@ -90,7 +90,7 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             }
             // Pruned operations are known applied only through the frontier.
-            if log.horizon >= 0 && applied as i64 <= log.horizon {
+            if log.pruned_prefix >= 0 && applied as i64 <= log.pruned_prefix {
                 continue;
             }
             let missing = collect_rows(
@@ -206,7 +206,7 @@ impl<A: RowApplication> Inner<A> {
                         "secure_checkpoint_pages",
                         "secure_checkpoint_stubs",
                         "secure_checkpoint_build_stubs",
-                        "secure_horizon_live_creations",
+                        "secure_compaction_live_creations",
                     ] {
                         inner
                             .conn

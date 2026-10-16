@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.buffer
 import kotlinx.serialization.json.*
 
 /**
- * What a database did in the background, in order: sync transfers, checkpoints, horizons, enrollment, renewal, author
+ * What a database did in the background, in order: sync transfers, checkpoints, enrollment, renewal, author
  * and group key changes. The database keeps the latest 512 in memory; see `docs/runtime/activity.md`.
  */
 sealed interface RockyEvent {
@@ -32,9 +32,6 @@ sealed interface RockyEvent {
         val checkpoint: String,
         val superseded: Long,
     ) : RockyEvent
-
-    /** Every replica applied the scope's history up to its horizon, so it was pruned. */
-    data class HorizonFinalized(override val sequence: Long, override val atEpochMillis: Long, val scope: ScopeName) : RockyEvent
 
     /** A checkpoint-first bootstrap of [scopes] scopes started or [finished] with [peer]. */
     data class Bootstrap(
@@ -147,8 +144,6 @@ sealed interface RockyEvent {
                 )
 
                 "checkpoint_imported" -> CheckpointImported(sequence, at, text("peer"), ScopeName.of(event), text("checkpoint"), event.long("superseded"))
-
-                "horizon_finalized" -> HorizonFinalized(sequence, at, ScopeName.of(event))
 
                 "bootstrap_started" -> Bootstrap(sequence, at, text("peer"), int("scopes"), finished = false)
 

@@ -1,9 +1,9 @@
-//! The horizon signal, checkpoint transfer and rebootstrap.
+//! The pruned_prefix signal, checkpoint transfer and rebootstrap.
 use super::*;
 
 /// Logs of a scope whose operations up to a sequence were pruned.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HorizonPage {
+pub struct PrunedPage {
     pub scope: ResourceScope,
     pub logs: Vec<(PublicKey, u64)>,
     pub next: Option<PublicKey>,
@@ -342,7 +342,6 @@ impl<A: RowApplication> Inner<A> {
                     ));
                 }
                 self.index_row_key(&blob, row, record).await?;
-                self.protection_stubs(id, record).await?;
                 // Every stored row's creation stays known, as after the switch.
                 self.put_stub(record.creation, id, *clock, true).await?;
             }
@@ -574,7 +573,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// Whether the scope has pruned history a peer may be behind.
-    pub(crate) async fn has_horizon(&self, scope: ResourceScope) -> Result<bool, Error> {
+    pub(crate) async fn has_pruned_prefix(&self, scope: ResourceScope) -> Result<bool, Error> {
         match self.find_scope_id(scope).await? {
             Some(id) => Ok(!self.logs(id, None, true, 1).await?.is_empty()),
             None => Ok(false),
@@ -594,9 +593,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         };
         let signed = self.verify_record(scope, &record)?;
-        if signed.statement.horizon != self.mergeable_horizon(scope).await? {
-            return Ok(None);
-        }
         // With a tip graph only a base at a seal of the followed path.
         if self.graphs.contains_key(&scope.domain)
             && !signed.statement.seal.is_some_and(|seal| {
@@ -627,14 +623,14 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The pruned prefix of every log in a scope, 256 logs per page. A peer
-    /// compares it with what it holds through `behind_horizon`.
-    pub async fn horizon_page(
+    /// compares it with what it holds through `behind_pruned`.
+    pub async fn pruned_page(
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
         scope: ResourceScope,
         after: Option<PublicKey>,
-    ) -> Result<HorizonPage, Error> {
+    ) -> Result<PrunedPage, Error> {
         let mut inner = self.inner.lock().await;
         inner.flush()?;
         inner.authorize_peer(peer, credentials, scope)?;
@@ -644,23 +640,26 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let more = logs.len() > STEP_ROWS;
         logs.truncate(STEP_ROWS);
-        Ok(HorizonPage {
+        Ok(PrunedPage {
             scope,
             next: logs.last().filter(|_| more).map(|(log, _)| log.author),
             logs: logs
                 .into_iter()
-                .map(|(log, horizon)| (log.author, horizon as u64))
+                .map(|(log, pruned_prefix)| (log.author, pruned_prefix as u64))
                 .collect(),
         })
     }
     /// True when a peer pruned operations this replica neither holds nor has
     /// pruned itself: the gap can only be closed by a rebootstrap.
-    pub async fn behind_horizon(&self, horizon: &HorizonPage) -> Result<bool, Error> {
+    pub async fn behind_pruned(&self, pruned_prefix: &PrunedPage) -> Result<bool, Error> {
         let inner = self.inner.lock().await;
-        let id = inner.find_scope_id(horizon.scope).await?;
-        for (author, sequence) in &horizon.logs {
+        let id = inner.find_scope_id(pruned_prefix.scope).await?;
+        for (author, sequence) in &pruned_prefix.logs {
             let own = match id {
-                Some(id) => inner.log(id, *author).await?.map_or(-1, |log| log.horizon),
+                Some(id) => inner
+                    .log(id, *author)
+                    .await?
+                    .map_or(-1, |log| log.pruned_prefix),
                 None => -1,
             };
             let needed = *sequence as i64 - own;
@@ -674,7 +673,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         "SELECT COUNT(*) FROM secure_operations WHERE author=? AND scope=? AND sequence>? AND sequence<=?",
                         bindings(vec![
                             SqlValue::Blob(author.as_bytes().to_vec()),
-                            SqlValue::Blob(encode(&horizon.scope)?),
+                            SqlValue::Blob(encode(&pruned_prefix.scope)?),
                             SqlValue::Integer(own),
                             SqlValue::Integer(*sequence as i64),
                         ]),
@@ -688,7 +687,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// The signed checkpoint a peer behind the horizon starts from.
+    /// The signed checkpoint a peer behind the pruned_prefix starts from.
     pub async fn checkpoint_offer(
         &self,
         peer: PublicKey,
@@ -732,7 +731,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .and_then(|manifest| inner.admits(manifest))
                     .is_ok()
                 && signed.statement.key_epoch == key_epoch
-                && signed.statement.horizon == inner.mergeable_horizon(scope).await?
                 && signed.verify_authority(&inner, now()?).is_ok()
             {
                 // Keep a transferable cut stable across page/session retries.
@@ -989,25 +987,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let id = inner.scope_id(scope).await?;
             inner.bind_node_author(&signed.credentials).await?;
             inner.check_frontier(id, &signed).await?;
-            if let Some(finalized) = &signed.statement.finalized {
-                for descriptor in &finalized.statement.bases {
-                    let expected = super::super::existence::ExistenceBaseAttachment {
-                        basis: super::super::existence::ExistenceBasis::Horizon(finalized.clone()),
-                        scope: descriptor.scope,
-                    };
-                    if !inner
-                        .existence_base(descriptor.scope)
-                        .await?
-                        .map(|base| base.covers(&expected))
-                        .transpose()?
-                        .unwrap_or(false)
-                    {
-                        return Err(denied(
-                            "import the authenticated existence attachment before switching checkpoint rows",
-                        ));
-                    }
-                }
-            }
             if inner
                 .staging(id)
                 .await?
@@ -1182,15 +1161,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let report = transaction!(inner, |inner| {
             inner.bind_node_author(&signed.credentials).await?;
             inner.check_frontier(id, &signed).await?;
-            if let Some(horizon) = &signed.statement.horizon {
-                inner.adopt_checkpoint_horizon(horizon).await?;
-                inner
-                    .index_pending_horizon(
-                        horizon,
-                        signed.statement.finalized.as_ref() != Some(horizon),
-                    )
-                    .await?;
-            }
             let mut report = RebootstrapReport {
                 checkpoint: signed.id()?,
                 superseded: 0,
@@ -1262,9 +1232,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.conn.execute(sql, [id]).await?;
             }
             // A direct import kept the release stubs of each page's rows.
-            if rewrite {
-                inner.restore_protection_stubs(scope, id).await?;
-            }
             for log in &statement.frontier {
                 inner
                     .conn
@@ -1342,13 +1309,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             for mark in &permanent {
                 inner.put_identity_mark(scope, mark).await?;
             }
-            inner
-                .conn
-                .execute(
-                    "DELETE FROM secure_horizon_bootstrap WHERE scope=?",
-                    [encode(&scope)?],
-                )
-                .await?;
             inner.clear_staging(id).await?;
             inner
                 .conn
@@ -1371,34 +1331,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// A checkpoint that ends before this replica's own horizon would lose
+    /// A checkpoint that ends before this replica's own pruned_prefix would lose
     /// the operations between them.
     async fn check_frontier(&self, id: i64, signed: &SignedCheckpoint) -> Result<(), Error> {
-        self.check_checkpoint_horizon(signed).await?;
-        if let Some(needed) = self.horizon_bootstrap(signed.statement.scope).await?
-            && signed.statement.finalized.as_deref() == Some(&needed)
-            && let Some(held) = self
-                .checkpoint_record(id, true)
-                .await?
-                .and_then(|record| record.signed)
-                .and_then(|checkpoint| checkpoint.statement.finalized)
-            && held.statement.sequence == needed.statement.sequence
-            && held.statement.previous == needed.statement.previous
-            && needed.id().map_err(credential)? < held.id().map_err(credential)?
-        {
-            // The publisher's lower sibling replaces the invalidated replay base.
-            return Ok(());
-        }
         // A base at a seal off the followed path is replaced by one of the
         // path; frames it pruned that the new base lacks come again as late frames.
         if self.base_off_path(signed.statement.scope, id).await? {
             return Ok(());
         }
-        for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
+        for (log, pruned_prefix) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
             if !signed.statement.frontier.iter().any(|position| {
-                position.author == log.author && position.sequence as i64 >= horizon
+                position.author == log.author && position.sequence as i64 >= pruned_prefix
             }) {
-                return Err(denied("checkpoint is behind this replica's horizon"));
+                return Err(denied("checkpoint is behind this replica's pruned_prefix"));
             }
         }
         Ok(())

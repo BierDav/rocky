@@ -14,16 +14,16 @@ pub const MAX_EXISTENCE_BASE_LOGS: usize = 256;
 
 /// The last folded record of one signer's log.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HorizonLog {
+pub struct ExistenceLog {
     pub signer: PublicKey,
     pub sequence: u64,
     pub head: Commitment,
 }
 /// Where a base cuts a scope's existence logs, and the base's state digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HorizonCut {
+pub struct ExistenceCut {
     pub scope: ResourceScope,
-    pub logs: Vec<HorizonLog>,
+    pub logs: Vec<ExistenceLog>,
     pub state: Commitment,
 }
 /// Identity sequences survive existence-record pruning, per scope and author.
@@ -59,7 +59,7 @@ pub struct ExistenceBaseStatement {
     /// The domain.
     pub scope: Scope,
     pub seal: Commitment,
-    pub cut: HorizonCut,
+    pub cut: ExistenceCut,
     pub base: ExistenceBase,
 }
 impl ExistenceBaseStatement {

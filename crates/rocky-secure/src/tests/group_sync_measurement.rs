@@ -6,7 +6,6 @@ use rocky_core::{
 use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
 use std::path::Path;
 
-use crate::replica::roles::FrontierReply;
 use std::time::{Duration, Instant};
 
 pub(crate) mod fixture;
@@ -29,7 +28,7 @@ async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
     pages * size
 }
 
-// Same row/existence/horizon sequence as rocky-sdk::sync::rows, over loopback TCP.
+// Same row/existence/pruned_prefix sequence as rocky-sdk::sync::rows, over loopback TCP.
 async fn sync(
     writer: &EncryptedReplica<TypedRows>,
     reader: &EncryptedReplica<TypedRows>,
@@ -91,12 +90,6 @@ async fn sync(
             if !exhausted {
                 for scope in reader.existence_scopes().await.unwrap() {
                     session.sync_existence(reader, scope).await.unwrap();
-                }
-                for scope in &changed {
-                    session
-                        .acknowledge_mergeable_horizon(reader, *scope)
-                        .await
-                        .unwrap();
                 }
             }
             session.close().await.unwrap();
@@ -412,133 +405,6 @@ async fn measure_200_partition_group_sync() {
     println!(
         "P09 additional_table metadata_bytes_per_partition={:.2}",
         (four.metadata - one.metadata) / 3.0
-    );
-}
-
-#[tokio::test]
-async fn batch_frontiers_preserve_horizons_and_refuse_ungranted_scopes() {
-    let root = tempfile::tempdir().unwrap();
-    let f = Fixture::new(4);
-    let writer = f
-        .open(
-            &root.path().join("writer.db"),
-            PrivateKey::new(),
-            f.grants(None, &[Right::Read]),
-            None,
-            vec![],
-        )
-        .await;
-    let reader = f
-        .open(
-            &root.path().join("reader.db"),
-            PrivateKey::new(),
-            f.grants(Some(&[1]), &[Right::Read]),
-            None,
-            vec![],
-        )
-        .await;
-    let names = ["customers", "orders", "order_lines", "attachments"];
-    for partition in 1..=2 {
-        f.keys(&writer, partition, &names).await;
-    }
-    f.keys(&reader, 1, &names).await;
-    let both: Vec<_> = (1..=2)
-        .flat_map(|partition| names.iter().map(move |name| (name, partition)))
-        .map(|(name, partition)| f.scope(name, partition))
-        .collect();
-    let batches = writer.frontier_batches(&both, 5).await.unwrap();
-    assert_eq!(batches.len(), 2);
-    assert!(batches.iter().all(|batch| batch.len() == 4
-        && (1..=2).any(|partition| {
-            names
-                .iter()
-                .all(|name| batch.contains(&f.scope(name, partition)))
-        })));
-    assert!(writer.frontier_batches(&both, 3).await.is_err());
-    let scopes: Vec<_> = names.iter().map(|name| f.scope(name, 1)).collect();
-    assert!(sync(&writer, &reader, &scopes).await.is_empty());
-    let signed = rocky_credentials::SignedHorizon::sign(
-        writer.horizon_statement(scopes[0], &[]).await.unwrap(),
-        &f.publisher,
-    )
-    .unwrap();
-    writer.receive_horizon(signed.clone()).await.unwrap();
-    assert_eq!(sync(&writer, &reader, &scopes).await, vec![scopes[0]]);
-    assert_eq!(
-        reader.admitted_horizon(scopes[0]).await.unwrap(),
-        Some(Box::new(signed))
-    );
-    let (peer, credentials) = {
-        let inner = reader.inner.lock().await;
-        (
-            inner.config.node.public_key(),
-            inner.config.credentials.clone(),
-        )
-    };
-    {
-        let inner = writer.inner.lock().await;
-        let time = now().unwrap();
-        let all = inner.verify_chain(&credentials, peer, time).unwrap();
-        for scope in &both {
-            let expected: Vec<_> = all
-                .iter()
-                .filter(|grant| grant.scope == *scope)
-                .cloned()
-                .collect();
-            assert_eq!(
-                inner
-                    .verify_chain_scopes(&credentials, peer, time, &[*scope])
-                    .unwrap(),
-                expected
-            );
-        }
-    }
-    let mut allowed = reader.frontier(scopes[0]).await.unwrap();
-    allowed.logs.push(crate::FrontierLog {
-        author: peer,
-        held: 1,
-        applied: 1,
-    });
-    let denied = reader.frontier(f.scope("customers", 2)).await.unwrap();
-    // A member outside the peer's grants is refused alone; the rest is recorded.
-    let replies = writer
-        .exchange_frontiers(peer, &credentials, &[allowed.clone(), denied.clone()])
-        .await
-        .unwrap();
-    assert!(
-        matches!(&replies[0], FrontierReply::Held(state) if state.frontier.scope == allowed.scope)
-    );
-    assert!(matches!(replies[1], FrontierReply::Refused(scope) if scope == denied.scope));
-    {
-        let inner = writer.inner.lock().await;
-        let rows = crate::storage::rows(
-            &inner.conn,
-            "SELECT DISTINCT scope FROM secure_peer_frontiers",
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            rows,
-            [[SqlValue::Blob(crate::encode(&allowed.scope).unwrap())]]
-        );
-    }
-    assert!(
-        writer
-            .exchange_frontiers(peer, &credentials, &[allowed.clone(), allowed.clone()])
-            .await
-            .is_err()
-    );
-    assert!(
-        writer
-            .exchange_frontiers(peer, &credentials, &[])
-            .await
-            .is_err()
-    );
-    assert!(
-        writer
-            .exchange_frontiers(peer, &credentials, &vec![allowed; 65])
-            .await
-            .is_err()
     );
 }
 

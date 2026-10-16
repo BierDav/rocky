@@ -3,8 +3,8 @@
 use super::base::ExistenceBasis;
 use super::*;
 use rocky_credentials::{
-    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceIdentity, HorizonCut,
-    HorizonLog, MAX_EXISTENCE_BASE_LOGS, SignedSeal,
+    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
+    ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedSeal,
 };
 
 const LIVE: &str = "rocky.existence-base-live.v1";
@@ -62,19 +62,12 @@ impl<A: RowApplication> Inner<A> {
         let id = seal.id().map_err(credential)?;
         let previous = self.existence_base(scope).await?;
         if let Some(previous) = &previous {
-            match &previous.basis {
-                ExistenceBasis::Horizon(_) => {
-                    return Err(denied("a horizon's existence base never folds at a seal"));
-                }
-                _ => {
-                    // A base at this seal or past it already folded more.
-                    let at = self.path_index(scope.domain, id)?;
-                    if let Some(folded) = previous.seal()
-                        && self.path_index(scope.domain, folded)? >= at
-                    {
-                        return Ok(());
-                    }
-                }
+            // A base at this seal or past it already folded more.
+            let at = self.path_index(scope.domain, id)?;
+            if let Some(folded) = previous.seal()
+                && self.path_index(scope.domain, folded)? >= at
+            {
+                return Ok(());
             }
         }
         let frontier: BTreeMap<u32, u64> = seal
@@ -124,7 +117,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 logs.insert(
                     record.signer,
-                    HorizonLog {
+                    ExistenceLog {
                         signer: record.signer,
                         sequence: statement.sequence,
                         head: hash,
@@ -246,7 +239,7 @@ impl<A: RowApplication> Inner<A> {
             format: EXISTENCE_BASE_FORMAT,
             scope: scope.domain,
             seal: id,
-            cut: HorizonCut {
+            cut: ExistenceCut {
                 scope,
                 logs: logs.into_values().collect(),
                 state: base.state().map_err(credential)?,

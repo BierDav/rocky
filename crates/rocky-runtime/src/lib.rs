@@ -43,7 +43,7 @@ mod worker;
 mod writer;
 pub use checkpoint::{
     AuditReport, Catchup, CheckpointCursor, CheckpointHold, CheckpointInfo, CheckpointPage,
-    CheckpointRecord, Deduplication, HorizonNotice, PeerRetention, RebootstrapReport,
+    CheckpointRecord, Deduplication, PeerRetention, PrunedNotice, RebootstrapReport,
     RetentionPolicy, RetentionStatus,
 };
 pub use digest::SetDigest;
@@ -87,7 +87,7 @@ pub struct RuntimeConfig {
     pub authors: Vec<(NodeId, PrincipalId)>,
     pub delivery_targets: Vec<NodeId>,
     /// Delivery targets trusted as full replica nodes. With a nonzero
-    /// `RetentionPolicy::custody`, only their applied frontiers move the horizon.
+    /// `RetentionPolicy::custody`, only their applied frontiers move the pruned_prefix.
     pub full_nodes: Vec<NodeId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +111,7 @@ pub struct QueryIdentity {
     pub name: &'static str,
 }
 /// Cursor pages cover retained records in key order. Restart a pass to discover
-/// new records inserted before its cursor. Records behind the horizon are gone.
+/// new records inserted before its cursor. Records behind the pruned prefix are gone.
 #[derive(Clone, Debug)]
 pub struct Page<T, C> {
     pub items: Vec<T>,

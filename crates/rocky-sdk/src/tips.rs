@@ -10,7 +10,7 @@ pub struct TipStatus {
     pub bookmark: Option<String>,
     pub tip: String,
     pub operations_since_seal: u64,
-    /// What compaction would release; null until lazy compaction exists.
+    /// An optional estimate of what compaction would release.
     pub evidence_releasable: Option<TipEvidence>,
     pub devices: Vec<TipDevice>,
 }

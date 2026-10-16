@@ -16,8 +16,6 @@ suite = "10s"
 # pure rocky-core epoch-order property and SDK capacity check stay in unit.
 # Phase 11: `tests::chains` (session chain table, stored chains, chains beside
 # a checkpoint page) uses real SQLite and is included by the rocky-secure filter.
-# Phase 13: partition_foreign_keys::horizon::relay tests use SQLite and
-# authenticated in-memory sessions, included by the rocky-secure filter.
 # The shopping release hub gate remains e2e; no budget exception is added.
 # Phase 18 endpoint socket-rebind and borrowed-ownership tests use real
 # loopback sockets; kind(test) includes them with the unchanged 2 s budget.
@@ -26,7 +24,7 @@ suite = "10s"
 # procedure is e2e (15 min). No Rust filter or budget exception is needed.
 # Phase 20 adds Kotlin application integration and shopping multi-process e2e
 # gates in the shopping CI job; scripts/test-tiers handles Rust binaries only.
-# The Rust driver projection and secure horizon custody regressions use real
+# The Rust driver projection and secure checkpoint custody regressions use real
 # SQLite and sessions; the existing integration filters include them.
 # No filter change or exception is needed.
 [integration]
@@ -139,8 +137,6 @@ filter = '''
           test(=tests::group_sync_measurement::holdings_idle_200_partition_four_table_fixture)
         | test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
         | test(=tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure)
-        | test(=tests::existence::a_horizon_proposal_alone_never_releases_tombstones_or_existence_history)
-        | test(=tests::existence::horizon_finalization_and_retention_plateau)
         | test(=tests::generations::a_local_plan_survives_an_interruption_at_every_step)
         | test(=tests::group::wal_stays_bounded_under_sustained_authoring)
         | test(=tests::partition_foreign_keys::row_moves::process::six_scenarios_across_device_processes)
@@ -194,13 +190,6 @@ expires = 2026-11-30
 
 # Accepted over-budget integration tests (Phase 19, shared check). Measured on a
 # loaded reference host (2026-10-10) while other phases built. Remove or fix before the expiry date.
-[[exception]]
-test = "rocky-secure tests::strong_history::missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_is_atomic"
-limit = "4s"
-measured = "3.63s"
-cause = "Strong-history acknowledgment and atomic prune across custody peers; the multi-peer setup is the cost."
-expires = 2026-11-30
-
 [[exception]]
 test = "rocky-secure tests::sql::natural_key_relink_converges_and_old_identity_edits_never_touch_replacement"
 limit = "3s"

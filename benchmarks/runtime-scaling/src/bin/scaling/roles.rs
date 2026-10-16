@@ -314,7 +314,7 @@ async fn push(client: &Node, server: &Node, scope: ResourceScope) -> Result<usiz
         finish(session, task).await?;
         frames += pushed.frames;
         if pushed.behind {
-            return Err("the full node is behind this replica's horizon".into());
+            return Err("the full node is behind this replica's pruned_prefix".into());
         }
         if !pushed.exhausted {
             return Ok(frames);
@@ -492,7 +492,7 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         "caught-up scope converges",
     )?;
 
-    // 3. Behind the horizon: offline edits are applied or reported.
+    // 3. Behind the pruned prefix: offline edits are applied or reported.
     a.replica.subscribe(world.scopes[1]).await?;
     for index in 0..10 {
         let current = rows(&b.replica, world.scopes[1]).await?[&World::row(1, index)].clone();

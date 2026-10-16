@@ -55,7 +55,10 @@ pub async fn bootstrap_from_partial() -> Result<(), Failure> {
         report_divergence(&[a.n(), f.n()]).await;
     }
     let healed = status_data(f.n()).await;
-    println!("  f after the issuer returned: pending={}", healed["bootstrap_pending"]);
+    println!(
+        "  f after the issuer returned: pending={}",
+        healed["bootstrap_pending"]
+    );
     if healed["bootstrap_pending"] != false {
         finding("full node keeps bootstrap pending after meeting its inviter");
     }
@@ -469,7 +472,6 @@ pub async fn request_fuzz() -> Result<(), Failure> {
         "partition_complete",
         "retention",
         "retention_limits",
-        "horizon",
         "pseudonym_request",
         "pseudonym_install",
         "pseudonym_assign",

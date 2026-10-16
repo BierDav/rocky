@@ -1,8 +1,8 @@
-//! The pruning horizon: how far it may move, what is deleted behind it,
+//! The pruned prefix: how far it may move, what is deleted behind it,
 //! and what a peer that asks for operations gets.
 use super::retention::*;
 use super::*;
-use crate::checkpoint::{Catchup, HorizonNotice, Step};
+use crate::checkpoint::{Catchup, PrunedNotice, Step};
 use crate::replication::{SyncState, TRANSFER_PAGE_SIZE, TransferPage};
 use std::collections::BTreeSet;
 
@@ -11,12 +11,12 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// Moves the horizon and deletes behind it; one bounded transaction.
+    /// Moves the pruned prefix and deletes behind it; one bounded transaction.
     pub(super) async fn prune_step(&mut self) -> Result<Step, Error> {
         let (stored, step, released) = self
             .transaction(async |worker| {
                 let mut stored = worker.retention.stored.clone();
-                let moved = worker.move_horizon(&mut stored).await?;
+                let moved = worker.advance_pruned_prefix(&mut stored).await?;
                 let (released, more) = worker.delete_behind(&stored).await?;
                 if moved {
                     worker.persist(&stored).await?;
@@ -39,11 +39,11 @@ where
         self.retention.prune_wanted = step == Step::More;
         Ok(step)
     }
-    /// The horizon follows the durable checkpoint, less the retained window,
+    /// The pruned prefix follows the durable checkpoint, less the retained window,
     /// as far as every delivery target has acknowledged or is declared behind.
     /// With `behind_after`, a target that holds it back that long is declared
     /// behind.
-    pub(super) async fn move_horizon(&self, stored: &mut Stored) -> Result<bool, Error> {
+    pub(super) async fn advance_pruned_prefix(&self, stored: &mut Stored) -> Result<bool, Error> {
         let Some((record, _)) = &self.retention.record else {
             return Ok(false);
         };
@@ -55,7 +55,7 @@ where
         let mut moved = false;
         let mut holding = BTreeSet::new();
         for (node, covered) in marks(&record.frontier) {
-            let current = at(&stored.horizon, node);
+            let current = at(&stored.pruned_prefix, node);
             let wanted = covered
                 .saturating_sub(window)
                 .min(current + PRUNE_BATCH as u64);
@@ -106,7 +106,7 @@ where
                 covered.sort_unstable_by(|a, b| b.cmp(a));
                 limit = limit.min(covered.get(custody - 1).copied().unwrap_or(current));
                 if limit > current {
-                    set(&mut stored.horizon, node, limit);
+                    set(&mut stored.pruned_prefix, node, limit);
                     moved = true;
                 }
                 continue;
@@ -151,7 +151,7 @@ where
                 limit = limit.min(acknowledged);
             }
             if limit > current {
-                set(&mut stored.horizon, node, limit);
+                set(&mut stored.pruned_prefix, node, limit);
                 moved = true;
             }
         }
@@ -160,7 +160,7 @@ where
         }
         Ok(moved)
     }
-    /// Records since when each target holds back the horizon and declares
+    /// Records since when each target holds back the pruned prefix and declares
     /// it behind after `after`. True if a mark changed.
     fn time_holding(
         &self,
@@ -202,7 +202,7 @@ where
         changed
     }
     /// Deletes operations, acknowledgments, outgoing entries and forgotten
-    /// handles behind the horizon. Returns the released records and bytes,
+    /// handles behind the pruned prefix. Returns the released records and bytes,
     /// and whether rows remain.
     pub(super) async fn delete_behind(
         &self,
@@ -211,8 +211,8 @@ where
         let batch = PRUNE_BATCH as i64;
         let mut released = (0, 0);
         let mut more = false;
-        for (node, horizon) in &stored.horizon {
-            let key = crate::sqlite::params![node.0.to_vec(), *horizon as i64, batch];
+        for (node, pruned_prefix) in &stored.pruned_prefix {
+            let key = crate::sqlite::params![node.0.to_vec(), *pruned_prefix as i64, batch];
             let mut deleted = self
                 .conn()
                 .query(
@@ -235,7 +235,7 @@ where
                         crate::sqlite::params![
                             peer.0.to_vec(),
                             node.0.to_vec(),
-                            *horizon as i64,
+                            *pruned_prefix as i64,
                             batch
                         ],
                     )
@@ -253,7 +253,7 @@ where
         }
         // A handle outlives its operation by the retry window.
         let local = self.identity.node;
-        let forgotten = at(&stored.horizon, local).min(
+        let forgotten = at(&stored.pruned_prefix, local).min(
             self.sequence
                 .saturating_sub(self.retention.policy.handles as u64),
         );
@@ -282,7 +282,7 @@ where
         Ok((released, more))
     }
     /// The operations `state` lacks after `after`, or the notice that it is
-    /// behind the horizon. A named target's held and applied frontiers are
+    /// behind the pruned prefix. A named target's held and applied frontiers are
     /// kept as acknowledgment, and clear the outgoing work they cover.
     pub(super) async fn catch_up(
         &mut self,
@@ -295,19 +295,19 @@ where
         let retention = &self.retention;
         if retention
             .stored
-            .horizon
+            .pruned_prefix
             .iter()
             .any(|(node, sequence)| at(&applied, *node) < *sequence)
         {
             let Some((record, commitment)) = &retention.record else {
-                return Err(Error::Corrupt("horizon without a checkpoint".into()));
+                return Err(Error::Corrupt("pruned_prefix without a checkpoint".into()));
             };
             return Ok((
                 None,
-                Catchup::BehindHorizon(HorizonNotice {
+                Catchup::BehindPruned(PrunedNotice {
                     scope: self.identity.scope,
                     node: self.identity.node,
-                    horizon: frontier(&retention.stored.horizon)?,
+                    pruned_prefix: frontier(&retention.stored.pruned_prefix)?,
                     checkpoint: *commitment,
                     sequence: record.sequence,
                 }),
@@ -345,7 +345,7 @@ where
         'authors: for node in nodes {
             let mut from = at(&applied, node)
                 .max(at(&held, node))
-                .max(self.retention.horizon(node));
+                .max(self.retention.pruned_prefix(node));
             if let Some(after) = after {
                 if node < after.node {
                     continue;

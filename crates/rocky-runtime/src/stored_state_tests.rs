@@ -273,7 +273,7 @@ async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
     let snapshot = replica.sync_state().await.unwrap();
     let window = options.retention.window as u64;
     assert_eq!(
-        snapshot.horizon.0,
+        snapshot.pruned_prefix.0,
         [(NODE, AuthorSequence::new(total - window).unwrap())]
     );
     // The retained window lies inside the held frontier.

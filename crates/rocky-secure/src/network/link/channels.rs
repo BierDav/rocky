@@ -422,12 +422,6 @@ impl Handle {
         replica
             .authorize_scope_peer(self.admission.peer, &self.admission.credentials, scope)
             .await?;
-        if replica
-            .horizon_peer_behind(self.admission.peer, &self.admission.credentials, scope)
-            .await?
-        {
-            return Err(denied("phase-3 rebootstrap required before sync or write"));
-        }
         rows::receive_voids(replica, &voids, &[scope]).await?;
         let mut received = Vec::new();
         for void in &voids {

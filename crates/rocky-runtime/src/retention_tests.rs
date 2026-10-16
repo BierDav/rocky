@@ -1,4 +1,4 @@
-//! Checkpoints, the horizon, pruning and rebootstrap of the trusted path.
+//! Checkpoints, the pruned prefix, pruning and rebootstrap of the trusted path.
 use super::*;
 use crate::checkpoint::{Request, Response, Step};
 use crate::tests::{create, fault, mutation};
@@ -54,13 +54,13 @@ async fn edit(replica: &Replica<TodoApp>, entity: OperationId, action: Action) -
         .await
         .unwrap()
 }
-/// Sends what `to` lacks, with acknowledgments; false if it is behind the horizon.
+/// Sends what `to` lacks, with acknowledgments; false if it is behind the pruned_prefix.
 async fn sync(from: &Replica<TodoApp>, to: &Replica<TodoApp>, peer: NodeId) -> bool {
     loop {
         let state = to.sync_state().await.unwrap();
         let page = match from.catch_up(Some(peer), state).await.unwrap() {
             Catchup::Operations(page) => page,
-            Catchup::BehindHorizon(_) => return false,
+            Catchup::BehindPruned(_) => return false,
         };
         if page.records.is_empty() {
             return true;
@@ -170,7 +170,7 @@ async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery()
     let laptop = open(&dir, fixtures::LAPTOP).await;
     assert_eq!(laptop.query().await.unwrap(), before);
     let state = laptop.sync_state().await.unwrap();
-    assert_eq!(sequence(&state.horizon, fixtures::LAPTOP), 4);
+    assert_eq!(sequence(&state.pruned_prefix, fixtures::LAPTOP), 4);
     // The one retained operation lies inside the held frontier.
     assert_eq!(sequence(&state.held, fixtures::LAPTOP), 5);
     assert!(state.received.is_empty());
@@ -242,7 +242,7 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
 }
 
 /// The phone is offline across a prune. Slightly behind, it converges from
-/// retained operations; behind the horizon it is told so, imports the
+/// retained operations; behind the pruned prefix it is told so, imports the
 /// checkpoint and converges with its own unsent edits.
 #[tokio::test]
 async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
@@ -269,19 +269,19 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     );
     // By policy the laptop stops waiting for the phone.
     laptop.declare_behind(fixtures::PHONE).await.unwrap();
-    let horizon = laptop.prune().await.unwrap();
-    assert_eq!(sequence(&horizon, fixtures::LAPTOP), 603);
+    let pruned_prefix = laptop.prune().await.unwrap();
+    assert_eq!(sequence(&pruned_prefix, fixtures::LAPTOP), 603);
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
     let notice = match laptop
         .catch_up(Some(fixtures::PHONE), phone.sync_state().await.unwrap())
         .await
         .unwrap()
     {
-        Catchup::BehindHorizon(notice) => notice,
+        Catchup::BehindPruned(notice) => notice,
         Catchup::Operations(_) => panic!("pruned operations cannot be sent"),
     };
-    assert_eq!(HorizonNotice::decode(&notice.encode()).unwrap(), notice);
-    assert_eq!(notice.horizon, horizon);
+    assert_eq!(PrunedNotice::decode(&notice.encode()).unwrap(), notice);
+    assert_eq!(notice.pruned_prefix, pruned_prefix);
     let checkpoint = laptop.retention_status().await.unwrap().checkpoint.unwrap();
     assert_eq!(notice.checkpoint, checkpoint.commitment);
     // The exact receipt set cannot tell a pruned peer from a missing one.
@@ -337,7 +337,7 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
 }
 
 #[tokio::test]
-async fn a_late_operation_from_before_the_horizon_cannot_resurrect_a_deleted_row() {
+async fn a_late_operation_from_before_the_pruned_prefix_cannot_resurrect_a_deleted_row() {
     let dir = TempDir::new().unwrap();
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
@@ -355,7 +355,7 @@ async fn a_late_operation_from_before_the_horizon_cannot_resurrect_a_deleted_row
     // The creation itself arrives again: a duplicate, not a new row.
     let ack = laptop.receive(created.encode().unwrap()).await.unwrap();
     assert!(ack.applied);
-    // Its dependency is behind the horizon; the tombstone still decides.
+    // Its dependency is behind the pruned prefix; the tombstone still decides.
     assert!(
         !laptop
             .receive(late.encode().unwrap())
@@ -373,7 +373,7 @@ async fn a_late_operation_from_before_the_horizon_cannot_resurrect_a_deleted_row
 }
 
 #[tokio::test]
-async fn retried_handles_from_before_the_horizon_do_not_execute_twice() {
+async fn retried_handles_from_before_the_pruned_prefix_do_not_execute_twice() {
     let dir = TempDir::new().unwrap();
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
@@ -442,10 +442,10 @@ async fn retried_handles_from_before_the_horizon_do_not_execute_twice() {
     phone.close().await.unwrap();
 }
 
-/// With `behind_after`, a delivery target that holds back the horizon that
+/// With `behind_after`, a delivery target that holds back the pruned_prefix that
 /// long is declared behind; contact restarts its time.
 #[tokio::test]
-async fn a_target_holding_back_the_horizon_too_long_is_declared_behind() {
+async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
     let dir = TempDir::new().unwrap();
     let timed = |after| RuntimeOptions {
         retention: RetentionPolicy {
@@ -535,7 +535,7 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
     let status = laptop.retention_status().await.unwrap();
     // Half the bound started checkpoints; nothing was lost or pruned.
     assert!(status.checkpoint.is_some());
-    assert!(status.horizon.0.is_empty());
+    assert!(status.pruned_prefix.0.is_empty());
     assert_eq!(status.retained_operations, written);
     assert_eq!(laptop.query().await.unwrap().rows.len(), written);
     // Declared behind, the phone no longer holds history back.
@@ -597,7 +597,7 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
             Ok(Response::Audit(_))
         ));
     }
-    // Candidate, replay and verification, then horizon and deletion.
+    // Candidate, replay and verification, then pruned prefix and deletion.
     assert!(failures >= 5, "{failures}");
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
     assert!(laptop.audit().await.unwrap().recomputed);

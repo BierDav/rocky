@@ -150,7 +150,6 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
         }
     }
     fun lists(): List<String> = call("lists").jsonArray.map { it.jsonPrimitive.content.substringAfter(':') }
-    fun finalized(table: String, list: Long) = call("horizon", "action" to "status", "table" to table, "list" to list).jsonObject["finalized"]?.jsonPrimitive?.boolean == true
 
     /** Shares [list] from this issuer; each reader's next sync delivers its envelope. */
     fun share(list: Long, vararg readers: Device) {
@@ -293,8 +292,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
     /**
      * The release gate: phones A and B are never online together and meet only the custody process. A duplicate
      * title converges by policy, a moved item keeps an offline tick, a deleted category hides only its links,
-     * a deleted list cascades, and a horizon finalizes everything on every device. Phone C joins from a
-     * checkpoint, stays offline across the horizon and rebootstraps.
+     * a deleted list cascades, and an offline phone catches up after the deletes.
      */
     fun gate() {
         val a = device("a").open("create")
@@ -375,45 +373,15 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         expect(b.lists().sorted() == listOf("Weekend", "Weekly")) { "B lists: ${b.lists()}" }
         notes += "category delete hid only its links; deleting Party cascaded to its items"
 
-        // Every horizon statement and acknowledgment travels through custody.
-        b.online(false)
-        a.online(true)
-        val order = listOf("item_categories", "items", "categories", "lists")
-        for (list in lists) {
-            for (table in order) {
-                a.call("horizon", "action" to "declare", "table" to table, "list" to list, "participants" to listOf(b.node))
-            }
-        }
-        for (table in order) {
-            for (list in lists) {
-                var rounds = 0
-                while (true) {
-                    relay(a, b)
-                    relay(b, a)
-                    rounds++
-                    val result = runCatching { a.call("horizon", "action" to "finalize", "table" to table, "list" to list) }
-                    if (result.isSuccess) break
-                    if (rounds == 4) throw result.exceptionOrNull()!!
-                }
-            }
-        }
-        relay(a, b)
-        for (phone in listOf(a, b)) {
-            expect(lists.all { list -> order.all { phone.finalized(it, list) } }) { "${phone.name} not finalized" }
-            expect(lists.associateWith { phone.items(it) } == deleted) { "${phone.name} after horizon" }
-        }
-        notes += "9 group-partition horizons finalized on A and B through custody alone"
-
-        // C was offline across the horizon: it rebootstraps from A's finalized checkpoints.
         c.online(true)
         repeat(2) { c.sync() }
-        expect(lists.associateWith { c.items(it) } == deleted) { "C after rebootstrap: ${lists.map { c.items(it) }}" }
+        expect(lists.associateWith { c.items(it) } == deleted) { "C after catch-up: ${lists.map { c.items(it) }}" }
         expect(c.lists().sorted() == listOf("Weekend", "Weekly")) { "C lists: ${c.lists()}" }
-        notes += "long-offline C rebootstrapped to the finalized state"
+        notes += "long-offline C caught up to the deleted state"
 
         b.call("add", "list" to weekend, "title" to "Eggs")
         relay(b, a)
-        expect(a.items(weekend) == listOf("Eggs", "Milk [x]")) { "A after horizon: ${a.items(weekend)}" }
+        expect(a.items(weekend) == listOf("Eggs", "Milk [x]")) { "A after catch-up: ${a.items(weekend)}" }
     }
 
     /** Scenario 2: a list shared with B and not C never reaches C; revoking C rotates the list it held. */

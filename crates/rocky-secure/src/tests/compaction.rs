@@ -671,3 +671,35 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
     }
     assert_eq!(titles(&a).await, vec![vec![text("live"), text("kept")]]);
 }
+
+#[tokio::test]
+async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let replica = open(&lineage, &dir, "alice", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "a", "before").await;
+    identity_insert(
+        &session(&replica).await,
+        "INSERT INTO tags(key,label) VALUES('tag','kept')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    seal(&lineage, &replica).await;
+    replica.compact(lineage.domain, 0).await.unwrap();
+    let tags = lineage.scope("tags");
+    let before = replica.checkpoint(tags).await.unwrap();
+    update(&replica, "a", "after").await;
+    seal(&lineage, &replica).await;
+    let session = session(&replica).await;
+    let mut observer = replica.observe_tables(Some(&["tags"])).await.unwrap();
+    replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(
+        replica.checkpoint(tags).await.unwrap().to_bytes().unwrap(),
+        before.to_bytes().unwrap()
+    );
+    assert_eq!(observer.try_next().unwrap(), None);
+    let rows = session.run("SELECT label FROM tags", vec![]).await.unwrap();
+    assert_eq!(rows.rows, vec![vec![text("kept")]]);
+}

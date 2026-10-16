@@ -58,7 +58,6 @@ class RockyClient(private val transport: Transport) {
         },
     )
     val partitions: Partitions get() = Partitions(this)
-    val horizons: Horizons get() = Horizons(this)
     val tips: Tips get() = Tips(this)
     suspend fun sql(statement: String, values: JsonArray = JsonArray(emptyList())): JsonObject = call(
         request("sql") {

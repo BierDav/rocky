@@ -1,6 +1,5 @@
 //! Checkpoint offers and paged imports: bootstrap and rebootstrap of a scope.
 use super::*;
-use horizon::HorizonMessage;
 use rows::{CatchUp, ScopeSync};
 
 /// Bytes of one checkpoint page: the largest a frame holds, leaving room
@@ -9,6 +8,13 @@ pub(super) const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum CheckpointMessage {
+    Pruned {
+        scope: ResourceScope,
+        after: Option<PublicKey>,
+    },
+    PrunedLogs {
+        page: PrunedPage,
+    },
     ArchiveProgress {
         after: Option<Commitment>,
         complete: bool,
@@ -39,123 +45,6 @@ pub(super) enum CheckpointMessage {
 }
 
 impl NativeSession {
-    pub(super) async fn deposit_finalized_checkpoint<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        signed: &SignedCheckpoint,
-    ) -> Result<(), Error> {
-        let scope = signed.statement.scope;
-        // Keyless archives may relay evidence but never manufacture pages.
-        if !replica.can_read_scope(scope).await {
-            return Ok(());
-        }
-        if let Some(finalized) = &signed.statement.finalized {
-            for base in &finalized.statement.bases {
-                if !self.push_existence_base(replica, base.scope).await? {
-                    return Err(denied(
-                        "native session byte budget exhausted; continue checkpoint deposit on a new session",
-                    ));
-                }
-            }
-        }
-        self.send(CheckpointMessage::ArchiveBegin {
-            signed: Box::new(signed.clone()),
-        })
-        .await?;
-        let CheckpointMessage::ArchiveProgress {
-            mut after,
-            complete,
-        } = self.reply::<CheckpointMessage>().await?
-        else {
-            return Err(denied("unexpected checkpoint archive progress"));
-        };
-        if complete {
-            return Ok(());
-        }
-        let checkpoint = signed.id()?;
-        loop {
-            if self.low(MAX_SECURE_FRAME) {
-                return Err(denied(
-                    "native session byte budget exhausted; continue checkpoint deposit on a new session",
-                ));
-            }
-            let page = replica
-                .checkpoint_page(
-                    self.peer,
-                    &self.credentials,
-                    scope,
-                    checkpoint,
-                    after,
-                    CHECKPOINT_PAGE,
-                )
-                .await?;
-            after = page.next;
-            self.send(CheckpointMessage::ArchivePage {
-                page: Box::new(page),
-            })
-            .await?;
-            self.acknowledged("unexpected checkpoint archive page acknowledgment")
-                .await?;
-            if after.is_none() {
-                return Ok(());
-            }
-        }
-    }
-    pub(super) async fn archive_peer_checkpoint<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        signed: SignedCheckpoint,
-    ) -> Result<(), Error> {
-        let scope = signed.statement.scope;
-        let checkpoint = signed.id()?;
-        if let Some(finalized) = &signed.statement.finalized {
-            for base in &finalized.statement.bases {
-                let expected = ExistenceBaseAttachment {
-                    basis: ExistenceBasis::Horizon(finalized.clone()),
-                    scope: base.scope,
-                };
-                if !self
-                    .pull_existence_base(replica, base.scope, Some(expected.id()?))
-                    .await?
-                {
-                    return Err(denied(
-                        "native session byte budget exhausted; continue checkpoint archive on a new session",
-                    ));
-                }
-            }
-        }
-        let (mut after, mut complete) = replica
-            .begin_checkpoint_archive(self.peer, &self.credentials, signed)
-            .await?;
-        while !complete {
-            if self.low(MAX_SECURE_FRAME) {
-                return Err(denied(
-                    "native session byte budget exhausted; continue checkpoint archive on a new session",
-                ));
-            }
-            self.send(CheckpointMessage::CheckpointPull {
-                scope,
-                checkpoint,
-                after,
-                quota: CHECKPOINT_PAGE,
-            })
-            .await?;
-            let CheckpointMessage::CheckpointRows { page } =
-                self.reply::<CheckpointMessage>().await?
-            else {
-                return Err(denied("unexpected checkpoint archive page"));
-            };
-            if page.scope != scope || page.checkpoint != checkpoint || page.after != after {
-                return Err(denied("checkpoint archive page outside request"));
-            }
-            after = page.next;
-            complete = after.is_none();
-            replica
-                .archive_checkpoint_page(self.peer, &self.credentials, *page)
-                .await?;
-        }
-        Ok(())
-    }
     /// Imports the peer's checkpoint of a scope and switches to it. An
     /// interrupted import of the same checkpoint continues where it stopped.
     pub async fn rebootstrap<A: RowApplication>(
@@ -244,13 +133,14 @@ impl NativeSession {
         scope: ResourceScope,
     ) -> Result<bool, Error> {
         self.ensure_holding(replica, &[scope]).await?;
-        self.send(HorizonMessage::Horizon { scope, after: None })
+        self.send(CheckpointMessage::Pruned { scope, after: None })
             .await?;
-        let HorizonMessage::HorizonLogs { page } = self.reply::<HorizonMessage>().await? else {
-            return Err(denied("unexpected horizon response"));
+        let CheckpointMessage::PrunedLogs { page } = self.reply::<CheckpointMessage>().await?
+        else {
+            return Err(denied("unexpected pruned_prefix response"));
         };
         if page.scope != scope {
-            return Err(denied("horizon outside subscription"));
+            return Err(denied("pruned_prefix outside subscription"));
         }
         Ok(page.logs.is_empty())
     }
@@ -267,7 +157,7 @@ impl NativeSession {
         for scope in scopes {
             offered.push(match self.checkpoint_offer(replica, *scope).await? {
                 Some(signed)
-                    if signed.statement.finalized.is_some()
+                    if signed.statement.seal.is_some()
                         || !replica.owns_checkpoint_signer(&signed).await =>
                 {
                     Some((signed.id()?, signed.statement.rows.count))
@@ -307,21 +197,6 @@ impl NativeSession {
     ) -> Result<Option<RebootstrapReport>, Error> {
         let scope = signed.statement.scope;
         let checkpoint = signed.id()?;
-        let finalized_checkpoint = signed.statement.finalized.is_some();
-        if let Some(finalized) = &signed.statement.finalized {
-            for base in &finalized.statement.bases {
-                let expected = ExistenceBaseAttachment {
-                    basis: ExistenceBasis::Horizon(finalized.clone()),
-                    scope: base.scope,
-                };
-                if !self
-                    .pull_existence_base(replica, base.scope, Some(expected.id()?))
-                    .await?
-                {
-                    return Ok(None);
-                }
-            }
-        }
         let (mut after, mut complete) = match replica.rebootstrap_progress(scope).await? {
             Some((staged, cursor, complete)) if staged == checkpoint => (cursor, complete),
             _ => {
@@ -368,15 +243,6 @@ impl NativeSession {
             replica.stage_checkpoint_page(*page).await?;
         }
         let report = replica.finish_rebootstrap(scope).await?;
-        if finalized_checkpoint && let Some(signed) = replica.admitted_horizon(scope).await? {
-            self.send(HorizonMessage::HorizonRejoined {
-                scope,
-                horizon: signed.id().map_err(credential)?,
-            })
-            .await?;
-            self.acknowledged("unexpected horizon rebootstrap acknowledgment")
-                .await?;
-        }
         Ok(Some(report))
     }
     /// Serves until the session ends or an answer fails; returns how many
@@ -421,7 +287,7 @@ impl NativeSession {
         let Some(signed) = self.checkpoint_offer(replica, scope).await? else {
             return Ok(None);
         };
-        if signed.statement.finalized.is_none() && replica.owns_checkpoint_signer(&signed).await {
+        if signed.statement.seal.is_none() && replica.owns_checkpoint_signer(&signed).await {
             return Ok(None);
         }
         // Switching to the installed checkpoint again would only rewrite its rows.
@@ -439,7 +305,9 @@ impl NativeSession {
             }
         };
         if catch_up.behind {
-            return Err(denied("still behind the peer's horizon after bootstrap"));
+            return Err(denied(
+                "still behind the peer's pruned_prefix after bootstrap",
+            ));
         }
         Ok(Some(ScopeSync {
             rebootstrap,
@@ -447,7 +315,7 @@ impl NativeSession {
         }))
     }
     /// Rebootstraps `scope` from the peer if this replica is behind its
-    /// horizon, then catches up.
+    /// pruned_prefix, then catches up.
     pub async fn sync_scope<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -477,7 +345,9 @@ impl NativeSession {
             }
             catch_up = self.catch_up(replica, scope, quota).await?;
             if catch_up.behind {
-                return Err(denied("still behind the peer's horizon after rebootstrap"));
+                return Err(denied(
+                    "still behind the peer's pruned_prefix after rebootstrap",
+                ));
             }
         }
         Ok(ScopeSync {
@@ -491,6 +361,12 @@ impl NativeSession {
         message: CheckpointMessage,
     ) -> Result<(), Error> {
         match message {
+            CheckpointMessage::Pruned { scope, after } => {
+                let page = replica
+                    .pruned_page(self.peer, &self.credentials, scope, after)
+                    .await?;
+                self.send(CheckpointMessage::PrunedLogs { page }).await
+            }
             CheckpointMessage::ArchiveBegin { signed } => {
                 let (after, complete) = replica
                     .begin_checkpoint_archive(self.peer, &self.credentials, *signed)

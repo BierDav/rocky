@@ -132,7 +132,7 @@ re-authors them. The SDK runs these steps at the start of every sync pass
 - A replica holding a child only keeps its records until a signed base
   arrives; it never folds a log whose frames it cannot count.
 - A creation the frontier excludes whose id is below its author's mark in
-  the base is refused as retired, as under a horizon: an id reserved before
+  the base is refused as retired: an id reserved before
   a seal and committed after a later one.
 - A logged scope whose fold sits at the lost seal cannot replay frames: its
   records were released there. It waits for a listed checkpoint and a signed
@@ -143,18 +143,20 @@ re-authors them. The SDK runs these steps at the start of every sync pass
   may still be missing, as for scopes the replica does not hold.
 - Replicas finalize and compact only the scopes they hold.
 - Change detection is per table, not per partition.
-- A [mergeable horizon](mergeable-horizon.md) is refused in a domain with a
-  tip graph.
 - While a seal waits, each maintenance step scans the stored frame headers.
 
 ## Formats
 
 | Boundary | Current |
 | --- | --- |
-| Encrypted checkpoint | Format 14: names the seal it sits at, if any |
+| Encrypted checkpoint | Format 15: names the seal it sits at, if any |
 | Row frame | 11: counts its existence records |
 | Existence base | Format 1, signed `rocky.existence-base.v1` |
 | Checkpoint record | Format 1, signed `rocky.checkpoint-record.v1` |
 | Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
 
-Seals and existence records do not change.
+The mergeable-horizon protocol and SDK operation are removed. Checkpoint
+statements contain neither admitted nor finalized declarations. Pruned log
+prefixes remain: `pruned_page`, `behind_pruned`, `PrunedPage` and
+`CheckpointMessage::Pruned`/`PrunedLogs` signal missing history without a
+separate finalization protocol. Seals and existence records do not change.

@@ -20,6 +20,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) fn row_payload(&self, frame: &EncryptedFrame) -> Result<RowPayload, Error> {
+        let operation = frame.operation()?;
+        let extension = &operation.header.extensions;
+        let key = self
+            .opening_key(extension.scope, extension.generation)
+            .ok_or_else(|| denied("row payload key unavailable"))?;
+        let payload = RowPayload::decode(&decrypt(&key.key, &encode(extension)?, &frame.body)?)?;
+        Ok(payload)
+    }
+
     /// One bounded transaction of `EncryptedReplica::settle`; true when
     /// more frames may be ready.
     pub(super) async fn apply_step(&mut self, time: u64) -> Result<bool, Error> {
@@ -134,18 +144,6 @@ impl<A: RowApplication> Inner<A> {
         if self.direct.contains(&extension.scope) {
             return Ok(Outcome::Waiting);
         }
-        if reach != tips::FrameReach::Held
-            && !self
-                .horizon_allows_position(
-                    extension.scope,
-                    operation.header.public_key,
-                    operation.header.seq_num,
-                    false,
-                )
-                .await?
-        {
-            return Ok(Outcome::Waiting);
-        }
         // An epoch this replica does not hold, later or earlier, waits for its key.
         let Some(key) = self.opening_key(extension.scope, extension.generation) else {
             return Ok(Outcome::Waiting);
@@ -231,23 +229,13 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Whether every dependency is applied or a member of `bundle`, which
     /// applies with it. A dependency whose frame was pruned counts through
-    /// its log tip, its log's horizon or its stub.
+    /// its log tip, its log's pruned_prefix or its stub.
     pub(super) async fn dependencies_ready(
         &self,
         frame: &EncryptedFrame,
         bundle: &BTreeSet<Hash>,
     ) -> Result<bool, Error> {
         let operation = frame.operation()?;
-        let payload = self.row_payload(frame)?;
-        if let Some((authored, _)) = payload.basis()
-            && authored
-                > self
-                    .finalized_basis(operation.header.extensions.scope)
-                    .await?
-                    .map_or(0, |(sequence, _)| sequence)
-        {
-            return Ok(false);
-        }
 
         let mut retired_creations = BTreeSet::new();
         // Behind a finalized base, a creation whose row is gone is retired.
@@ -258,9 +246,7 @@ impl<A: RowApplication> Inner<A> {
                 .checkpoint_record(scope_id, true)
                 .await?
                 .and_then(|record| record.signed)
-                .filter(|signed| {
-                    signed.statement.finalized.is_some() || signed.statement.seal.is_some()
-                })
+                .filter(|signed| signed.statement.seal.is_some())
             && let Some(key) = self.opening_key(
                 operation.header.extensions.scope,
                 operation.header.extensions.generation,
@@ -373,7 +359,7 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(Some(log.clock));
             }
             // Deeper in the pruned prefix: covered, its clock is not kept.
-            return Ok((predecessor <= log.horizon).then_some(0));
+            return Ok((predecessor <= log.pruned_prefix).then_some(0));
         }
         if let Some((stub, clock)) = self.stub(id).await? {
             if stub != scope {
@@ -385,7 +371,7 @@ impl<A: RowApplication> Inner<A> {
         let mut tip = self
             .conn
             .query(
-                "SELECT clock FROM secure_logs WHERE scope=? AND hash=? AND horizon>=sequence",
+                "SELECT clock FROM secure_logs WHERE scope=? AND hash=? AND pruned_prefix>=sequence",
                 bindings(vec![
                     SqlValue::Integer(scope),
                     SqlValue::Blob(id.as_bytes().to_vec()),

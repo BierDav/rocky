@@ -405,16 +405,11 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
             "  prune {table}: {}",
             short(&r.map(|s| (
                 s["covered"].clone(),
-                s["horizon"].as_array().map(|h| h.len()),
+                s["pruned_prefix"].as_array().map(|h| h.len()),
                 s["error"].clone()
             )))
         );
     }
-    let h = a
-        .n()
-        .call(json!({"type":"horizon","collection":"notes"}))
-        .await;
-    println!("  horizon call: {}", short(&h));
     // C returns; then is killed in the middle of its rebootstrap.
     c.n()
         .call(json!({"type":"networking_control","enabled":true}))

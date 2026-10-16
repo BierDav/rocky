@@ -54,11 +54,7 @@ async fn refusal(client: &Replica, server: &Replica, message: Message) -> (Strin
     (error, messages, count)
 }
 
-fn requests(
-    scope: ResourceScope,
-    node: &PrivateKey,
-    credentials: &CredentialChain,
-) -> Vec<Message> {
+fn requests(scope: ResourceScope) -> Vec<Message> {
     let frontier = ScopeFrontier {
         scope,
         logs: Vec::new(),
@@ -87,6 +83,7 @@ fn requests(
         }
         .into(),
         RowMessage::FrontierQuery { scope }.into(),
+        CheckpointMessage::Pruned { scope, after: None }.into(),
         CheckpointMessage::CheckpointOffer { scope }.into(),
         CheckpointMessage::CheckpointPull {
             scope,
@@ -99,25 +96,6 @@ fn requests(
             scope,
             after: None,
             max_rows: 1,
-        }
-        .into(),
-        horizon_relay::HorizonRelayMessage::Exchange {
-            scope,
-            signed: None,
-            acks: Vec::new(),
-            finalized: None,
-        }
-        .into(),
-        HorizonMessage::MergeableCut { scope }.into(),
-        HorizonMessage::Horizon { scope, after: None }.into(),
-        HorizonMessage::HorizonRejoined {
-            scope,
-            horizon: [0; 32],
-        }
-        .into(),
-        HorizonMessage::HorizonAck {
-            scope,
-            ack: rocky_credentials::HorizonAck::sign([0; 32], node, credentials.clone()).unwrap(),
         }
         .into(),
         ExistenceMessage::BaseOffer {
@@ -198,10 +176,7 @@ async fn transcript_case(custody: bool) {
         let inner = member.inner.lock().await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
-    for (known, missing) in requests(scope, &node, &credentials)
-        .into_iter()
-        .zip(requests(unknown, &node, &credentials))
-    {
+    for (known, missing) in requests(scope).into_iter().zip(requests(unknown)) {
         let known = refusal(&member, &server, known).await;
         let missing = refusal(&member, &server, missing).await;
         assert_eq!(known, missing);

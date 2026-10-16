@@ -217,28 +217,4 @@ class RoomGateTest {
             assertEquals(listOf("Eggs", "Milk"), sqlite.rows("SELECT title FROM items WHERE list = 'l1' ORDER BY title").map { it.single() })
         }
     }
-
-    @Test fun kotlinHorizonsFinalizeThroughTheNativeBridgeAndRoomKeepsConvergedRows() = pair {
-        roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs")))
-        roomA.shop().delete(roomA.shop().items("l1").first { it.key == "i2" })
-        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
-        val declared = a.horizons.declare("items", setOf(b.session().node))
-        assertFalse(declared.getValue("finalized").jsonPrimitive.boolean)
-        b.horizons.admit("items", declared.getValue("statement").jsonPrimitive.content)
-        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
-        assertTrue(b.horizons.status("items").getValue("finalized").jsonPrimitive.boolean)
-        assertTrue(a.horizons.finalize("items").getValue("finalized").jsonPrimitive.boolean)
-        assertEquals(a.horizons.status("items").getValue("statement"), b.horizons.status("items").getValue("statement"))
-        assertEquals(listOf("Milk"), roomA.shop().items("l1").map { it.title })
-        assertEquals(roomA.shop().items("l1"), roomB.shop().items("l1"))
-        val state = "SELECT hex(scope),hex(digest),rows,tombstones FROM secure_scope_state ORDER BY scope"
-        val memberState = file(File(directory, "b")) { it.rows(state) }
-        val issuerState = file(File(directory, "a")) { it.rows(state) }
-        assertEquals(2, memberState.size, "the member holds the two application tables")
-        assertEquals(3, issuerState.size, "the issuer also holds its private registry")
-        val sharedScopes = memberState.map { it.first() }.toSet()
-        assertEquals(memberState, issuerState.filter { it.first() in sharedScopes })
-        assertEquals(listOf(listOf("0")), file(File(directory, "a")) { it.rows("SELECT sum(tombstones) FROM secure_scope_state") })
-        assertTrue(a.horizons.maintain("items", 1).getValue("finalized").jsonPrimitive.boolean)
-    }
 }

@@ -42,7 +42,7 @@ impl Node {
     }
     /// Drops the manifests of earlier generations nothing this replica
     /// retains names any longer, in the replica and then in the saved
-    /// lineage; their transitions stay. Runs after a horizon finalized,
+    /// lineage; their transitions stay. Runs after compaction,
     /// when retained frames go.
     pub(super) async fn forget_generations(&self) -> Result<(), Failure> {
         let dropped = self.replica.drop_unreferenced_generations().await?;

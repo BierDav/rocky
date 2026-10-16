@@ -1,5 +1,5 @@
-//! Stored credential chains. A retained operation, the local node author
-//! and a horizon credential name a chain by digest; the chain is kept once
+//! Stored credential chains. Retained operations and the local node author
+//! name a chain by digest; the chain is kept once
 //! and removed with the last of them. See
 //! `docs/decisions/0053-chains-by-reference.md`.
 use super::*;
@@ -35,7 +35,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(kept.next().await?.is_some())
     }
-    /// The stored chain a retained operation or a horizon credential names.
+    /// The stored chain a retained operation names.
     pub(super) async fn stored_chain(&self, digest: Commitment) -> Result<Chain, Error> {
         let cached = || {
             self.chains
@@ -78,7 +78,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(frame.with_chain(chain))
     }
     /// Removes every chain nothing names any more. Runs in the transaction
-    /// that removed operations or replaced a horizon credential, so no
+    /// that removed operations, so no
     /// interruption leaves an operation without its chain.
     pub(super) async fn sweep_chains(&self) -> Result<(), Error> {
         let registered: Vec<Vec<u8>> = self
@@ -89,7 +89,7 @@ impl<A: RowApplication> Inner<A> {
         let unnamed = collect_rows(
             self.conn
                 .query(
-                    "SELECT digest FROM secure_chains c WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.chain=c.digest) AND NOT EXISTS(SELECT 1 FROM secure_horizon_credentials h WHERE h.chain=c.digest)",
+                    "SELECT digest FROM secure_chains c WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.chain=c.digest)",
                     (),
                 )
                 .await?,

@@ -318,8 +318,6 @@ struct WitnessBody {
     #[serde(with = "serde_bytes")]
     body: Vec<u8>,
     creations: Vec<(Commitment, Commitment)>,
-    basis: Option<(u64, Commitment)>,
-    releases: Vec<Commitment>,
 }
 /// A current row payload, always protected by a creation witness envelope.
 #[derive(Clone)]
@@ -330,8 +328,6 @@ pub(crate) struct RowPayload {
     reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
     creations: Vec<(Commitment, Commitment)>,
-    basis: Option<(u64, Commitment)>,
-    releases: Vec<Commitment>,
 }
 impl RowPayload {
     pub(crate) fn check_formats(plaintext: &[u8]) -> Result<(), Error> {
@@ -363,10 +359,7 @@ impl RowPayload {
         if envelope.version != 1 {
             return Err(denied("unsupported creation witness format"));
         }
-        if envelope.basis.is_some_and(|(sequence, _)| sequence == 0)
-            || envelope.releases.len() > 64
-            || envelope.releases.windows(2).any(|pair| pair[0] >= pair[1])
-            || envelope.creations.len() > 32
+        if envelope.creations.len() > 32
             || envelope
                 .creations
                 .windows(2)
@@ -385,8 +378,6 @@ impl RowPayload {
             reauthors: body.reauthors,
             writes: body.writes,
             creations: envelope.creations,
-            basis: envelope.basis,
-            releases: envelope.releases,
         })
     }
     pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
@@ -423,15 +414,11 @@ impl RowPayload {
     pub(crate) fn witness(
         body: Vec<u8>,
         creations: Vec<(Commitment, Commitment)>,
-        basis: Option<(u64, Commitment)>,
-        releases: Vec<Commitment>,
     ) -> Result<Vec<u8>, Error> {
         encode(&WitnessBody {
             version: 1,
             body,
             creations,
-            basis,
-            releases,
         })
     }
     pub(crate) fn stamp_body(
@@ -449,12 +436,6 @@ impl RowPayload {
     }
     pub(crate) fn carried(&self, row: &Commitment) -> Option<&crate::replica::moves::Carried> {
         self.carried.get(row)
-    }
-    pub(crate) fn protection(&self) -> (Option<Commitment>, &[Commitment]) {
-        (self.basis.map(|(_, hash)| hash), &self.releases)
-    }
-    pub(crate) fn basis(&self) -> Option<(u64, Commitment)> {
-        self.basis
     }
     pub(crate) fn creations(&self) -> &[(Commitment, Commitment)] {
         &self.creations

@@ -109,7 +109,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             (group::Done::Bundle(frames), _) => Ok(frames),
             (group::Done::Pruned(_), _) => Err(denied(
-                "mutation handle was committed before the pruning horizon",
+                "mutation handle was committed before the pruned prefix",
             )),
             _ => Err(denied("missing authoring result")),
         }

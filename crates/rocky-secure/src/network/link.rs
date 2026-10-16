@@ -401,7 +401,7 @@ pub async fn scope_token<A: RowApplication>(
             .map(|log| (log.author, log.held))
             .collect();
         let existence: Vec<_> = inner.existence_frontier(scope).await?.into_iter().collect();
-        let bytes = encode(&(logs, existence, inner.mergeable_horizon(scope).await?))?;
+        let bytes = encode(&(logs, existence))?;
         (bytes, inner.flusher.clone(), inner.commit)
     };
     flusher.flush(commit)?;

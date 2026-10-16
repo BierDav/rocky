@@ -1,8 +1,7 @@
 //! The shopping release gate on the group schema: two phones that are never
 //! online together share lists through a keyless custody peer. A duplicate
 //! title converges by policy, a deleted list cascades, a deleted category
-//! nulls only its reference, a moved item keeps an offline tick and a horizon
-//! finalizes on every device. See `docs/runtime/shopping-qualification.md`.
+//! nulls only its reference, and a moved item keeps an offline tick. See `docs/runtime/shopping-qualification.md`.
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -151,20 +150,6 @@ impl Peer {
             .await
             .map(drop)
     }
-    async fn horizon(
-        &self,
-        table: &str,
-        list: &str,
-        action: &str,
-        extra: Value,
-    ) -> Result<Value, Failure> {
-        let mut request =
-            json!({"type":"horizon","collection":table,"action":action,"values":values(list)});
-        if let (Some(request), Some(extra)) = (request.as_object_mut(), extra.as_object()) {
-            request.extend(extra.clone());
-        }
-        self.call(request).await
-    }
 }
 fn values(list: &str) -> Value {
     json!([{"type":"integer","value":list}])
@@ -186,8 +171,6 @@ async fn introduce(left: &Peer, right: &Peer) -> Result<(), Failure> {
     right.call(json!({"type":"peer_add","contact":l})).await?;
     Ok(())
 }
-
-const ORDER: [&str; 3] = ["items", "categories", "lists"];
 
 /// Phone A issues; B is an enrolled writer; custody holds frames without keys.
 struct Topology {
@@ -238,9 +221,6 @@ async fn relay(from: &Peer, to: &Peer) -> Result<(), Failure> {
     from.online(false).await?;
     to.online(true).await?;
     to.sync().await
-}
-async fn finalized(peer: &Peer, table: &str, list: &str) -> Result<bool, Failure> {
-    Ok(peer.horizon(table, list, "status", json!({})).await?["finalized"] == true)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -323,55 +303,6 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
         [[json!("Weekend")], [json!("Weekly")]]
     );
 
-    // Every horizon statement and acknowledgment travels through custody.
-    b.online(false).await?;
-    a.online(true).await?;
-    let participants = json!([b.node().await?]);
-    let lists = [&weekly, &weekend, &party];
-    for list in lists {
-        for table in ORDER {
-            a.horizon(
-                table,
-                list,
-                "declare",
-                json!({"participants": participants}),
-            )
-            .await?;
-        }
-    }
-    // Children finalize before the parents that their cuts captured.
-    let early = a.horizon("lists", &weekly, "finalize", json!({})).await;
-    assert!(
-        early
-            .as_ref()
-            .is_err_and(|error| error.to_string().contains("dependent child")),
-        "{early:?}"
-    );
-    for table in ORDER {
-        for list in lists {
-            let mut rounds = 0;
-            loop {
-                relay(a, b).await?;
-                relay(b, a).await?;
-                rounds += 1;
-                match a.horizon(table, list, "finalize", json!({})).await {
-                    Ok(_) => break,
-                    Err(error) if rounds == 4 => return Err(error),
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-    relay(a, b).await?;
-    for peer in [a, b] {
-        for list in lists {
-            for table in ORDER {
-                assert!(finalized(peer, table, list).await?, "{table} {list}");
-            }
-        }
-        assert_eq!(peer.items().await?, deleted);
-    }
-    // After the horizon both phones still converge on new writes.
     b.add(&weekend, "Eggs", None).await?;
     relay(b, a).await?;
     assert_eq!(a.items().await?, b.items().await?);
@@ -398,14 +329,6 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
         "from":values(&weekly),"to":values(&weekend)}),
     )
     .await?;
-    // Enrollment after finalization never adds C to the old participant set.
-    for table in ORDER {
-        for list in [&weekly, &weekend] {
-            a.horizon(table, list, "declare", json!({"participants":[]}))
-                .await?;
-            a.horizon(table, list, "finalize", json!({})).await?;
-        }
-    }
     // The weekly checkpoint holds the moved row's tombstone, which has no image.
     let c = Peer::new(
         Database::join(
@@ -420,11 +343,6 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     }
     c.sync().await?;
     assert_eq!(c.items().await?, a.items().await?);
-    for table in ORDER {
-        for list in [&weekly, &weekend] {
-            assert!(finalized(&c, table, list).await?);
-        }
-    }
     assert_eq!(
         c.items().await?,
         [[json!(weekend), json!("Milk"), json!("0"), Value::Null]]

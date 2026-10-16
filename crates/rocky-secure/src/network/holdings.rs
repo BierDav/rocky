@@ -274,22 +274,14 @@ impl NativeSession {
                 held::HeldMessage::Pull { scope, .. } | held::HeldMessage::Push { scope, .. },
             ) => vec![*scope],
             Message::Checkpoints(
-                CheckpointMessage::CheckpointOffer { scope }
+                CheckpointMessage::Pruned { scope, .. }
+                | CheckpointMessage::CheckpointOffer { scope }
                 | CheckpointMessage::CheckpointPull { scope, .. },
             ) => vec![*scope],
             Message::Checkpoints(CheckpointMessage::ArchiveBegin { signed }) => {
                 vec![signed.statement.scope]
             }
             Message::Checkpoints(CheckpointMessage::ArchivePage { page }) => vec![page.scope],
-            Message::HorizonRelay(horizon_relay::HorizonRelayMessage::Exchange {
-                scope, ..
-            }) => vec![*scope],
-            Message::Horizon(
-                HorizonMessage::MergeableCut { scope }
-                | HorizonMessage::HorizonRejoined { scope, .. }
-                | HorizonMessage::HorizonAck { scope, .. }
-                | HorizonMessage::Horizon { scope, .. },
-            ) => vec![*scope],
             Message::Existence(message) => match message {
                 ExistenceMessage::BaseOffer { scope, .. }
                 | ExistenceMessage::BaseStage { scope, .. }

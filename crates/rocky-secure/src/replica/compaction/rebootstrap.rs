@@ -77,7 +77,7 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Result<Vec<_>, _>>()?;
         let mut needs = Vec::new();
         for (scope, id) in self.domain_scopes(domain).await? {
-            let pruned = self.has_horizon(scope).await?;
+            let pruned = self.has_pruned_prefix(scope).await?;
             let needed = match self.base_seal(id).await? {
                 Some(seal) => !path.contains(&seal),
                 None => pruned,

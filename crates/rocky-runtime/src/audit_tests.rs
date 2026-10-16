@@ -596,3 +596,40 @@ async fn observer_quota_preserves_existing_observers() {
     drop(replica.observe().unwrap());
     replica.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_previous_trusted_file_identity_is_refused_before_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.db");
+    let replica = todo(&dir).await;
+    create(&replica, "kept").await;
+    replica.close().await.unwrap();
+    {
+        let db = crate::sqlite::Connection::open(&path).unwrap();
+        let values = crate::tests::rows(&db, "SELECT identity FROM rocky_replica WHERE id=1")
+            .await
+            .unwrap();
+        let SqlValue::Blob(mut identity) = values[0][0].clone() else {
+            panic!("identity")
+        };
+        // Five 16-byte identities precede the file format version.
+        assert_eq!(&identity[80..84], &4u32.to_le_bytes());
+        identity[80..84].copy_from_slice(&3u32.to_le_bytes());
+        db.execute("UPDATE rocky_replica SET identity=? WHERE id=1", [identity])
+            .await
+            .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        Replica::open_with_config(
+            &path,
+            TodoApp,
+            StaticPolicy::default(),
+            crate::tests::identity(),
+            runtime_config()
+        )
+        .await,
+        Err(Error::Incompatible(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

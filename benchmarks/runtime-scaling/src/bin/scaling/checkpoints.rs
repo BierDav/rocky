@@ -177,12 +177,12 @@ pub async fn run(
     );
     let started = Instant::now();
     let checkpoint = replica.checkpoint().await?;
-    let horizon = replica.prune().await?;
+    let pruned_prefix = replica.prune().await?;
     println!(
-        "{tag} final checkpoint {} and prune: {} ms, horizon {:?}",
+        "{tag} final checkpoint {} and prune: {} ms, pruned_prefix {:?}",
         checkpoint.record.sequence,
         started.elapsed().as_millis(),
-        horizon
+        pruned_prefix
             .0
             .iter()
             .map(|(_, sequence)| sequence.get())

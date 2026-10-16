@@ -348,12 +348,6 @@ impl<A: RowApplication> Inner<A> {
     async fn store_existence(&self, record: &ExistenceRecord) -> Result<ReceiveStatus, Error> {
         let statement = &record.statement;
         self.bind_node_author(&statement.credentials).await?;
-        if !self
-            .horizon_allows_position(statement.scope, record.signer, statement.sequence, true)
-            .await?
-        {
-            return Ok(ReceiveStatus::PendingDependencies);
-        }
         let scope = SqlValue::Blob(encode(&statement.scope)?);
         let signer = SqlValue::Blob(record.signer.as_bytes().to_vec());
         let hash = record.hash()?;

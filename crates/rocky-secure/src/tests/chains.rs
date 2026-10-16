@@ -188,10 +188,13 @@ async fn a_pushed_frame_without_its_chain_is_not_received() {
         assert_eq!(pushed.frames, 1);
         let held = usize::from(!withhold);
         assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, held);
-        // The chain itself is stored either way: it is the one Alice
-        // authenticated with, which her horizon credential names. Holding
-        // its bytes does not complete a frame the session never carried.
-        assert_eq!(b.chain_census().await, ([a_chain.digest()].into(), 0));
+        // Only a carried frame retains its chain; link admission does not.
+        let chains = if withhold {
+            BTreeSet::new()
+        } else {
+            [a_chain.digest()].into()
+        };
+        assert_eq!(b.chain_census().await, (chains, 0));
     }
 }
 
@@ -282,40 +285,6 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, 3);
     assert_eq!(b.chain_census().await, ([b_chain.digest()].into(), 0));
     assert_eq!(b.audit(f.public).await.unwrap().operations, 3);
-}
-
-#[tokio::test]
-async fn a_horizon_credential_keeps_its_chain_until_a_renewal_replaces_it() {
-    let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
-    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
-    let (a, a_chain) = open(&f, &dir, &alice, 2).await;
-    let (_b, b_chain) = open(&f, &dir, &bob, 2).await;
-    // A peer's credential names its chain; a renewal replaces it.
-    a.record_horizon_credentials(bob.public_key(), b_chain.credentials())
-        .await
-        .unwrap();
-    assert_eq!(a.chain_census().await.0, [b_chain.digest()].into());
-    assert_eq!(
-        encode(
-            &a.cached_peer_credentials(&[bob.public_key()])
-                .await
-                .unwrap()[0]
-                .1
-        )
-        .unwrap(),
-        encode(&b_chain).unwrap()
-    );
-    let renewed = Chain::new(f.credentials(&bob, f.full())).unwrap();
-    a.record_horizon_credentials(bob.public_key(), renewed.credentials())
-        .await
-        .unwrap();
-    assert_eq!(a.chain_census().await.0, [renewed.digest()].into());
-    insert(&a, &f, 1).await;
-    assert_eq!(
-        a.chain_census().await,
-        ([renewed.digest(), a_chain.digest()].into(), 0)
-    );
 }
 
 /// A private row the source authored and checkpointed, for the target to

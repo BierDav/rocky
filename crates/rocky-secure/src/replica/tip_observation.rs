@@ -139,7 +139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(Error::Corrupt("scope".into()));
             };
             let resource: ResourceScope = decode(bytes)?;
-            if resource.domain == scope && inner.has_horizon(resource).await? {
+            if resource.domain == scope && inner.has_pruned_prefix(resource).await? {
                 return Err(denied(
                     "a close seal needs retained history; pruned logs have no author frontier",
                 ));

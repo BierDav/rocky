@@ -40,7 +40,7 @@ async fn transfer(from: &Replica<TodoApp>, to: &Replica<TodoApp>, peer: NodeId) 
             .unwrap()
         {
             Catchup::Operations(page) => page,
-            Catchup::BehindHorizon(_) => panic!("nothing is pruned here"),
+            Catchup::BehindPruned(_) => panic!("nothing is pruned here"),
         };
         if page.records.is_empty() {
             break;

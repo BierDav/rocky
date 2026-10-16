@@ -14,22 +14,14 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 /// Earlier generations a replica keeps admitting.
 pub const MAX_GENERATIONS: usize = 64;
-/// Stored artifacts that may name a manifest: frames, checkpoints, horizon
-/// statements and acknowledgments and existence bases. A
-/// generation's manifest is kept while any of them, or a credential chain
-/// of a retained frame or registered author, names it. The chains peers
-/// last authenticated with do not keep it: a peer presents its chain again
-/// and the sync fetches the manifest.
+/// Manifests are retained while frames, checkpoints or existence bases name
+/// them. Peers present their credential chain again on every session.
 const REFERENCES: &[(&str, &str)] = &[
     ("secure_operations", "header"),
     ("secure_roles", "config"),
     ("secure_checkpoints", "signed"),
     ("secure_checkpoint_archive", "signed"),
     ("secure_rebootstrap", "signed"),
-    ("secure_horizon_relay_finalized", "checkpoint"),
-    ("secure_mergeable_horizon", "statement"),
-    ("secure_horizon_bootstrap", "statement"),
-    ("secure_horizon_ack", "ack"),
     ("secure_existence_base", "attachment"),
     ("secure_existence_archive", "attachment"),
     ("secure_existence_stage", "attachment"),
@@ -946,7 +938,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(count)
     }
     /// Forgets the manifest of each earlier generation that no retained
-    /// frame, credential, checkpoint, horizon statement or existence base
+    /// frame, credential, checkpoint or existence base
     /// names; its transition stays, so retained history remains
     /// verifiable and a peer that still writes it is asked for it again.
     /// Returns the manifests dropped.

@@ -1789,15 +1789,13 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
         &crate::wire::RowPayload::witness(
             crate::wire::RowPayload::rows(&[change]).unwrap(),
             vec![],
-            None,
-            vec![],
         )
         .unwrap(),
     )
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 14);
+    assert_eq!(signed.statement.format, 15);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 

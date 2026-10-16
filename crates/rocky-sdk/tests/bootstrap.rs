@@ -24,7 +24,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
         .ok(json!({"type": "retention", "collection": "items", "policy": policy, "maintain": true}))
         .await;
     assert_eq!(status["covered"], 1);
-    assert_eq!(status["horizon"], json!([]));
+    assert_eq!(status["pruned_prefix"], json!([]));
     assert!(
         device
             .call(json!({"type": "retention", "collection": "missing", "policy": policy}))
@@ -46,7 +46,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Result<(), Failure> {
+async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
@@ -78,9 +78,14 @@ async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Re
     }, "maintain": true}),
         )
         .await;
-    assert!(!status["horizon"].as_array().expect("horizon").is_empty());
+    assert!(
+        !status["pruned_prefix"]
+            .as_array()
+            .expect("pruned_prefix")
+            .is_empty()
+    );
     a.add(13, "tail").await;
-    // Pushing to a peer behind the horizon skips the scope; the pass succeeds.
+    // Pushing to a peer behind the pruned_prefix skips the scope; the pass succeeds.
     common::introduce(&a, &c).await;
     a.sync().await.expect("push to a behind peer");
     let behind = c.node().await;
@@ -113,9 +118,9 @@ async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Re
         .ok(json!({"type": "retention", "collection": "items"}))
         .await;
     assert!(
-        !status["horizon"]
+        !status["pruned_prefix"]
             .as_array()
-            .expect("imported horizon")
+            .expect("imported pruned_prefix")
             .is_empty()
     );
     c.add(99, "unsent").await;
@@ -663,57 +668,6 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     c.close().await;
     gate.close().await;
     a.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn horizon_sdk_declares_finalizes_maintains_and_preserves_reopen_state() -> Result<(), Failure>
-{
-    let root = tempfile::tempdir()?;
-    let device = Device::create(root.path(), None)?;
-    device.add(101, "base").await;
-    let nodes: Vec<_> = (0..65)
-        .map(|_| rocky_sdk::credentials::PrivateKey::new().public_key())
-        .collect();
-    let error = device
-        .call(
-            json!({"type":"horizon","collection":"items","action":"declare","participants":nodes}),
-        )
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("horizon_participants_full"));
-    let unknown = rocky_sdk::credentials::PrivateKey::new().public_key();
-    let error = device.call(json!({"type":"horizon","collection":"items","action":"declare","participants":[unknown]})).await.unwrap_err();
-    assert!(error.to_string().contains("no registry record"));
-    assert!(device.call(json!({"type":"horizon","collection":"items","action":"maintain","max_operations":0})).await.is_err());
-    let declared = device
-        .ok(json!({"type":"horizon","collection":"items","action":"declare","participants":[]}))
-        .await;
-    assert_eq!(declared["sequence"], 1);
-    assert_eq!(declared["finalized"], false);
-    let finalized = device
-        .ok(json!({"type":"horizon","collection":"items","action":"finalize"}))
-        .await;
-    assert_eq!(finalized["finalized"], true);
-    device.add(102, "fresh").await;
-    device
-        .ok(json!({"type":"horizon","collection":"items","action":"maintain","max_operations":1}))
-        .await;
-    let final_status = device
-        .ok(json!({"type":"horizon","collection":"items","action":"maintain","max_operations":1}))
-        .await;
-    assert_eq!(final_status["sequence"], 2);
-    assert_eq!(final_status["finalized"], true);
-    assert_eq!(final_status["operations_since_finalization"], 0);
-    device.close().await;
-    let reopened = Device::open(root.path(), None)?;
-    let status = reopened
-        .ok(json!({"type":"horizon","collection":"items"}))
-        .await;
-    assert_eq!(status["statement"], final_status["statement"]);
-    assert_eq!(status["finalized"], true);
-    assert_eq!(reopened.titles().await, ["base", "fresh"]);
-    reopened.close().await;
     Ok(())
 }
 

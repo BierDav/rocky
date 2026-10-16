@@ -186,7 +186,7 @@ where
             }
             let covered = marks(&record.frontier);
             if stored
-                .horizon
+                .pruned_prefix
                 .iter()
                 .any(|(node, sequence)| at(&covered, *node) < *sequence)
             {
@@ -309,7 +309,7 @@ where
         stored.history = (record.history.sum, record.history.count);
         stored.record = Some(record.encode());
         stored.candidate = None;
-        stored.horizon = covered;
+        stored.pruned_prefix = covered;
         stored.import = None;
         let budget = rows(
             self.conn(),

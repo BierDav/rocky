@@ -4,7 +4,7 @@
 use super::*;
 use rocky_credentials::PeerId;
 
-/// Unconfigured peers whose horizon credentials and frontiers a replica
+/// Unconfigured peers whose frontiers a replica
 /// keeps; the least recently served beyond it lose theirs.
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
 /// Session peers whose declared tip a replica remembers; the least
@@ -73,7 +73,7 @@ impl<A: RowApplication> Inner<A> {
         let mut found = self
             .conn
             .query(
-                "SELECT 1 FROM secure_horizon_credentials WHERE node=?1 UNION ALL SELECT 1 FROM secure_peer_frontiers WHERE peer=?1 LIMIT 1",
+                "SELECT 1 FROM secure_peer_frontiers WHERE peer=?1 LIMIT 1",
                 [key],
             )
             .await?;
@@ -82,21 +82,25 @@ impl<A: RowApplication> Inner<A> {
     /// Inside the open transaction, after a peer's first row: removes the
     /// rows of the least recently served unconfigured peers beyond the
     /// bound. Configured peers and full nodes are never removed. A lost
-    /// frontier only delays pruning, lost credentials a horizon deadline.
+    /// frontier only delays pruning, lost credentials a pruned_prefix deadline.
     pub(super) async fn bound_peers(&mut self) -> Result<(), Error> {
         let full = self.role().await?.full_nodes;
         let configured: BTreeSet<_> = self.configured.iter().copied().map(PeerId::of).collect();
         let mut unconfigured = Vec::new();
         for record in rows(
             &self.conn,
-            "SELECT node FROM secure_horizon_credentials UNION SELECT peer FROM secure_peer_frontiers",
+            "SELECT DISTINCT peer FROM secure_peer_frontiers",
         )
         .await?
         {
             let [SqlValue::Blob(peer)] = record.as_slice() else {
                 return Err(Error::Corrupt("peer key".into()));
             };
-            let peer = PeerId::from_bytes(peer.as_slice().try_into().map_err(|_| Error::Corrupt("peer reference".into()))?);
+            let peer = PeerId::from_bytes(
+                peer.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("peer reference".into()))?,
+            );
             if !configured.contains(&peer) && !full.contains(&peer) {
                 unconfigured.push(peer);
             }
@@ -108,12 +112,6 @@ impl<A: RowApplication> Inner<A> {
         unconfigured.sort_by_key(|peer| self.served.1.get(peer).copied().unwrap_or(0));
         for peer in &unconfigured[..excess] {
             let key = peer.as_bytes().to_vec();
-            self.conn
-                .execute(
-                    "DELETE FROM secure_horizon_credentials WHERE node=?",
-                    [key.clone()],
-                )
-                .await?;
             self.conn
                 .execute("DELETE FROM secure_peer_frontiers WHERE peer=?", [key])
                 .await?;
@@ -146,19 +144,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.record_peer_tip(node, tip);
         Ok(())
     }
-    /// The peers whose credentials and frontiers stay whatever the bound on
+    /// The peers whose frontiers stay whatever the bound on
     /// unconfigured peers: the contacts this device keeps.
     pub async fn configure_peers(&self, peers: impl IntoIterator<Item = PublicKey>) {
         self.inner.lock().await.configured = peers.into_iter().collect();
     }
-    /// Distinct peers with horizon credentials and with frontiers.
+    /// Distinct peers with retained frontiers.
     #[cfg(test)]
-    pub(crate) async fn recorded_peers(&self) -> (usize, usize) {
+    pub(crate) async fn recorded_peers(&self) -> usize {
         let inner = self.inner.lock().await;
-        let count = async |sql| rows(&inner.conn, sql).await.unwrap().len();
-        (
-            count("SELECT node FROM secure_horizon_credentials").await,
-            count("SELECT DISTINCT peer FROM secure_peer_frontiers").await,
+        rows(
+            &inner.conn,
+            "SELECT DISTINCT peer FROM secure_peer_frontiers",
         )
+        .await
+        .unwrap()
+        .len()
     }
 }

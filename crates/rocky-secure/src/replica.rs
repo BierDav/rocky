@@ -15,18 +15,14 @@ mod generation;
 pub(super) mod group;
 mod held;
 mod holdings;
-mod horizon;
 mod identity;
-mod protection;
-pub(crate) mod publication;
-pub(crate) use horizon::HorizonFinalization;
-pub use horizon::{HorizonPending, HorizonProgress};
 mod incoming;
 mod keys;
 pub(crate) mod migrate;
 pub(crate) mod moves;
 mod offload;
 mod partition;
+pub(crate) mod publication;
 mod queries;
 mod reads;
 mod rebuild;
@@ -54,7 +50,7 @@ pub use admission::MAX_UNCONFIGURED_PEERS;
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{
     AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
-    HorizonPage, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, RebootstrapReport,
+    LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, PrunedPage, RebootstrapReport,
     RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
 };
 pub use coordinated::{
@@ -139,7 +135,7 @@ pub enum ReceiveStatus {
     Held,
     Duplicate,
     Rejected,
-    /// At or before this replica's horizon: already part of its checkpoint.
+    /// At or before this replica's pruned_prefix: already part of its checkpoint.
     Pruned,
     /// An owner-signed cut abandoned its coordinated position: consumed
     /// without effect, its author log continues.
@@ -175,7 +171,7 @@ pub struct CiphertextPage {
     pub frames: Vec<EncryptedFrame>,
     pub next: Option<Hash>,
     /// Requested scopes with pruned history. A receiver compares
-    /// `horizon_page` with what it holds before it relies on this pass.
+    /// `pruned_page` with what it holds before it relies on this pass.
     pub pruned: Vec<ResourceScope>,
     /// Void records consuming the positions before the frames.
     pub voids: Vec<SignedVoid>,
@@ -240,8 +236,6 @@ pub(super) struct Materialized {
     proof: Option<moves::StoredProof>,
     #[serde(with = "serde_bytes")]
     moved_from: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    protected: Option<protection::Protected>,
     #[serde(with = "byte_fields")]
     fields: RowFields,
     #[serde(with = "byte_keys")]
@@ -419,8 +413,6 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
     #[cfg(test)]
-    pub(super) fail_horizon_at: Option<u8>,
-    #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
     pub(super) group_fault: Option<group::GroupFault>,
@@ -576,7 +568,6 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         roles::SCHEMA,
         keys::SCHEMA,
         existence::SCHEMA,
-        horizon::SCHEMA,
         constraints::SCHEMA,
         chains::SCHEMA,
         publication::SCHEMA,
@@ -825,8 +816,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             fail_before_commit: 0,
             #[cfg(test)]
-            fail_horizon_at: None,
-            #[cfg(test)]
             retry_before_commit: 0,
             #[cfg(test)]
             group_fault: None,
@@ -959,7 +948,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             (group::Done::Author(frame), _) => Ok(frame),
             // The handle did commit once; its frame is no longer retained.
             (group::Done::Pruned(_), _) => Err(denied(
-                "mutation handle was committed before the pruning horizon",
+                "mutation handle was committed before the pruned prefix",
             )),
             _ => Err(denied("missing authoring result")),
         }

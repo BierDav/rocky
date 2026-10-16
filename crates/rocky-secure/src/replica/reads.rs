@@ -80,11 +80,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }) {
                 return Err(denied("ciphertext custody denied"));
             }
+            inner.ensure_cut_clean(*scope).await?;
         }
         // Never a silent gap: every page names the scopes with pruned history.
         let mut pruned = Vec::new();
         for scope in scopes {
-            if inner.has_horizon(*scope).await? {
+            if inner.has_pruned_prefix(*scope).await? {
                 pruned.push(*scope);
             }
         }

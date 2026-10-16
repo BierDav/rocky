@@ -166,3 +166,40 @@ unpushed, so link `rocky.link.v9` and replica file
 - A scope pruned at another cut before the graph is found by
   `seal_rebootstraps` and imports a listed checkpoint the same way; no test
   covers that case or an SDK join of a graph domain by frames.
+
+
+## Slice 4: remove the mergeable horizon
+
+Removed declarations, participants, acknowledgments, deadlines, guards,
+competing statements and completed certificates across credentials, replica,
+wire, SDK and Kotlin. Inserts carry no finalized basis or key-release proofs;
+seal diffs retain the finalization behavior. Existence bases use only local or
+signed seal folds, with neutral `ExistenceCut` and `ExistenceLog` type names;
+the signed `rocky.existence-base.v1` field encoding stays unchanged.
+`installed_existence_base` moved to `replica/existence/base.rs`.
+
+Pruned log prefixes remain as `secure_logs.pruned_prefix`, `has_pruned_prefix`,
+`pruned_page`, `behind_pruned`, `PrunedPage` and the checkpoint family's
+`Pruned`/`PrunedLogs`. The range page's `behind` flag and `retains_history`
+remain. `secure_compaction_live_creations` replaces the scratch table, and
+the horizon's bootstrap and participant tables are gone. Coordinated-cut
+fences and the off-path exception in `check_frontier` remain.
+
+Checkpoint format 15 removes both declaration fields; format 14 is refused.
+All of phase 15 is unpushed, so link `rocky.link.v9`, replica file
+`rocky.encrypted-replica.v25`, row frame 11 and witness envelope 1 stay current.
+The removed existence attachment variant and changed native message family
+have only the current encoding; there are no migrations or legacy readers.
+
+Horizon-only tests are removed. Shared row-move, admission, chain retention,
+coordinated-cut and generation tests keep their still-supported checks.
+The SDK's old manifest-dropping scenario depended on explicit generation
+switches followed by horizons; seal-based schema changes remain phase 17.
+Core manifest cache tests remain, and SDK compaction now drops unreferenced
+manifests after signing and listing its bases.
+
+Gate evidence and final verification follow with slice 5. The existence
+probe now uses 64 create/delete cycles (131 records before the fold and none
+after it). Unchanged scopes reuse their prior seal checkpoint when no included
+operation or finalization diff changed them; the regression checks identical
+checkpoint bytes, no table observer event and a working session after compact.

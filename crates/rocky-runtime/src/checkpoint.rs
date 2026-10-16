@@ -1,4 +1,4 @@
-//! Checkpoints, the pruning horizon and rebootstrap of the trusted path.
+//! Checkpoints, the pruning pruned prefix and rebootstrap of the trusted path.
 //! See `docs/runtime/checkpoints.md`.
 use crate::{Command, Error, Replica, SyncState, TransferPage, digest::SetDigest};
 use rocky_core::{
@@ -26,11 +26,11 @@ pub struct RetentionPolicy {
     /// Run checkpoint and prune steps beside writes. Otherwise only
     /// `Replica::checkpoint` and `Replica::prune` run them.
     pub automatic: bool,
-    /// How long a delivery target may hold back the horizon before it is
+    /// How long a delivery target may hold back the pruned prefix before it is
     /// declared behind. None waits for `Replica::declare_behind`.
     pub behind_after: Option<std::time::Duration>,
     /// Full nodes of `RuntimeConfig::full_nodes` that must have applied an
-    /// operation before the horizon passes it; other delivery targets then
+    /// operation before the pruned prefix passes it; other delivery targets then
     /// do not hold it back. Zero waits for every delivery target instead.
     pub custody: usize,
 }
@@ -87,7 +87,7 @@ pub struct CheckpointRecord {
     pub sole_recovery: Vec<Commitment>,
 }
 const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v2";
-const NOTICE_MAGIC: &[u8] = b"rocky.horizon.v1";
+const NOTICE_MAGIC: &[u8] = b"rocky.pruned.v1";
 const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v2";
 
 #[derive(Default)]
@@ -274,24 +274,24 @@ impl CheckpointRecord {
     }
 }
 
-/// The wire signal for a peer behind the horizon: the sender has declared
-/// the operations at or before `horizon` prunable and can no longer supply
+/// The wire signal for a peer behind the pruned prefix: the sender has declared
+/// the operations at or before `pruned_prefix` prunable and can no longer supply
 /// them. The peer imports `checkpoint` and syncs operations after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HorizonNotice {
+pub struct PrunedNotice {
     pub scope: Scope,
     pub node: NodeId,
-    pub horizon: AppliedFrontier,
+    pub pruned_prefix: AppliedFrontier,
     pub checkpoint: Commitment,
     pub sequence: u64,
 }
-impl HorizonNotice {
+impl PrunedNotice {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Writer::default();
         out.bytes(NOTICE_MAGIC);
         out.scope(self.scope);
         out.bytes(&self.node.0);
-        out.frontier(&self.horizon);
+        out.frontier(&self.pruned_prefix);
         out.bytes(&self.checkpoint);
         out.u64(self.sequence);
         out.0
@@ -302,7 +302,7 @@ impl HorizonNotice {
         let notice = Self {
             scope: input.scope()?,
             node: NodeId(input.array()?),
-            horizon: input.frontier()?,
+            pruned_prefix: input.frontier()?,
             checkpoint: input.array()?,
             sequence: input.u64()?,
         };
@@ -314,7 +314,7 @@ impl HorizonNotice {
 #[derive(Clone, Debug)]
 pub enum Catchup {
     Operations(TransferPage),
-    BehindHorizon(HorizonNotice),
+    BehindPruned(PrunedNotice),
 }
 
 /// A position in a checkpoint's rows.
@@ -461,8 +461,8 @@ pub struct RetentionStatus {
     pub pending: Option<AppliedFrontier>,
     pub hold: Option<CheckpointHold>,
     /// Operations at or before it are pruned or about to be.
-    pub horizon: AppliedFrontier,
-    /// Delivery targets declared behind the horizon.
+    pub pruned_prefix: AppliedFrontier,
+    /// Delivery targets declared behind the pruned prefix.
     pub behind: Vec<NodeId>,
     pub retained_operations: usize,
     pub retained_bytes: usize,
@@ -505,7 +505,7 @@ pub(crate) enum Request {
     Status,
     /// One step of creating and recomputing a checkpoint.
     Checkpoint,
-    /// One step of declaring the horizon and deleting behind it.
+    /// One step of declaring the pruned prefix and deleting behind it.
     Prune,
     DeclareBehind(NodeId),
     Catchup(Option<NodeId>, Box<SyncState>, Option<OperationId>),
@@ -620,23 +620,23 @@ where
             .checkpoint
             .ok_or_else(|| Error::Corrupt("checkpoint missing after its last step".into()))
     }
-    /// Advances the horizon as far as the checkpoint, the retained window
+    /// Advances the pruned prefix as far as the checkpoint, the retained window
     /// and delivery acknowledgments allow, and deletes behind it in bounded
-    /// steps. Returns the horizon.
+    /// steps. Returns the pruned prefix.
     pub async fn prune(&self) -> Result<AppliedFrontier, Error> {
         self.flush().await?;
         self.steps(|| Request::Prune).await?;
-        Ok(self.retention_status().await?.horizon)
+        Ok(self.retention_status().await?.pruned_prefix)
     }
     /// Stops waiting for `peer` to acknowledge history. It will be told to
-    /// import a checkpoint once it asks for operations behind the horizon.
+    /// import a checkpoint once it asks for operations behind the pruned prefix.
     pub async fn declare_behind(&self, peer: NodeId) -> Result<(), Error> {
         self.retention_request(Request::DeclareBehind(peer))
             .await
             .map(|_| ())
     }
     /// The operations a peer lacks, given its `sync_state`, or the notice
-    /// that it is behind the horizon. `peer` names a delivery target, whose
+    /// that it is behind the pruned_prefix. `peer` names a delivery target, whose
     /// applied frontier then counts as acknowledgment.
     pub async fn catch_up(&self, peer: Option<NodeId>, state: SyncState) -> Result<Catchup, Error> {
         self.catch_up_after(peer, state, None).await
@@ -816,14 +816,17 @@ mod tests {
         let mut previous = bytes.clone();
         previous[b"rocky.checkpoint.v".len()] = b'1';
         assert!(CheckpointRecord::decode(&previous).is_err());
-        let notice = HorizonNotice {
+        let notice = PrunedNotice {
             scope: fixtures::SCOPE,
             node: fixtures::LAPTOP,
-            horizon: frontier,
+            pruned_prefix: frontier,
             checkpoint: record.commitment(),
             sequence: 2,
         };
-        assert_eq!(HorizonNotice::decode(&notice.encode()).unwrap(), notice);
+        assert_eq!(PrunedNotice::decode(&notice.encode()).unwrap(), notice);
+        let mut unsupported = notice.encode();
+        unsupported[b"rocky.pruned.v".len()] = b'2';
+        assert!(PrunedNotice::decode(&unsupported).is_err());
         let start = CheckpointCursor {
             checkpoint: record.commitment(),
             table: 0,

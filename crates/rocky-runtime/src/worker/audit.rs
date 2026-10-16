@@ -44,8 +44,8 @@ where
             .map(|(node, _)| *node)
             .collect::<std::collections::BTreeSet<_>>()
         {
-            let horizon = self.retention.horizon(node);
-            pruned |= horizon > 0;
+            let pruned_prefix = self.retention.pruned_prefix(node);
+            pruned |= pruned_prefix > 0;
             let applied = self.frontier.get(&node).map_or(0, |applied| applied.get());
             applied_count += applied;
             let mut previous: Option<u64> = None;
@@ -78,7 +78,7 @@ where
                         // Applied history has no gap; pruning removes a prefix.
                         || match previous {
                             Some(previous) => after <= applied && after != previous + 1,
-                            None => after <= applied && after > horizon + 1,
+                            None => after <= applied && after > pruned_prefix + 1,
                         }
                     {
                         return Err(corrupt("foreign or inconsistent history"));
@@ -89,7 +89,7 @@ where
                         continue;
                     }
                     for dependency in &op.dependencies {
-                        if self.retention.below_horizon(*dependency) {
+                        if self.retention.below_pruned_prefix(*dependency) {
                             continue;
                         }
                         let mut records = self
@@ -118,8 +118,8 @@ where
                     break;
                 }
             }
-            if previous.unwrap_or(horizon) < applied
-                || (node == local && previous.unwrap_or(horizon).max(applied) != sequence)
+            if previous.unwrap_or(pruned_prefix) < applied
+                || (node == local && previous.unwrap_or(pruned_prefix).max(applied) != sequence)
             {
                 return Err(corrupt("counters differ from canonical history"));
             }
@@ -183,7 +183,7 @@ where
                 let id =
                     incoming::operation_id(&node, sequence).map_err(|_| corrupt("ack author"))?;
                 if ![0, 1].contains(&row.get::<i64>(3)?)
-                    || (!self.retention.below_horizon(id)
+                    || (!self.retention.below_pruned_prefix(id)
                         && self
                             .status_of(id)
                             .await?
@@ -199,14 +199,14 @@ where
         }
     }
     /// Every local operation still inside the retry window has one handle
-    /// bound to its input; a handle without an operation is behind the horizon.
+    /// bound to its input; a handle without an operation is behind the pruned prefix.
     async fn audit_handles(&self, sequence: u64) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("mutation handle binding".into());
         let local = self.identity.node;
         let window = self.retention.handle_window() as u64;
         let kept_after = self
             .retention
-            .horizon(local)
+            .pruned_prefix(local)
             .min(sequence.saturating_sub(window));
         let mut kept = 0;
         let mut after = 0i64;
@@ -242,7 +242,7 @@ where
                             return Err(corrupt());
                         }
                     }
-                    None if self.retention.below_horizon(id) => {}
+                    None if self.retention.below_pruned_prefix(id) => {}
                     None => return Err(Error::Corrupt("handle operation".into())),
                 }
             }
@@ -262,12 +262,12 @@ where
         }
         Ok(())
     }
-    /// The outbox holds exactly the local operations after the horizon that
+    /// The outbox holds exactly the local operations after the pruned prefix that
     /// some delivery target has not acknowledged.
     async fn audit_outbox(&self) -> Result<(), Error> {
         let local = self.identity.node;
-        let horizon = self.retention.horizon(local);
-        let mut after = horizon as i64;
+        let pruned_prefix = self.retention.pruned_prefix(local);
+        let mut after = pruned_prefix as i64;
         loop {
             let mut page = self
                 .conn()

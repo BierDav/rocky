@@ -136,7 +136,7 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
         assert!(dialed.is_err(), "{case}");
         // The acceptor said nothing: the stranger saw neither its hello nor its chain.
         assert!(read.lock().unwrap().is_empty(), "{case}");
-        assert_eq!(a.recorded_peers().await, (0, 0), "{case}");
+        assert_eq!(a.recorded_peers().await, 0, "{case}");
     }
     // A member is recorded once it is served.
     insert(&a, &f, 1, "served").await;
@@ -147,8 +147,8 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
     let (served, pulled) = tokio::join!(server.serve_once(&a), client.peer_frontier(&b, f.public));
     served.unwrap();
     pulled.unwrap();
-    assert_eq!(a.recorded_peers().await, (1, 0));
-    assert_eq!(b.recorded_peers().await, (0, 1));
+    assert_eq!(a.recorded_peers().await, 0);
+    assert_eq!(b.recorded_peers().await, 1);
 }
 
 #[tokio::test]
@@ -193,7 +193,7 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     told(erin_side, &erin);
     assert_eq!(rejected(alice_side), PEER_REVOKED);
     assert!(e.revocations().await.revokes(&dave.public_key()));
-    assert_eq!(a.recorded_peers().await, (0, 0));
+    assert_eq!(a.recorded_peers().await, 0);
     // Both still open: a replica never holds the statement revoking itself.
     drop((d, e));
     open(&f, &dir, "d.db", &dave).await;
@@ -287,9 +287,6 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     .unwrap();
     let serve = async |key: &PrivateKey| {
         let chain = f.credentials(key, f.full());
-        a.record_horizon_credentials(key.public_key(), &chain)
-            .await
-            .unwrap();
         a.acknowledge_frontier(key.public_key(), &chain, &frontier)
             .await
             .unwrap();
@@ -301,10 +298,22 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
         serve(stranger).await;
     }
     let kept = MAX_UNCONFIGURED_PEERS + 2;
-    assert_eq!(a.recorded_peers().await, (kept, kept));
+    assert_eq!(a.recorded_peers().await, kept);
     // The two kept whatever the bound, and the most recent strangers, stay.
-    let present =
-        async |key: &PrivateKey| a.cached_peer_credentials(&[key.public_key()]).await.is_ok();
+    let present = async |key: &PrivateKey| {
+        let inner = a.inner.lock().await;
+        let mut rows = inner
+            .conn
+            .query(
+                "SELECT 1 FROM secure_peer_frontiers WHERE peer=?",
+                [rocky_credentials::PeerId::of(key.public_key())
+                    .as_bytes()
+                    .to_vec()],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().is_some()
+    };
     assert!(present(&configured).await && present(&full_node).await);
     assert!(present(&strangers[299]).await && present(&strangers[300 - 256]).await);
     assert!(!present(&strangers[0]).await && !present(&strangers[300 - 257]).await);
@@ -317,5 +326,5 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     assert!(present(&strangers[oldest]).await && present(&newcomer).await);
     assert!(!present(&strangers[oldest + 1]).await);
     assert!(present(&configured).await && present(&full_node).await);
-    assert_eq!(a.recorded_peers().await, (kept, kept));
+    assert_eq!(a.recorded_peers().await, kept);
 }

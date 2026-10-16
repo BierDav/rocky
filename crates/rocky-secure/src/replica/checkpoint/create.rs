@@ -148,7 +148,6 @@ impl<A: RowApplication> Inner<A> {
                 if signed.signer() == signer
                     && signed.statement.revocations == inner.revocation_digest()?
                     && signed.statement.key_epoch == inner.scope_key(scope)?.0
-                    && signed.statement.horizon == inner.mergeable_horizon(scope).await?
                 {
                     return Ok(Step::Done(Box::new(signed)));
                 }
@@ -160,24 +159,10 @@ impl<A: RowApplication> Inner<A> {
                     limit: MAX_CHECKPOINT_LOGS,
                 });
             }
-            let horizon = inner.mergeable_horizon(scope).await?;
-            if horizon.as_ref().is_some_and(|signed| {
-                signed.statement.logs.iter().any(|cut| {
-                    !logs.iter().any(|(log, _)| {
-                        log.author == cut.signer
-                            && log.sequence >= cut.sequence
-                            && (log.sequence != cut.sequence || log.hash.as_bytes() == &cut.head)
-                    })
-                })
-            }) {
-                return Err(denied(
-                    "sync to the admitted issuer horizon before capturing a checkpoint",
-                ));
-            }
             if verified
                 .as_ref()
                 .and_then(|record| record.signed.as_ref())
-                .is_some_and(|signed| signed.statement.finalized.is_some())
+                .is_some_and(|signed| signed.statement.seal.is_some())
             {
                 inner
                     .capture_checkpoint_creations(scope, id, "secure_checkpoint_build_stubs")
@@ -190,11 +175,6 @@ impl<A: RowApplication> Inner<A> {
                 None => None,
             };
             let capture = Capture {
-                finalized: verified
-                    .as_ref()
-                    .and_then(|record| record.signed.as_ref())
-                    .and_then(|signed| signed.statement.finalized.clone()),
-                horizon,
                 identities: inner.identity_marks(scope).await?,
                 clock: logs.iter().map(|(log, _)| log.clock).max().unwrap_or(0),
                 frontier: logs.into_iter().map(|(log, _)| log).collect(),
@@ -325,13 +305,9 @@ impl<A: RowApplication> Inner<A> {
             }
             let previous = inner.checkpoint_record(id, true).await?;
             let manifest = &inner.definition;
-            let horizon = capture.horizon;
-            let finalized = capture.finalized;
             let statement = CheckpointStatement {
                 format: CHECKPOINT_FORMAT,
                 seal: None,
-                finalized,
-                horizon,
                 partition: inner.partitions.get(&scope).cloned(),
                 identities: capture.identities,
                 moves: inner.checkpoint_moves(id).await?,
@@ -544,11 +520,7 @@ impl<A: RowApplication> Inner<A> {
                     .scope_key(scope)
                     .is_ok_and(|(generation, _)| generation != signed.statement.key_epoch)
         });
-        let horizon_changed = verified
-            .as_ref()
-            .and_then(|signed| signed.statement.horizon.as_ref())
-            != self.mergeable_horizon(scope).await?.as_ref();
-        if (rotated || horizon_changed) && state != "failed" {
+        if rotated && state != "failed" {
             self.checkpoint_step(scope, true).await?;
             return Ok(true);
         }

@@ -416,7 +416,7 @@ impl<A: RowApplication> Inner<A> {
                     Err(error) => Err(error),
                 },
                 Work::Receive(frame) => match frame.scope() {
-                    Ok(scope) => match self.ensure_horizon_current(scope).await {
+                    Ok(scope) => match self.ensure_cut_clean(scope).await {
                         Ok(()) => self.receive_step(frame, time).await,
                         Err(error) => Err(error),
                     },
@@ -506,7 +506,7 @@ impl<A: RowApplication> Inner<A> {
         if held {
             return Ok(Staged::Duplicate);
         }
-        // A late frame from before the horizon is part of the checkpoint: it
+        // A late frame from before the pruned_prefix is part of the checkpoint: it
         // is not stored and cannot be applied a second time.
         let scope = operation.header.extensions.scope;
         if self.frame_reach(
@@ -520,7 +520,7 @@ impl<A: RowApplication> Inner<A> {
         )? != tips::FrameReach::Held
             && let Some(id) = self.find_scope_id(scope).await?
             && let Some(log) = self.log(id, operation.header.public_key).await?
-            && operation.header.seq_num as i64 <= log.horizon
+            && operation.header.seq_num as i64 <= log.pruned_prefix
         {
             // A pending frame may name it as a dependency.
             if self.has_pending(scope).await? {

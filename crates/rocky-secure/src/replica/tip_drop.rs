@@ -198,7 +198,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?
                 .is_empty()
-                    || inner.has_horizon(*scope).await?)
+                    || inner.has_pruned_prefix(*scope).await?)
             {
                 return Err(denied("checkpoint history prevents dropping tip frames"));
             }

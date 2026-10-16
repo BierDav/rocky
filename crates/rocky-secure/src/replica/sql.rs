@@ -1125,7 +1125,7 @@ impl<A: RowApplication> SecureSql<A> {
             Some(Ok(frames)) => return Ok(Sealed::Replayed(SecureCommit { handle, frames })),
             Some(Err(_)) => {
                 return Err(denied(
-                    "transaction handle was committed before the pruning horizon",
+                    "transaction handle was committed before the pruned prefix",
                 ));
             }
             None => {}

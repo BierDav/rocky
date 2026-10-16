@@ -1,4 +1,4 @@
-//! Checkpoints, the horizon and pruning of one domain. The checkpoint is a
+//! Checkpoints, the pruned prefix and pruning of one domain. The checkpoint is a
 //! second copy of the application's tables that lags the projection; it
 //! advances by replaying retained operations. See
 //! `docs/runtime/checkpoints.md`.
@@ -35,7 +35,7 @@ pub(super) fn now_millis() -> i64 {
 /// the copy catches up under any load without one long step.
 pub(super) const ADVANCE_OPERATIONS: usize = 128;
 pub(super) const ADVANCE_BOUNDS: (usize, usize) = (32, 256);
-/// Records one step deletes, and sequences it moves the horizon per author.
+/// Records one step deletes, and sequences it moves the pruned prefix per author.
 pub(super) const PRUNE_BATCH: usize = 512;
 /// Rows and bytes of one exported checkpoint page.
 pub(super) const EXPORT_ROWS: usize = 512;
@@ -97,7 +97,7 @@ pub(super) struct PeerMark {
     /// The peer reported holding everything at or before this.
     #[serde(default)]
     pub(super) held: Marks,
-    /// Since when, in Unix milliseconds, the peer has held back the horizon.
+    /// Since when, in Unix milliseconds, the peer has held back the pruned prefix.
     #[serde(default)]
     pub(super) holding_since: Option<i64>,
 }
@@ -116,7 +116,7 @@ pub(super) struct Stored {
     pub(super) history: (Commitment, u64),
     pub(super) candidate: Option<Candidate>,
     pub(super) record: Option<Vec<u8>>,
-    pub(super) horizon: Marks,
+    pub(super) pruned_prefix: Marks,
     pub(super) peers: Vec<(NodeId, PeerMark)>,
     pub(super) import: Option<Import>,
 }
@@ -128,7 +128,7 @@ impl Default for Stored {
             history: Default::default(),
             candidate: None,
             record: None,
-            horizon: Vec::new(),
+            pruned_prefix: Vec::new(),
             peers: Vec::new(),
             import: None,
         }
@@ -159,7 +159,7 @@ pub(super) struct Retention {
     pub(super) definition: Commitment,
     /// A flush covers the latest record.
     pub(super) record_flushed: bool,
-    /// The horizon may be able to move, or rows remain behind it.
+    /// The pruned prefix may be able to move, or rows remain behind it.
     pub(super) prune_wanted: bool,
     pub(super) lease: Option<std::time::Instant>,
 }
@@ -257,18 +257,18 @@ impl Retention {
             .filter(|table| table.checkpointed)
             .enumerate()
     }
-    pub(super) fn horizon(&self, node: NodeId) -> u64 {
-        at(&self.stored.horizon, node)
+    pub(super) fn pruned_prefix(&self, node: NodeId) -> u64 {
+        at(&self.stored.pruned_prefix, node)
     }
-    pub(super) fn below_horizon(&self, id: OperationId) -> bool {
-        id.sequence.get() <= self.horizon(id.node)
+    pub(super) fn below_pruned_prefix(&self, id: OperationId) -> bool {
+        id.sequence.get() <= self.pruned_prefix(id.node)
     }
-    /// An acknowledgment may let the horizon follow the checkpoint further.
+    /// An acknowledgment may let the pruned prefix follow the checkpoint further.
     pub(super) fn acknowledged(&mut self) {
         if let Some((record, _)) = &self.record {
             let window = self.policy.window as u64;
             self.prune_wanted |= record.frontier.0.iter().any(|(node, covered)| {
-                covered.get().saturating_sub(window) > at(&self.stored.horizon, *node)
+                covered.get().saturating_sub(window) > at(&self.stored.pruned_prefix, *node)
             });
         }
     }
@@ -293,12 +293,12 @@ impl Retention {
         self.stored.shadow.as_deref()
     }
     /// The sequence up to which `peer` holds `node`'s pruned operations:
-    /// the horizon, or what it reported applied while declared behind.
+    /// the pruned prefix, or what it reported applied while declared behind.
     pub(super) fn acknowledged_behind(&self, peer: NodeId, node: NodeId) -> u64 {
-        let horizon = self.horizon(node);
+        let pruned_prefix = self.pruned_prefix(node);
         match self.stored.peers.iter().find(|(known, _)| *known == peer) {
-            Some((_, mark)) if mark.behind => at(&mark.applied, node).min(horizon),
-            _ => horizon,
+            Some((_, mark)) if mark.behind => at(&mark.applied, node).min(pruned_prefix),
+            _ => pruned_prefix,
         }
     }
     pub(super) fn status_record(&self) -> Option<&CheckpointRecord> {
@@ -412,8 +412,8 @@ where
             _ => &self.retention.shadow_writer,
         }
     }
-    pub(super) fn retention_horizon(&self) -> Result<rocky_core::AppliedFrontier, Error> {
-        frontier(&self.retention.stored.horizon)
+    pub(super) fn retention_pruned_prefix(&self) -> Result<rocky_core::AppliedFrontier, Error> {
+        frontier(&self.retention.stored.pruned_prefix)
     }
     pub(super) fn applied_marks(&self) -> Marks {
         self.frontier
@@ -485,7 +485,7 @@ where
             if record.scope != self.identity.scope
                 || record.definition != self.retention.definition
                 || stored
-                    .horizon
+                    .pruned_prefix
                     .iter()
                     .any(|(node, sequence)| *sequence > at(&covered, *node))
                 || stored.shadow.as_ref().is_some_and(|shadow| {
@@ -498,8 +498,8 @@ where
                     "checkpoint record differs from this domain".into(),
                 ));
             }
-        } else if !stored.horizon.is_empty() {
-            return Err(Error::Corrupt("horizon without a checkpoint".into()));
+        } else if !stored.pruned_prefix.is_empty() {
+            return Err(Error::Corrupt("pruned_prefix without a checkpoint".into()));
         }
         Ok(())
     }
@@ -567,7 +567,7 @@ where
                 && since >= retention.policy.checkpoint_operations as u64)
                 || self.retained_bytes >= retention.policy.retained_bytes / 2)
     }
-    /// A verified checkpoint waits for a flush before the horizon may move.
+    /// A verified checkpoint waits for a flush before the pruned prefix may move.
     pub(crate) fn wants_flush(&self) -> bool {
         let retention = &self.retention;
         retention.policy.automatic
@@ -700,7 +700,7 @@ where
                 _ => None,
             },
             hold,
-            horizon: frontier(&retention.stored.horizon)?,
+            pruned_prefix: frontier(&retention.stored.pruned_prefix)?,
             behind: retention
                 .stored
                 .peers

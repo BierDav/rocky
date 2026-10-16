@@ -1,4 +1,4 @@
-//! Checkpoints, pruning, the horizon signal and rebootstrap.
+//! Checkpoints, pruning, the pruned_prefix signal and rebootstrap.
 use super::super::replica::checkpoint::Stage;
 use super::*;
 use crate::storage::rows;
@@ -355,7 +355,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         assert_eq!(count(&a, &format!("SELECT COUNT(*) FROM {table}")).await, 0);
     }
     let status = a.checkpoint_status(f.public).await.unwrap();
-    assert_eq!(status.horizon, vec![(a_key.public_key(), 19)]);
+    assert_eq!(status.pruned_prefix, vec![(a_key.public_key(), 19)]);
     assert_eq!(
         (status.covered, status.uncovered, status.retained_bytes),
         (0, 0, 0)
@@ -394,7 +394,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
 }
 
 #[tokio::test]
-async fn late_frames_and_retried_handles_from_before_the_horizon_do_nothing() {
+async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothing() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
@@ -439,11 +439,11 @@ async fn late_frames_and_retried_handles_from_before_the_horizon_do_nothing() {
         Companion::Deleted
     );
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
-    // A retried handle from before the horizon never authors again.
+    // A retried handle from before the pruned_prefix never authors again.
     let operations = count(&a, "SELECT COUNT(*) FROM secure_handles").await;
     assert!(matches!(
         a.author(handle(1), insert(&f, 1, "alive"), vec![]).await,
-        Err(Error::Rejected(message)) if message.contains("before the pruning horizon")
+        Err(Error::Rejected(message)) if message.contains("before the pruned prefix")
     ));
     assert_eq!(
         a.author_buffered(handle(1), insert(&f, 1, "alive"), vec![])
@@ -519,7 +519,7 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     assert_eq!(a.lookup_mutation(handle(1)).await.unwrap(), None);
     assert!(matches!(
         a.author(handle(3), insert(&f, 3, "third"), vec![]).await,
-        Err(Error::Rejected(message)) if message.contains("before the pruning horizon")
+        Err(Error::Rejected(message)) if message.contains("before the pruned prefix")
     ));
     // A forgotten handle authors again.
     a.author(handle(1), insert(&f, 4, "fourth"), vec![])
@@ -595,18 +595,18 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         .id()
         .unwrap();
     // B was online and acknowledged everything: it is not behind and converges.
-    let horizon = a
-        .horizon_page(keys[1].public_key(), &b_credentials, f.public, None)
+    let pruned_prefix = a
+        .pruned_page(keys[1].public_key(), &b_credentials, f.public, None)
         .await
         .unwrap();
-    assert_eq!(horizon.logs, vec![(keys[0].public_key(), 46)]);
-    assert!(!b.behind_horizon(&horizon).await.unwrap());
+    assert_eq!(pruned_prefix.logs, vec![(keys[0].public_key(), 46)]);
+    assert!(!b.behind_pruned(&pruned_prefix).await.unwrap());
     assert_eq!(
         sync(&f, &a, (&b, &keys[1], &b_credentials)).await,
         vec![f.public]
     );
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
-    assert!(c.behind_horizon(&horizon).await.unwrap());
+    assert!(c.behind_pruned(&pruned_prefix).await.unwrap());
     // Over the link C is told so, and no frame is received into a gap.
     let quota = 8192;
     let before = all_rows(&f, &c).await;
@@ -662,7 +662,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     assert_eq!(c.rebootstrap_progress(f.public).await.unwrap(), None);
     c.audit(f.public).await.unwrap();
     // C now syncs the frames after the checkpoint and A receives C's edits.
-    assert!(!c.behind_horizon(&horizon).await.unwrap());
+    assert!(!c.behind_pruned(&pruned_prefix).await.unwrap());
     sync(&f, &a, (&c, &keys[2], &c_credentials)).await;
     sync(&f, &c, (&a, &keys[0], &a_credentials)).await;
     let rows = all_rows(&f, &a).await;
@@ -893,7 +893,7 @@ async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
     assert_eq!(status.maintenance_error, None);
     assert!(peak <= 60 * size as u64, "{peak}");
     assert!(status.checkpoint.unwrap().statement.operations > 100);
-    assert!(!status.horizon.is_empty());
+    assert!(!status.pruned_prefix.is_empty());
     assert!(count(&a, "SELECT COUNT(*) FROM secure_operations").await < 60);
     a.audit(f.public).await.unwrap();
     // Without acknowledgments nothing may be pruned: the hard bound answers

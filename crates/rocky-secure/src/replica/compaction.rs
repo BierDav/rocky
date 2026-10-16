@@ -326,7 +326,7 @@ impl<A: RowApplication> Inner<A> {
             match self.base_seal(*id).await? {
                 Some(base) if self.path_index(domain, base)? >= at => continue,
                 Some(_) => {}
-                None if self.has_horizon(*scope).await? => {
+                None if self.has_pruned_prefix(*scope).await? => {
                     return Ok(Some(
                         "history pruned before the seals; a checkpoint at a seal replaces it"
                             .into(),
@@ -1038,6 +1038,33 @@ impl<A: RowApplication> Inner<A> {
             .map(|(_, position)| position)
             .next_back()
             .unwrap_or(cursor);
+        // No included operations or finalization diff: the earlier seal's
+        // base still describes this scope exactly.
+        let reusable = match base {
+            Some((_, signed)) => {
+                signed.statement.key_epoch == self.scope_key(scope)?.0
+                    && signed.statement.revocations == self.revocation_digest()?
+            }
+            None => false,
+        };
+        if reusable && through == cursor {
+            let mut drops = self
+                .conn
+                .query(
+                    "SELECT 1 FROM secure_seal_drops WHERE scope=? AND depth<=? LIMIT 1",
+                    [id, target.depth],
+                )
+                .await?;
+            if drops.next().await?.is_none() {
+                self.conn
+                    .execute(
+                        "DELETE FROM secure_seal_bounds WHERE scope=? AND depth<=?",
+                        [id, target.depth],
+                    )
+                    .await?;
+                return Ok(());
+            }
+        }
         let mut sets = match self.checkpoint_record(id, true).await? {
             Some(record) if base.is_some() => record.sets,
             _ => Sets::new(),
@@ -1123,8 +1150,6 @@ impl<A: RowApplication> Inner<A> {
         let statement = CheckpointStatement {
             format: CHECKPOINT_FORMAT,
             seal: Some(target.seal),
-            horizon: None,
-            finalized: None,
             partition: self.partitions.get(&scope).cloned(),
             identities: self.identity_marks(scope).await?,
             moves: self.imported_moves(id).await?,
@@ -1190,14 +1215,14 @@ impl<A: RowApplication> Inner<A> {
         // past the seal only the creations of stored and base rows are needed.
         self.conn
             .execute(
-                "DELETE FROM secure_horizon_live_creations WHERE scope=?",
+                "DELETE FROM secure_compaction_live_creations WHERE scope=?",
                 [id],
             )
             .await?;
         for creation in self.base_creations(id).await? {
             self.conn
                 .execute(
-                    "INSERT OR IGNORE INTO secure_horizon_live_creations VALUES(?,?)",
+                    "INSERT OR IGNORE INTO secure_compaction_live_creations VALUES(?,?)",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(creation.as_bytes().to_vec()),
@@ -1232,7 +1257,7 @@ impl<A: RowApplication> Inner<A> {
                 let record: Materialized = decode(fields)?;
                 self.conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_horizon_live_creations VALUES(?,?)",
+                        "INSERT OR IGNORE INTO secure_compaction_live_creations VALUES(?,?)",
                         bindings(vec![
                             SqlValue::Integer(id),
                             SqlValue::Blob(record.creation.as_bytes().to_vec()),
@@ -1243,13 +1268,13 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "DELETE FROM secure_stubs WHERE scope=?1 AND (creation=0 OR hash NOT IN (SELECT hash FROM secure_horizon_live_creations WHERE scope=?1))",
+                "DELETE FROM secure_stubs WHERE scope=?1 AND (creation=0 OR hash NOT IN (SELECT hash FROM secure_compaction_live_creations WHERE scope=?1))",
                 [id],
             )
             .await?;
         self.conn
             .execute(
-                "DELETE FROM secure_horizon_live_creations WHERE scope=?",
+                "DELETE FROM secure_compaction_live_creations WHERE scope=?",
                 [id],
             )
             .await?;

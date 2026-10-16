@@ -114,7 +114,6 @@ private fun EntryRow(entry: ActivityEntry, now: Long) {
 private fun EntryKind.look(): Pair<ImageVector, Color> = when (this) {
     EntryKind.Transfer -> Icons.Filled.SwapVert to Color(0xFF43A047)
     EntryKind.Checkpoint -> Icons.Filled.Inventory2 to Color(0xFFF9A825)
-    EntryKind.Horizon -> Icons.Filled.ContentCut to Color(0xFF8E24AA)
     EntryKind.PeerUp -> Icons.Filled.Link to Color(0xFF43A047)
     EntryKind.PeerDown -> Icons.Filled.LinkOff to Color(0xFFE53935)
     EntryKind.Credentials -> Icons.Filled.Badge to MaterialTheme.colorScheme.tertiary

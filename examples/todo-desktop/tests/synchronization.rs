@@ -241,7 +241,7 @@ async fn dropped_operation_retry_and_rejection_are_distinct() {
 /// The phone stays offline while the laptop checkpoints and prunes. The
 /// transport then copies the checkpoint; the phone's own edit survives.
 #[tokio::test]
-async fn a_replica_behind_the_horizon_rebootstraps_through_the_transport() {
+async fn a_replica_behind_the_pruned_prefix_rebootstraps_through_the_transport() {
     let dir = TempDir::new().unwrap();
     let demo = Demo::open(dir.path()).await.unwrap();
     let mut transport = SimulatedTransport::new(64).unwrap();
@@ -255,8 +255,8 @@ async fn a_replica_behind_the_horizon_rebootstraps_through_the_transport() {
         .await
         .unwrap();
     laptop.checkpoint().await.unwrap();
-    let horizon = laptop.prune().await.unwrap();
-    assert!(!horizon.0.is_empty());
+    let pruned_prefix = laptop.prune().await.unwrap();
+    assert!(!pruned_prefix.0.is_empty());
     settle(&mut transport, &demo).await;
     let (ours, theirs) = (
         laptop.query().await.unwrap(),

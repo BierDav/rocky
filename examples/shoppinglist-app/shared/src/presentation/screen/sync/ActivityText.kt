@@ -5,7 +5,7 @@ import rocky.RockyEvent
 import rocky.ScopeName
 
 /** How an activity line is drawn. */
-enum class EntryKind { Transfer, Checkpoint, Horizon, PeerUp, PeerDown, Credentials, Device, Author, Key, Network, Problem }
+enum class EntryKind { Transfer, Checkpoint, PeerUp, PeerDown, Credentials, Device, Author, Key, Network, Problem }
 
 /** One line of the activity log, newest first in the list. */
 data class ActivityEntry(val key: String, val atEpochMillis: Long, val kind: EntryKind, val title: String, val detail: String? = null, val isProblem: Boolean = kind == EntryKind.Problem)
@@ -36,13 +36,6 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             EntryKind.Checkpoint,
             "Restarted ${scope(event.scope)} from ${device(event.peer)}'s checkpoint",
             "checkpoint ${event.checkpoint.take(12)}…, ${event.superseded} operations it covers dropped",
-        )
-
-        is RockyEvent.HorizonFinalized -> ActivityEntry(
-            key,
-            event.atEpochMillis,
-            EntryKind.Horizon,
-            "Every device applied ${scope(event.scope)}: history pruned up to its horizon",
         )
 
         is RockyEvent.Bootstrap -> ActivityEntry(

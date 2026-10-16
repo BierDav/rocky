@@ -1,7 +1,7 @@
 //! Row transfer: pulls by subscription, ranges by frontier, pushes, scope
 //! lists and remote reads.
 use super::*;
-use horizon::HorizonMessage;
+use checkpoints::CheckpointMessage;
 
 /// Frames in one transfer page.
 pub(super) const MAX_SECURE_PAGE: usize = 32;
@@ -85,7 +85,7 @@ pub struct CatchUp {
     /// Frames received, including duplicates.
     pub frames: usize,
     pub pages: usize,
-    /// This replica is behind the peer's horizon and must rebootstrap.
+    /// This replica is behind the peer's pruned_prefix and must rebootstrap.
     pub behind: bool,
     /// Encoded bytes of the frames received.
     pub bytes: usize,
@@ -101,7 +101,7 @@ pub struct CatchUp {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pushed {
     pub frames: usize,
-    /// The peer is behind this replica's horizon and must rebootstrap from it.
+    /// The peer is behind this replica's pruned_prefix and must rebootstrap from it.
     pub behind: bool,
     /// The session's byte budget ran low; continue on a new session.
     pub exhausted: bool,
@@ -127,12 +127,12 @@ impl NativeSession {
         let pulled = self.pull_page(replica, scopes, after, quota).await?;
         if !pulled.rebootstrap.is_empty() {
             return Err(denied(
-                "behind the peer's pruning horizon; rebootstrap the scope",
+                "behind the peer's pruned prefix; rebootstrap the scope",
             ));
         }
         Ok(pulled.next)
     }
-    /// One pull. Frames of a scope this replica is behind the peer's horizon
+    /// One pull. Frames of a scope this replica is behind the peer's pruned_prefix
     /// for are not received; the scope is returned in `rebootstrap`.
     pub async fn pull_page<A: RowApplication>(
         &mut self,
@@ -168,15 +168,17 @@ impl NativeSession {
             }
             let mut after = None;
             loop {
-                self.send(HorizonMessage::Horizon { scope, after }).await?;
-                let HorizonMessage::HorizonLogs { page } = self.reply::<HorizonMessage>().await?
+                self.send(CheckpointMessage::Pruned { scope, after })
+                    .await?;
+                let CheckpointMessage::PrunedLogs { page } =
+                    self.reply::<CheckpointMessage>().await?
                 else {
-                    return Err(denied("unexpected horizon response"));
+                    return Err(denied("unexpected pruned_prefix response"));
                 };
                 if page.scope != scope || page.logs.len() > MAX_SECURE_PAGE * 8 {
-                    return Err(denied("horizon outside subscription"));
+                    return Err(denied("pruned_prefix outside subscription"));
                 }
-                if replica.behind_horizon(&page).await? {
+                if replica.behind_pruned(&page).await? {
                     rebootstrap.push(scope);
                     break;
                 }
@@ -230,7 +232,7 @@ impl NativeSession {
     }
     /// Pulls every frame of `scope` this replica lacks in bounded pages and
     /// acknowledges its frontier after each page. Stops at once when this
-    /// replica is behind the peer's horizon.
+    /// replica is behind the peer's pruned_prefix.
     pub async fn catch_up<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -238,37 +240,6 @@ impl NativeSession {
         quota: usize,
     ) -> Result<CatchUp, Error> {
         self.ensure_holding(replica, &[scope]).await?;
-        self.relay_mergeable_horizon(replica, scope).await?;
-        self.send(HorizonMessage::MergeableCut { scope }).await?;
-        let HorizonMessage::MergeableState { signed, behind } =
-            self.reply::<HorizonMessage>().await?
-        else {
-            return Err(denied("unexpected mergeable horizon response"));
-        };
-        if signed
-            .as_ref()
-            .is_some_and(|signed| signed.statement.scope != scope)
-        {
-            return Err(denied("mergeable horizon outside requested scope"));
-        }
-        if behind || replica.horizon_rebootstrap_required(scope).await? {
-            if let Some(signed) = signed {
-                replica.require_horizon_rebootstrap(*signed).await?;
-            }
-            return Ok(CatchUp {
-                behind: true,
-                ..Default::default()
-            });
-        }
-        if let Some(signed) = signed
-            && replica.receive_horizon((*signed).clone()).await.is_err()
-        {
-            replica.require_horizon_rebootstrap(*signed).await?;
-            return Ok(CatchUp {
-                behind: true,
-                ..Default::default()
-            });
-        }
         let mut report = CatchUp::default();
         let mut after = None;
         loop {
@@ -342,9 +313,6 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<Pushed, Error> {
-        if replica.horizon_rebootstrap_required(scope).await? {
-            return Err(denied("phase-3 rebootstrap required before sync or write"));
-        }
         let mut frontier = self.peer_frontier(replica, scope).await?;
         let mut after = None;
         let mut pushed = Pushed::default();
@@ -472,19 +440,6 @@ impl NativeSession {
                 if quota > MAX_SECURE_FRAME / 2 {
                     return Err(denied("native page quota"));
                 }
-                for scope in &scopes {
-                    if replica.horizon_rebootstrap_required(*scope).await? {
-                        return Err(denied(
-                            "phase-3 rebootstrap required before serving row sync",
-                        ));
-                    }
-                    if replica
-                        .horizon_peer_behind(self.peer, &self.credentials, *scope)
-                        .await?
-                    {
-                        return Err(denied("phase-3 rebootstrap required before sync or write"));
-                    }
-                }
                 let mut page = replica
                     .transfer_page(self.peer, &self.credentials, &scopes, after, quota)
                     .await?;
@@ -516,17 +471,6 @@ impl NativeSession {
                 if quota > MAX_SECURE_FRAME / 2 {
                     return Err(denied("native page quota"));
                 }
-                if replica.horizon_rebootstrap_required(frontier.scope).await? {
-                    return Err(denied(
-                        "phase-3 rebootstrap required before serving row sync",
-                    ));
-                }
-                if replica
-                    .horizon_peer_behind(self.peer, &self.credentials, frontier.scope)
-                    .await?
-                {
-                    return Err(denied("phase-3 rebootstrap required before sync or write"));
-                }
                 let mut page = replica
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
@@ -555,12 +499,6 @@ impl NativeSession {
                 voids,
                 cuts,
             } => {
-                if replica
-                    .horizon_peer_behind(self.peer, &self.credentials, scope)
-                    .await?
-                {
-                    return Err(denied("phase-3 rebootstrap required before sync or write"));
-                }
                 replica
                     .authorize_scope_peer(self.peer, &self.credentials, scope)
                     .await?;

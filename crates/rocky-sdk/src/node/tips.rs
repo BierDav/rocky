@@ -69,6 +69,7 @@ impl Node {
                 let report = self.replica.compact(scope, keep).await?;
                 self.sign_existence_bases(scope).await?;
                 self.list_checkpoints(scope).await?;
+                self.forget_generations().await?;
                 self.observations.touch();
                 let blocked = report
                     .blocked

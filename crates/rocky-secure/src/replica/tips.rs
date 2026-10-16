@@ -428,9 +428,9 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut starts = BTreeMap::new();
         if let Some(id) = self.find_scope_id(scope).await? {
-            for (log, horizon) in self.logs(id, None, false, MAX_CHECKPOINT_LOGS + 1).await? {
-                if horizon >= 0 {
-                    starts.insert(log.author, horizon as u64 + 1);
+            for (log, pruned_prefix) in self.logs(id, None, false, MAX_CHECKPOINT_LOGS + 1).await? {
+                if pruned_prefix >= 0 {
+                    starts.insert(log.author, pruned_prefix as u64 + 1);
                 }
             }
         }
@@ -824,7 +824,7 @@ impl<A: RowApplication> Inner<A> {
                 .and_then(|record| record.signed)
                 .and_then(|signed| signed.statement.seal)
                 .is_some_and(|seal| path.contains(&seal));
-            if !kept && self.has_horizon(scope).await? {
+            if !kept && self.has_pruned_prefix(scope).await? {
                 return Err(denied(
                     "switching tips needs retained history or a target checkpoint",
                 ));

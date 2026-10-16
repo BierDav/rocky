@@ -47,19 +47,16 @@ pub(crate) struct Moved {
     pub bytes: usize,
     /// The checkpoint a rebootstrap imported, with the held operations it superseded.
     pub checkpoint: Option<(rocky_core::Commitment, u64)>,
-    /// The scope's horizon was finalized and pruned.
-    pub finalized: bool,
 }
 impl Moved {
     pub fn is_empty(&self) -> bool {
-        self.pulled == 0 && self.pushed == 0 && self.checkpoint.is_none() && !self.finalized
+        self.pulled == 0 && self.pushed == 0 && self.checkpoint.is_none()
     }
     fn merge(&mut self, other: Self) {
         self.pulled += other.pulled;
         self.pushed += other.pushed;
         self.bytes += other.bytes;
         self.checkpoint = other.checkpoint.or(self.checkpoint);
-        self.finalized |= other.finalized;
     }
 }
 /// What a reconcile did, by scope, in first-change order.
@@ -71,7 +68,7 @@ pub(crate) struct Transfer {
     pub refused: Vec<ResourceScope>,
     pub held: Vec<ResourceScope>,
     /// Scopes the peer restores from a checkpoint, as it is importing them
-    /// or behind this device's pruning horizon: no history was pushed.
+    /// or behind this device's pruned prefix: no history was pushed.
     pub waiting: Vec<ResourceScope>,
 }
 impl Transfer {
@@ -432,31 +429,6 @@ async fn rows(
         if !exhausted {
             for scope in replica.existence_scopes().await? {
                 session.sync_existence(replica, scope).await?;
-            }
-            for scope in scopes {
-                // A refused scope is not exchanged with this peer at all.
-                if !exchange.refused.contains(scope) {
-                    session
-                        .acknowledge_mergeable_horizon(replica, *scope)
-                        .await?;
-                }
-                if replica.can_finalize_horizon(*scope).await?
-                    && let Some(signed) = replica.admitted_horizon(*scope).await?
-                    && replica.finalized_horizon(*scope).await?.as_ref() != Some(&signed)
-                    && !replica.horizon_rebootstrap_required(*scope).await?
-                    && replica.horizon_progress(*scope).await?.waiting.is_empty()
-                    && !replica.horizon_dependents_pending(*scope).await?
-                {
-                    replica.finalize_horizon(*scope).await?;
-                    replica.prune(*scope).await?;
-                    transfer.add(
-                        *scope,
-                        Moved {
-                            finalized: true,
-                            ..Moved::default()
-                        },
-                    );
-                }
             }
         }
         session.close().await?;

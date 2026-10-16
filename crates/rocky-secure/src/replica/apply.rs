@@ -37,7 +37,7 @@ impl<A: RowApplication> Inner<A> {
                 .count(),
             false => 0,
         };
-        // Fewer only where the author's rows were absent behind a horizon.
+        // Fewer only where the author's rows were absent after seal finalization.
         if operation.header.extensions.existence as usize > logged {
             return Err(denied("frame miscounts its existence records"));
         }
@@ -54,8 +54,7 @@ impl<A: RowApplication> Inner<A> {
         let mut identities = BTreeSet::new();
         let extension = &operation.header.extensions;
         let marks = self.identity_marks(scope).await?;
-        let basis = self.finalized_basis(scope).await?;
-        let finalized = basis.is_some() || self.seal_finalized(scope).await?;
+        let finalized = self.seal_finalized(scope).await?;
         let payload = self.row_payload(frame)?;
         let ceiling = Stamp {
             clock: operation.header.timestamp,
@@ -118,20 +117,6 @@ impl<A: RowApplication> Inner<A> {
                     return Err(denied("a move or follow requires a transaction bundle"));
                 }
                 self.check_carried(write, carried, &ceiling)?;
-                if change.before.is_some()
-                    && let Some(id) = self.find_scope_id(scope).await?
-                    && let Some(checkpoint) = self
-                        .checkpoint_record(id, true)
-                        .await?
-                        .and_then(|record| record.signed)
-                    && checkpoint.statement.finalized.is_some()
-                    && carried
-                        .stamps
-                        .values()
-                        .any(|stamp| stamp.clock <= checkpoint.statement.clock)
-                {
-                    return Err(denied("followed update is behind the destination horizon"));
-                }
             }
             if let Some(identity) = self
                 .app
@@ -161,49 +146,14 @@ impl<A: RowApplication> Inner<A> {
                     || (change.before.is_none() && current.is_some()))
             {
                 if carried.is_some() {
-                    return Err(denied("move or follow is behind the horizon"));
+                    return Err(denied("move or follow is behind the pruned_prefix"));
                 }
                 self.consume(
                     operation.hash,
-                    "row is unavailable behind the finalized horizon",
+                    "row is unavailable behind the finalized seal",
                 )
                 .await?;
                 continue;
-            }
-            if finalized
-                && change.before.is_none()
-                && self.protected_conflict(change, &payload).await?
-            {
-                if carried.is_some() {
-                    return Err(denied("move or follow is behind the horizon"));
-                }
-                self.consume(
-                    operation.hash,
-                    "row is unavailable behind the finalized horizon",
-                )
-                .await?;
-                continue;
-            }
-            if change.before.is_none()
-                && let Some((sequence, hash)) = basis
-            {
-                if payload
-                    .basis()
-                    .is_none_or(|(authored, _)| authored < sequence)
-                {
-                    if carried.is_some() {
-                        return Err(denied("move insert is behind the destination horizon"));
-                    }
-                    self.consume(
-                        operation.hash,
-                        "insert has an older or missing finalized basis",
-                    )
-                    .await?;
-                    continue;
-                }
-                if payload.basis() != Some((sequence, hash)) {
-                    return Err(denied("insert does not bind the current finalized horizon"));
-                }
             }
             let (actual, mut record) = merge_row(write, current, &operation, carried)?;
             if change.before.is_none()
@@ -228,7 +178,6 @@ impl<A: RowApplication> Inner<A> {
                 }
                 record.proof = Some(proof.stored()?);
             }
-            self.release_protection(&mut record, write, &operation)?;
             record.key = Some(change.row);
             record.identity = self
                 .app
@@ -322,7 +271,6 @@ impl<A: RowApplication> Inner<A> {
                 Some(row) => Some(row.get::<Vec<u8>>(0)?),
                 None => None,
             };
-            self.protection_stubs(id, &record).await?;
             // The record names its proof's bindings by digest.
             if let Some(proof) = payload
                 .carried(&change.row)
@@ -411,7 +359,6 @@ pub(super) fn merge_row(
     let mut record = current.clone().unwrap_or(Materialized {
         proof: None,
         moved_from: None,
-        protected: None,
         fields: BTreeMap::new(),
         stamps: BTreeMap::new(),
         deleted: false,

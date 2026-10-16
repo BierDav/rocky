@@ -10,12 +10,12 @@ use super::*;
 pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
-pub use transfer::{CheckpointPage, HorizonPage, RebootstrapReport};
+pub use transfer::{CheckpointPage, PrunedPage, RebootstrapReport};
 #[cfg(test)]
 pub(crate) use transfer::{forge_page, forge_page_bindings};
 
 pub(crate) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_horizon_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_compaction_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_build_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_identity_marks(scope BLOB NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
@@ -23,7 +23,7 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_retained(id INTEGER PRIMARY KEY CHECK(id=1),records INTEGER NOT NULL,bytes INTEGER NOT NULL,handles INTEGER NOT NULL,handle_digest BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_applied(position INTEGER PRIMARY KEY AUTOINCREMENT,scope INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE)",
     "CREATE INDEX IF NOT EXISTS secure_applied_scope ON secure_applied(scope,position)",
-    "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,horizon INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,pruned_prefix INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,state TEXT NOT NULL,position INTEGER NOT NULL,cursor INTEGER NOT NULL,sets BLOB NOT NULL,capture BLOB,signed BLOB,PRIMARY KEY(scope,sequence))",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
@@ -93,17 +93,13 @@ pub struct CoordinatedBinding {
     pub highest: u64,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 14;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 15;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
     /// The seal whose finalized state this is, in a domain with a tip graph;
     /// its frontier bounds the covered frames. None for another cut.
     pub seal: Option<Commitment>,
-    /// Most recently admitted issuer declaration.
-    pub horizon: Option<Box<rocky_credentials::SignedHorizon>>,
-    /// Last cut atomically finalized into the replay base.
-    pub finalized: Option<Box<rocky_credentials::SignedHorizon>>,
     pub partition: Option<rocky_core::PartitionTuple>,
     pub identities: Vec<IdentityMark>,
     /// Opaque move links, also committed by the corresponding materialized rows.
@@ -261,15 +257,6 @@ impl SignedCheckpoint {
         time: u64,
     ) -> Result<(), Error> {
         self.verify_signature()?;
-        inner.verify_checkpoint_horizon(self)?;
-        if self
-            .statement
-            .horizon
-            .as_ref()
-            .is_some_and(|horizon| horizon.statement.issued > time)
-        {
-            return Err(denied("checkpoint horizon issue time is in the future"));
-        }
         inner.admits(inner.manifest_of_tip(self.statement.tip)?)?;
         inner.check_authenticated_partition(
             self.statement.scope,
@@ -304,7 +291,7 @@ impl SignedCheckpoint {
 pub struct RetentionPolicy {
     /// Peers that must have acknowledged an operation before it is pruned.
     pub required: BTreeSet<rocky_credentials::PeerId>,
-    /// Peers declared behind the horizon: not waited for; they rebootstrap.
+    /// Peers declared behind the pruned_prefix: not waited for; they rebootstrap.
     pub behind: BTreeSet<rocky_credentials::PeerId>,
     /// Other nodes that must hold a copy; at least one is always required.
     pub copies: usize,
@@ -348,7 +335,7 @@ pub struct CheckpointStatus {
     /// Admitted operations of the scope that are not applied.
     pub pending: u64,
     /// Logs with pruned history and the last pruned sequence of each.
-    pub horizon: Vec<(PublicKey, u64)>,
+    pub pruned_prefix: Vec<(PublicKey, u64)>,
     /// Retained header and body bytes of the whole replica.
     pub retained_bytes: u64,
     /// The last failure of automatic maintenance.
@@ -535,9 +522,6 @@ pub(super) fn handle_item(handle: &[u8], input: &[u8], hash: &[u8]) -> Vec<u8> {
 /// What a checkpoint must reproduce, captured in one transaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Capture {
-    pub horizon: Option<Box<rocky_credentials::SignedHorizon>>,
-    /// Last cut atomically finalized into the replay base.
-    pub finalized: Option<Box<rocky_credentials::SignedHorizon>>,
     pub identities: Vec<IdentityMark>,
     pub frontier: Vec<LogPosition>,
     pub clock: u64,
@@ -561,7 +545,7 @@ pub(super) struct Log {
     pub sequence: i64,
     pub hash: Hash,
     pub clock: u64,
-    pub horizon: i64,
+    pub pruned_prefix: i64,
 }
 /// Which replay overlay a caller uses over the checkpoint rows.
 #[derive(Clone, Copy)]
@@ -703,7 +687,7 @@ impl<A: RowApplication> Inner<A> {
         let mut result = self
             .conn
             .query(
-                "SELECT sequence,hash,clock,horizon FROM secure_logs WHERE scope=? AND author=?",
+                "SELECT sequence,hash,clock,pruned_prefix FROM secure_logs WHERE scope=? AND author=?",
                 bindings(vec![
                     SqlValue::Integer(scope),
                     SqlValue::Blob(author.as_bytes().to_vec()),
@@ -717,10 +701,10 @@ impl<A: RowApplication> Inner<A> {
             sequence: row.get::<i64>(0)?,
             hash: hash_of(&row.get::<Vec<u8>>(1)?)?,
             clock: row.get::<i64>(2)? as u64,
-            horizon: row.get::<i64>(3)?,
+            pruned_prefix: row.get::<i64>(3)?,
         }))
     }
-    /// Every log of a scope in author order; `pruned` keeps only logs with a horizon.
+    /// Every log of a scope in author order; `pruned` keeps only logs with a pruned_prefix.
     pub(super) async fn logs(
         &self,
         scope: i64,
@@ -731,7 +715,7 @@ impl<A: RowApplication> Inner<A> {
         let records = collect_rows(
             self.conn
                 .query(
-                    "SELECT author,sequence,hash,clock,horizon FROM secure_logs WHERE scope=? AND author>? AND horizon>=? ORDER BY author LIMIT ?",
+                    "SELECT author,sequence,hash,clock,pruned_prefix FROM secure_logs WHERE scope=? AND author>? AND pruned_prefix>=? ORDER BY author LIMIT ?",
                     bindings(vec![
                         SqlValue::Integer(scope),
                         SqlValue::Blob(after.map(|key| key.as_bytes().to_vec()).unwrap_or_default()),
@@ -750,7 +734,7 @@ impl<A: RowApplication> Inner<A> {
                     SqlValue::Integer(sequence),
                     SqlValue::Blob(hash),
                     SqlValue::Integer(clock),
-                    SqlValue::Integer(horizon),
+                    SqlValue::Integer(pruned_prefix),
                 ] = record.as_slice()
                 else {
                     return Err(Error::Corrupt("log record".into()));
@@ -762,7 +746,7 @@ impl<A: RowApplication> Inner<A> {
                         hash: hash_of(hash)?,
                         clock: *clock as u64,
                     },
-                    *horizon,
+                    *pruned_prefix,
                 ))
             })
             .collect()
@@ -1095,8 +1079,7 @@ impl<A: RowApplication> Inner<A> {
         )
         .await?;
         let mut last = None;
-        let basis = self.finalized_basis(scope).await?;
-        let finalized = basis.is_some() || self.seal_finalized(scope).await?;
+        let finalized = self.seal_finalized(scope).await?;
         for record in records {
             let [
                 SqlValue::Integer(position),
@@ -1176,21 +1159,6 @@ impl<A: RowApplication> Inner<A> {
                 {
                     continue;
                 }
-                if finalized
-                    && write.change.before.is_none()
-                    && self.protected_conflict(&write.change, &payload).await?
-                {
-                    continue;
-                }
-                if write.change.before.is_none()
-                    && basis.is_some_and(|(sequence, _)| {
-                        payload
-                            .basis()
-                            .is_none_or(|(authored, _)| authored < sequence)
-                    })
-                {
-                    continue;
-                }
                 created |= current.is_none();
                 let (_, mut record) = apply::merge_row(
                     &write,
@@ -1204,7 +1172,6 @@ impl<A: RowApplication> Inner<A> {
                         .map(moves::CreationProof::stored)
                         .transpose()?;
                 }
-                self.release_protection(&mut record, &write, &operation)?;
                 record.key = Some(write.change.row);
                 record.identity = self
                     .app
@@ -1304,7 +1271,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             uncovered: 0,
             covered: 0,
             pending: 0,
-            horizon: vec![],
+            pruned_prefix: vec![],
             retained_bytes: inner.retained().await?.1,
             maintenance_error: inner.maintenance_error.clone(),
         };
@@ -1347,11 +1314,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             status.uncovered = *uncovered as u64;
             status.covered = *covered as u64;
         }
-        status.horizon = inner
+        status.pruned_prefix = inner
             .logs(id, None, true, MAX_CHECKPOINT_LOGS)
             .await?
             .into_iter()
-            .map(|(log, horizon)| (log.author, horizon as u64))
+            .map(|(log, pruned_prefix)| (log.author, pruned_prefix as u64))
             .collect();
         Ok(status)
     }

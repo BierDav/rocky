@@ -721,7 +721,7 @@ impl<A: RowApplication> Inner<A> {
         // and has since been pruned or covered by a checkpoint.
         if let Some(id) = self.find_scope_id(opening.scope).await?
             && let Some(log) = self.log(id, author).await?
-            && opening.sequence as i64 <= log.sequence.max(log.horizon)
+            && opening.sequence as i64 <= log.sequence.max(log.pruned_prefix)
         {
             return Ok(Member::Settled(None));
         }

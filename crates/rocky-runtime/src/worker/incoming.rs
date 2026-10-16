@@ -89,8 +89,8 @@ where
                 Some(row) => row.get::<i64>(0)? as u64,
                 None => 0,
             };
-            // Everything behind the horizon was applied before it was pruned.
-            let applied = retained.max(self.retention.horizon(node));
+            // Everything behind the pruned prefix was applied before it was pruned.
+            let applied = retained.max(self.retention.pruned_prefix(node));
             if applied > 0 {
                 frontier.insert(node, AuthorSequence::new(applied)?);
             }
@@ -139,7 +139,7 @@ where
                     .find(|(author, _)| *author == node)
                     .map_or(0, |(_, sequence)| *sequence)
             })
-            .max(self.retention.horizon(node));
+            .max(self.retention.pruned_prefix(node));
         let mut after = base;
         loop {
             let mut page = self
@@ -211,8 +211,8 @@ where
     pub(super) async fn readiness(&self, op: &Envelope) -> Result<Readiness, Error> {
         let mut pending = false;
         for dependency in &op.dependencies {
-            // Behind the horizon everything was applied; its clock is gone.
-            if self.retention.below_horizon(*dependency) {
+            // Behind the pruned prefix everything was applied; its clock is gone.
+            if self.retention.below_pruned_prefix(*dependency) {
                 continue;
             }
             match self.record_status(*dependency).await? {
@@ -276,7 +276,8 @@ where
         let mut held = Vec::new();
         let mut exceptions = Vec::new();
         for node in nodes {
-            let mut prefix = super::retention::at(&applied, node).max(self.retention.horizon(node));
+            let mut prefix =
+                super::retention::at(&applied, node).max(self.retention.pruned_prefix(node));
             // Received, pending and rejected operations extend the prefix
             // while they are contiguous.
             loop {
@@ -351,7 +352,7 @@ where
                 Ok(Response::Operation(
                     record
                         .filter(|(_, status)| {
-                            status != "rejected" && !self.retention.below_horizon(id)
+                            status != "rejected" && !self.retention.below_pruned_prefix(id)
                         })
                         .map(|(bytes, _)| bytes),
                 ))
@@ -374,12 +375,12 @@ where
                 let (held, received) = self
                     .read_transaction(async |worker| worker.held().await)
                     .await?;
-                let horizon = self.retention_horizon()?;
+                let pruned_prefix = self.retention_pruned_prefix()?;
                 Ok(Response::State(SyncState {
                     held,
                     received,
                     applied,
-                    horizon,
+                    pruned_prefix,
                 }))
             }
             Request::Missing(known) => {
@@ -401,7 +402,7 @@ where
                             for id in page {
                                 if known.contains(&id)
                                     || rejected.contains(&id)
-                                    || worker.retention.below_horizon(id)
+                                    || worker.retention.below_pruned_prefix(id)
                                 {
                                     continue;
                                 }
@@ -459,7 +460,7 @@ where
             bytes += encoded.len();
             let id = operation_id(&row.get::<Vec<u8>>(0)?, row.get(1)?)?;
             last = Some(id);
-            if !self.retention.below_horizon(id) {
+            if !self.retention.below_pruned_prefix(id) {
                 items.push(encoded);
             }
         }
@@ -479,7 +480,7 @@ where
         }
         // Applied and pruned: a late copy is a duplicate, whatever it would
         // do to rows that changed or were deleted since.
-        if self.retention.below_horizon(op.id) {
+        if self.retention.below_pruned_prefix(op.id) {
             return Ok(Acknowledgment {
                 id: op.id,
                 applied: true,
@@ -707,8 +708,8 @@ where
     }
     async fn acknowledge(&mut self, peer: NodeId, ack: Acknowledgment) -> Result<(), Error> {
         self.validate_peer(peer)?;
-        // Behind the horizon the acknowledgment is no longer needed.
-        if self.retention.below_horizon(ack.id) {
+        // Behind the pruned prefix the acknowledgment is no longer needed.
+        if self.retention.below_pruned_prefix(ack.id) {
             return Ok(());
         }
         if self
@@ -768,7 +769,7 @@ where
             .map(|ack| ack.id)
             .collect();
         // Local operations are exactly 1..=sequence. Those behind the
-        // horizon were acknowledged before they were pruned, unless the peer
+        // pruned prefix were acknowledged before they were pruned, unless the peer
         // is declared behind.
         let pruned = self.retention.acknowledged_behind(peer, self.identity.node);
         let (held, reported) = self.retention.reported(peer);

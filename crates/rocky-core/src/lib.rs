@@ -68,7 +68,7 @@ pub trait Application {
     ) -> Result<(), Self::Error> {
         self.admit(envelope, policy)
     }
-    /// Classifies an effect-free operation on an incarnation covered by a runtime horizon.
+    /// Classifies an effect-free operation on an incarnation covered by a runtime pruned prefix.
     /// Admission still runs; implementations must identify only absent/retired rows or insert conflicts.
     fn definite_drop(&self, _state: &Self::State, _envelope: &Envelope) -> bool {
         false

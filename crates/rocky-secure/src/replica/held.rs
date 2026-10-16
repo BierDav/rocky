@@ -692,7 +692,7 @@ impl<A: RowApplication> Inner<A> {
                     sequence: held.seq_num as i64,
                     hash: held.hash(),
                     clock: held.timestamp,
-                    horizon: tip.map_or(-1, |tip| tip.horizon),
+                    pruned_prefix: tip.map_or(-1, |tip| tip.pruned_prefix),
                 }))
             }
             _ => Ok(tip),
@@ -726,7 +726,7 @@ impl<A: RowApplication> Inner<A> {
             sequence: voided.seq_num as i64,
             hash: voided.hash(),
             clock: voided.timestamp,
-            horizon: tip.map_or(-1, |tip| tip.horizon),
+            pruned_prefix: tip.map_or(-1, |tip| tip.pruned_prefix),
         }))
     }
     /// The last consumed position, independent of an imported checkpoint's frontier.
@@ -807,7 +807,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok(false);
         };
         let predecessor = header.seq_num as i64 - 1;
-        Ok((predecessor == log.sequence && log.hash == previous) || predecessor <= log.horizon)
+        Ok((predecessor == log.sequence && log.hash == previous)
+            || predecessor <= log.pruned_prefix)
     }
     /// The void records a reader of `frames` needs: those consuming each
     /// frame's voided backlinks, oldest last.

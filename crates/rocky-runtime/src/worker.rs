@@ -1,6 +1,6 @@
 mod audit;
-mod horizon;
 mod incoming;
+mod pruning;
 mod rebootstrap;
 pub(crate) mod retention;
 mod sql;
@@ -164,7 +164,7 @@ pub(crate) fn identity_bytes<A: StoredApplication>(
     }
     let descriptor = app.descriptor();
     for version in [
-        3u32,
+        4u32,
         descriptor.operations.protocol,
         descriptor.operations.schema,
         descriptor.operations.operation,
@@ -752,7 +752,7 @@ where
         }
     }
     /// The operation a handle committed. A handle whose operation is behind
-    /// the horizon reports `Pruned`: it was committed and must not run again.
+    /// the pruned_prefix reports `Pruned`: it was committed and must not run again.
     async fn lookup_mutation(
         &self,
         handle: crate::MutationHandle,
@@ -776,7 +776,7 @@ where
         Ok(Some((
             hash,
             match self.record(id).await? {
-                Some((bytes, _)) if !self.retention.below_horizon(id) => {
+                Some((bytes, _)) if !self.retention.below_pruned_prefix(id) => {
                     Ok(Envelope::decode(&bytes)?)
                 }
                 _ => Err(Error::Pruned {
@@ -836,7 +836,7 @@ where
         // Reduction: loading the touched rows and running the reducer.
         let reduce_started = Instant::now();
         let before = self.window(op).await?;
-        if self.retention.below_horizon(op.entity) && self.app.definite_drop(&before, op) {
+        if self.retention.below_pruned_prefix(op.entity) && self.app.definite_drop(&before, op) {
             return Ok(self
                 .app
                 .admit_candidate(
@@ -1052,7 +1052,7 @@ where
         let mut changed = false;
         for follow in follows {
             if follow.original.node != self.identity.node
-                || self.retention.below_horizon(follow.original)
+                || self.retention.below_pruned_prefix(follow.original)
             {
                 continue;
             }

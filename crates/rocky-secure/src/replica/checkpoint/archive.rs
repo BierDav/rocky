@@ -19,28 +19,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !crate::replica::roles::holds_whole(&inner.local_grants(now()?)?, scope) {
             return Err(denied("local checkpoint custody denied"));
         }
-        if signed.statement.finalized.is_none() {
+        if signed.statement.seal.is_none() {
             return Err(denied("custody requires a finalized checkpoint"));
         }
         // Readers already retain verified materialized checkpoints.
         if inner.scope_key(scope).is_ok() {
             return Ok((None, true));
         }
-        if let Some(held) = inner.archived_checkpoint(scope, false).await? {
-            if held.id()? == signed.id()? {
-                return inner.archive_progress(scope).await;
-            }
-            let held_horizon = held.statement.finalized.as_ref().ok_or_else(|| {
-                Error::Corrupt("custody checkpoint has no finalized horizon".into())
-            })?;
-            let incoming = signed
-                .statement
-                .finalized
-                .as_ref()
-                .ok_or_else(|| denied("custody requires a finalized checkpoint"))?;
-            if incoming.statement.sequence < held_horizon.statement.sequence {
-                return Err(denied("custody checkpoint does not advance"));
-            }
+        if let Some(held) = inner.archived_checkpoint(scope, false).await?
+            && held.id()? == signed.id()?
+        {
+            return inner.archive_progress(scope).await;
         }
         transaction!(inner, |inner| {
             inner

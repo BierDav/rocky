@@ -240,24 +240,6 @@ private class DeviceProcess {
 
             "renew" -> JsonPrimitive(database.renew().revocations.statements)
 
-            "horizon" -> {
-                val values = database.list(list()).values
-                val table = request.text("table")
-                when (val action = request.text("action")) {
-                    "declare" -> database.horizons.declare(
-                        table,
-                        request.getValue("participants").jsonArray.map { it.jsonPrimitive.content }.toSet(),
-                        values,
-                    )
-
-                    "finalize" -> database.horizons.finalize(table, values)
-
-                    "status" -> database.horizons.status(table, values)
-
-                    else -> error("unknown horizon action $action")
-                }
-            }
-
             "close" -> JsonNull
 
             else -> error("unknown op ${request.text("op")}")

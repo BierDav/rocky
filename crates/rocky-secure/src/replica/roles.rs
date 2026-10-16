@@ -119,8 +119,6 @@ pub(crate) const MAX_FRONTIER_SCOPES: usize = 64;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FrontierState {
     pub(crate) frontier: ScopeFrontier,
-    pub(crate) signed: Option<Box<rocky_credentials::SignedHorizon>>,
-    pub(crate) behind: bool,
     /// The replying replica imports the scope from a checkpoint and takes
     /// no history for it meanwhile.
     pub(crate) importing: bool,
@@ -175,7 +173,7 @@ pub struct RangePage {
     pub frames: Vec<EncryptedFrame>,
     /// Continue after this log position; `None` ends the pass.
     pub next: Option<(PublicKey, u64)>,
-    /// The peer is behind this replica's horizon and must rebootstrap; no
+    /// The peer is behind this replica's pruned_prefix and must rebootstrap; no
     /// frames are sent.
     pub behind: bool,
     /// The sender's own frontier, for lag reporting.
@@ -584,7 +582,7 @@ impl<A: RowApplication> Inner<A> {
         Ok((held, applied))
     }
     /// One page of frames `request` lacks, after `after`. A requester behind
-    /// this replica's horizon gets the signal and no frames.
+    /// this replica's pruned_prefix gets the signal and no frames.
     pub(crate) async fn range(
         &mut self,
         peer: PublicKey,
@@ -617,6 +615,7 @@ impl<A: RowApplication> Inner<A> {
         let scope = request.scope;
         self.authorize_peer(peer, credentials, scope)?;
         self.same_tip_peer(peer)?;
+        self.ensure_cut_clean(scope).await?;
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }
@@ -636,8 +635,8 @@ impl<A: RowApplication> Inner<A> {
                 .await?,
         };
         if let Some(id) = self.find_scope_id(scope).await? {
-            for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
-                if request.held(log.author) as i64 <= horizon {
+            for (log, pruned_prefix) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
+                if request.held(log.author) as i64 <= pruned_prefix {
                     page.behind = true;
                     return Ok(page);
                 }
@@ -1157,11 +1156,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             replies.push(FrontierReply::Held(FrontierState {
                 frontier: inner.frontier(frontier.scope).await?,
-                signed: inner.mergeable_horizon(frontier.scope).await?,
-                behind: inner.horizon_device_behind(frontier.scope, peer).await?
-                    || inner
-                        .horizon_device_behind(frontier.scope, inner.config.node.public_key())
-                        .await?,
                 importing: inner.importing(frontier.scope).await?,
             }));
         }

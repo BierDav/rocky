@@ -203,10 +203,6 @@ impl Node {
             let staging = self.replica.rebootstrap_progress(scope).await?;
             imports.push(ScopeImportStatus {
                 scope: self.observed_scope(scope),
-                horizon_rebootstrap_required: self
-                    .replica
-                    .horizon_rebootstrap_required(scope)
-                    .await?,
                 checkpoint: staging.map(|(id, _, _)| HEXLOWER.encode(&id)),
                 cursor: staging
                     .and_then(|(_, cursor, _)| cursor.map(|cursor| HEXLOWER.encode(&cursor))),
@@ -214,9 +210,7 @@ impl Node {
             });
         }
         let bootstrap_pending = self.path.with_file_name("bootstrap.json").exists()
-            || imports
-                .iter()
-                .any(|scope| scope.horizon_rebootstrap_required || scope.checkpoint.is_some());
+            || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let profile = serde_json::to_value(&settings.profile)?;
         let mut status = DatabaseStatus {
@@ -401,7 +395,6 @@ impl Node {
                     bytes: moved.bytes as u64,
                     checkpoint: moved.checkpoint.map(|(id, _)| HEXLOWER.encode(&id)),
                     superseded: moved.checkpoint.map(|(_, rows)| rows),
-                    finalized: moved.finalized,
                 })
                 .collect();
         }

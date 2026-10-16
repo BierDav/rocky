@@ -33,7 +33,7 @@ impl From<RuntimeError> for Error {
 }
 
 /// Copies `from`'s latest checkpoint into `to`, which is behind `from`'s
-/// horizon. The development adapter moves pages directly, not through its
+/// pruned prefix. The development adapter moves pages directly, not through its
 /// queue. Local operations of `to` are kept and applied again.
 pub async fn rebootstrap<A>(from: &Replica<A>, to: &Replica<A>) -> Result<(), Error>
 where
@@ -137,7 +137,7 @@ impl SimulatedTransport {
                 .await?
             {
                 Catchup::Operations(page) => page,
-                Catchup::BehindHorizon(_) => {
+                Catchup::BehindPruned(_) => {
                     rebootstrap(&replicas[from], &replicas[to]).await?;
                     continue;
                 }

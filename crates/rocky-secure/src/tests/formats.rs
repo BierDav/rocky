@@ -18,7 +18,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         .unwrap();
     drop(replica);
     let source = template.path().join("base.sqlite");
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -177,8 +177,6 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         #[serde(with = "serde_bytes")]
         body: Vec<u8>,
         creations: Vec<(Commitment, Commitment)>,
-        basis: Option<(u64, Commitment)>,
-        releases: Vec<Commitment>,
     }
     let f = Fixture::new();
     let directory = TempDir::new().unwrap();
@@ -229,8 +227,6 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
             })
             .unwrap(),
             creations: vec![],
-            basis: None,
-            releases: vec![],
         })
         .unwrap();
         let frame = crate::wire::author(

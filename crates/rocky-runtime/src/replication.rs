@@ -11,14 +11,14 @@ pub const MAX_SYNC_EXCEPTIONS: usize = 256;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncState {
     /// Per author, the contiguous prefix this replica holds: behind its
-    /// horizon, applied, received or rejected.
+    /// pruned prefix, applied, received or rejected.
     pub held: AppliedFrontier,
     /// Retained operations above `held`, including dependency-pending ones,
     /// lowest first. At most `MAX_SYNC_EXCEPTIONS`; a longer gap is resent.
     pub received: Vec<OperationId>,
     pub applied: AppliedFrontier,
     /// Everything at or before it is applied and no longer listed or sent.
-    pub horizon: AppliedFrontier,
+    pub pruned_prefix: AppliedFrontier,
 }
 impl SyncState {
     /// Whether the replica holds `id`, as far as this state shows.

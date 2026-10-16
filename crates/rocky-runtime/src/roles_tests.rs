@@ -47,7 +47,7 @@ async fn open(
     .unwrap()
 }
 /// One range pass from `from` to `to`; returns the pages and records sent,
-/// or `None` when `to` is behind the horizon.
+/// or `None` when `to` is behind the pruned_prefix.
 async fn pass(
     from: &Replica<TodoApp>,
     to: &Replica<TodoApp>,
@@ -63,7 +63,7 @@ async fn pass(
             .unwrap()
         {
             Catchup::Operations(page) => page,
-            Catchup::BehindHorizon(_) => return None,
+            Catchup::BehindPruned(_) => return None,
         };
         pages += 1;
         records += page.records.len();
@@ -166,7 +166,7 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
 }
 
 #[tokio::test]
-async fn full_node_custody_moves_the_horizon_without_waiting_for_devices() {
+async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices() {
     let dir = TempDir::new().unwrap();
     let laptop = open(&dir, fixtures::LAPTOP, &[SERVER], 1).await;
     let phone = open(&dir, fixtures::PHONE, &[SERVER], 1).await;
@@ -192,7 +192,7 @@ async fn full_node_custody_moves_the_horizon_without_waiting_for_devices() {
     }
     assert_eq!(pass(&laptop, &phone, fixtures::PHONE).await, Some((2, 41)));
     assert_eq!(at(&laptop.prune().await.unwrap(), fixtures::LAPTOP), 0);
-    // The full node applied everything: the horizon follows it alone.
+    // The full node applied everything: the pruned prefix follows it alone.
     assert!(pass(&laptop, &server, SERVER).await.is_some());
     let edit = laptop
         .mutate(mutation(Some(first.id), Action::SetCompleted(true)))

@@ -399,7 +399,7 @@ impl<A: RowApplication> Inner<A> {
                 "{name}: move requires the held readable table partition"
             )));
         }
-        self.ensure_horizon_writable(scope).await
+        self.ensure_cut_clean(scope).await
     }
     async fn move_records(&self, scope: ResourceScope) -> Result<Vec<Materialized>, Error> {
         let rows = collect_rows(
@@ -433,7 +433,7 @@ impl<A: RowApplication> Inner<A> {
             &encode(&(name, id, scalar_bytes(from), scalar_bytes(to)))?,
         );
         if let Some(previous) = self.lookup_bundle(handle, input).await? {
-            return previous.map_err(|_| denied("move handle is behind pruning horizon"));
+            return previous.map_err(|_| denied("move handle is behind pruned prefix"));
         }
         let typed = self
             .typed
@@ -802,21 +802,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    async fn move_finalized(&self, source: &MoveSource) -> Result<bool, Error> {
-        let Some(id) = self.find_scope_id(source.scope).await? else {
-            return Ok(false);
-        };
-        Ok(self
-            .checkpoint_record(id, true)
-            .await?
-            .and_then(|checkpoint| checkpoint.signed)
-            .and_then(|checkpoint| checkpoint.statement.finalized)
-            .is_some_and(|horizon| {
-                horizon.statement.logs.iter().any(|log| {
-                    log.signer == source.deletion_author && log.sequence >= source.deletion_sequence
-                })
-            }))
-    }
     pub(super) async fn follow_moves(&mut self, time: u64) -> Result<(), Error> {
         if self.node_author.is_none() || self.local_grants(time).is_err() {
             return Ok(());
@@ -849,7 +834,7 @@ impl<A: RowApplication> Inner<A> {
             let proof = self.carried_proof(proof).await?;
             if !self.holds(destination).await?
                 || !self.readable(destination).unwrap_or(false)
-                || self.ensure_horizon_writable(destination).await.is_err()
+                || self.ensure_cut_clean(destination).await.is_err()
             {
                 continue;
             }
@@ -859,9 +844,6 @@ impl<A: RowApplication> Inner<A> {
             while let Some(source) = link {
                 if !visited.insert(source.scope) {
                     return Err(denied("cyclic move links"));
-                }
-                if self.move_finalized(&source).await? {
-                    break;
                 }
                 link = match self
                     .row(
@@ -939,16 +921,6 @@ impl<A: RowApplication> Inner<A> {
             }
             if candidates.is_empty() {
                 continue;
-            }
-            // A followed stamp must also remain mergeable at B's finalized cut.
-            if let Some(id) = self.find_scope_id(destination).await?
-                && let Some(checkpoint) = self
-                    .checkpoint_record(id, true)
-                    .await?
-                    .and_then(|checkpoint| checkpoint.signed)
-                && checkpoint.statement.finalized.is_some()
-            {
-                candidates.retain(|_, (stamp, _, _)| stamp.clock > checkpoint.statement.clock);
             }
             let mut after = record.fields.clone();
             let mut stamps = BTreeMap::new();

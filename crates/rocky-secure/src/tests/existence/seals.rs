@@ -157,7 +157,7 @@ async fn a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_i
         .await;
         items.extend(frames);
     }
-    for cycle in 0..4 {
+    for cycle in 0..64 {
         let (id, _) = commit(
             &sa,
             &[(
@@ -183,7 +183,7 @@ async fn a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_i
     assert_eq!(milk.len(), 1, "the hardware item is orphaned");
     assert_eq!(rows(&sb, ITEMS).await, milk);
     let logged = "SELECT count(*) FROM secure_existence_log";
-    assert_eq!(count(&a, logged).await, 11);
+    assert_eq!(count(&a, logged).await, 131);
 
     let (sealed, statements) = seal(&erp, &a).await;
     follow(&erp, &b, &[created.clone(), statements.clone()].concat()).await;
@@ -210,7 +210,7 @@ async fn a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_i
     assert_eq!(rows(&sa, ITEMS).await, milk);
     // B holds no list frames: it folds nothing and keeps the records.
     b.replica.compact(erp.domain, 0).await.unwrap();
-    assert_eq!(count(&b, logged).await, 11);
+    assert_eq!(count(&b, logged).await, 131);
 
     // An unsigned fold is never offered; the owner signs it for others.
     admit(&a, &b).await;

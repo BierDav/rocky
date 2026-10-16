@@ -76,7 +76,7 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         self.ensure_tip_restored().await?;
-        self.ensure_horizon_writable(scope).await?;
+        self.ensure_cut_clean(scope).await?;
         let partition = self
             .app
             .row_partition(&writes[0].change)
@@ -184,12 +184,10 @@ impl<A: RowApplication> Inner<A> {
             .flat_map(|carried| carried.stamps.values())
             .map(|stamp| stamp.clock)
             .fold(clock, u64::max);
-        let basis = self.finalized_basis(scope).await?;
-        let finalized = basis.is_some();
+        let finalized = self.seal_finalized(scope).await?;
         let mut witnesses = BTreeMap::new();
-        let mut releases = BTreeSet::new();
         let mut previous: BTreeSet<Hash> = dependencies.iter().copied().collect();
-        // Rows behind a finalized horizon that the commit leaves untouched.
+        // Rows a finalized seal dropped that the commit leaves untouched.
         let mut absent = BTreeSet::new();
         for change in writes.iter().map(|write| &write.change) {
             let held = self
@@ -221,13 +219,6 @@ impl<A: RowApplication> Inner<A> {
             }
             if finalized && held.is_none() && change.before.is_some() {
                 absent.insert(change.row);
-            }
-            if change.before.is_none() && finalized {
-                for (hash, known) in self.protection_dependencies(change).await? {
-                    previous.insert(hash);
-                    releases.insert(*hash.as_bytes());
-                    clock = clock.max(known);
-                }
             }
             // A local write passes every merged row its constraints compare with.
             clock = clock.max(self.constraint_clock(change).await?);
@@ -332,8 +323,6 @@ impl<A: RowApplication> Inner<A> {
             &RowPayload::witness(
                 RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
                 witnesses.into_iter().collect(),
-                basis,
-                releases.into_iter().collect(),
             )?,
         )?;
         self.verify_frame(&frame, time)?;

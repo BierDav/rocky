@@ -29,9 +29,6 @@ mod frontiers;
 mod held;
 use held::HeldMessage;
 pub(crate) mod holdings;
-mod horizon;
-mod horizon_relay;
-use horizon_relay::HorizonRelayMessage;
 mod revocations;
 mod rows;
 mod tips;
@@ -45,7 +42,6 @@ use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
 use holdings::HoldingMessage;
-use horizon::HorizonMessage;
 use revocations::RevocationMessage;
 use rows::RowMessage;
 pub use rows::{CatchUp, Pulled, Pushed, ScopeSync};
@@ -127,8 +123,6 @@ enum Message {
     Acknowledged,
     Rows(RowMessage),
     Checkpoints(CheckpointMessage),
-    Horizon(HorizonMessage),
-    HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
     Revocations(RevocationMessage),
@@ -162,8 +156,6 @@ macro_rules! families {
 families!(
     Rows(RowMessage),
     Checkpoints(CheckpointMessage),
-    Horizon(HorizonMessage),
-    HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
     Revocations(RevocationMessage),
@@ -558,16 +550,11 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: Message,
     ) -> Result<(), Error> {
-        replica
-            .record_horizon_chain(self.peer, &self.peer_chain)
-            .await?;
         self.guard_message(replica, &message).await?;
         match message {
             Message::Holdings(message) => self.answer_holdings(replica, message).await,
             Message::Rows(message) => self.answer_rows(replica, message).await,
             Message::Checkpoints(message) => self.answer_checkpoints(replica, message).await,
-            Message::Horizon(message) => self.answer_horizon(replica, message).await,
-            Message::HorizonRelay(message) => self.answer_horizon_relay(replica, message).await,
             Message::Frontiers(message) => self.answer_frontiers(replica, message).await,
             Message::Existence(message) => self.answer_existence(replica, message).await,
             Message::Entries(message) => self.answer_entries(replica, message).await,

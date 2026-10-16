@@ -218,7 +218,6 @@ pub struct ScopeStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeImportStatus {
     pub scope: ScopeStatus,
-    pub horizon_rebootstrap_required: bool,
     pub checkpoint: Option<String>,
     pub cursor: Option<String>,
     pub pages_complete: Option<bool>,
@@ -364,7 +363,6 @@ pub struct ScopeReconciliationTransfer {
     pub bytes: u64,
     pub checkpoint: Option<String>,
     pub superseded: Option<u64>,
-    pub finalized: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerReconciliation {

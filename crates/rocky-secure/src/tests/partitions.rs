@@ -550,7 +550,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 14);
+    assert_eq!(cp.statement.format, 15);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);
@@ -721,65 +721,6 @@ async fn measure_200_partitions() {
         file_bytes,
         logical_bytes
     );
-}
-
-#[tokio::test]
-async fn horizon_preserves_table_identity_allocation_across_partitions() {
-    let root = tempfile::tempdir().unwrap();
-    let f = Fixture::new();
-    let writer = f
-        .open(
-            &root.path().join("writer.db"),
-            PrivateKey::new(),
-            f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
-        )
-        .await;
-    for name in ["A", "B"] {
-        f.key(&writer, name, if name == "A" { [1; 32] } else { [2; 32] })
-            .await;
-    }
-    for (handle, name) in [(1, "A"), (2, "B")] {
-        let birth = if name == "A" { 1 } else { 3 };
-        let write = f.write(name, birth, 10);
-        writer
-            .author_bundle([handle; 32], vec![write.clone()], vec![])
-            .await
-            .unwrap();
-        let delete = RowWrite::changed(RowChange {
-            before: write.change.after,
-            after: None,
-            ..write.change
-        });
-        writer
-            .author_bundle([handle + 2; 32], vec![delete], vec![])
-            .await
-            .unwrap();
-        let signed = rocky_credentials::SignedHorizon::sign(
-            writer.horizon_statement(f.scope(name), &[]).await.unwrap(),
-            &f.publisher,
-        )
-        .unwrap();
-        writer.receive_horizon(signed).await.unwrap();
-        let checkpoint = writer.finalize_horizon(f.scope(name)).await.unwrap();
-        assert_eq!(checkpoint.statement.identities[0].sequence, birth);
-        assert_eq!(checkpoint.statement.rows.count, 0);
-        writer
-            .author_bundle([handle + 4; 32], vec![f.write(name, birth + 1, 20)], vec![])
-            .await
-            .unwrap();
-        assert_eq!(
-            writer
-                .checkpoint(f.scope(name))
-                .await
-                .unwrap()
-                .statement
-                .identities[0]
-                .sequence,
-            birth + 1
-        );
-        writer.audit(f.scope(name)).await.unwrap();
-    }
 }
 
 async fn constraint_state(

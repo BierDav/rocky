@@ -402,7 +402,7 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
     );
     for name in ["items", "attachments"] {
         let checkpoint = b.checkpoint(f.scope(name, partitions[1])).await.unwrap();
-        assert_eq!(checkpoint.statement.format, 14);
+        assert_eq!(checkpoint.statement.format, 15);
         assert_eq!(checkpoint.statement.moves.count, 1);
         b.rebuild_projection(f.scope(name, partitions[1]))
             .await
@@ -633,55 +633,6 @@ async fn proof_replay_and_future_stamps_require_the_current_move_contract() {
         b.receive(insertion.clone()).await.unwrap(),
         ReceiveStatus::Duplicate
     );
-}
-
-#[tokio::test]
-async fn source_finalization_and_destination_horizon_fence_late_follows() {
-    for source_cut in [false, true] {
-        let f = Fixture::new();
-        let root = tempfile::tempdir().unwrap();
-        let partitions = [
-            RowIdentity::new(1, 1).unwrap().integer(),
-            RowIdentity::new(1, 2).unwrap().integer(),
-        ];
-        let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
-        let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
-        let row = setup(&f, &a, &b, &partitions).await;
-        edit(&f, &a, &row, "ticked", 100).await;
-        let moved = session(&f, &b, &partitions)
-            .await
-            .move_row(
-                [101; 32],
-                "items",
-                RowIdentity::new(1, 1).unwrap(),
-                &[SqlValue::Integer(partitions[0])],
-                &[SqlValue::Integer(partitions[1])],
-            )
-            .await
-            .unwrap();
-        let cut_scope = f.scope("items", partitions[usize::from(!source_cut)]);
-        let cut = rocky_credentials::SignedHorizon::sign(
-            b.horizon_statement(cut_scope, &[]).await.unwrap(),
-            &f.publisher,
-        )
-        .unwrap();
-        b.receive_horizon(cut).await.unwrap();
-        b.finalize_horizon(cut_scope).await.unwrap();
-        if source_cut {
-            super::horizon::restore_scope(&b, &a, cut_scope).await;
-        }
-        send(&moved, &a).await;
-        if !source_cut {
-            let frames = crate::tests::stored_frames(&a, "SELECT header,body FROM secure_operations WHERE status='applied' ORDER BY sequence").await;
-            for frame in frames {
-                b.receive(frame).await.unwrap();
-            }
-            assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
-            super::horizon::restore_scope(&b, &a, cut_scope).await;
-        }
-        assert_eq!(title(&f, &a, partitions[1]).await.as_deref(), Some("Item"));
-        assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
-    }
 }
 
 #[tokio::test]

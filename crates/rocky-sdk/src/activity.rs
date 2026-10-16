@@ -1,5 +1,5 @@
 //! What a node did in the background, newest last, for an application to
-//! show: sync transfers, checkpoints, horizons, enrollment, renewal, author
+//! show: sync transfers, checkpoints, enrollment, renewal, author
 //! and group key changes. Bounded and in memory only; see
 //! `docs/runtime/activity.md`.
 use serde_json::{Value, json};

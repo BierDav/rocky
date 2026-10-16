@@ -38,8 +38,18 @@ impl std::str::FromStr for Profile {
         }
     }
 }
+/// The sealed state a read-only connection reads instead of the live
+/// tables. See `docs/runtime/kept-seals.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    /// A seal this device keeps.
+    Seal(rocky_core::Commitment),
+    /// The seal a bookmark shows: its tip's own once sealed, else the one
+    /// its tip starts from. It is resolved when the connection opens.
+    Bookmark(String),
+}
 /// What a connection is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionOptions {
     /// A reader steps snapshot cursors and refuses writes. `PRAGMA
     /// query_only` switches the kind outside a transaction.
@@ -50,6 +60,8 @@ pub struct ConnectionOptions {
     /// How long a write transaction may hold the replica; 5 s by default,
     /// at most 60 s.
     pub transaction_timeout: Option<std::time::Duration>,
+    /// Binds the connection to a kept seal's state, read only.
+    pub binding: Option<Binding>,
 }
 impl ConnectionOptions {
     fn sql(&self) -> rocky_secure::SqlOptions {
@@ -325,6 +337,8 @@ pub(crate) struct State {
     /// The tables the application declares otherwise than the installed
     /// generation, as Room validates them; read between transactions.
     declared: Vec<rocky_core::LogicalTable>,
+    /// The kept seal a bound connection reads, resolved once.
+    seal: Option<rocky_core::Commitment>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -336,8 +350,18 @@ impl State {
         };
         let version = node.declared_version();
         let declared = node.declared_differences()?;
+        let seal = match &options.binding {
+            None => None,
+            Some(Binding::Seal(seal)) => Some(*seal),
+            Some(Binding::Bookmark(name)) => Some(
+                node.replica
+                    .bookmark_seal(node.domain().scope, name)
+                    .await?,
+            ),
+        };
         let mut state = Self {
-            read_only: options.read_only,
+            // A bound connection only reads.
+            read_only: options.read_only || seal.is_some(),
             options,
             node,
             opened: None,
@@ -348,6 +372,7 @@ impl State {
             room,
             version,
             declared,
+            seal,
         };
         state.sql().await?;
         Ok(state)
@@ -374,7 +399,10 @@ impl State {
             None => false,
         };
         if !current {
-            let (session, sql) = self.node.sql_session(self.options.sql()).await?;
+            let (session, mut sql) = self.node.sql_session(self.options.sql()).await?;
+            if let Some(seal) = self.seal {
+                sql.bind_seal(seal).await?;
+            }
             self.opened = Some(Opened { session, sql });
         }
         Ok(&self.opened.as_ref().ok_or("connection has no session")?.sql)
@@ -438,6 +466,9 @@ impl State {
             Some(_) if self.active() => {
                 Err(failure(code::ERROR, "query_only cannot change inside a transaction").into())
             }
+            Some(false) if self.seal.is_some() => {
+                Err(failure(code::READONLY, "a connection bound to a seal is read-only").into())
+            }
             Some(read_only) => {
                 self.read_only = read_only;
                 Ok(Pending::rows(Vec::new(), Vec::new()))
@@ -470,7 +501,9 @@ impl State {
         if self.options.profile.is_none() {
             return Ok(None);
         }
-        let read_only = self.read_only;
+        // Room's identity lives on the connection, so a bound connection
+        // keeps it as a writer does.
+        let read_only = self.read_only && self.seal.is_none();
         let timeout = self.options.sql().transaction_timeout.as_millis();
         // The session of an idle connection may have lost its authority.
         if !self.authority_pinned() {
@@ -595,6 +628,17 @@ impl State {
                 none()
             }
             SqlControl::Begin("DEFERRED") => Err(failure(
+                code::ERROR,
+                "cannot start a transaction within a transaction",
+            )
+            .into()),
+            // A bound connection reads in any transaction its ORM begins;
+            // its writes fail as statements.
+            SqlControl::Begin(_) if self.seal.is_some() && self.reading.is_none() => {
+                self.reading = Some(Reading::default());
+                none()
+            }
+            SqlControl::Begin(_) if self.seal.is_some() => Err(failure(
                 code::ERROR,
                 "cannot start a transaction within a transaction",
             )

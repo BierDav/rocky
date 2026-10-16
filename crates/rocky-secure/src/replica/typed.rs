@@ -388,6 +388,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         verify_constraint_indexes(&inner.conn, &typed).await?;
         let constrained = typed.constraints.is_some();
         inner.workspace.typed = Some(Arc::new(typed));
+        transaction!(inner, |inner| inner.install_history().await)?;
         if constrained {
             transaction!(inner, |inner| Box::pin(
                 inner.rebuild_constraints(None, None)
@@ -538,6 +539,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         verify_constraint_indexes(&self.conn, &typed).await?;
         self.workspace.typed = Some(Arc::new(typed));
+        transaction!(self, |inner| inner.install_history().await)?;
         self.start_events();
         Ok(())
     }
@@ -701,14 +703,21 @@ impl<A: RowApplication> Inner<A> {
             // Children elsewhere lose their parents with it.
             return Box::pin(self.rebuild_constraints(Some(scope), Some(scope))).await;
         }
-        if let Some(table) = self.workspace.typed.as_ref().and_then(|typed| typed.by_scope(scope)) {
+        if let Some(table) = self
+            .workspace
+            .typed
+            .as_ref()
+            .and_then(|typed| typed.by_scope(scope))
+        {
             self.touch(&table.table.sql_name);
-            reproject(
-                &self.conn,
-                self.workspace.typed
-                    .as_ref()
-                    .ok_or_else(|| denied("missing typed schema"))?,
-                table,
+            let typed = self
+                .workspace
+                .typed
+                .as_ref()
+                .ok_or_else(|| denied("missing typed schema"))?;
+            self.in_bulk(
+                std::slice::from_ref(&table.table.sql_name),
+                reproject(&self.conn, typed, table),
             )
             .await?;
         }
@@ -734,7 +743,11 @@ impl<A: RowApplication> Inner<A> {
         match typed.by_scope(scope) {
             Some(table) => {
                 self.touch(&table.table.sql_name);
-                reproject(&self.conn, &typed, table).await
+                self.in_bulk(
+                    std::slice::from_ref(&table.table.sql_name),
+                    reproject(&self.conn, &typed, table),
+                )
+                .await
             }
             None if typed.declared_by_scope(scope).is_some() => Ok(()),
             None => Err(Error::Corrupt("missing typed scope for rebuild".into())),

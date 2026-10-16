@@ -1,0 +1,1221 @@
+//! History tables of the live workspace. A change to a live row writes its
+//! previous version to the table's history, in the same transaction, while
+//! a kept seal still needs it; a kept seal's state is the live rows unchanged
+//! since its mark plus the history rows valid at it. See
+//! `docs/runtime/kept-seals.md`.
+use super::typed::{Typed, quoted};
+use super::*;
+use rocky_core::Scope;
+use std::sync::atomic::AtomicUsize;
+
+pub(super) const SCHEMA: &[&str] = &[
+    // The live tables' change counter. A change made at `version` records
+    // the version it replaces with that number; `paused` while a bulk
+    // rebuild records its difference itself.
+    "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL)",
+    // Kept seals: the counter's value while the live tables held each one.
+    "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_kept_config(id INTEGER PRIMARY KEY CHECK(id=1),bookmarked INTEGER NOT NULL,latest INTEGER NOT NULL,every INTEGER NOT NULL)",
+    // Each kept seal's tables as they were: their columns, and the frozen
+    // copy a later removal or migration left in their place.
+    "CREATE TABLE IF NOT EXISTS secure_kept_tables(seal BLOB NOT NULL,tab TEXT NOT NULL,columns BLOB NOT NULL,frozen TEXT,PRIMARY KEY(seal,tab)) WITHOUT ROWID",
+];
+
+/// The seals a node keeps, among those of the tips it follows. A seal is
+/// kept only once this node finalized it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptSeals {
+    /// The seal each bookmarked tip starts from, or a closed tip's own.
+    pub bookmarked: bool,
+    /// The latest this many kept seals.
+    pub latest: u32,
+    /// Every seal.
+    pub every: bool,
+}
+
+/// Why this node holds a seal's state: it may open a branch there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldSeal {
+    /// History tables keep its state.
+    Kept,
+    /// Every held scope's replay base sits there, or its state there was
+    /// pulled from a node that keeps it.
+    Checkpoint,
+    /// The live tables hold its state now.
+    Live,
+}
+
+/// The counter's current value, as triggers read it.
+const CLOCK: &str = "COALESCE((SELECT version FROM secure_kept_clock WHERE id=1),1)";
+/// Triggers record only while a seal is kept and no bulk rebuild runs.
+const ACTIVE: &str = "EXISTS(SELECT 1 FROM secure_kept_marks) AND COALESCE((SELECT paused FROM secure_kept_clock WHERE id=1),0)=0";
+
+pub(super) fn history_name(table: &str) -> String {
+    format!("secure_history_{table}")
+}
+
+/// One live table and its history table.
+pub(super) struct History {
+    pub(super) live: String,
+    pub(super) history: String,
+    before: String,
+    /// Quoted column names, in declaration order.
+    pub(super) columns: Vec<String>,
+    /// Quoted primary key columns.
+    key: Vec<String>,
+    /// Quoted columns of each unique index.
+    uniques: Vec<Vec<String>>,
+    row_kind: bool,
+}
+impl History {
+    pub(super) fn of(typed: &Typed) -> Vec<Self> {
+        typed
+            .tables
+            .iter()
+            .filter_map(|projected| {
+                let logical = typed.rows.schema().table(&projected.table.sql_name)?;
+                let column = |name: &str| quoted(name);
+                Some(Self {
+                    live: quoted(&logical.sql_name),
+                    history: quoted(&history_name(&logical.sql_name)),
+                    before: quoted(&format!("secure_history_before_{}", logical.sql_name)),
+                    columns: logical
+                        .columns
+                        .iter()
+                        .map(|c| column(&c.sql_name))
+                        .collect(),
+                    key: logical.primary_key.iter().map(|k| column(k)).collect(),
+                    uniques: logical
+                        .indexes
+                        .iter()
+                        .filter(|index| index.unique)
+                        .map(|index| index.columns.iter().map(|c| column(&c.name)).collect())
+                        .collect(),
+                    row_kind: logical.column("row_kind").is_some(),
+                })
+            })
+            .collect()
+    }
+    fn list(columns: &[String], image: &str) -> String {
+        columns
+            .iter()
+            .map(|column| format!("{image}.{column}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+    fn same(columns: &[String], a: &str, b: &str) -> String {
+        columns
+            .iter()
+            .map(|column| format!("{a}.{column} IS {b}.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    }
+    fn differs(&self, a: &str, b: &str) -> String {
+        self.columns
+            .iter()
+            .map(|column| format!("{a}.{column} IS NOT {b}.{column}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }
+    /// Whether a kept seal may still see the version at `image`'s key: one
+    /// is marked since that key last changed, as far as history shows.
+    fn needed(&self, image: &str) -> String {
+        format!(
+            "EXISTS(SELECT 1 FROM secure_kept_marks WHERE mark>=COALESCE((SELECT MAX(p.rocky_version) FROM {} AS p WHERE {}),-1))",
+            self.history,
+            Self::same(&self.key, "p", image)
+        )
+    }
+    fn columns(&self) -> String {
+        self.columns.join(",")
+    }
+    /// Records `image`, a trigger's `OLD`, as replaced now.
+    fn record_image(&self, image: &str) -> String {
+        format!(
+            "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},0 WHERE {};",
+            self.history,
+            self.columns(),
+            Self::list(&self.columns, image),
+            self.needed(image)
+        )
+    }
+    /// Records the live rows `filter` selects as replaced now.
+    fn record_rows(&self, filter: &str) -> String {
+        format!(
+            "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},0 FROM {} AS r WHERE ({filter}) AND {};",
+            self.history,
+            self.columns(),
+            Self::list(&self.columns, "r"),
+            self.live,
+            self.needed("r")
+        )
+    }
+    /// Records that no row was at `image`'s key until now.
+    fn record_absent(&self, image: &str) -> String {
+        format!(
+            "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},1 WHERE NOT EXISTS(SELECT 1 FROM {} AS r WHERE {}) AND {};",
+            self.history,
+            self.key.join(","),
+            Self::list(&self.key, image),
+            self.live,
+            Self::same(&self.key, "r", image),
+            self.needed(image)
+        )
+    }
+    /// The live rows a write of `image` would replace through a unique
+    /// index, other than the row at `own`'s key.
+    fn conflicts(&self, image: &str, own: &str) -> Vec<String> {
+        self.uniques
+            .iter()
+            .map(|unique| {
+                self.record_rows(&format!(
+                    "{} AND NOT ({})",
+                    Self::same(unique, "r", image),
+                    Self::same(&self.key, "r", own)
+                ))
+            })
+            .collect()
+    }
+    fn trigger(&self, event: &str) -> String {
+        let name = self.live.trim_matches('"').replace("\"\"", "\"");
+        quoted(&format!("secure_kept_{event}_{name}"))
+    }
+    pub(super) fn statements(&self) -> Vec<String> {
+        let mut statements = vec![format!(
+            "CREATE TABLE IF NOT EXISTS {}({},rocky_version INTEGER NOT NULL,rocky_absent INTEGER NOT NULL,PRIMARY KEY({},rocky_version))",
+            self.history,
+            self.columns(),
+            self.key.join(",")
+        )];
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS {} BEFORE DELETE ON {} FOR EACH ROW WHEN {ACTIVE} BEGIN {} END",
+            self.trigger("delete"),
+            self.live,
+            self.record_image("OLD")
+        ));
+        let mut update = vec![
+            self.record_image("OLD"),
+            self.record_absent("NEW"),
+            self.record_rows(&format!(
+                "{} AND NOT ({})",
+                Self::same(&self.key, "r", "NEW"),
+                Self::same(&self.key, "r", "OLD")
+            )),
+        ];
+        update.extend(self.conflicts("NEW", "OLD"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS {} BEFORE UPDATE ON {} FOR EACH ROW WHEN {ACTIVE} AND ({}) BEGIN {} END",
+            self.trigger("update"),
+            self.live,
+            self.differs("OLD", "NEW"),
+            update.join(" ")
+        ));
+        // An upsert or a replace changes the row at the key without an
+        // update or delete trigger of its own.
+        let mut insert = vec![
+            self.record_absent("NEW"),
+            self.record_rows(&format!(
+                "{} AND ({})",
+                Self::same(&self.key, "r", "NEW"),
+                self.differs("r", "NEW")
+            )),
+        ];
+        insert.extend(self.conflicts("NEW", "NEW"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS {} BEFORE INSERT ON {} FOR EACH ROW WHEN {ACTIVE} BEGIN {} END",
+            self.trigger("insert"),
+            self.live,
+            insert.join(" ")
+        ));
+        statements
+    }
+    /// Deletes the versions no kept seal needs any more.
+    fn prune(&self) -> String {
+        format!(
+            "DELETE FROM {h} WHERE rowid IN (SELECT h.rowid FROM {h} AS h WHERE NOT EXISTS(SELECT 1 FROM secure_kept_marks AS k WHERE k.mark<h.rocky_version AND k.mark>=COALESCE((SELECT MAX(p.rocky_version) FROM {h} AS p WHERE {} AND p.rocky_version<h.rocky_version),-1)))",
+            Self::same(&self.key, "p", "h"),
+            h = self.history,
+        )
+    }
+    /// The table's SQL name.
+    pub(super) fn name(&self) -> String {
+        unquoted(&self.live)
+    }
+    /// This table's rows at `mark`, showing `columns`. Support rows are
+    /// filtered.
+    fn select(&self, mark: i64, columns: &[String]) -> String {
+        let support = |image: &str| {
+            if self.row_kind {
+                format!("{image}.\"row_kind\"=0 AND ")
+            } else {
+                String::new()
+            }
+        };
+        format!(
+            "SELECT {} FROM main.{live} AS l WHERE {}NOT EXISTS(SELECT 1 FROM main.{h} AS p WHERE {} AND p.rocky_version>{mark}) UNION ALL SELECT {} FROM main.{h} AS r WHERE {}r.rocky_absent=0 AND r.rocky_version=(SELECT MIN(p.rocky_version) FROM main.{h} AS p WHERE {} AND p.rocky_version>{mark})",
+            Self::list(columns, "l"),
+            support("l"),
+            Self::same(&self.key, "p", "l"),
+            Self::list(columns, "r"),
+            support("r"),
+            Self::same(&self.key, "p", "r"),
+            live = self.live,
+            h = self.history,
+        )
+    }
+}
+
+/// Bulk rebuilds of live tables in progress: they pause the triggers and
+/// record their difference at the end.
+#[derive(Default)]
+pub(crate) struct Bulk {
+    depth: AtomicUsize,
+    /// Live tables copied before the outermost rebuild began.
+    copied: std::sync::Mutex<BTreeSet<String>>,
+}
+
+impl<A: RowApplication> Inner<A> {
+    fn histories(&self) -> Vec<History> {
+        self.workspace
+            .typed
+            .as_deref()
+            .map(History::of)
+            .unwrap_or_default()
+    }
+    /// Creates the history table and triggers of every live table, inside
+    /// the caller's transaction.
+    pub(super) async fn install_history(&self) -> Result<(), Error> {
+        match self.workspace.typed.clone() {
+            Some(typed) => self.install_history_for(&typed).await,
+            None => Ok(()),
+        }
+    }
+    /// `install_history` for the live tables of `typed`.
+    pub(super) async fn install_history_for(&self, typed: &Typed) -> Result<(), Error> {
+        for history in History::of(typed) {
+            // A history table keeps the columns of earlier schemas and
+            // gains those a later one adds.
+            let known: BTreeSet<String> = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT name FROM pragma_table_info(?)",
+                        [history.history.trim_matches('"').replace("\"\"", "\"")],
+                    )
+                    .await?,
+            )
+            .await?
+            .into_iter()
+            .filter_map(|record| match record.as_slice() {
+                [SqlValue::Text(name)] => Some(quoted(name).to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+            if !known.is_empty() {
+                for column in &history.columns {
+                    if !known.contains(&column.to_ascii_lowercase()) {
+                        self.conn
+                            .execute(
+                                format!("ALTER TABLE {} ADD COLUMN {column}", history.history),
+                                (),
+                            )
+                            .await?;
+                    }
+                }
+            }
+            for sql in history.statements() {
+                self.conn.execute(sql, ()).await?;
+            }
+        }
+        Ok(())
+    }
+    async fn kept(&self) -> Result<bool, Error> {
+        Ok(!rows(&self.conn, "SELECT 1 FROM secure_kept_marks LIMIT 1")
+            .await?
+            .is_empty())
+    }
+    /// Before a bulk rebuild of `tables`, by SQL name: copies them and
+    /// pauses the triggers, when a seal is kept.
+    pub(super) async fn begin_bulk(&self, tables: &[String]) -> Result<bool, Error> {
+        if !self.kept().await? {
+            return Ok(false);
+        }
+        let outer = self.workspace.bulk.depth.fetch_add(1, Ordering::SeqCst) == 0;
+        let result = async {
+            if outer {
+                self.conn
+                    .execute("INSERT INTO secure_kept_clock VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1", ())
+                    .await?;
+            }
+            for history in self.histories() {
+                let name = history.live.clone();
+                if !tables
+                    .iter()
+                    .any(|table| quoted(table).eq_ignore_ascii_case(&name))
+                {
+                    continue;
+                }
+                let fresh = self
+                    .workspace
+                    .bulk
+                    .copied
+                    .lock()
+                    .map_err(|_| Error::Corrupt("bulk history".into()))?
+                    .insert(name.to_ascii_lowercase());
+                if !fresh {
+                    continue;
+                }
+                self.copy_before(&history).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            self.end_bulk(false).await?;
+        }
+        result.map(|_| true)
+    }
+    /// Runs `work`, a bulk rebuild of `tables`, recording what it changes
+    /// in history at the end rather than row by row.
+    pub(super) async fn in_bulk<T>(
+        &self,
+        tables: &[String],
+        work: impl std::future::Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        let active = self.begin_bulk(tables).await?;
+        let result = work.await;
+        if active {
+            match &result {
+                Ok(_) => self.end_bulk(true).await?,
+                Err(_) => {
+                    // The failed rebuild's transaction rolls the copies back.
+                    let _ = self.end_bulk(false).await;
+                }
+            }
+        }
+        result
+    }
+    /// After a bulk rebuild: the outermost records what differs from the
+    /// copies, unless the rebuild failed, and resumes the triggers.
+    pub(super) async fn end_bulk(&self, record: bool) -> Result<(), Error> {
+        if self.workspace.bulk.depth.fetch_sub(1, Ordering::SeqCst) != 1 {
+            return Ok(());
+        }
+        let copied = std::mem::take(
+            &mut *self
+                .workspace
+                .bulk
+                .copied
+                .lock()
+                .map_err(|_| Error::Corrupt("bulk history".into()))?,
+        );
+        for history in self.histories() {
+            if !copied.contains(&history.live.to_ascii_lowercase()) {
+                continue;
+            }
+            if record {
+                self.record_difference(&history, &history.columns).await?;
+            }
+            self.conn
+                .execute(format!("DROP TABLE IF EXISTS temp.{}", history.before), ())
+                .await?;
+        }
+        self.conn
+            .execute("UPDATE secure_kept_clock SET paused=0 WHERE id=1", ())
+            .await?;
+        Ok(())
+    }
+    pub(super) async fn kept_config(&self) -> Result<KeptSeals, Error> {
+        let records = rows(
+            &self.conn,
+            "SELECT bookmarked,latest,every FROM secure_kept_config WHERE id=1",
+        )
+        .await?;
+        match records.first().map(Vec::as_slice) {
+            None => Ok(KeptSeals::default()),
+            Some(
+                [
+                    SqlValue::Integer(bookmarked),
+                    SqlValue::Integer(latest),
+                    SqlValue::Integer(every),
+                ],
+            ) => Ok(KeptSeals {
+                bookmarked: *bookmarked != 0,
+                latest: u32::try_from(*latest)
+                    .map_err(|_| Error::Corrupt("kept seal count".into()))?,
+                every: *every != 0,
+            }),
+            _ => Err(Error::Corrupt("kept seal configuration".into())),
+        }
+    }
+    /// Kept seals with their marks, oldest first.
+    pub(super) async fn kept_marks(&self) -> Result<Vec<(Commitment, i64)>, Error> {
+        rows(
+            &self.conn,
+            "SELECT seal,mark FROM secure_kept_marks ORDER BY mark",
+        )
+        .await?
+        .into_iter()
+        .map(|record| match record.as_slice() {
+            [SqlValue::Blob(seal), SqlValue::Integer(mark)] => Ok((
+                seal.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("kept seal".into()))?,
+                *mark,
+            )),
+            _ => Err(Error::Corrupt("kept seal".into())),
+        })
+        .collect()
+    }
+    /// The seals bookmarks show: a sealed tip's own seal, else the seal its
+    /// tip starts from.
+    pub(super) fn bookmarked_seals(&self, domain: Scope) -> Result<BTreeSet<Commitment>, Error> {
+        let Some(graph) = self.graphs.get(&domain) else {
+            return Ok(BTreeSet::new());
+        };
+        let names: BTreeSet<&str> = graph
+            .moves
+            .iter()
+            .map(|movement| movement.statement.name.as_str())
+            .collect();
+        let mut seals = BTreeSet::new();
+        for name in names {
+            let Some(tip) = graph.bookmark(name).map_err(credential)? else {
+                continue;
+            };
+            if let Some(seal) = bookmark_seal(graph, tip)? {
+                seals.insert(seal);
+            }
+        }
+        Ok(seals)
+    }
+    /// Inside the caller's transaction, records that the live tables hold
+    /// `seal`'s state now.
+    pub(super) async fn mark_seal(&self, seal: Commitment) -> Result<(), Error> {
+        if self.workspace.typed.is_none() {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                format!("INSERT OR IGNORE INTO secure_kept_marks VALUES(?,{CLOCK})"),
+                [seal.to_vec()],
+            )
+            .await?;
+        for history in self.histories() {
+            let columns: Vec<String> = history.columns.iter().map(|c| unquoted(c)).collect();
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_kept_tables VALUES(?,?,?,NULL)",
+                    bindings(vec![
+                        SqlValue::Blob(seal.to_vec()),
+                        SqlValue::Text(history.name()),
+                        SqlValue::Blob(encode(&columns)?),
+                    ]),
+                )
+                .await?;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO secure_kept_clock VALUES(1,2,0) ON CONFLICT(id) DO UPDATE SET version=version+1",
+                (),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Whether the configuration keeps `seal`, about to be finalized as the
+    /// newest seal of the followed path.
+    pub(super) async fn keeps_finalized(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<bool, Error> {
+        let config = self.kept_config().await?;
+        Ok(self.workspace.typed.is_some()
+            && (config.every
+                || config.latest > 0
+                || (config.bookmarked && self.bookmarked_seals(domain)?.contains(&seal))))
+    }
+    /// Inside the caller's transaction, releases the kept seals the
+    /// configuration no longer names, deleting the versions only they
+    /// needed, and keeps a newly named one the live tables hold now.
+    pub(super) async fn retain_kept(&self, domain: Scope) -> Result<(), Error> {
+        let config = self.kept_config().await?;
+        let bookmarked = if config.bookmarked {
+            self.bookmarked_seals(domain)?
+        } else {
+            BTreeSet::new()
+        };
+        let marks = self.kept_marks().await?;
+        let latest = usize::try_from(config.latest).unwrap_or(usize::MAX);
+        let mut released = false;
+        for (index, (seal, _)) in marks.iter().enumerate() {
+            let named = config.every || marks.len() - index <= latest || bookmarked.contains(seal);
+            if !named {
+                self.release_seal(*seal).await?;
+                released = true;
+            }
+        }
+        if released {
+            for history in self.histories() {
+                self.conn.execute(history.prune(), ()).await?;
+            }
+        }
+        for seal in bookmarked {
+            if !marks.iter().any(|(known, _)| *known == seal) && self.live_at(domain, seal).await? {
+                self.mark_seal(seal).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Forgets kept `seal` and drops its frozen copies; the caller prunes
+    /// the history it alone needed.
+    async fn release_seal(&self, seal: Commitment) -> Result<(), Error> {
+        for table in self.kept_tables(seal).await? {
+            if let Some(frozen) = table.frozen {
+                self.conn
+                    .execute(format!("DROP TABLE IF EXISTS {}", quoted(&frozen)), ())
+                    .await?;
+            }
+        }
+        for sql in [
+            "DELETE FROM secure_kept_marks WHERE seal=?",
+            "DELETE FROM secure_kept_tables WHERE seal=?",
+        ] {
+            self.conn.execute(sql, [seal.to_vec()]).await?;
+        }
+        Ok(())
+    }
+    /// The tables kept `seal` shows, as they were there.
+    async fn kept_tables(&self, seal: Commitment) -> Result<Vec<KeptTable>, Error> {
+        collect_rows(
+            self.conn
+                .query(
+                    "SELECT tab,columns,frozen FROM secure_kept_tables WHERE seal=? ORDER BY tab",
+                    [seal.to_vec()],
+                )
+                .await?,
+        )
+        .await?
+        .into_iter()
+        .map(|record| match record.as_slice() {
+            [SqlValue::Text(table), SqlValue::Blob(columns), frozen] => Ok(KeptTable {
+                table: table.clone(),
+                columns: decode(columns)?,
+                frozen: match frozen {
+                    SqlValue::Text(frozen) => Some(frozen.clone()),
+                    _ => None,
+                },
+            }),
+            _ => Err(Error::Corrupt("kept table".into())),
+        })
+        .collect()
+    }
+    /// The rows `table` showed at the kept seal marked `mark`, and the
+    /// tables that holds them.
+    fn kept_select(
+        histories: &[History],
+        mark: i64,
+        table: &KeptTable,
+    ) -> Option<(String, String)> {
+        let columns: Vec<String> = table.columns.iter().map(|c| quoted(c)).collect();
+        match &table.frozen {
+            Some(frozen) => Some((
+                format!("SELECT {} FROM main.{}", columns.join(","), quoted(frozen)),
+                frozen.clone(),
+            )),
+            None => histories
+                .iter()
+                .find(|history| history.name().eq_ignore_ascii_case(&table.table))
+                .map(|history| (history.select(mark, &columns), unquoted(&history.history))),
+        }
+    }
+    /// Whether the live tables hold `seal`'s state: it is finalized on the
+    /// followed path and no held scope applied anything it excludes.
+    pub(super) async fn live_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
+        let Some(depth) = self.finalized_depth(domain, seal).await? else {
+            return Ok(false);
+        };
+        for (_, id) in self.domain_scopes(domain).await? {
+            let bound = match collect_rows(
+                self.conn
+                    .query(
+                        "SELECT position FROM secure_seal_bounds WHERE scope=? AND depth=?",
+                        [id, depth],
+                    )
+                    .await?,
+            )
+            .await?
+            .first()
+            .map(Vec::as_slice)
+            {
+                Some([SqlValue::Integer(position)]) => *position,
+                // A compacted seal: its replay base holds the position.
+                None => match self.checkpoint_record(id, true).await? {
+                    Some(record)
+                        if record
+                            .signed
+                            .as_ref()
+                            .and_then(|signed| signed.statement.seal)
+                            == Some(seal) =>
+                    {
+                        record.position
+                    }
+                    _ => return Ok(false),
+                },
+                _ => return Err(Error::Corrupt("seal bound".into())),
+            };
+            let beyond = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_applied WHERE scope=? AND position>? LIMIT 1",
+                        [id, bound],
+                    )
+                    .await?,
+            )
+            .await?;
+            if !beyond.is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    /// How this node holds `seal`'s state, if it does.
+    pub(super) async fn held_seal(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Option<HeldSeal>, Error> {
+        if self
+            .kept_marks()
+            .await?
+            .iter()
+            .any(|(known, _)| *known == seal)
+        {
+            return Ok(Some(HeldSeal::Kept));
+        }
+        if self.live_at(domain, seal).await? {
+            return Ok(Some(HeldSeal::Live));
+        }
+        // A replay base there, or a state pulled from a node that keeps it.
+        let scopes = self.domain_scopes(domain).await?;
+        let mut based = !scopes.is_empty();
+        for (_, id) in scopes {
+            based &= self.base_seal(id).await? == Some(seal)
+                || self.pulled_seal(id).await? == Some(seal);
+        }
+        Ok(based.then_some(HeldSeal::Checkpoint))
+    }
+    /// The statements that bind a read-only connection to kept `seal`:
+    /// temporary views with the live tables' names and shape, and the
+    /// application's views over them.
+    pub(super) async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
+        let mark = self
+            .kept_marks()
+            .await?
+            .into_iter()
+            .find(|(known, _)| *known == seal)
+            .map(|(_, mark)| mark)
+            .ok_or_else(|| denied("this node does not keep that seal"))?;
+        let typed = self
+            .workspace
+            .typed
+            .as_deref()
+            .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
+        let histories = History::of(typed);
+        let kept = self.kept_tables(seal).await?;
+        let mut statements = Vec::new();
+        let mut readable = Vec::new();
+        for table in &kept {
+            if let Some((select, holder)) = Self::kept_select(&histories, mark, table) {
+                statements.push(format!(
+                    "CREATE TEMP VIEW {} AS {select}",
+                    quoted(&table.table)
+                ));
+                readable.push(holder);
+            }
+        }
+        // A table added after the seal had no rows there.
+        for history in &histories {
+            if !kept
+                .iter()
+                .any(|table| table.table.eq_ignore_ascii_case(&history.name()))
+            {
+                statements.push(format!(
+                    "CREATE TEMP VIEW {} AS SELECT {} FROM main.{} WHERE 0",
+                    history.live,
+                    history.columns(),
+                    history.live
+                ));
+            }
+        }
+        for view in &typed.rows.schema().views {
+            statements.push(temporary(&view.create_sql));
+        }
+        Ok(SealViews {
+            seal,
+            needs: vec![seal],
+            statements,
+            readable,
+        })
+    }
+}
+
+/// Live tables a projection switch replaces, by name with the columns
+/// they had, copied to record what the switch changes in them.
+pub(super) struct Switching {
+    copied: Vec<(String, Vec<String>)>,
+}
+
+/// A table as a kept seal shows it.
+struct KeptTable {
+    table: String,
+    /// Its columns there, unquoted.
+    columns: Vec<String>,
+    /// The copy holding its rows since a removal or migration replaced it.
+    frozen: Option<String>,
+}
+
+fn unquoted(name: &str) -> String {
+    name.strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+        .unwrap_or(name)
+        .replace("\"\"", "\"")
+}
+
+impl SealViews {
+    /// Returns a row inside a snapshot while every needed seal is kept.
+    pub(super) fn requires(&self) -> String {
+        let seals: Vec<String> = self
+            .needs
+            .iter()
+            .map(|seal| {
+                format!(
+                    "X'{}'",
+                    seal.iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            })
+            .collect();
+        format!(
+            "SELECT 1 WHERE (SELECT count(*) FROM secure_kept_marks WHERE seal IN ({}))={}",
+            seals.join(","),
+            seals.len()
+        )
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Views for the tables a statement names as `table@seal`, with the
+    /// seal in hex, or `table@bookmark`: the kept seal's rows of `table`.
+    /// None when it names no history.
+    pub(super) async fn named_history(
+        &self,
+        tables: &BTreeSet<String>,
+    ) -> Result<Option<SealViews>, Error> {
+        let named: Vec<&String> = tables.iter().filter(|name| name.contains('@')).collect();
+        if named.is_empty() {
+            return Ok(None);
+        }
+        let typed = self
+            .workspace
+            .typed
+            .as_deref()
+            .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
+        let histories = History::of(typed);
+        let marks = self.kept_marks().await?;
+        let domain = self.workspace.followed.as_ref().map(|(scope, _)| *scope);
+        let mut views = SealViews {
+            seal: [0; 32],
+            needs: Vec::new(),
+            statements: Vec::new(),
+            readable: Vec::new(),
+        };
+        let mut seals = BTreeSet::new();
+        for name in named {
+            let Some((table, reference)) = name.rsplit_once('@') else {
+                continue;
+            };
+            let history = histories
+                .iter()
+                .find(|history| history.name().eq_ignore_ascii_case(table));
+            let seal = match decode_hex(reference) {
+                Some(seal) => seal,
+                None => {
+                    let domain = domain.ok_or_else(|| denied("no bookmark is followed"))?;
+                    let graph = self.graph_for(domain)?;
+                    let tip = graph
+                        .bookmark(reference)
+                        .map_err(credential)?
+                        .ok_or_else(|| denied(&format!("{name} names no seal or bookmark")))?;
+                    bookmark_seal(graph, tip)?
+                        .ok_or_else(|| denied("the bookmark's tip starts from no seal"))?
+                }
+            };
+            let mark = marks
+                .iter()
+                .find(|(known, _)| *known == seal)
+                .map(|(_, mark)| *mark)
+                .ok_or_else(|| denied(&format!("{name}: this node does not keep that seal")))?;
+            seals.insert(seal);
+            let kept = self.kept_tables(seal).await?;
+            let shown = kept
+                .iter()
+                .find(|kept| kept.table.eq_ignore_ascii_case(table))
+                .and_then(|kept| Self::kept_select(&histories, mark, kept));
+            let (select, holder) = match shown {
+                Some(shown) => shown,
+                None => {
+                    let history = history
+                        .ok_or_else(|| denied(&format!("{name} names no table's history")))?;
+                    (
+                        format!(
+                            "SELECT {} FROM main.{} WHERE 0",
+                            history.columns(),
+                            history.live
+                        ),
+                        unquoted(&history.history),
+                    )
+                }
+            };
+            views
+                .statements
+                .push(format!("CREATE TEMP VIEW {} AS {select}", quoted(name)));
+            views.readable.push(holder);
+        }
+        views.seal = seals.first().copied().unwrap_or_default();
+        views.needs = seals.into_iter().collect();
+        Ok(Some(views))
+    }
+}
+
+fn decode_hex(text: &str) -> Option<Commitment> {
+    if text.len() != 64 {
+        return None;
+    }
+    (0..64)
+        .step_by(2)
+        .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?
+        .try_into()
+        .ok()
+}
+
+/// Makes an application's `CREATE VIEW` temporary, so its names resolve to
+/// the seal's views first.
+fn temporary(sql: &str) -> String {
+    let trimmed = sql.trim_start();
+    match trimmed.get(..12) {
+        Some(head) if head.eq_ignore_ascii_case("CREATE VIEW ") => {
+            format!("CREATE TEMP VIEW {}", &trimmed[12..])
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// The seal a tip's bookmark shows: the tip's own seal once sealed, else
+/// the seal it starts from.
+pub(super) fn bookmark_seal(
+    graph: &rocky_credentials::TipGraph,
+    tip: TipId,
+) -> Result<Option<Commitment>, Error> {
+    if let Some(seal) = graph.seal(tip).map_err(credential)? {
+        return Ok(Some(seal.id().map_err(credential)?));
+    }
+    for seal in &graph.seals {
+        if seal.successor().map_err(credential)? == Some(tip) {
+            return Ok(Some(seal.id().map_err(credential)?));
+        }
+    }
+    for opening in &graph.openings {
+        if opening.tip().map_err(credential)? == tip {
+            return Ok(Some(opening.statement.seal));
+        }
+    }
+    Ok(None)
+}
+
+/// What binds a read-only connection to a kept seal.
+#[derive(Clone, Debug)]
+pub struct SealViews {
+    pub seal: Commitment,
+    /// Every kept seal the views read.
+    pub needs: Vec<Commitment>,
+    /// Run on the connection before its first read.
+    pub statements: Vec<String>,
+    /// History tables the views read.
+    pub readable: Vec<String>,
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Names the seals this node keeps from now on. Seals it no longer names
+    /// are released at once; a newly named one is kept only if its state is
+    /// still at hand: the live tables hold it.
+    pub async fn keep_seals(&self, config: KeptSeals) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        let domain = inner.workspace.followed.as_ref().map(|(scope, _)| *scope);
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "INSERT INTO secure_kept_config VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET bookmarked=excluded.bookmarked,latest=excluded.latest,every=excluded.every",
+                    [
+                        i64::from(config.bookmarked),
+                        i64::from(config.latest),
+                        i64::from(config.every),
+                    ],
+                )
+                .await?;
+            if let Some(domain) = domain {
+                inner.retain_kept(domain).await?;
+                if config.every || config.latest > 0 {
+                    let path = inner.path_seals(domain)?;
+                    if let Some(newest) = path.last() {
+                        let newest = newest.id().map_err(credential)?;
+                        if !inner
+                            .kept_marks()
+                            .await?
+                            .iter()
+                            .any(|(seal, _)| *seal == newest)
+                            && inner.live_at(domain, newest).await?
+                        {
+                            inner.mark_seal(newest).await?;
+                        }
+                    }
+                }
+            } else {
+                inner.retain_kept_without_graph().await?;
+            }
+            Ok(())
+        })?;
+        inner.flush()?;
+        Ok(())
+    }
+    pub async fn kept_seal_config(&self) -> Result<KeptSeals, Error> {
+        self.inner.lock().await.kept_config().await
+    }
+    /// The seals this node keeps, oldest first.
+    pub async fn kept_seals(&self) -> Result<Vec<Commitment>, Error> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .kept_marks()
+            .await?
+            .into_iter()
+            .map(|(seal, _)| seal)
+            .collect())
+    }
+    /// How this node holds `seal`'s state; none when it is shallow here.
+    pub async fn held_seal(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Option<HeldSeal>, Error> {
+        let inner = self.inner.lock().await;
+        inner.graph_for(domain)?;
+        inner.held_seal(domain, seal).await
+    }
+    /// The seal `bookmark` shows: its tip's own seal once sealed, else the
+    /// seal its tip starts from.
+    pub async fn bookmark_seal(&self, domain: Scope, bookmark: &str) -> Result<Commitment, Error> {
+        let inner = self.inner.lock().await;
+        let graph = inner.graph_for(domain)?;
+        let tip = graph
+            .bookmark(bookmark)
+            .map_err(credential)?
+            .ok_or_else(|| denied("no such bookmark"))?;
+        bookmark_seal(graph, tip)?.ok_or_else(|| denied("the bookmark's tip starts from no seal"))
+    }
+    /// What binds a read-only connection to kept `seal`.
+    pub async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
+        self.inner.lock().await.seal_views(seal).await
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Without a followed bookmark there is no seal to keep.
+    async fn retain_kept_without_graph(&self) -> Result<(), Error> {
+        if self.kept().await? {
+            for (seal, _) in self.kept_marks().await? {
+                self.release_seal(seal).await?;
+            }
+            for history in self.histories() {
+                self.conn.execute(history.prune(), ()).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Inside a projection switch's transaction, before the live tables of
+    /// `old` make way for those of `new`: each kept seal keeps a frozen
+    /// copy of a table the switch removes or narrows, whose history goes;
+    /// the other tables are copied to record what the switch changes.
+    pub(super) async fn begin_switch_history(
+        &self,
+        old: &Typed,
+        new: &Typed,
+    ) -> Result<Option<Switching>, Error> {
+        if !self.kept().await? {
+            return Ok(None);
+        }
+        let marks = self.kept_marks().await?;
+        let mut copied = Vec::new();
+        for history in History::of(old) {
+            let name = history.name();
+            let remaining: Option<BTreeSet<String>> = new
+                .by_name(&name)
+                .and_then(|_| new.rows.schema().table(&name))
+                .map(|table| {
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| column.sql_name.to_ascii_lowercase())
+                        .collect()
+                });
+            let narrowed = remaining.as_ref().is_none_or(|remaining| {
+                history
+                    .columns
+                    .iter()
+                    .any(|column| !remaining.contains(&unquoted(column).to_ascii_lowercase()))
+            });
+            if !narrowed {
+                self.copy_before(&history).await?;
+                copied.push((name, history.columns.clone()));
+                continue;
+            }
+            for (seal, mark) in &marks {
+                for table in self.kept_tables(*seal).await? {
+                    if table.frozen.is_some() || !table.table.eq_ignore_ascii_case(&name) {
+                        continue;
+                    }
+                    let Some((select, _)) =
+                        Self::kept_select(std::slice::from_ref(&history), *mark, &table)
+                    else {
+                        continue;
+                    };
+                    let frozen = format!("secure_frozen_{mark}_{name}");
+                    self.conn
+                        .execute(format!("CREATE TABLE {} AS {select}", quoted(&frozen)), ())
+                        .await?;
+                    self.conn
+                        .execute(
+                            "UPDATE secure_kept_tables SET frozen=? WHERE seal=? AND tab=?",
+                            bindings(vec![
+                                SqlValue::Text(frozen),
+                                SqlValue::Blob(seal.to_vec()),
+                                SqlValue::Text(table.table.clone()),
+                            ]),
+                        )
+                        .await?;
+                }
+            }
+            self.conn
+                .execute(format!("DROP TABLE IF EXISTS {}", history.history), ())
+                .await?;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO secure_kept_clock VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1",
+                (),
+            )
+            .await?;
+        Ok(Some(Switching { copied }))
+    }
+    /// After the switch installed `new`'s live tables and their history:
+    /// records, over the columns they kept, what the switch changed.
+    pub(super) async fn end_switch_history(
+        &self,
+        new: &Typed,
+        switching: Option<Switching>,
+    ) -> Result<(), Error> {
+        let Some(switching) = switching else {
+            return Ok(());
+        };
+        let histories = History::of(new);
+        for (name, columns) in switching.copied {
+            if let Some(history) = histories
+                .iter()
+                .find(|history| history.name().eq_ignore_ascii_case(&name))
+            {
+                self.record_difference(history, &columns).await?;
+            }
+            self.conn
+                .execute(
+                    format!(
+                        "DROP TABLE IF EXISTS temp.{}",
+                        quoted(&format!("secure_history_before_{name}"))
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        self.conn
+            .execute("UPDATE secure_kept_clock SET paused=0 WHERE id=1", ())
+            .await?;
+        Ok(())
+    }
+    /// Copies `history`'s live rows before a bulk change.
+    async fn copy_before(&self, history: &History) -> Result<(), Error> {
+        self.conn
+            .execute(format!("DROP TABLE IF EXISTS temp.{}", history.before), ())
+            .await?;
+        self.conn
+            .execute(
+                format!(
+                    "CREATE TEMP TABLE {}({},PRIMARY KEY({}))",
+                    history.before,
+                    history.columns(),
+                    history.key.join(",")
+                ),
+                (),
+            )
+            .await?;
+        self.conn
+            .execute(
+                format!(
+                    "INSERT INTO temp.{}({cols}) SELECT {cols} FROM main.{}",
+                    history.before,
+                    history.live,
+                    cols = history.columns()
+                ),
+                (),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Records, from `history`'s copy, the versions a bulk change replaced
+    /// in `columns` and the keys it added.
+    async fn record_difference(&self, history: &History, columns: &[String]) -> Result<(), Error> {
+        let mut identical = vec![History::same(&history.key, "a", "b")];
+        identical.extend(
+            columns
+                .iter()
+                .map(|column| format!("a.{column} IS b.{column}")),
+        );
+        for sql in [
+            format!(
+                "INSERT OR IGNORE INTO main.{}({},rocky_version,rocky_absent) SELECT {},{CLOCK},0 FROM temp.{} AS b WHERE NOT EXISTS(SELECT 1 FROM main.{} AS a WHERE {}) AND {}",
+                history.history,
+                columns.join(","),
+                History::list(columns, "b"),
+                history.before,
+                history.live,
+                identical.join(" AND "),
+                history.needed("b")
+            ),
+            format!(
+                "INSERT OR IGNORE INTO main.{}({},rocky_version,rocky_absent) SELECT {},{CLOCK},1 FROM main.{} AS a WHERE NOT EXISTS(SELECT 1 FROM temp.{} AS b WHERE {}) AND {}",
+                history.history,
+                history.key.join(","),
+                History::list(&history.key, "a"),
+                history.live,
+                history.before,
+                History::same(&history.key, "b", "a"),
+                history.needed("a")
+            ),
+        ] {
+            self.conn.execute(sql, ()).await?;
+        }
+        Ok(())
+    }
+}

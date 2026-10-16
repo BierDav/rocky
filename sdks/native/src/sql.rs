@@ -2,7 +2,7 @@
 //! One call executes a statement or delivers a page; values cross typed,
 //! never as JSON. See `docs/runtime/sql-driver.md`.
 use crate::{NativeError, database::NativeDatabase, failure};
-use rocky_sdk::{ConnectionOptions, SqlFailure, SqlValue};
+use rocky_sdk::{Binding, ConnectionOptions, SqlFailure, SqlValue};
 use std::sync::Arc;
 
 /// One SQLite value.
@@ -37,6 +37,33 @@ impl From<SqlValue> for NativeValue {
         }
     }
 }
+/// The sealed state a read-only connection reads instead of the live
+/// tables.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum NativeBinding {
+    /// A seal this device keeps, as lowercase hex.
+    Seal { seal: String },
+    /// The seal a bookmark shows, resolved when the connection opens.
+    Bookmark { name: String },
+}
+impl NativeBinding {
+    fn binding(self) -> Result<Binding, NativeError> {
+        Ok(match self {
+            Self::Seal { seal } => Binding::Seal(
+                (0..seal.len())
+                    .step_by(2)
+                    .map(|index| {
+                        seal.get(index..index + 2)
+                            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    })
+                    .collect::<Option<Vec<u8>>>()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or_else(|| failure("seal must be a hex digest".into()))?,
+            ),
+            Self::Bookmark { name } => Binding::Bookmark(name),
+        })
+    }
+}
 /// One page of a statement's result; columns come with the first.
 #[derive(uniffi::Record)]
 pub struct NativePage {
@@ -69,11 +96,13 @@ impl NativeDatabase {
     /// A connection for a driver: the writer is a secure SQL session, a
     /// reader steps snapshot cursors. `profile` names the ORM version
     /// whose housekeeping the connection answers, such as `room-2.8.4`.
+    /// `binding` makes it a read-only connection to a kept seal's state.
     pub async fn connect(
         &self,
         read_only: bool,
         profile: Option<String>,
         transaction_timeout_millis: Option<u64>,
+        binding: Option<NativeBinding>,
     ) -> Result<Arc<NativeConnection>, NativeError> {
         let options = ConnectionOptions {
             read_only,
@@ -82,6 +111,7 @@ impl NativeDatabase {
                 .transpose()
                 .map_err(failure)?,
             transaction_timeout: transaction_timeout_millis.map(std::time::Duration::from_millis),
+            binding: binding.map(NativeBinding::binding).transpose()?,
         };
         let connection = self.database().connect(options).await.map_err(failure)?;
         Ok(Arc::new(NativeConnection {

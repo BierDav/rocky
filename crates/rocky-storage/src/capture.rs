@@ -536,6 +536,15 @@ impl Sink {
             return false;
         };
         let target = plan.table(table).filter(|_| main);
+        // What the runtime's history triggers write is no session's change.
+        if main
+            && target.is_none()
+            && table
+                .get(..crate::sqlite::HISTORY_TABLES.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(crate::sqlite::HISTORY_TABLES))
+        {
+            return false;
+        }
         if self.mode == Mode::Reconcile {
             return target.is_some_and(|index| plan.tables[index].captured());
         }

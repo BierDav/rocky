@@ -94,6 +94,12 @@ pub struct CursorPlan {
     pub revision: Option<String>,
     pub limits: CursorLimits,
     pub guard: Guard,
+    /// Run on the connection before the snapshot opens, such as the
+    /// temporary views of a connection bound to a seal.
+    pub prelude: Vec<String>,
+    /// Must return a row inside the snapshot, or the cursor fails with
+    /// `Unavailable::Released`.
+    pub requires: Option<String>,
 }
 
 /// A whole result another statement read from the cursor's snapshot.
@@ -379,6 +385,9 @@ fn run(
     let expires = started + plan.limits.lifetime;
     let cancelled = control.cancelled.clone();
     let prepared = (|| {
+        for sql in &plan.prelude {
+            raw.execute_batch(sql).map_err(engine)?;
+        }
         raw.pragma_update(None, "query_only", 1).map_err(engine)?;
         raw.execute_batch("BEGIN").map_err(engine)?;
         // Reading anything starts the snapshot every later page shares.
@@ -397,7 +406,24 @@ fn run(
                 None
             }
         };
+        if let Some(sql) = &plan.requires {
+            let found = raw
+                .query_row(sql, [], |_| Ok(()))
+                .map(|_| true)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                    error => Err(error),
+                })
+                .map_err(engine)?;
+            if !found {
+                return Err(Error::Sql(SqlError::Unavailable {
+                    table: String::new(),
+                    reason: crate::sql::Unavailable::Released,
+                }));
+            }
+        }
         let readable = plan.readable.clone();
+        let viewed = !plan.prelude.is_empty();
         raw.authorizer(Some(move |context: AuthContext<'_>| match context.action {
             AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => {
                 Authorization::Allow
@@ -408,6 +434,10 @@ fn run(
                         .iter()
                         .any(|table| table.eq_ignore_ascii_case(table_name)) =>
             {
+                Authorization::Allow
+            }
+            // The prelude's temporary views read only readable tables.
+            AuthAction::Read { .. } if viewed && context.database_name == Some("temp") => {
                 Authorization::Allow
             }
             _ => Authorization::Deny,
@@ -695,6 +725,8 @@ mod tests {
             revision: Some("SELECT count(*) FROM items".into()),
             limits,
             guard,
+            prelude: Vec::new(),
+            requires: None,
         }
     }
     fn open() -> Guard {

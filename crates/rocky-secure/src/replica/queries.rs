@@ -61,7 +61,8 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn bump_authority(&mut self) {
         self.authority += 1;
         self.authority_events.send_replace(self.authority);
-        self.workspace.queries
+        self.workspace
+            .queries
             .authority
             .store(self.authority, Ordering::SeqCst);
         if let Some(events) = &self.workspace.queries.events {
@@ -87,7 +88,8 @@ impl<A: RowApplication> Inner<A> {
         }
     }
     pub(crate) fn touched(&self) -> bool {
-        self.workspace.queries
+        self.workspace
+            .queries
             .touched
             .lock()
             .is_ok_and(|touched| !touched.tables.is_empty())
@@ -191,6 +193,19 @@ impl<A: RowApplication> SecureSql<A> {
             |index| self.writable.contains(&index),
         )
     }
+    /// Binds this session's reads to kept `seal`: cursors and snapshots
+    /// read its rows through temporary views with the live tables' names
+    /// and shape, and every other statement is refused. Reads fail with
+    /// `Unavailable::Released` once the seal is no longer kept.
+    pub async fn bind_seal(&mut self, seal: Commitment) -> Result<(), Error> {
+        let views = self.session.replica.seal_views(seal).await?;
+        self.seal = Some(Arc::new(views));
+        Ok(())
+    }
+    /// The kept seal this session's reads see, if bound.
+    pub fn bound_seal(&self) -> Option<Commitment> {
+        self.seal.as_ref().map(|views| views.seal)
+    }
     /// Opens a cursor over the latest committed snapshot. It needs every
     /// named typed table available, holds no replica lease while it runs
     /// and ends with `Unavailable::Revoked` once the session's authority
@@ -235,6 +250,11 @@ impl<A: RowApplication> SecureSql<A> {
                 .await?
         };
         let analyzed = self.read_statement(&checked)?;
+        if analyzed.tables.iter().any(|name| name.contains('@')) {
+            return Err(Error::Sql(SqlError::Unsupported(
+                "name history in a statement of its own, outside a read transaction".into(),
+            )));
+        }
         {
             let inner = self.session.replica.inner.lock().await;
             inner.check_authority(Some(self.session.authority))?;
@@ -271,16 +291,32 @@ impl<A: RowApplication> SecureSql<A> {
             inner.availability(tables, &self.session.status).await?;
             let authority = inner.workspace.queries.authority.clone();
             let (opened, expires) = (self.session.authority, self.session.status.expires);
+            let mut readable: Vec<String> = self
+                .plan
+                .tables
+                .iter()
+                .map(|table| table.physical.clone())
+                .collect();
+            // A bound session reads its seal; another names history as
+            // `table@seal` or `table@bookmark`.
+            let views = match &self.seal {
+                Some(views) => Some(views.as_ref().clone()),
+                None => inner.named_history(tables).await?,
+            };
+            let (prelude, requires) = match views {
+                Some(views) => {
+                    readable.extend(views.readable.iter().cloned());
+                    (views.statements.clone(), Some(views.requires()))
+                }
+                None => (Vec::new(), None),
+            };
             CursorPlan {
                 path: inner.path().to_path_buf(),
                 sql,
                 params,
-                readable: self
-                    .plan
-                    .tables
-                    .iter()
-                    .map(|table| table.physical.clone())
-                    .collect(),
+                readable,
+                prelude,
+                requires,
                 revision: Some("SELECT revision FROM secure_metadata WHERE id=1".into()),
                 limits,
                 guard: Arc::new(move || {

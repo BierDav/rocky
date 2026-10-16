@@ -4,6 +4,7 @@ import androidx.room.RoomDatabase
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.retryWhen
+import rocky.RockyBinding
 import rocky.RockyDatabase
 import rocky.sqlite.RockySQLiteDriver
 import kotlin.coroutines.CoroutineContext
@@ -18,6 +19,13 @@ const val ROOM_PROFILE = "room-2.8.4"
  * observers, or use [buildOnRocky], which does both.
  */
 fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE)).setQueryCoroutineContext(queryContext)
+
+/**
+ * Room on a sealed state of [database]: the same DAOs read a seal this device keeps, or the seal a bookmark shows,
+ * through views shaped like the live tables. Writes fail with SQLite's read-only code 8, and nothing changes the
+ * state, so the database needs no [followRocky]. See `docs/runtime/kept-seals.md`.
+ */
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockySeal(database: RockyDatabase, binding: RockyBinding, queryContext: CoroutineContext = Dispatchers.IO): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE, binding = binding)).setQueryCoroutineContext(queryContext)
 
 /** Builds Room on [database]'s file and follows its sync in [queryContext] until [RockyRoom.close]. */
 fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RockyRoom<T> = RockyRoom(setRockyDatabase(database, queryContext).build(), database, queryContext)

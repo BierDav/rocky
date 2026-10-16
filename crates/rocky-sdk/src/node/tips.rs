@@ -2,9 +2,9 @@
 //! graph. See `docs/runtime/tips-and-bookmarks.md`.
 use super::*;
 use crate::tips::{
-    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction, TipDevice,
-    TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier, TipSeal,
-    TipStatus,
+    Bookmark, BookmarkMove, KeptSeals, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction,
+    TipDevice, TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier,
+    TipSeal, TipStatus,
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
@@ -44,6 +44,8 @@ fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
 struct Signer {
     identity: Arc<dyn IdentityProvider>,
     links: CredentialChain,
+    /// The owner or a trusted identity, which open tips.
+    opens: bool,
 }
 
 impl Node {
@@ -53,6 +55,23 @@ impl Node {
         match action {
             "status" => {}
             "inspect" => return Ok(serde_json::to_value(self.inspect_tips(scope).await?)?),
+            "kept" => return Ok(serde_json::to_value(self.kept_seals().await?)?),
+            "keep" => {
+                let config: KeptSeals =
+                    serde_json::from_value(request.get("kept").cloned().unwrap_or(Value::Null))
+                        .map_err(|error| {
+                            refused(format!("kept must name the seals to keep: {error}"))
+                        })?;
+                self.replica
+                    .keep_seals(rocky_secure::KeptSeals {
+                        bookmarked: config.bookmarked,
+                        latest: config.latest,
+                        every: config.every,
+                    })
+                    .await?;
+                self.observations.touch();
+                return Ok(serde_json::to_value(self.kept_seals().await?)?);
+            }
             "compaction" => {
                 return Ok(serde_json::to_value(
                     self.compaction(scope, 0, Vec::new()).await?,
@@ -241,8 +260,24 @@ impl Node {
         })
     }
 
+    async fn kept_seals(&self) -> Result<KeptSeals, Failure> {
+        let config = self.replica.kept_seal_config().await?;
+        Ok(KeptSeals {
+            bookmarked: config.bookmarked,
+            latest: config.latest,
+            every: config.every,
+        })
+    }
+
     async fn inspect_tips(&self, scope: Scope) -> Result<TipInspection, Failure> {
         let graph = self.replica.tip_graph(scope).await?;
+        let mut held = std::collections::BTreeMap::new();
+        for seal in &graph.seals {
+            let id = seal.id()?;
+            if let Some(how) = self.replica.held_seal(scope, id).await? {
+                held.insert(id, how);
+            }
+        }
         let seals = graph
             .seals
             .iter()
@@ -286,6 +321,14 @@ impl Node {
                             })
                         })
                         .collect::<Result<_, Failure>>()?,
+                    held: held.get(&seal.id()?).map(|how| {
+                        match how {
+                            rocky_secure::HeldSeal::Kept => "kept",
+                            rocky_secure::HeldSeal::Checkpoint => "checkpoint",
+                            rocky_secure::HeldSeal::Live => "live",
+                        }
+                        .into()
+                    }),
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -433,20 +476,24 @@ impl Node {
         let links = settings.identity_links();
         let trusted =
             links.0.len() == 1 && links.0[0].capability.extended()?.trusted == Some(scope);
-        let links = if settings.owner() {
-            CredentialChain::default()
+        let (links, opens) = if settings.owner() {
+            (CredentialChain::default(), true)
         } else if let Some(trusted) = settings.trusted_links() {
-            trusted
+            (trusted, true)
         } else if trusted {
-            links
+            (links, true)
         } else if settings.issuer() {
-            settings.issuer_links()
+            (settings.issuer_links(), false)
         } else {
             return Err(refused(
                 "only the owner, a trusted identity or an issuer signs tip statements",
             ));
         };
-        Ok(Signer { identity, links })
+        Ok(Signer {
+            identity,
+            links,
+            opens,
+        })
     }
 
     /// Publishes `statements` once they have the effect `expected` checks
@@ -624,6 +671,16 @@ impl Node {
             .seal_by_id(seal)
             .map_err(refused)?;
         let signer = self.tip_signer(scope).await?;
+        if !signer.opens {
+            return Err(refused("only the owner or a trusted identity opens tips"));
+        }
+        // A branch starts from the seal's state, which this device must hold.
+        self.replica.finalize_path(scope).await?;
+        if self.replica.held_seal(scope, seal).await?.is_none() {
+            return Err(refused(
+                "this device does not hold the seal's state; pull it from a device that keeps it, or seal now",
+            ));
+        }
         let opening = SignedTipOpening::endorse(
             TipOpeningStatement {
                 format: TIP_OPENING_FORMAT,

@@ -12,6 +12,7 @@ import kotlinx.serialization.json.*
 import rocky.*
 import rocky.room.ROOM_PROFILE
 import rocky.room.setRockyDatabase
+import rocky.room.setRockySeal
 import rocky.sqlite.RockySQLiteDriver
 import java.io.File
 import java.nio.file.Files
@@ -118,6 +119,35 @@ class RoomGateTest {
         assertEquals(3, roomA.shop().items("l1").size)
         b.syncOnce()
         assertEquals(3, roomB.shop().items("l1").size)
+    }
+
+    @Test fun aDaoReadsASealKeptTwoSealsAgoUnchanged() = pair {
+        a.tips.createBookmark("main")
+        a.tips.follow("main")
+        a.tips.keep(KeptSeals(every = true))
+        roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs")))
+        // A continue seal's id is its successor tip.
+        val kept = a.tips.seal().tip
+        val sealed = roomA.shop().items("l1")
+        roomA.shop().update(sealed.single { it.key == "i1" }.copy(title = "Oat milk"))
+        a.tips.seal()
+        roomA.shop().createItems(listOf(item("i3", "Jam")))
+        roomA.shop().delete(sealed.single { it.key == "i2" })
+        a.tips.seal()
+        roomA.shop().createItems(listOf(item("i4", "Bread")))
+        assertEquals(TipHeld.KEPT, a.tips.inspect().seals.single { it.id == kept }.held)
+
+        val bound = Room.databaseBuilder<ShopDatabase>(File(directory, "sealed").path).setRockySeal(a, RockyBinding.Seal(kept)).build()
+        try {
+            assertEquals(sealed, bound.shop().items("l1"), "the same DAO returns the seal's rows")
+            assertEquals(listOf(Summary("l1", 2, 0)), bound.shop().summary())
+            assertEquals(listOf("Bread", "Jam", "Oat milk"), roomA.shop().items("l1").map { it.title })
+            val refused = assertFailsWith<SQLiteException> { bound.shop().createItems(listOf(item("i9", "Never"))) }
+            assertContains(refused.message.orEmpty(), "Error code: 8")
+            assertEquals(sealed, bound.shop().items("l1"))
+        } finally {
+            bound.close()
+        }
     }
 
     @Test fun aDaoObtainsEachIdBeforeItsInsertInOneTransaction() = pair {

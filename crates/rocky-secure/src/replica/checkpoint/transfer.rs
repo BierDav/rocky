@@ -181,8 +181,8 @@ pub struct RebootstrapReport {
 }
 pub(super) struct Staging {
     pub(super) signed: SignedCheckpoint,
-    cursor: Option<Commitment>,
-    complete: bool,
+    pub(super) cursor: Option<Commitment>,
+    pub(super) complete: bool,
     pub(super) sets: Sets,
     /// The scope held nothing when the import began: verified pages go
     /// straight into its stored rows and projection.
@@ -478,7 +478,11 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Undoes a direct import's rows so the scope holds nothing again.
     /// Operations applied over them wait to apply after the next import.
-    async fn abort_direct(&mut self, scope: ResourceScope, id: i64) -> Result<(), Error> {
+    pub(super) async fn abort_direct(
+        &mut self,
+        scope: ResourceScope,
+        id: i64,
+    ) -> Result<(), Error> {
         let blob = encode(&scope)?;
         self.conn
             .execute(
@@ -559,7 +563,7 @@ impl<A: RowApplication> Inner<A> {
             Some(_) => Err(Error::Corrupt("checkpoint page record".into())),
         }
     }
-    async fn clear_staging(&self, id: i64) -> Result<(), Error> {
+    pub(super) async fn clear_staging(&self, id: i64) -> Result<(), Error> {
         for table in [
             "secure_rebootstrap",
             "secure_rebootstrap_rows",
@@ -1117,7 +1121,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<RebootstrapReport, Error> {
         let mut inner = self.inner.lock().await;
         let time = now()?;
-        let (generation, key) = inner.scope_key(scope)?;
+        let (generation, _) = inner.scope_key(scope)?;
         let id = inner
             .find_scope_id(scope)
             .await?
@@ -1159,166 +1163,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // Operations applied again at the switch must not wait on the import.
         inner.direct.remove(&scope);
         let report = transaction!(inner, |inner| {
-            inner.bind_node_author(&signed.credentials).await?;
-            inner.check_frontier(id, &signed).await?;
-            let mut report = RebootstrapReport {
-                checkpoint: signed.id()?,
-                superseded: 0,
-                reapplied: vec![],
-                rejected: vec![],
-                pending: vec![],
-            };
-            // A direct import's rows and projection are in place, unless a
-            // local write applied over them: then they are restored and
-            // the write applies again.
-            let rewrite = !direct || inner.applied_any(id).await?;
-            let reapply = inner.supersede(scope, &statement, &mut report).await?;
-            let blob = encode(&scope)?;
-            if rewrite {
-                inner
-                    .conn
-                    .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
-                    .await?;
-                inner
-                    .conn
-                    .execute(
-                        match direct {
-                            true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
-                            false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
-                        },
-                        bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
-                    )
-                    .await?;
-            }
-            let permanent = inner.identity_marks(scope).await?;
             inner
-                .conn
-                .execute(
-                    "DELETE FROM secure_identity_marks WHERE scope=?",
-                    [encode(&scope)?],
-                )
-                .await?;
-            for mark in &statement.identities {
-                inner.put_identity_mark(scope, mark).await?;
-            }
-            if rewrite {
-                inner.reproject(scope).await?;
-            }
-            if !direct {
-                for sql in [
-                    "DELETE FROM secure_checkpoint_rows WHERE scope=?",
-                    "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
-                ] {
-                    inner.conn.execute(sql, [id]).await?;
-                }
-            }
-            if rewrite {
-                inner
-                    .conn
-                    .execute("DELETE FROM secure_stubs WHERE scope=?", [id])
-                    .await?;
-            }
-            for sql in [
-                "DELETE FROM secure_checkpoint_overlay WHERE scope=?",
-                "DELETE FROM secure_checkpoint_scratch WHERE scope=?",
-                "INSERT INTO secure_stubs SELECT hash,scope,clock,1 FROM secure_rebootstrap_stubs WHERE scope=? ON CONFLICT(hash) DO UPDATE SET creation=1",
-                "DELETE FROM secure_logs WHERE scope=?",
-                "DELETE FROM secure_checkpoints WHERE scope=?",
-                "DELETE FROM secure_checkpoint_stubs WHERE scope=?",
-                "INSERT INTO secure_checkpoint_stubs SELECT * FROM secure_rebootstrap_stubs WHERE scope=?",
-                "DELETE FROM secure_checkpoint_pages WHERE scope=?",
-                "INSERT INTO secure_checkpoint_pages SELECT * FROM secure_rebootstrap_pages WHERE scope=?",
-            ] {
-                inner.conn.execute(sql, [id]).await?;
-            }
-            // A direct import kept the release stubs of each page's rows.
-            for log in &statement.frontier {
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_logs VALUES(?,?,?,?,?,?)",
-                        bindings(vec![
-                            SqlValue::Integer(id),
-                            SqlValue::Blob(log.author.as_bytes().to_vec()),
-                            SqlValue::Integer(log.sequence as i64),
-                            SqlValue::Blob(log.hash.as_bytes().to_vec()),
-                            SqlValue::Integer(log.clock as i64),
-                            SqlValue::Integer(log.sequence as i64),
-                        ]),
-                    )
-                    .await?;
-            }
-            inner
-                .store_scope_state(
-                    id,
-                    sets.rows,
-                    sets.tombstones,
-                    &sets.digest,
-                    statement.operations,
-                )
-                .await?;
-            // Operations applied from here on get later positions.
-            inner
-                .conn
-                .execute(
-                    "INSERT INTO secure_checkpoints SELECT ?,?,'verified',COALESCE(MAX(seq),0),COALESCE(MAX(seq),0),?,NULL,? FROM sqlite_sequence WHERE name='secure_applied'",
-                    bindings(vec![
-                        SqlValue::Integer(id),
-                        SqlValue::Integer(statement.sequence as i64),
-                        SqlValue::Blob(sets.to_bytes()),
-                        SqlValue::Blob(signed.to_bytes()?),
-                    ]),
-                )
-                .await?;
-            inner
-                .conn
-                .execute(
-                    "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
-                    bindings(vec![
-                        SqlValue::Blob(encode(&scope)?),
-                        SqlValue::Blob(encode(&generation)?),
-                        SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key).to_vec()),
-                    ]),
-                )
-                .await?;
-            // A checkpoint sealed under an earlier generation names what
-            // this one removed: its rows and base keep only the rest.
-            inner.keep_current(id, scope, true).await?;
-            // A clean base replaces the one a cut tainted.
-            inner
-                .conn
-                .execute(
-                    "DELETE FROM secure_cut_guard WHERE scope=?",
-                    [encode(&scope)?],
-                )
-                .await?;
-            for hash in reapply {
-                let frame = inner
-                    .frame(hash)
-                    .await?
-                    .ok_or_else(|| Error::Corrupt("retained operation".into()))?;
-                match inner.apply_frame(&frame, time).await? {
-                    incoming::Outcome::Applied => match inner.consumed(hash).await? {
-                        Some(reason) => report.rejected.push((hash, reason)),
-                        None => report.reapplied.push(hash),
-                    },
-                    incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
-                    incoming::Outcome::Waiting => report.pending.push(hash),
-                }
-            }
-            for mark in &permanent {
-                inner.put_identity_mark(scope, mark).await?;
-            }
-            inner.clear_staging(id).await?;
-            inner
-                .conn
-                .execute(
-                    "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
-                    (),
-                )
-                .await?;
-            inner.fault(Stage::Switch)?;
-            Ok(report)
+                .switch_to_staged(scope, id, &signed, &sets, direct, time)
+                .await
         });
         inner.load_direct().await?;
         let report = report?;
@@ -1326,6 +1173,177 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.publish_revision().await?;
         drop(inner);
         self.settle().await?;
+        Ok(report)
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Inside the caller's transaction, switches `scope` to its verified
+    /// staged import of `signed`: held operations the checkpoint covers are
+    /// dropped, and every other operation this replica had applied is
+    /// applied again on top or reported as rejected with its reason.
+    pub(super) async fn switch_to_staged(
+        &mut self,
+        scope: ResourceScope,
+        id: i64,
+        signed: &SignedCheckpoint,
+        sets: &Sets,
+        direct: bool,
+        time: u64,
+    ) -> Result<RebootstrapReport, Error> {
+        let statement = signed.statement.clone();
+        let (generation, key) = self.scope_key(scope)?;
+        self.bind_node_author(&signed.credentials).await?;
+        self.check_frontier(id, signed).await?;
+        let mut report = RebootstrapReport {
+            checkpoint: signed.id()?,
+            superseded: 0,
+            reapplied: vec![],
+            rejected: vec![],
+            pending: vec![],
+        };
+        // A direct import's rows and projection are in place, unless a
+        // local write applied over them: then they are restored and
+        // the write applies again.
+        let rewrite = !direct || self.applied_any(id).await?;
+        let reapply = self.supersede(scope, &statement, &mut report).await?;
+        let blob = encode(&scope)?;
+        if rewrite {
+            self.conn
+                .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                .await?;
+            self
+                .conn
+                .execute(
+                    match direct {
+                        true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
+                        false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
+                    },
+                    bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
+                )
+                .await?;
+        }
+        let permanent = self.identity_marks(scope).await?;
+        self.conn
+            .execute(
+                "DELETE FROM secure_identity_marks WHERE scope=?",
+                [encode(&scope)?],
+            )
+            .await?;
+        for mark in &statement.identities {
+            self.put_identity_mark(scope, mark).await?;
+        }
+        if rewrite {
+            self.reproject(scope).await?;
+        }
+        if !direct {
+            for sql in [
+                "DELETE FROM secure_checkpoint_rows WHERE scope=?",
+                "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
+            ] {
+                self.conn.execute(sql, [id]).await?;
+            }
+        }
+        if rewrite {
+            self.conn
+                .execute("DELETE FROM secure_stubs WHERE scope=?", [id])
+                .await?;
+        }
+        for sql in [
+            "DELETE FROM secure_checkpoint_overlay WHERE scope=?",
+            "DELETE FROM secure_checkpoint_scratch WHERE scope=?",
+            "INSERT INTO secure_stubs SELECT hash,scope,clock,1 FROM secure_rebootstrap_stubs WHERE scope=? ON CONFLICT(hash) DO UPDATE SET creation=1",
+            "DELETE FROM secure_logs WHERE scope=?",
+            "DELETE FROM secure_checkpoints WHERE scope=?",
+            "DELETE FROM secure_checkpoint_stubs WHERE scope=?",
+            "INSERT INTO secure_checkpoint_stubs SELECT * FROM secure_rebootstrap_stubs WHERE scope=?",
+            "DELETE FROM secure_checkpoint_pages WHERE scope=?",
+            "INSERT INTO secure_checkpoint_pages SELECT * FROM secure_rebootstrap_pages WHERE scope=?",
+        ] {
+            self.conn.execute(sql, [id]).await?;
+        }
+        // A direct import kept the release stubs of each page's rows.
+        for log in &statement.frontier {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_logs VALUES(?,?,?,?,?,?)",
+                    bindings(vec![
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(log.author.as_bytes().to_vec()),
+                        SqlValue::Integer(log.sequence as i64),
+                        SqlValue::Blob(log.hash.as_bytes().to_vec()),
+                        SqlValue::Integer(log.clock as i64),
+                        SqlValue::Integer(log.sequence as i64),
+                    ]),
+                )
+                .await?;
+        }
+        self.store_scope_state(
+            id,
+            sets.rows,
+            sets.tombstones,
+            &sets.digest,
+            statement.operations,
+        )
+        .await?;
+        // Operations applied from here on get later positions.
+        self
+            .conn
+            .execute(
+                "INSERT INTO secure_checkpoints SELECT ?,?,'verified',COALESCE(MAX(seq),0),COALESCE(MAX(seq),0),?,NULL,? FROM sqlite_sequence WHERE name='secure_applied'",
+                bindings(vec![
+                    SqlValue::Integer(id),
+                    SqlValue::Integer(statement.sequence as i64),
+                    SqlValue::Blob(sets.to_bytes()),
+                    SqlValue::Blob(signed.to_bytes()?),
+                ]),
+            )
+            .await?;
+        self.conn
+            .execute(
+                "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
+                bindings(vec![
+                    SqlValue::Blob(encode(&scope)?),
+                    SqlValue::Blob(encode(&generation)?),
+                    SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key).to_vec()),
+                ]),
+            )
+            .await?;
+        // A checkpoint sealed under an earlier generation names what
+        // this one removed: its rows and base keep only the rest.
+        self.keep_current(id, scope, true).await?;
+        // A clean base replaces the one a cut tainted.
+        self.conn
+            .execute(
+                "DELETE FROM secure_cut_guard WHERE scope=?",
+                [encode(&scope)?],
+            )
+            .await?;
+        for hash in reapply {
+            let frame = self
+                .frame(hash)
+                .await?
+                .ok_or_else(|| Error::Corrupt("retained operation".into()))?;
+            match self.apply_frame(&frame, time).await? {
+                incoming::Outcome::Applied => match self.consumed(hash).await? {
+                    Some(reason) => report.rejected.push((hash, reason)),
+                    None => report.reapplied.push(hash),
+                },
+                incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
+                incoming::Outcome::Waiting => report.pending.push(hash),
+            }
+        }
+        for mark in &permanent {
+            self.put_identity_mark(scope, mark).await?;
+        }
+        self.clear_staging(id).await?;
+        self.conn
+            .execute(
+                "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                (),
+            )
+            .await?;
+        self.fault(Stage::Switch)?;
         Ok(report)
     }
 }

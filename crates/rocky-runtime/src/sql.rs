@@ -318,6 +318,8 @@ impl SqlSession {
             revision: parts.revision,
             limits,
             guard: Arc::new(|| Ok(())),
+            prelude: Vec::new(),
+            requires: None,
         };
         crate::cursor::SnapshotCursor::open(&parts.host, self.cursors.clone(), plan).await
     }

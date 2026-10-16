@@ -60,7 +60,13 @@ impl<A: RowApplication> Inner<A> {
     }
     fn visible_header(&self, graph: &TipGraph, header: &Extensions) -> Result<bool, Error> {
         let author = header.author.ok_or_else(|| denied("node author missing"))?;
-        self.visible_frame(graph, header.tip, author, header.author_sequence, self.workspace.tip)
+        self.visible_frame(
+            graph,
+            header.tip,
+            author,
+            header.author_sequence,
+            self.workspace.tip,
+        )
     }
     async fn observed_devices(&self, scope: Scope) -> Result<Vec<TipDevice>, Error> {
         let mut peers = BTreeMap::<PeerId, BTreeMap<ResourceScope, Vec<FrontierLog>>>::new();
@@ -192,8 +198,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             devices: inner.observed_devices(scope).await?,
         })
     }
-    /// This node's holdings and the tips peers' open links claim. No node
-    /// keeps a seal's state before kept seals exist, so this one keeps none.
+    /// This node's holdings, with the seals it keeps, and the tips peers'
+    /// open links claim; peers report no holdings.
     pub async fn tip_nodes(&self, scope: Scope) -> Result<Vec<TipNodeObservation>, Error> {
         let inner = self.inner.lock().await;
         inner.scope_graph(scope)?;
@@ -206,7 +212,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             node: local,
             followed_tip: Some(inner.workspace.tip),
             kept_tips: Some(tips.into_iter().collect()),
-            kept_seals: Some(Vec::new()),
+            kept_seals: Some(
+                inner
+                    .kept_marks()
+                    .await?
+                    .into_iter()
+                    .map(|(seal, _)| seal)
+                    .collect(),
+            ),
         }];
         for device in inner.observed_devices(scope).await? {
             if device.node != local {

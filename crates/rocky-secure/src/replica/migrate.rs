@@ -334,6 +334,7 @@ impl<A: RowApplication> Inner<A> {
                 )?)
                 .await?,
             ));
+            transaction!(self, |inner| inner.install_history().await)?;
             self.start_events();
             // Sessions and cursors planned against the old tables end.
             self.bump_authority();
@@ -366,6 +367,10 @@ impl<A: RowApplication> Inner<A> {
         // Resolution reads the installed projection.
         let previous = self.workspace.typed.replace(projected.clone());
         let switched = transaction!(self, |inner| {
+            let switching = match &previous {
+                Some(old) => inner.begin_switch_history(old, &projected).await?,
+                None => None,
+            };
             for table in installed.mergeable() {
                 inner.touch(&table.sql_name);
                 for name in [
@@ -412,6 +417,8 @@ impl<A: RowApplication> Inner<A> {
             }
             Box::pin(inner.rebuild_constraints(None, None)).await?;
             typed::verify_constraint_indexes(&inner.conn, &projected).await?;
+            inner.install_history().await?;
+            inner.end_switch_history(&projected, switching).await?;
             inner.finish_switch(record).await
         });
         if let Err(error) = switched {
@@ -491,6 +498,17 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .ok_or_else(|| Error::Corrupt("a projection plan without typed tables".into()))?
             .0;
+        let projected = self
+            .authorized_projection(Typed::new(
+                record.schema.clone(),
+                record.domain,
+                &record.readers,
+            )?)
+            .await?;
+        let switching = match self.workspace.typed.clone() {
+            Some(old) => self.begin_switch_history(&old, &projected).await?,
+            None => None,
+        };
         for table in installed.mergeable() {
             self.touch(&table.sql_name);
             self.conn
@@ -500,13 +518,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        let projected = self
-            .authorized_projection(Typed::new(
-                record.schema.clone(),
-                record.domain,
-                &record.readers,
-            )?)
-            .await?;
         self.record_projection_access(&projected).await?;
         for table in record.schema.tables.iter().filter(|table| {
             table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
@@ -531,6 +542,10 @@ impl<A: RowApplication> Inner<A> {
                 _ => self.replace_indexes(&installed, table).await?,
             }
         }
+        if switching.is_some() {
+            self.install_history_for(&projected).await?;
+        }
+        self.end_switch_history(&projected, switching).await?;
         self.finish_switch(record).await
     }
     /// A local table keeps its rows; only its indexes

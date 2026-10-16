@@ -82,6 +82,8 @@ pub struct SecureSql<A: RowApplication> {
     cancelled: Arc<AtomicBool>,
     /// Open snapshot cursors of this session.
     pub(super) cursors: Arc<std::sync::atomic::AtomicUsize>,
+    /// The kept seal its reads see instead of the live tables.
+    pub(super) seal: Option<Arc<super::SealViews>>,
 }
 impl<A: RowApplication> Drop for SecureSql<A> {
     fn drop(&mut self) {
@@ -168,6 +170,7 @@ impl<A: RowApplication> SecureSession<A> {
             })),
             cancelled: Arc::default(),
             cursors: Arc::default(),
+            seal: None,
         })
     }
 }
@@ -446,6 +449,13 @@ impl<A: RowApplication> SecureSql<A> {
         target: Target,
         commit: Kind,
     ) -> Result<SecureRows, Error> {
+        // A bound session reads the seal through cursors; the live tables
+        // are not its to read or write.
+        if self.seal.is_some() {
+            return Err(Error::Sql(SqlError::Unsupported(
+                "a connection bound to a seal only reads".into(),
+            )));
+        }
         let control = classify(sql).map_err(Error::Sql)?;
         let mut lease = self.lease.lock().await;
         if let Some(reason) = lease.aborted.clone() {

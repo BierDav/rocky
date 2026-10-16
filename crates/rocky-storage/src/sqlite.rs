@@ -252,6 +252,11 @@ pub struct Connection(
 /// The SQL function the generated support-row triggers call: true while
 /// the runtime's own statements run, false under a session's armed gate.
 pub const SUPPORT_MAINTENANCE: &str = "rocky_support_maintenance";
+/// The name prefix of the runtime's history triggers, which a session's
+/// statements fire.
+pub const HISTORY_TRIGGERS: &str = "secure_kept_";
+/// The name prefix of the history tables those triggers write.
+pub const HISTORY_TABLES: &str = "secure_history_";
 impl Connection {
     pub fn open(path: &Path) -> Result<Self> {
         Self::configure(rusqlite::Connection::open(path)?)
@@ -413,6 +418,14 @@ impl Connection {
                 } => Access::Update(table_name, column_name),
                 _ => Access::Other,
             };
+            // The runtime's history triggers write what a session's change
+            // replaces; the session never names their tables.
+            if context
+                .accessor
+                .is_some_and(|trigger| trigger.starts_with(HISTORY_TRIGGERS))
+            {
+                return Authorization::Allow;
+            }
             // Statements of another schema, such as `temp`, are never a session's.
             let foreign = context.database_name.is_some_and(|name| name != "main");
             let Ok(mut gate) = gate.lock() else {

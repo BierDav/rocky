@@ -128,11 +128,13 @@ const WRITER: ConnectionOptions = ConnectionOptions {
     read_only: false,
     profile: None,
     transaction_timeout: None,
+    binding: None,
 };
 const READER: ConnectionOptions = ConnectionOptions {
     read_only: true,
     profile: None,
     transaction_timeout: None,
+    binding: None,
 };
 
 /// Runs `sql` to its end and returns every row.
@@ -768,11 +770,11 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         profile: Some("room-2.8.4".parse()?),
         ..WRITER
     };
-    let writer = database.connect(room).await?;
+    let writer = database.connect(room.clone()).await?;
     let reader = database
         .connect(ConnectionOptions {
             read_only: true,
-            ..room
+            ..room.clone()
         })
         .await?;
     let one = |rows: Vec<Vec<SqlValue>>| {
@@ -1235,7 +1237,7 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
             })
             .collect()
     };
-    let writer = database.connect(room).await?;
+    let writer = database.connect(room.clone()).await?;
     let current = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
     assert!(current.contains(&"rank".to_string()), "{current:?}");
     let indexes = all(&writer, "PRAGMA index_list(items)", vec![]).await?;
@@ -1249,7 +1251,7 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
         call(&database, json!({"type": "generation"})).await?["application"],
         "behind"
     );
-    let writer = database.connect(room).await?;
+    let writer = database.connect(room.clone()).await?;
     assert_eq!(
         all(&writer, "PRAGMA user_version", vec![]).await?,
         vec![vec![SqlValue::Integer(3)]]
@@ -1272,5 +1274,135 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     assert_eq!(count(&writer, "items").await?, 0);
     writer.close().await;
     database.close().await?;
+    Ok(())
+}
+
+/// The SQLite code `sql` fails with.
+async fn failing(connection: &Connection, sql: &str) -> Result<i32, Failure> {
+    match all(connection, sql, Vec::new()).await {
+        Ok(_) => Err(format!("{sql} succeeded").into()),
+        Err(error) => Ok(error
+            .downcast::<rocky_sdk::SqlFailure>()
+            .map_err(|_| "code")?
+            .code),
+    }
+}
+fn titles(rows: Vec<Vec<SqlValue>>) -> Vec<String> {
+    rows.into_iter()
+        .filter_map(|row| match row.into_iter().next() {
+            Some(SqlValue::Text(title)) => Some(title),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let database = create(open(root.path(), None), None).await?.database;
+    let tips = |action: &str, body: Value| {
+        let mut request = json!({"type": "tips", "action": action});
+        for (key, value) in body.as_object().into_iter().flatten() {
+            request[key] = value.clone();
+        }
+        call(&database, request)
+    };
+    tips("create", json!({"name": "main"})).await?;
+    tips("follow", json!({"name": "main"})).await?;
+    tips("keep", json!({"kept": {"every": true}})).await?;
+    let writer = database.connect(WRITER).await?;
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    run(
+        &writer,
+        "INSERT INTO lists(key,title) VALUES('l1','Groceries')",
+    )
+    .await?;
+    run(
+        &writer,
+        "INSERT INTO items(key,list,title,completed) VALUES('i1','l1','Milk',0)",
+    )
+    .await?;
+    run(&writer, "END TRANSACTION").await?;
+    // A continue seal's id is its successor tip.
+    let first = tips("seal", json!({})).await?["tip"].clone();
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    run(&writer, "UPDATE items SET title='Oat milk' WHERE key='i1'").await?;
+    run(
+        &writer,
+        "INSERT INTO items(key,list,title,completed) VALUES('i2','l1','Eggs',0)",
+    )
+    .await?;
+    run(&writer, "END TRANSACTION").await?;
+    let second = tips("seal", json!({})).await?["tip"].clone();
+    run(&writer, "DELETE FROM items WHERE key='i1'").await?;
+    let seal = |value: &Value| -> Result<rocky_core::Commitment, Failure> {
+        let hex = value.as_str().ok_or("seal")?;
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16))
+            .collect::<Result<_, _>>()?;
+        Ok(bytes.try_into().map_err(|_| "seal")?)
+    };
+    let kept = tips("inspect", json!({})).await?;
+    for id in [&first, &second] {
+        let held = kept["seals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|known| known["id"] == *id)
+            .map(|known| known["held"].clone());
+        assert_eq!(held, Some(json!("kept")), "{id}");
+    }
+
+    let bound = |binding| ConnectionOptions {
+        binding: Some(binding),
+        ..WRITER
+    };
+    let at_first = database
+        .connect(bound(rocky_sdk::Binding::Seal(seal(&first)?)))
+        .await?;
+    let items = "SELECT title FROM items ORDER BY key";
+    assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
+    // The bookmark's tip is open: it shows the seal it starts from.
+    let at_main = database
+        .connect(bound(rocky_sdk::Binding::Bookmark("main".into())))
+        .await?;
+    assert_eq!(
+        titles(all(&at_main, items, vec![]).await?),
+        ["Oat milk", "Eggs"]
+    );
+    assert_eq!(titles(all(&writer, items, vec![]).await?), ["Eggs"]);
+    // Writes fail with SQLite's read-only code, in or outside a transaction.
+    for sql in [
+        "INSERT INTO items(key,list,title,completed) VALUES('i9','l1','x',0)",
+        "UPDATE items SET title='x'",
+        "DELETE FROM items",
+        "PRAGMA query_only = 0",
+    ] {
+        assert_eq!(failing(&at_first, sql).await?, 8, "{sql}");
+    }
+    run(&at_first, "BEGIN IMMEDIATE TRANSACTION").await?;
+    assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
+    assert_eq!(failing(&at_first, "DELETE FROM items").await?, 8);
+    run(&at_first, "END TRANSACTION").await?;
+    // Unlimited bound connections may be open at once.
+    let mut many = Vec::new();
+    for _ in 0..8 {
+        many.push(
+            database
+                .connect(bound(rocky_sdk::Binding::Seal(seal(&second)?)))
+                .await?,
+        );
+    }
+    for connection in &many {
+        assert_eq!(count(connection, "items").await?, 2);
+    }
+    // A seal this device does not keep cannot be bound.
+    assert!(
+        database
+            .connect(bound(rocky_sdk::Binding::Seal([7; 32])))
+            .await
+            .is_err()
+    );
     Ok(())
 }

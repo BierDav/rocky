@@ -1351,6 +1351,7 @@ mod existence;
 mod formats;
 mod generations;
 mod group;
+mod kept;
 mod partitions;
 mod revocations;
 #[cfg(unix)]

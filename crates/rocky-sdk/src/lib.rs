@@ -30,7 +30,9 @@ pub mod transport;
 mod typed;
 
 pub use backup::{Entry as BackupEntry, Inventory as BackupInventory};
-pub use connection::{ConnectionOptions, Page, Profile, SqlFailure, TableChange, TableEvents};
+pub use connection::{
+    Binding, ConnectionOptions, Page, Profile, SqlFailure, TableChange, TableEvents,
+};
 pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
 pub use engine::Engine;

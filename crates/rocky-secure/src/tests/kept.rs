@@ -1,0 +1,517 @@
+//! Kept seals: history tables keep what a seal's rows were, read through
+//! views shaped like the live tables.
+use super::compaction::{Replica, delete, follow_main, insert, open, scalar, seal, sync, titles};
+use super::generations::{Lineage, session, text};
+use super::*;
+use crate::KeptSeals;
+use rocky_core::{Commitment, SqlValue};
+
+/// The rows `sql` reads through a session bound to `seal`.
+async fn at_seal(replica: &Replica, seal: Commitment, sql: &str) -> Vec<Vec<SqlValue>> {
+    let mut bound = session(replica).await;
+    bound.bind_seal(seal).await.unwrap();
+    let mut cursor = bound
+        .cursor(sql, vec![], crate::cursor::CursorLimits::default())
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    loop {
+        let page = cursor.next().await.unwrap();
+        rows.extend(page.rows);
+        if page.done {
+            return rows;
+        }
+    }
+}
+async fn update(replica: &Replica, key: &str, title: &str) {
+    session(replica)
+        .await
+        .run(
+            "UPDATE items SET title=? WHERE key=?",
+            vec![text(title), text(key)],
+        )
+        .await
+        .unwrap();
+}
+fn rows(pairs: &[(&str, &str)]) -> Vec<Vec<SqlValue>> {
+    pairs
+        .iter()
+        .map(|(key, title)| vec![text(key), text(title)])
+        .collect()
+}
+const TITLES: &str = "SELECT key,title FROM items ORDER BY key";
+
+#[tokio::test]
+async fn kept_seals_show_their_rows_while_the_live_tables_move_on() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "alice", &key).await;
+    follow_main(&lineage, &replica).await;
+    replica
+        .keep_seals(KeptSeals {
+            every: true,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    for (key, title) in [("a", "one"), ("b", "two"), ("c", "three")] {
+        insert(&replica, key, title).await;
+    }
+    let first = seal(&lineage, &replica).await.id().unwrap();
+    replica.compact(lineage.domain, 100).await.unwrap();
+    update(&replica, "a", "one again").await;
+    delete(&replica, "b").await;
+    insert(&replica, "d", "four").await;
+    let second = seal(&lineage, &replica).await.id().unwrap();
+    replica.compact(lineage.domain, 100).await.unwrap();
+    update(&replica, "a", "one more").await;
+    insert(&replica, "e", "five").await;
+    delete(&replica, "c").await;
+    insert(&replica, "b", "two again").await;
+
+    assert_eq!(replica.kept_seals().await.unwrap(), vec![first, second]);
+    assert_eq!(
+        at_seal(&replica, first, TITLES).await,
+        rows(&[("a", "one"), ("b", "two"), ("c", "three")])
+    );
+    assert_eq!(
+        at_seal(&replica, second, TITLES).await,
+        rows(&[("a", "one again"), ("c", "three"), ("d", "four")])
+    );
+    assert_eq!(
+        titles(&replica).await,
+        rows(&[
+            ("a", "one more"),
+            ("b", "two again"),
+            ("d", "four"),
+            ("e", "five")
+        ])
+    );
+    // Only versions a kept seal needs are stored: a's first two, b's
+    // first and its absence at the second seal, c's, and d's absence at
+    // the first seal; e was absent at both and is recorded once.
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_history_items").await,
+        7
+    );
+
+    // Keeping only the latest releases the first seal and what only it
+    // needed.
+    replica
+        .keep_seals(KeptSeals {
+            latest: 1,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(replica.kept_seals().await.unwrap(), vec![second]);
+    assert_eq!(
+        at_seal(&replica, second, TITLES).await,
+        rows(&[("a", "one again"), ("c", "three"), ("d", "four")])
+    );
+    assert!(replica.seal_views(first).await.is_err());
+    // An unbound session names history explicitly, by seal or bookmark.
+    let hex: String = second.iter().map(|byte| format!("{byte:02x}")).collect();
+    for name in [format!("items@{hex}"), "items@main".into()] {
+        let mut cursor = session(&replica)
+            .await
+            .cursor(
+                &format!("SELECT key,title FROM \"{name}\" ORDER BY key"),
+                vec![],
+                crate::cursor::CursorLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cursor.next().await.unwrap().rows,
+            rows(&[("a", "one again"), ("c", "three"), ("d", "four")]),
+            "{name}"
+        );
+    }
+    // A bound session only reads; its seal's release ends its reads.
+    let mut bound = session(&replica).await;
+    bound.bind_seal(second).await.unwrap();
+    assert!(
+        bound
+            .run("UPDATE items SET title='x'", vec![])
+            .await
+            .is_err()
+    );
+    replica.keep_seals(KeptSeals::default()).await.unwrap();
+    assert!(matches!(
+        bound
+            .cursor(TITLES, vec![], crate::cursor::CursorLimits::default())
+            .await
+            .err(),
+        Some(Error::Sql(crate::sql::SqlError::Unavailable {
+            reason: crate::sql::Unavailable::Released,
+            ..
+        }))
+    ));
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_history_items").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_seal_learned_before_its_frames_is_shallow_until_they_arrive() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "a", "one").await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    b.keep_seals(KeptSeals {
+        every: true,
+        ..KeptSeals::default()
+    })
+    .await
+    .unwrap();
+    update(&a, "a", "sealed").await;
+    insert(&a, "b", "two").await;
+    let sealed = seal(&lineage, &a).await.id().unwrap();
+    // B learns the seal without its frames: it is shallow there.
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    b.finalize_path(lineage.domain).await.unwrap();
+    assert_eq!(b.held_seal(lineage.domain, sealed).await.unwrap(), None);
+    assert!(b.kept_seals().await.unwrap().is_empty());
+    assert!(
+        b.compaction_status(lineage.domain)
+            .await
+            .unwrap()
+            .waiting
+            .is_some()
+    );
+    // A writes on after the seal; once B holds the frames, it keeps the
+    // seal's state, not the later write.
+    update(&a, "b", "after the seal").await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.finalize_path(lineage.domain).await.unwrap();
+    assert_eq!(
+        b.held_seal(lineage.domain, sealed).await.unwrap(),
+        Some(crate::HeldSeal::Kept)
+    );
+    assert_eq!(
+        at_seal(&b, sealed, TITLES).await,
+        rows(&[("a", "sealed"), ("b", "two")])
+    );
+    assert_eq!(
+        titles(&b).await,
+        rows(&[("a", "sealed"), ("b", "after the seal")])
+    );
+}
+
+/// Bytes `table` and its indexes store, from the engine's page statistics.
+async fn stored_bytes(replica: &Replica, table: &str) -> i64 {
+    scalar(
+        replica,
+        &format!(
+            "SELECT SUM(d.payload) FROM dbstat AS d JOIN sqlite_schema AS s ON s.name=d.name WHERE s.tbl_name='{table}'"
+        ),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn five_kept_seals_of_one_percent_changes_add_about_five_percent() {
+    const ROWS: i64 = 500;
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "alice", &key).await;
+    follow_main(&lineage, &replica).await;
+    replica
+        .keep_seals(KeptSeals {
+            latest: 5,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    let sql = session(&replica).await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    let first = sql.next_id("items").await.unwrap().integer();
+    sql.run(
+        "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO items(key,title,id) SELECT printf('%06d',i),printf('item number %06d',i),?+i FROM n",
+        vec![SqlValue::Integer(ROWS - 1), SqlValue::Integer(first)],
+    )
+    .await
+    .unwrap();
+    sql.run("COMMIT", vec![]).await.unwrap();
+    let mut kept = Vec::new();
+    for round in 0..6i64 {
+        kept.push(seal(&lineage, &replica).await.id().unwrap());
+        replica.finalize_path(lineage.domain).await.unwrap();
+        // One percent of the rows change before the next seal.
+        session(&replica).await.run(
+            "UPDATE items SET title=printf('edit %d of %s',?,key) WHERE CAST(key AS INTEGER)%100=?",
+            vec![SqlValue::Integer(round), SqlValue::Integer(round)],
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(replica.kept_seals().await.unwrap(), kept[1..].to_vec());
+    let history = scalar(&replica, "SELECT count(*) FROM secure_history_items").await;
+    assert_eq!(history, 25);
+    let (live, added) = (
+        stored_bytes(&replica, "items").await,
+        stored_bytes(&replica, "secure_history_items").await,
+    );
+    let percent = added as f64 * 100.0 / live as f64;
+    eprintln!("live {live} B, history {added} B: {percent:.2}%");
+    assert!((4.0..=7.0).contains(&percent), "{percent:.2}%");
+    // The oldest kept seal still shows its rows.
+    assert_eq!(
+        at_seal(
+            &replica,
+            kept[1],
+            "SELECT count(*) FROM items WHERE title LIKE 'edit 0 of%'"
+        )
+        .await,
+        vec![vec![SqlValue::Integer(5)]]
+    );
+}
+
+#[tokio::test]
+async fn a_seal_before_a_removal_still_shows_the_removed_field_and_table() {
+    use super::generations::identity_insert;
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    // Generation 3 has items(key,title,note,rank) and tags; 4 removes both
+    // `note` and `tags`.
+    let replica = lineage
+        .open(
+            &dir.path().join("alice.db"),
+            &key,
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap();
+    follow_main(&lineage, &replica).await;
+    replica
+        .keep_seals(KeptSeals {
+            every: true,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    for sql in [
+        "INSERT INTO items VALUES('0001','one','noted',NULL)",
+        "INSERT INTO items VALUES('0002','two',NULL,2)",
+        "INSERT INTO tags VALUES('t','label')",
+    ] {
+        identity_insert(&session(&replica).await, sql, vec![])
+            .await
+            .unwrap();
+    }
+    let sealed = seal(&lineage, &replica).await.id().unwrap();
+    replica.finalize_path(lineage.domain).await.unwrap();
+    session(&replica)
+        .await
+        .run("UPDATE items SET note='changed' WHERE key='0001'", vec![])
+        .await
+        .unwrap();
+    // An additive change keeps history: the seal shows its own columns.
+    let before = at_seal(&replica, sealed, "SELECT * FROM items ORDER BY key").await;
+    assert_eq!(
+        before[0][..4],
+        [text("0001"), text("one"), text("noted"), SqlValue::Null]
+    );
+
+    replica.inner.lock().await.generations_with_graph = true;
+    assert!(
+        replica
+            .adopt_generation(
+                lineage.app(4),
+                lineage.config(4, &key),
+                lineage.upgrade(1, 4)
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        session(&replica)
+            .await
+            .run("SELECT note FROM items", vec![])
+            .await
+            .is_err()
+    );
+    // The seal before the removal still shows the field and the table,
+    // from frozen copies of only the affected tables.
+    assert_eq!(
+        at_seal(&replica, sealed, "SELECT * FROM items ORDER BY key").await,
+        before
+    );
+    assert_eq!(
+        at_seal(&replica, sealed, "SELECT key,label FROM tags").await,
+        vec![vec![text("t"), text("label")]]
+    );
+    assert_eq!(
+        scalar(
+            &replica,
+            "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'secure_frozen_%'"
+        )
+        .await,
+        2
+    );
+    // Releasing the seal drops its frozen copies.
+    replica.keep_seals(KeptSeals::default()).await.unwrap();
+    assert_eq!(
+        scalar(
+            &replica,
+            "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'secure_frozen_%'"
+        )
+        .await,
+        0
+    );
+}
+
+/// Pulls `source`'s checkpoint of items, which must sit at `seal`, into
+/// `target` as held state.
+async fn pull_seal(
+    lineage: &Lineage,
+    source: &Replica,
+    target: &Replica,
+    key: &PrivateKey,
+    seal: Commitment,
+) {
+    let scope = lineage.scope("items");
+    let credentials = lineage.credentials(3, key);
+    source
+        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = source
+        .checkpoint_offer(key.public_key(), &credentials, scope)
+        .await
+        .unwrap()
+        .expect("a checkpoint");
+    assert_eq!(offered.statement.seal, Some(seal));
+    let checkpoint = offered.id().unwrap();
+    target.begin_seal_pull(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = source
+            .checkpoint_page(
+                key.public_key(),
+                &credentials,
+                scope,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        target.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(target.finish_seal_pull(scope).await.unwrap(), seal);
+}
+
+#[tokio::test]
+async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that_keeps_it() {
+    use crate::TipStatement;
+    use rocky_credentials::{
+        BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
+        TIP_OPENING_FORMAT, TipOpeningStatement,
+    };
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    a.keep_seals(KeptSeals {
+        every: true,
+        ..KeptSeals::default()
+    })
+    .await
+    .unwrap();
+    insert(&a, "a", "one").await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let first = seal(&lineage, &a).await.id().unwrap();
+    update(&a, "a", "after the first seal").await;
+    insert(&a, "b", "two").await;
+    let second = seal(&lineage, &a).await.id().unwrap();
+    sync(&lineage, &a, &b, &keys[1]).await;
+    // B compacts at the latest seal; A keeps both and never compacts past
+    // the oldest, so its replay base sits there.
+    assert_eq!(
+        b.compact(lineage.domain, 0).await.unwrap().compacted,
+        Some(second)
+    );
+    assert_eq!(
+        a.compact(lineage.domain, 0).await.unwrap().compacted,
+        Some(first)
+    );
+    assert_eq!(b.held_seal(lineage.domain, first).await.unwrap(), None);
+    assert_eq!(
+        a.held_seal(lineage.domain, first).await.unwrap(),
+        Some(crate::HeldSeal::Kept)
+    );
+
+    let main_tip = b.followed_tip().await;
+    let opening = SignedTipOpening::sign(
+        TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            scope: lineage.domain,
+            seal: first,
+            minimum_in_sync: 1,
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    let dev = opening.tip().unwrap();
+    let bookmark = SignedBookmarkMove::sign(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "dev".into(),
+            from: None,
+            to: Some(dev),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    b.publish_tip_statements(&[
+        TipStatement::Opening(opening),
+        TipStatement::Bookmark(bookmark),
+    ])
+    .await
+    .unwrap();
+    // Following a branch on a seal B does not hold is refused.
+    let refused = b.follow_bookmark(lineage.domain, "dev").await.unwrap_err();
+    assert!(refused.to_string().contains("does not hold"), "{refused}");
+    assert_eq!(b.followed_tip().await, main_tip);
+
+    pull_seal(&lineage, &a, &b, &keys[1], first).await;
+    assert_eq!(
+        b.held_seal(lineage.domain, first).await.unwrap(),
+        Some(crate::HeldSeal::Checkpoint)
+    );
+    // Its rows did not change; following the branch now starts from the
+    // pulled seal's state.
+    assert_eq!(
+        titles(&b).await,
+        rows(&[("a", "after the first seal"), ("b", "two")])
+    );
+    assert_eq!(scalar(&b, "SELECT count(*) FROM secure_pulled").await, 1);
+    b.follow_bookmark(lineage.domain, "dev").await.unwrap();
+    // The pulled state became the replay base: no rebootstrap waits.
+    assert_eq!(scalar(&b, "SELECT count(*) FROM secure_pulled").await, 0);
+    assert_eq!(titles(&b).await, rows(&[("a", "one")]));
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.rebootstrap, None);
+}

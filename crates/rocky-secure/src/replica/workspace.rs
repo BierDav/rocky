@@ -16,6 +16,8 @@ pub(crate) struct Workspace {
     pub(super) shadow: Option<Arc<typed::Typed>>,
     /// Cursors, table events and the authority mirror of the live tables.
     pub(crate) queries: queries::Queries,
+    /// Bulk rebuilds of the live tables in progress.
+    pub(super) bulk: history::Bulk,
 }
 impl Workspace {
     pub(super) fn new(tip: TipId) -> Self {
@@ -25,6 +27,7 @@ impl Workspace {
             typed: None,
             shadow: None,
             queries: Default::default(),
+            bulk: Default::default(),
         }
     }
 }

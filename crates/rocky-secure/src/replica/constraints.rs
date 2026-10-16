@@ -851,7 +851,8 @@ fn stamps(node: &Node, record: &Materialized) -> Vec<Option<Stamp>> {
 
 impl<A: RowApplication> Inner<A> {
     fn constraints(&self) -> Option<Arc<Typed>> {
-        self.workspace.typed
+        self.workspace
+            .typed
             .clone()
             .filter(|typed| typed.constraints.is_some())
     }
@@ -1249,6 +1250,25 @@ impl<A: RowApplication> Inner<A> {
     /// Rebuilds the selected partition, or the unpartitioned dependency graph.
     /// With no target, rebuilds all scopes; `without` is being evicted.
     pub(super) async fn rebuild_constraints(
+        &self,
+        target: Option<ResourceScope>,
+        without: Option<ResourceScope>,
+    ) -> Result<(), Error> {
+        let Some(typed) = self.constraints() else {
+            return Ok(());
+        };
+        let tables: Vec<String> = typed
+            .constraints
+            .as_ref()
+            .ok_or_else(|| corrupt("constraints"))?
+            .nodes
+            .iter()
+            .map(|node| typed.tables[node.table].table.sql_name.clone())
+            .collect();
+        self.in_bulk(&tables, self.rebuild_constraints_now(target, without))
+            .await
+    }
+    async fn rebuild_constraints_now(
         &self,
         target: Option<ResourceScope>,
         without: Option<ResourceScope>,

@@ -4,6 +4,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
+import rocky.internal.native.NativeBinding
 import rocky.internal.native.NativeConnection
 import rocky.internal.native.NativeDatabase
 import rocky.internal.native.NativeDatabaseSession
@@ -12,6 +13,15 @@ import rocky.internal.native.NativeNetwork
 import rocky.internal.native.NativeNetworkService
 import rocky.internal.native.NativeTableEvents
 import rocky.internal.native.prepareDevice
+
+/**
+ * The sealed state a read-only driver connection reads instead of the live tables: a [Seal] this device keeps, or
+ * the seal a [Bookmark] shows, resolved when the connection opens. See `docs/runtime/kept-seals.md`.
+ */
+sealed interface RockyBinding {
+    data class Seal(val seal: String) : RockyBinding
+    data class Bookmark(val name: String) : RockyBinding
+}
 
 /** Database ownership is independent of sessions and of an optional network. */
 class RockyDatabase private constructor(
@@ -64,7 +74,23 @@ class RockyDatabase private constructor(
      * The native handles of a SQL driver, such as `rocky-sqlite`'s: a writer is a secure SQL session, a reader
      * steps snapshot cursors. See `docs/runtime/sql-driver.md`.
      */
-    suspend fun driverConnection(readOnly: Boolean, profile: String? = null, transactionTimeoutMillis: Long? = null): NativeConnection = nativeCall { native.connect(readOnly, profile, transactionTimeoutMillis?.toULong()) }
+    suspend fun driverConnection(
+        readOnly: Boolean,
+        profile: String? = null,
+        transactionTimeoutMillis: Long? = null,
+        binding: RockyBinding? = null,
+    ): NativeConnection = nativeCall {
+        native.connect(
+            readOnly,
+            profile,
+            transactionTimeoutMillis?.toULong(),
+            when (binding) {
+                null -> null
+                is RockyBinding.Seal -> NativeBinding.Seal(binding.seal)
+                is RockyBinding.Bookmark -> NativeBinding.Bookmark(binding.name)
+            },
+        )
+    }
 
     /** Committed changes of `tables`, or of every table, for a driver to invalidate what it read. */
     suspend fun driverTableEvents(tables: List<String>? = null): NativeTableEvents = nativeCall { native.observeTables(tables) }

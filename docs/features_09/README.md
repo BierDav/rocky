@@ -10,6 +10,8 @@ API or guides ([evidence](10-stuck-recovery-evidence.md));
 and 18 are skipped. Phase 14 is in progress: all slices are implemented, and
 [two gate gaps remain](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
 Phase 15 is implemented ([evidence](15-lazy-compaction-evidence.md)).
+Phase 16 is in progress: all slices are implemented and
+[one gate item remains](16-kept-seals-and-views.md#what-remains).
 Phases 14–17, 19 and 20 replace
 generations' transitions, the mergeable horizon and recovery cuts with
 [sealed forks](#generations-as-sealed-forks).

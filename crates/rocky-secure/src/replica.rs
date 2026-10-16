@@ -14,6 +14,8 @@ mod existence;
 mod generation;
 pub(super) mod group;
 mod held;
+mod history;
+pub use history::{HeldSeal, KeptSeals, SealViews};
 mod holdings;
 mod identity;
 mod incoming;
@@ -404,6 +406,10 @@ pub(super) struct Inner<A> {
     /// The stage fault exits the process instead of returning an error.
     #[cfg(test)]
     stage_exit: bool,
+    /// Adopts generations in a domain with a tip graph, which production
+    /// refuses until schema changes are seals.
+    #[cfg(test)]
+    pub(super) generations_with_graph: bool,
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
     #[cfg(test)]
@@ -548,6 +554,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         rebuild::SCHEMA,
         removal::SCHEMA,
         held::SCHEMA,
+        history::SCHEMA,
         coordinated::SCHEMA,
         coordinated::cut::SCHEMA,
         coordinated::proposal::SCHEMA,
@@ -558,6 +565,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         partition::SCHEMA,
         checkpoint::SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
+        checkpoint::PULLED_SCHEMA,
         compaction::SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
@@ -804,6 +812,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             stage_exit: false,
             #[cfg(test)]
+            generations_with_graph: false,
+            #[cfg(test)]
             fail_before_commit: 0,
             #[cfg(test)]
             retry_before_commit: 0,
@@ -857,7 +867,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.load_tip_graphs().await?;
                 let stored = inner.stored_identity().await?;
                 if inner.workspace.followed.is_some() {
-                    identity = generation::identity(inner.workspace.tip, inner.config.node.public_key())?;
+                    identity =
+                        generation::identity(inner.workspace.tip, inner.config.node.public_key())?;
                 }
                 let activated = if inner.workspace.followed.is_some() {
                     false

@@ -458,38 +458,39 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         let mut groups = BTreeMap::<(rocky_core::Scope, Commitment), Vec<ResourceScope>>::new();
         for scope in scopes {
-            let address =
-                if let (Some(typed), Some(tuple)) = (&inner.workspace.typed, inner.partitions.get(scope)) {
-                    let table = typed
-                        .rows
-                        .table(&scope.table)
-                        .ok_or_else(|| denied("unknown partition table"))?;
-                    let schema = typed.rows.schema();
-                    let logical = schema
-                        .table(&table.sql_name)
-                        .ok_or_else(|| denied("unknown partition table"))?;
-                    let values = logical
-                        .partition_by
-                        .iter()
-                        .map(|name| {
-                            let column = logical
-                                .column(name)
-                                .ok_or_else(|| denied("unknown partition column"))?;
-                            tuple
-                                .values()
-                                .get(&schema.field_id(logical, column))
-                                .ok_or_else(|| denied("missing partition value"))?
-                                .value()
-                                .map_err(|error| denied(&error.to_string()))
-                        })
-                        .collect::<Result<Vec<_>, Error>>()?;
-                    schema
-                        .group_address(scope.domain, &table.sql_name, &values)
-                        .map_err(|error| denied(&error.to_string()))?
-                        .commitment
-                } else {
-                    rocky_core::commitment("rocky.frontier-single-scope", &encode(scope)?)
-                };
+            let address = if let (Some(typed), Some(tuple)) =
+                (&inner.workspace.typed, inner.partitions.get(scope))
+            {
+                let table = typed
+                    .rows
+                    .table(&scope.table)
+                    .ok_or_else(|| denied("unknown partition table"))?;
+                let schema = typed.rows.schema();
+                let logical = schema
+                    .table(&table.sql_name)
+                    .ok_or_else(|| denied("unknown partition table"))?;
+                let values = logical
+                    .partition_by
+                    .iter()
+                    .map(|name| {
+                        let column = logical
+                            .column(name)
+                            .ok_or_else(|| denied("unknown partition column"))?;
+                        tuple
+                            .values()
+                            .get(&schema.field_id(logical, column))
+                            .ok_or_else(|| denied("missing partition value"))?
+                            .value()
+                            .map_err(|error| denied(&error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                schema
+                    .group_address(scope.domain, &table.sql_name, &values)
+                    .map_err(|error| denied(&error.to_string()))?
+                    .commitment
+            } else {
+                rocky_core::commitment("rocky.frontier-single-scope", &encode(scope)?)
+            };
             groups
                 .entry((scope.domain, address))
                 .or_default()

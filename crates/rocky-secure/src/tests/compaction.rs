@@ -9,9 +9,14 @@ use rocky_credentials::{
     SealStatement, SignedBookmarkMove, SignedCheckpointRecord, SignedSeal,
 };
 
-type Replica = EncryptedReplica<TypedRows>;
+pub(super) type Replica = EncryptedReplica<TypedRows>;
 
-async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) -> Replica {
+pub(super) async fn open(
+    lineage: &Lineage,
+    dir: &TempDir,
+    name: &str,
+    key: &PrivateKey,
+) -> Replica {
     lineage
         .open(
             &dir.path().join(format!("{name}.db")),
@@ -22,7 +27,7 @@ async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) ->
         .await
         .unwrap()
 }
-fn bookmark(lineage: &Lineage, from: Option<TipId>, to: TipId) -> TipStatement {
+pub(super) fn bookmark(lineage: &Lineage, from: Option<TipId>, to: TipId) -> TipStatement {
     TipStatement::Bookmark(
         SignedBookmarkMove::sign(
             BookmarkMoveStatement {
@@ -38,7 +43,7 @@ fn bookmark(lineage: &Lineage, from: Option<TipId>, to: TipId) -> TipStatement {
     )
 }
 /// Creates `main` on the genesis tip and follows it.
-async fn follow_main(lineage: &Lineage, replica: &Replica) {
+pub(super) async fn follow_main(lineage: &Lineage, replica: &Replica) {
     let genesis = replica.followed_tip().await;
     replica
         .publish_tip_statements(&[bookmark(lineage, None, genesis)])
@@ -51,7 +56,7 @@ async fn follow_main(lineage: &Lineage, replica: &Replica) {
 }
 /// The owner seals the followed tip at what `replica` holds and moves
 /// `main` on; returns the seal.
-fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>) -> SignedSeal {
+pub(super) fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>) -> SignedSeal {
     SignedSeal::sign(
         SealStatement {
             format: SEAL_FORMAT,
@@ -66,7 +71,7 @@ fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>) -> Signed
     )
     .unwrap()
 }
-async fn seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
+pub(super) async fn seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
     let tip = replica.followed_tip().await;
     let frontier = replica.seal_frontier(lineage.domain, false).await.unwrap();
     publish_seal(lineage, replica, sign_seal(lineage, tip, frontier)).await
@@ -83,7 +88,7 @@ async fn publish_seal(lineage: &Lineage, replica: &Replica, seal: SignedSeal) ->
         .unwrap();
     seal
 }
-async fn insert(replica: &Replica, key: &str, title: &str) {
+pub(super) async fn insert(replica: &Replica, key: &str, title: &str) {
     identity_insert(
         &session(replica).await,
         "INSERT INTO items(key,title) VALUES(?,?)",
@@ -92,7 +97,7 @@ async fn insert(replica: &Replica, key: &str, title: &str) {
     .await
     .unwrap();
 }
-async fn delete(replica: &Replica, key: &str) {
+pub(super) async fn delete(replica: &Replica, key: &str) {
     session(replica)
         .await
         .run("DELETE FROM items WHERE key=?", vec![text(key)])
@@ -107,7 +112,7 @@ async fn churn(replica: &Replica, cycles: usize, prefix: &str) {
         delete(replica, &key).await;
     }
 }
-async fn scalar(replica: &Replica, sql: &str) -> i64 {
+pub(super) async fn scalar(replica: &Replica, sql: &str) -> i64 {
     let inner = replica.inner.lock().await;
     match crate::storage::rows(&inner.conn, sql)
         .await
@@ -130,7 +135,7 @@ async fn stored(replica: &Replica) -> (i64, i64) {
         .await,
     )
 }
-async fn titles(replica: &Replica) -> Vec<Vec<SqlValue>> {
+pub(super) async fn titles(replica: &Replica) -> Vec<Vec<SqlValue>> {
     select(replica, "SELECT key,title FROM items ORDER BY key").await
 }
 
@@ -182,7 +187,7 @@ async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
 
 /// Hands `source`'s graph and the items frames `target` lacks to `target`,
 /// whose node key is `key`.
-async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
+pub(super) async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
     target
         .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())
         .await

@@ -5,6 +5,8 @@ pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
 mod create;
 mod prune;
+mod pulled;
+pub(crate) use pulled::SCHEMA as PULLED_SCHEMA;
 mod transfer;
 use super::*;
 pub use audit::AuditReport;

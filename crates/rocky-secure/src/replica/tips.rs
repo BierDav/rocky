@@ -368,14 +368,18 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn ensure_tip_writable(&self, scope: Scope) -> Result<(), Error> {
         if let Some((followed, name)) = &self.workspace.followed
             && *followed == scope
-            && self.graph_for(scope)?.bookmark(name).map_err(credential)? != Some(self.workspace.tip)
+            && self.graph_for(scope)?.bookmark(name).map_err(credential)?
+                != Some(self.workspace.tip)
         {
             return Err(denied(
                 "followed bookmark moved or was deleted; workspace is read-only",
             ));
         }
         if let Some(graph) = self.graphs.get(&scope)
-            && graph.seal(self.workspace.tip).map_err(credential)?.is_some()
+            && graph
+                .seal(self.workspace.tip)
+                .map_err(credential)?
+                .is_some()
         {
             return Err(denied("followed bookmark points to a sealed tip"));
         }
@@ -416,7 +420,8 @@ impl<A: RowApplication> Inner<A> {
                 None => {
                     self.explicit_frame(e.tip, header.timestamp)
                         && (e.tip == self.workspace.tip
-                            || last.get(&header.public_key).map(|(_, tip)| *tip) == Some(self.workspace.tip))
+                            || last.get(&header.public_key).map(|(_, tip)| *tip)
+                                == Some(self.workspace.tip))
                 }
             };
             if visible && (status != "held" || self.graphs.contains_key(&scope.domain)) {
@@ -631,6 +636,39 @@ impl<A: RowApplication> Inner<A> {
         self.node_author = selected;
         Ok(())
     }
+    /// Refuses following `target` onto a seal this node does not hold
+    /// when no replay base lies on its path: the node pulls that seal's
+    /// state from a node that keeps it first.
+    async fn require_held_start(&self, domain: Scope, target: TipId) -> Result<(), Error> {
+        let graph = self.graph_for(domain)?;
+        if target == self.workspace.tip
+            || graph
+                .continues(self.workspace.tip, target)
+                .is_ok_and(|continues| continues)
+        {
+            return Ok(());
+        }
+        let Some(start) = history::bookmark_seal(graph, target)? else {
+            return Ok(());
+        };
+        let path = compaction::tip_path_seals(graph, target)?
+            .iter()
+            .map(|seal| seal.id().map_err(credential))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut based = true;
+        for (_, id) in self.domain_scopes(domain).await? {
+            based &= match self.base_seal(id).await? {
+                Some(seal) => path.contains(&seal),
+                None => true,
+            };
+        }
+        if based || self.held_seal(domain, start).await?.is_some() {
+            return Ok(());
+        }
+        Err(denied(
+            "this node does not hold the seal the tip starts from; pull it from a node that keeps it",
+        ))
+    }
     async fn node_continues(
         &self,
         scope: Scope,
@@ -798,16 +836,32 @@ impl<A: RowApplication> Inner<A> {
         self.index_inherited_held(domain).await?;
         // Finalized seals off the new path are undone by the rebuild.
         self.revalidate_finalized(domain, false).await?;
-        // A compacted seal off the new path cannot be undone: the rows wait
-        // for a rebootstrap at a seal of the path.
-        if self.compaction_lost(domain).await?.is_some() {
-            return Ok(());
-        }
         let path = self
             .path_seals(domain)?
             .iter()
             .map(|seal| seal.id().map_err(credential))
             .collect::<Result<BTreeSet<_>, _>>()?;
+        // A compacted seal off the new path cannot be undone: the rows wait
+        // for a rebootstrap at a seal of the path, unless states pulled at
+        // seals of the path replace every base that left it.
+        if self.compaction_lost(domain).await?.is_some() {
+            let mut installed = false;
+            for (scope, id) in self.domain_scopes(domain).await? {
+                if self.base_off_path(scope, id).await?
+                    && self
+                        .pulled_seal(id)
+                        .await?
+                        .is_some_and(|seal| path.contains(&seal))
+                {
+                    self.install_pulled(scope, id).await?;
+                    installed = true;
+                }
+            }
+            if installed {
+                Box::pin(self.settle_seal_rebootstrap(domain)).await?;
+            }
+            return Ok(());
+        }
         let scopes = rows(&self.conn, "SELECT scope FROM secure_scope_state").await?;
         for record in scopes {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
@@ -825,6 +879,16 @@ impl<A: RowApplication> Inner<A> {
                 .and_then(|record| record.signed)
                 .and_then(|signed| signed.statement.seal)
                 .is_some_and(|seal| path.contains(&seal));
+            // A state pulled at a seal the new tip passes replaces pruned
+            // history.
+            let kept = kept
+                || match self.pulled_seal(id).await? {
+                    Some(seal) if path.contains(&seal) && self.has_pruned_prefix(scope).await? => {
+                        self.install_pulled(scope, id).await?;
+                        true
+                    }
+                    _ => false,
+                };
             if !kept && self.has_pruned_prefix(scope).await? {
                 return Err(denied(
                     "switching tips needs retained history or a target checkpoint",
@@ -1044,6 +1108,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             // A finalized seal that lost a race is undone.
             if let Some((scope, _)) = old_followed.clone() {
                 inner.revalidate_finalized(scope, true).await?;
+                // Bookmarks may show other seals now.
+                inner.retain_kept(scope).await?;
             }
             Ok(())
         });
@@ -1086,6 +1152,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .bookmark(name)
             .map_err(credential)?
             .ok_or_else(|| denied("bookmark does not exist"))?;
+        inner.require_held_start(scope, target).await?;
         inner.follow_target(scope, name, target).await?;
         inner.bump_authority();
         inner.flush()?;

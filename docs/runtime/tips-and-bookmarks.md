@@ -175,9 +175,9 @@ whether a revocation ended it (`revoked`), openings with their minimum in-sync
 size, bookmarks with their tip, moves (with `authority` and `revoked`) and
 `losers` (`name` such as `main/1`, losing `move`, its `tip`), and nodes. A `continue`
 seal's id is its successor tip; an opening's id is its tip. For this device a
-node lists the tips it holds frames of and no kept seals, which arrive with
-[phase 16](../features_09/16-kept-seals-and-views.md); for peers both are null,
-since peers do not report them.
+node lists the tips it holds frames of and its
+[kept seals](kept-seals.md); for peers both are null, since peers do not
+report them. Each seal's `held` says how this device holds its state.
 
 ## Replica boundary
 

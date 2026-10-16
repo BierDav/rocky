@@ -167,7 +167,10 @@ impl<A: RowApplication> Inner<A> {
     /// compacted seal lost forgets its finalized seals, which it finalizes
     /// again from the path's start, and its rows are rebuilt at the
     /// followed tip. Returns whether no scope waits.
-    async fn settle_seal_rebootstrap(&mut self, domain: Scope) -> Result<bool, Error> {
+    pub(in crate::replica) async fn settle_seal_rebootstrap(
+        &mut self,
+        domain: Scope,
+    ) -> Result<bool, Error> {
         if !self.seal_rebootstraps(domain).await?.is_empty() {
             return Ok(false);
         }

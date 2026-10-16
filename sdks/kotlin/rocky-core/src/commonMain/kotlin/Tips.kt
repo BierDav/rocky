@@ -45,6 +45,24 @@ class Tips internal constructor(private val client: RockyClient) {
     /** Where this device's compaction of the followed path stands; nothing is compacted. */
     suspend fun compaction(): TipCompaction = TipCompaction.decode(call("compaction"))
 
+    /**
+     * Names the seals this device keeps from now on, among those of the tips it follows; seals no longer named are
+     * released at once. A seal is kept once this device holds every frame through its frontier. Read a kept seal
+     * through a connection bound to it ([RockyBinding]). See `docs/runtime/kept-seals.md`.
+     */
+    suspend fun keep(kept: KeptSeals): KeptSeals = KeptSeals.decode(
+        call("keep") {
+            putJsonObject("kept") {
+                put("bookmarked", kept.bookmarked)
+                put("latest", kept.latest.toLong())
+                put("every", kept.every)
+            }
+        },
+    )
+
+    /** The seals this device keeps. */
+    suspend fun kept(): KeptSeals = KeptSeals.decode(call("kept"))
+
     /** Creates [name] on [tip], or on the followed tip when omitted. */
     suspend fun createBookmark(name: String, tip: String? = null): TipStatus = TipStatus.decode(
         call("create") {
@@ -88,6 +106,20 @@ data class TrustGrant(val identity: String, val capability: String, val grant: S
             value.getValue("identity").jsonPrimitive.content,
             value.getValue("capability").jsonPrimitive.content,
             value.getValue("grant").jsonPrimitive.content,
+        )
+    }
+}
+
+/**
+ * The seals a device keeps: the seal each bookmarked tip starts from ([bookmarked]), the [latest] so many, or
+ * [every] one. Keeping the latest seal lets a device open a branch on it after writing on.
+ */
+data class KeptSeals(val bookmarked: Boolean = false, val latest: UInt = 0u, val every: Boolean = false) {
+    internal companion object {
+        fun decode(value: JsonObject) = KeptSeals(
+            value.getValue("bookmarked").jsonPrimitive.boolean,
+            value.unsigned("latest").toUInt(),
+            value.getValue("every").jsonPrimitive.boolean,
         )
     }
 }
@@ -176,7 +208,8 @@ enum class TipAuthority { OWNER, TRUSTED, ISSUER }
  * A seal; [canonical] is false for a concurrent seal of the same tip that lost.
  * A [revoked] seal's signer was revoked; it takes part in no race. A [final] seal was committed by its tip's
  * coordinated log and acknowledged by enough trusted nodes; it beats every other seal of its tip. [checkpoints]
- * lists the checkpoints of its state a device may rebootstrap from.
+ * lists the checkpoints of its state a device may rebootstrap from. [held] says how this device holds its state,
+ * which a branch opening needs; null when it is shallow here.
  */
 data class TipSeal(
     val id: String,
@@ -188,7 +221,11 @@ data class TipSeal(
     val revoked: Boolean,
     val final: Boolean,
     val checkpoints: List<TipCheckpoint>,
+    val held: TipHeld? = null,
 )
+
+/** How a device holds a seal's state: [KEPT] in history tables, a [CHECKPOINT] base there, or its [LIVE] tables now. */
+enum class TipHeld { KEPT, CHECKPOINT, LIVE }
 
 /**
  * A checkpoint of one [scope] at a seal, signed by the node [signer] and listed by [authority]; [rows] is its size.
@@ -252,6 +289,7 @@ data class TipInspection(
                             checkpoint.unsigned("rows"),
                         )
                     },
+                    it.nullableText("held")?.let { held -> TipHeld.valueOf(held.uppercase()) },
                 )
             },
             value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },

@@ -75,39 +75,7 @@ impl<A: RowApplication> Inner<A> {
         if self.workspace.followed.as_ref().map(|(scope, _)| *scope) != Some(domain) {
             return Ok(Vec::new());
         }
-        let mut seals = Vec::new();
-        if let Some(own) = graph.seal(self.workspace.tip).map_err(credential)? {
-            seals.push(own.clone());
-        }
-        let mut cursor = self.workspace.tip;
-        let mut visited = BTreeSet::new();
-        while visited.insert(cursor) {
-            let mut parent = None;
-            for seal in &graph.seals {
-                if seal.successor().map_err(credential)? == Some(cursor) {
-                    parent = Some(seal.clone());
-                    break;
-                }
-            }
-            if parent.is_none() {
-                for opening in &graph.openings {
-                    if opening.tip().map_err(credential)? == cursor {
-                        parent = Some(
-                            graph
-                                .seal_by_id(opening.statement.seal)
-                                .map_err(credential)?
-                                .clone(),
-                        );
-                        break;
-                    }
-                }
-            }
-            let Some(seal) = parent else { break };
-            cursor = seal.statement.tip;
-            seals.push(seal);
-        }
-        seals.reverse();
-        Ok(seals)
+        tip_path_seals(graph, self.workspace.tip)
     }
     /// Where `seal` lies on the followed path; none off it.
     pub(super) fn path_index(
@@ -146,8 +114,24 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
+    /// The depth `seal` was finalized at, while it is recorded.
+    pub(super) async fn finalized_depth(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Option<i64>, Error> {
+        Ok(self
+            .finalized(domain)
+            .await?
+            .into_iter()
+            .find(|known| known.seal == seal)
+            .map(|known| known.depth))
+    }
     /// The keyed scopes of `domain` this replica holds state of.
-    async fn domain_scopes(&self, domain: Scope) -> Result<Vec<(ResourceScope, i64)>, Error> {
+    pub(super) async fn domain_scopes(
+        &self,
+        domain: Scope,
+    ) -> Result<Vec<(ResourceScope, i64)>, Error> {
         let mut scopes = Vec::new();
         for record in rows(
             &self.conn,
@@ -553,17 +537,20 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Per held scope: its applied positions after its last bound that
     /// `seal` excludes and the last one it includes. A scope changes when
-    /// the seal includes any; once a constrained one does, every
+    /// the seal includes any, or, for a seal to `keep`, when its live rows
+    /// hold any it excludes; once a constrained one does, every
     /// constrained scope changes, its dependencies may have.
     async fn seal_changes(
         &self,
         domain: Scope,
         seal: &SignedSeal,
         scopes: &[(ResourceScope, i64)],
+        keep: bool,
     ) -> Result<Vec<SealChange>, Error> {
         let graph = self.graph_for(domain)?;
         let constrained = |scope: ResourceScope| {
-            self.workspace.typed
+            self.workspace
+                .typed
                 .as_ref()
                 .and_then(|typed| typed.constraints.as_ref())
                 .and_then(|constraints| constraints.node(scope))
@@ -614,7 +601,7 @@ impl<A: RowApplication> Inner<A> {
                     change.excluded.push((*position, hash.clone()));
                 }
             }
-            change.changed = change.through > bound;
+            change.changed = change.through > bound || (keep && !change.excluded.is_empty());
             changes.push(change);
         }
         if changes
@@ -679,6 +666,7 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         seal: &SignedSeal,
         changes: &[SealChange],
+        keep: bool,
     ) -> Result<(), Error> {
         let depth = match collect_rows(
             self.conn
@@ -719,6 +707,10 @@ impl<A: RowApplication> Inner<A> {
         }
         for change in &changed {
             self.reproject(change.scope).await?;
+        }
+        // The live tables hold the seal's state now.
+        if keep {
+            self.mark_seal(seal.id().map_err(credential)?).await?;
         }
         let mut drops = Vec::new();
         for change in &changed {
@@ -819,8 +811,12 @@ impl<A: RowApplication> Inner<A> {
                         inner.clear_checkpoints(*scope, *id).await?;
                     }
                 }
-                let changes = inner.seal_changes(domain, &seal, &scopes).await?;
-                inner.finalize_seal(domain, &seal, &changes).await
+                let keep = inner
+                    .keeps_finalized(domain, seal.id().map_err(credential)?)
+                    .await?;
+                let changes = inner.seal_changes(domain, &seal, &scopes, keep).await?;
+                inner.finalize_seal(domain, &seal, &changes, keep).await?;
+                inner.retain_kept(domain).await
             })?;
             count += 1;
         }
@@ -950,9 +946,20 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Option<(Finalized, SignedSeal)>, Error> {
         let graph = self.graph_for(domain)?;
         let path = self.path_seals(domain)?;
+        let kept: BTreeSet<Commitment> = self
+            .kept_marks()
+            .await?
+            .into_iter()
+            .map(|(seal, _)| seal)
+            .collect();
         let mut target = None;
         for known in self.finalized(domain).await? {
             if known.compacted {
+                // The replay base never passes a kept seal: this node can
+                // rebuild and serve every seal it keeps.
+                if kept.contains(&known.seal) {
+                    break;
+                }
                 continue;
             }
             let Some(index) = path
@@ -962,7 +969,11 @@ impl<A: RowApplication> Inner<A> {
                 break;
             };
             if graph.is_final(known.seal).map_err(credential)? || path.len() - 1 - index >= keep {
+                let stop = kept.contains(&known.seal);
                 target = Some((known, path[index].clone()));
+                if stop {
+                    break;
+                }
             } else {
                 break;
             }
@@ -1359,6 +1370,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.publish_revision().await?;
         Ok(report)
     }
+    /// Finalizes every seal of the followed path whose frames this replica
+    /// holds, as maintenance does, and keeps those the configuration names.
+    pub async fn finalize_path(&self, domain: Scope) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        inner.graph_for(domain)?;
+        inner.finalize_ready(domain).await?;
+        inner.flush()?;
+        inner.publish_revision().await
+    }
     pub async fn compaction_status(&self, domain: Scope) -> Result<CompactionStatus, Error> {
         let inner = self.inner.lock().await;
         inner.graph_for(domain)?;
@@ -1395,4 +1415,44 @@ impl<A: RowApplication> EncryptedReplica<A> {
             rebootstrap,
         })
     }
+}
+
+/// The seals `tip`'s state passes through, oldest first, as `path_seals`.
+pub(super) fn tip_path_seals(
+    graph: &rocky_credentials::TipGraph,
+    tip: TipId,
+) -> Result<Vec<SignedSeal>, Error> {
+    let mut seals = Vec::new();
+    if let Some(own) = graph.seal(tip).map_err(credential)? {
+        seals.push(own.clone());
+    }
+    let mut cursor = tip;
+    let mut visited = BTreeSet::new();
+    while visited.insert(cursor) {
+        let mut parent = None;
+        for seal in &graph.seals {
+            if seal.successor().map_err(credential)? == Some(cursor) {
+                parent = Some(seal.clone());
+                break;
+            }
+        }
+        if parent.is_none() {
+            for opening in &graph.openings {
+                if opening.tip().map_err(credential)? == cursor {
+                    parent = Some(
+                        graph
+                            .seal_by_id(opening.statement.seal)
+                            .map_err(credential)?
+                            .clone(),
+                    );
+                    break;
+                }
+            }
+        }
+        let Some(seal) = parent else { break };
+        cursor = seal.statement.tip;
+        seals.push(seal);
+    }
+    seals.reverse();
+    Ok(seals)
 }

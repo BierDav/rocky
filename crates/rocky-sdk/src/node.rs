@@ -3600,6 +3600,7 @@ pub fn error(error: &Failure) -> Value {
                 Unavailable::Incomplete | Unavailable::KeyMissing => ("missing_dependencies", true),
                 Unavailable::NotHeld => ("rejected", false),
                 Unavailable::Revoked => ("denied", false),
+                Unavailable::Released => ("rejected", false),
             },
             Some(Error::Conflict) => ("conflict", true),
             Some(Error::Backpressure) => ("quota", true),

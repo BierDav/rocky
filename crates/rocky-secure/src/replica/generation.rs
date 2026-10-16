@@ -314,7 +314,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
     Error::Incompatible(reason.into())
 }
 /// The one encrypted replica file format; files of another are refused.
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v25";
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v26";
 /// The file identity of `tip` at `node`.
 pub(super) fn identity(tip: rocky_core::TipId, node: PublicKey) -> Result<Vec<u8>, Error> {
     encode(&(FILE_IDENTITY, tip, node))
@@ -1047,7 +1047,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.manifest == manifest.hash() {
             return Ok(false);
         }
-        if !inner.graphs.is_empty() {
+        #[cfg(test)]
+        let refused = !inner.graphs.is_empty() && !inner.generations_with_graph;
+        #[cfg(not(test))]
+        let refused = !inner.graphs.is_empty();
+        if refused {
             return Err(incompatible(
                 "schema changes of bookmark tips require phase 17 seals",
             ));
@@ -1075,10 +1079,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
             domains: manifest.domains.iter().map(|item| item.domain).collect(),
             definition: manifest,
         };
+        #[cfg(test)]
+        let installed = inner.manifest;
         definition.swap(&mut inner);
         let activated = transaction!(inner, |inner| {
             inner.bind_node_author(&inner.config.credentials).await?;
             let stored = inner.stored_identity().await?;
+            // A test adopting under a graph starts from the installed genesis.
+            #[cfg(test)]
+            let stored = if inner.generations_with_graph {
+                self::identity(
+                    rocky_credentials::genesis_tip(installed),
+                    inner.config.node.public_key(),
+                )?
+            } else {
+                stored
+            };
             if !inner.activate(&stored, Some(&upgrade)).await? {
                 return Err(incompatible(
                     "the lineage does not start at the installed generation",

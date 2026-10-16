@@ -498,6 +498,7 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
             read_only: false,
             profile: Some(Profile::Room284),
             transaction_timeout: Some(Duration::from_secs(1)),
+            binding: None,
         };
         let writer = connections.get(connections.connect(node.clone(), options).await?)?;
         let execute = |sql: &str, params: Vec<SqlValue>| {

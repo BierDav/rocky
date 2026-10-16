@@ -300,6 +300,9 @@ async fn moving_main_back_closes_its_tip_and_holds_the_abandoned_writes() -> Res
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
     let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
+    // `a` opens a branch on the seal after writing past it: it keeps the
+    // seals its bookmarks start from.
+    ok(&a, "keep", json!({"kept": {"bookmarked": true}})).await;
     a.add(1, "kept").await;
     let continued = ok(&a, "seal", json!({})).await["tip"].clone();
     a.add(2, "abandoned").await;
@@ -761,6 +764,8 @@ mod trusted {
             return Err("devices".into());
         };
         trust(owner, t).await;
+        // t opens a branch on this seal later: it keeps the seals it passes.
+        ok(t, "keep", json!({"kept": {"every": true}})).await;
         let earlier = ok(t, "status", json!({})).await["tip"].clone();
         let inspection = ok(t, "inspect", json!({})).await;
         let seal = inspection["seals"]

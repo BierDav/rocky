@@ -65,6 +65,8 @@ pub enum Unavailable {
     Incomplete,
     /// The session's authority changed; open a new session.
     Revoked,
+    /// The seal a bound connection reads is no longer kept.
+    Released,
 }
 /// Why the runtime rolled a transaction back.
 #[derive(Clone, Debug, PartialEq, Eq)]

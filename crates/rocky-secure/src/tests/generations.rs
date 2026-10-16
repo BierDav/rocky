@@ -155,7 +155,7 @@ impl Lineage {
         });
         schema
     }
-    fn app(&self, generation: u32) -> TypedRows {
+    pub(super) fn app(&self, generation: u32) -> TypedRows {
         let schema = self.schema(generation);
         let items = schema.table("items").unwrap();
         let added = items
@@ -324,7 +324,7 @@ impl Lineage {
                 .unwrap(),
         ])
     }
-    fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
+    pub(super) fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
         let keys = ["items", "tags"]
             .iter()
             .take(if matches!(generation, 2 | 3) { 2 } else { 1 })

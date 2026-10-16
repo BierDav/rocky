@@ -67,6 +67,23 @@ pub struct TipSeal {
     pub finalized: bool,
     /// Checkpoints of this seal's state the graph lists, by digest.
     pub checkpoints: Vec<TipCheckpoint>,
+    /// How this device holds the seal's state: `kept`, `checkpoint` or
+    /// `live`; null when it is shallow here.
+    pub held: Option<String>,
+}
+/// The seals a device keeps, among those of the tips it follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptSeals {
+    /// The seal each bookmarked tip starts from, or a closed tip's own.
+    #[serde(default)]
+    pub bookmarked: bool,
+    /// The latest this many kept seals.
+    #[serde(default)]
+    pub latest: u32,
+    /// Every seal.
+    #[serde(default)]
+    pub every: bool,
 }
 /// A checkpoint of one scope at a seal; its body moves only on request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

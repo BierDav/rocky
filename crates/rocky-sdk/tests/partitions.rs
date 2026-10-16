@@ -66,6 +66,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
             read_only: false,
             profile: None,
             transaction_timeout: None,
+            binding: None,
         })
         .await
         .unwrap();

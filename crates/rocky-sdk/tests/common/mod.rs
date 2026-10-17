@@ -168,6 +168,27 @@ impl Device {
     pub async fn close(&self) {
         self.database.close().await.expect("close");
     }
+    /// The owner's application creates and follows `main` once; Rocky
+    /// defines no bookmark.
+    pub async fn follow_main(&self) {
+        self.ok(json!({"type": "tips", "action": "create", "name": "main"}))
+            .await;
+        self.ok(json!({"type": "tips", "action": "follow", "name": "main"}))
+            .await;
+    }
+    /// `follow_main` with the genesis line's signed minimum, which an
+    /// issuer's migration opening inherits.
+    pub async fn follow_main_migrating(&self) {
+        self.follow_main().await;
+        self.ok(json!({"type": "tips", "action": "genesis_minimum", "minimum_in_sync": 1}))
+            .await;
+    }
+    /// Seals the followed tip and compacts at the seal: the base a joining
+    /// or pruned peer imports.
+    pub async fn seal_and_compact(&self) -> Value {
+        self.ok(json!({"type": "tips", "action": "seal"})).await;
+        self.ok(json!({"type": "tips", "action": "compact"})).await
+    }
 }
 /// Configures each device as the other's peer.
 pub async fn introduce(left: &Device, right: &Device) {

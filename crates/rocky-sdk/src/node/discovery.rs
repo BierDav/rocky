@@ -18,7 +18,8 @@ impl Node {
     /// before an admitted session handed over the root, and none once this
     /// device knows it is revoked or logged out.
     pub(super) async fn discovery_topics(&self) -> Vec<[u8; 32]> {
-        if self.ended.lock().await.is_some() {
+        if self.ended.lock().await.is_some() || self.replica.private_schema().await.unwrap_or(true)
+        {
             return Vec::new();
         }
         let settings = self.settings.lock().await;

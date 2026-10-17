@@ -10,7 +10,7 @@ use rocky_secure::{
 
 /// The in-sync set reached over this node's open live links. A member
 /// without one misses the entry's deadline and leaves the set.
-struct LinkPeers<'a>(&'a Node);
+pub(super) struct LinkPeers<'a>(pub(super) &'a Node);
 impl LinkPeers<'_> {
     fn handles(
         &self,
@@ -42,19 +42,28 @@ impl EntryPeers for LinkPeers<'_> {
     }
     fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
+            let mut collected = std::collections::BTreeMap::new();
             for handle in self.handles(None) {
                 let Ok(mut session) = handle.open().await else {
                     continue;
                 };
                 let entries = session.committed_entries(log, after).await;
                 let _ = session.close().await;
-                if let Ok(entries) = entries
-                    && !entries.is_empty()
-                {
-                    return Ok(entries);
+                if let Ok(entries) = entries {
+                    for entry in entries {
+                        if let Some(held) = collected.get(&entry.position) {
+                            let held: &CommittedEntry = held;
+                            if held.hash != entry.hash {
+                                return Err(Error::Rejected(
+                                    "conflicting committed evidence".into(),
+                                ));
+                            }
+                        }
+                        collected.entry(entry.position).or_insert(entry);
+                    }
                 }
             }
-            Ok(Vec::new())
+            Ok(collected.into_values().collect())
         })
     }
 }
@@ -78,6 +87,7 @@ impl Coordinated {
             CoordinatedError::Aborted => ("aborted", true),
             CoordinatedError::Undecided => ("undecided", true),
             CoordinatedError::Behind => ("behind", true),
+            CoordinatedError::CustodyRequired => ("custody_required", false),
             CoordinatedError::Unfollowed => ("unfollowed_tip", false),
             CoordinatedError::Sealed => ("sealed", false),
             CoordinatedError::Refused(_) => ("rejected", false),
@@ -85,7 +95,7 @@ impl Coordinated {
         }
     }
 }
-fn coordinated(error: CoordinatedError) -> Failure {
+pub(super) fn coordinated(error: CoordinatedError) -> Failure {
     match error {
         CoordinatedError::Storage(error) => Box::new(error),
         other => Box::new(Coordinated(other)),

@@ -2,6 +2,40 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod binding_tests;
+
+struct VerifiedBindings<'a> {
+    chain: &'a [rocky_credentials::AuthorBinding],
+    publisher: PublicKey,
+    table: Commitment,
+    author: u32,
+    signer: PublicKey,
+}
+
+/// Only the last historical chain success in one materialization attempt.
+#[derive(Default)]
+pub(super) struct FrameBindings<'a> {
+    last: Option<VerifiedBindings<'a>>,
+    #[cfg(test)]
+    own_gates: usize,
+    #[cfg(test)]
+    full: usize,
+    #[cfg(test)]
+    hits: usize,
+}
+
+#[cfg(test)]
+impl Drop for FrameBindings<'_> {
+    fn drop(&mut self) {
+        crate::BINDING_TRACE.with(|trace| {
+            if let Some(trace) = trace.borrow_mut().as_mut() {
+                trace.push((self.own_gates, self.full, self.hits));
+            }
+        });
+    }
+}
+
 /// The digest a stored proof names an encoded set of author bindings by.
 pub(super) fn bindings_digest(encoded: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.author-bindings.v1", encoded)
@@ -28,6 +62,33 @@ impl StoredProof {
     pub(super) fn bindings(&self) -> Commitment {
         self.bindings
     }
+    /// The original creation statement this proof names; see [`provenance`].
+    pub(super) fn provenance(&self) -> Result<Commitment, Error> {
+        provenance(
+            self.version,
+            self.manifest,
+            self.table,
+            self.id,
+            &self.stamp,
+            self.bindings,
+        )
+    }
+}
+/// A commitment to an original creation statement: what a row's identity
+/// was first created as, whichever frame carries the proof now. Neither the
+/// signature nor a transport hash enters it.
+fn provenance(
+    version: u8,
+    manifest: Commitment,
+    table: Commitment,
+    id: rocky_core::RowIdentity,
+    stamp: &Stamp,
+    bindings: Commitment,
+) -> Result<Commitment, Error> {
+    Ok(rocky_core::commitment(
+        "rocky.creation-provenance.v1",
+        &encode(&(version, manifest, table, id, stamp, bindings))?,
+    ))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +150,21 @@ impl CreationProof {
         id: rocky_core::RowIdentity,
         ceiling: &Stamp,
     ) -> Result<(), Error> {
+        self.verify_with_bindings(publisher, manifest, table, id, ceiling, None)
+    }
+    pub(super) fn verify_with_bindings<'a>(
+        &'a self,
+        publisher: PublicKey,
+        manifest: Commitment,
+        table: Commitment,
+        id: rocky_core::RowIdentity,
+        ceiling: &Stamp,
+        mut memo: Option<&mut FrameBindings<'a>>,
+    ) -> Result<(), Error> {
+        #[cfg(test)]
+        if let Some(memo) = memo.as_mut() {
+            memo.own_gates += 1;
+        }
         if self.version != 1
             || self.manifest != manifest
             || self.table != table
@@ -102,20 +178,62 @@ impl CreationProof {
         {
             return Err(denied("invalid signed row creation proof"));
         }
+        let signer = self.stamp.author.key()?;
+        let author = id.author();
+        if let Some(memo) = memo.as_mut() {
+            if memo.last.as_ref().is_some_and(|old| {
+                old.publisher == publisher
+                    && old.table == table
+                    && old.author == author
+                    && old.signer == signer
+                    && old.chain == self.bindings.as_slice()
+            }) {
+                #[cfg(test)]
+                {
+                    memo.hits += 1;
+                }
+                return Ok(());
+            }
+            #[cfg(test)]
+            {
+                memo.full += 1;
+            }
+        }
         rocky_credentials::AuthorBinding::verify_chain(
             &self.bindings,
             publisher,
             table,
-            id.author(),
-            self.stamp.author.key()?,
+            author,
+            signer,
         )
-        .map_err(credential)
+        .map_err(credential)?;
+        if let Some(memo) = memo {
+            memo.last = Some(VerifiedBindings {
+                chain: &self.bindings,
+                publisher,
+                table,
+                author,
+                signer,
+            });
+        }
+        Ok(())
     }
     pub(crate) fn stamp(&self) -> &Stamp {
         &self.stamp
     }
     pub(super) fn manifest(&self) -> Commitment {
         self.manifest
+    }
+    /// The original creation statement this proof names.
+    pub(super) fn provenance(&self) -> Result<Commitment, Error> {
+        provenance(
+            self.version,
+            self.manifest,
+            self.table,
+            self.id,
+            &self.stamp,
+            bindings_digest(&encode(&self.bindings)?),
+        )
     }
     /// The proof as a row record stores it.
     pub(super) fn stored(&self) -> Result<StoredProof, Error> {
@@ -399,7 +517,7 @@ impl<A: RowApplication> Inner<A> {
                 "{name}: move requires the held readable table partition"
             )));
         }
-        self.ensure_cut_clean(scope).await
+        Ok(())
     }
     async fn move_records(&self, scope: ResourceScope) -> Result<Vec<Materialized>, Error> {
         let rows = collect_rows(
@@ -833,10 +951,7 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("moved row lacks creation proof"));
             };
             let proof = self.carried_proof(proof).await?;
-            if !self.holds(destination).await?
-                || !self.readable(destination).unwrap_or(false)
-                || self.ensure_cut_clean(destination).await.is_err()
-            {
+            if !self.holds(destination).await? || !self.readable(destination).unwrap_or(false) {
                 continue;
             }
             let mut sources = Vec::new();
@@ -875,7 +990,7 @@ impl<A: RowApplication> Inner<A> {
                         return Err(Error::Corrupt("own updates".into()));
                     };
                     let frame = EncryptedFrame::bare(header.clone(), body.clone());
-                    let operation = frame.operation()?;
+                    let operation = frame.operation_ref()?;
                     let payload = self.row_payload(&frame)?;
                     for write in payload.clone().into_writes() {
                         if write.change.before.is_none()
@@ -1018,12 +1133,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    pub(super) async fn checkpoint_moves(
-        &self,
-        scope: i64,
-    ) -> Result<checkpoint::SetSummary, Error> {
-        self.move_summary("SELECT row,fields FROM secure_checkpoint_rows WHERE scope=?1 AND row NOT IN(SELECT row FROM secure_checkpoint_overlay WHERE scope=?1) UNION ALL SELECT row,fields FROM secure_checkpoint_overlay WHERE scope=?1", scope).await
-    }
     pub(super) async fn rebootstrap_moves(
         &self,
         scope: i64,

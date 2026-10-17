@@ -30,6 +30,7 @@ mod frontiers;
 mod held;
 use held::HeldMessage;
 pub(crate) mod holdings;
+mod placements;
 mod revocations;
 mod rows;
 mod tips;
@@ -43,6 +44,7 @@ use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
 use holdings::HoldingMessage;
+use placements::PlacementMessage;
 use revocations::RevocationMessage;
 use rows::RowMessage;
 pub use rows::{CatchUp, Pulled, Pushed, ScopeSync};
@@ -135,6 +137,7 @@ enum Message {
     Entries(EntryMessage),
     HeldChanges(HeldMessage),
     Tips(TipMessage),
+    Placements(PlacementMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -167,6 +170,7 @@ families!(
     Entries(EntryMessage),
     HeldChanges(HeldMessage),
     Tips(TipMessage),
+    Placements(PlacementMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -302,6 +306,9 @@ impl NativeSession {
         byte_budget: usize,
         (version, resolve): (u32, bool),
     ) -> Result<Option<Self>, Error> {
+        if replica.private_schema().await? {
+            return Err(denied("schema publication is private"));
+        }
         if byte_budget == 0 || byte_budget > MAX_SECURE_BYTES {
             return Err(denied("session peer/budget"));
         }
@@ -561,6 +568,7 @@ impl NativeSession {
             Message::Entries(message) => self.answer_entries(replica, message).await,
             Message::HeldChanges(message) => self.answer_held(replica, message).await,
             Message::Tips(message) => self.answer_tips(replica, message).await,
+            Message::Placements(message) => self.answer_placements(replica, message).await,
             Message::Delivery(_) => Err(denied("this peer serves no envelope delivery")),
             _ => Err(denied("unexpected native request")),
         }

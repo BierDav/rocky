@@ -699,8 +699,9 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
         crate::tests::node_number(fresh_node.public_key()),
     );
     for scope in [shop.items, shop.lists] {
-        let signed = a.checkpoint(scope).await.unwrap();
+        let signed = compacted_base(&a, &shop.publisher, scope).await;
         let checkpoint = signed.id().unwrap();
+        link_up(&a, &fresh, scope.domain).await;
         fresh.begin_rebootstrap(signed).await.unwrap();
         let mut after = None;
         loop {
@@ -775,7 +776,8 @@ async fn author_bindings_are_stored_once_and_travel_with_checkpoint_pages() {
     let fresh = shop
         .open(&dir.path().join("fresh.db"), &fresh_node, 33)
         .await;
-    let signed = a.checkpoint(shop.lists).await.unwrap();
+    let signed = compacted_base(&a, &shop.publisher, shop.lists).await;
+    link_up(&a, &fresh, shop.lists.domain).await;
     fresh.begin_rebootstrap(signed.clone()).await.unwrap();
     let page = a
         .checkpoint_page(
@@ -813,6 +815,23 @@ async fn author_bindings_are_stored_once_and_travel_with_checkpoint_pages() {
     }
     fresh.stage_checkpoint_page(page).await.unwrap();
     fresh.finish_rebootstrap(shop.lists).await.unwrap();
+    // The shop's never-written tables are signed empty bases at the seal.
+    let empty = crate::tests::import_needed_bases(
+        &a,
+        &fresh,
+        &fresh_node,
+        &shop.credentials(
+            &fresh_node,
+            crate::tests::node_number(fresh_node.public_key()),
+        ),
+        shop.lists.domain,
+    )
+    .await;
+    assert!(!empty.is_empty());
+    for signed in &empty {
+        assert_ne!(signed.statement.scope, shop.lists);
+        crate::tests::assert_signed_empty(signed);
+    }
     assert_eq!(sets(&fresh).await, stored);
     assert_eq!(
         rows(&shop.sql(&fresh).await, "SELECT title FROM lists")

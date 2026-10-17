@@ -7,6 +7,8 @@ use super::*;
 /// Frames of one bundle. Each frame holds at most `ROWS_PER_FRAME` rows of
 /// one scope, which bounds a bundle's rows.
 pub const MAX_BUNDLE_FRAMES: usize = 64;
+// A carry record names one bundle's frames.
+const _: () = assert!(rocky_credentials::MAX_CARRY_FRAMES == MAX_BUNDLE_FRAMES);
 pub const ROWS_PER_FRAME: usize = 32;
 pub const MAX_BUNDLE_ROWS: usize = MAX_BUNDLE_FRAMES * ROWS_PER_FRAME;
 /// Encoded writes of one bundle.
@@ -415,12 +417,12 @@ impl<A: RowApplication> Inner<A> {
         &self,
         first: &EncryptedFrame,
     ) -> Result<Result<Vec<EncryptedFrame>, Hash>, Error> {
-        let operation = first.operation()?;
+        let operation = first.operation_ref()?;
         let key = self.member_key(&operation.header.extensions)?;
         let payload = RowPayload::decode(&decrypt(
             &key.key,
             &encode(&operation.header.extensions)?,
-            &first.body,
+            first.body_bytes(),
         )?)?;
         let membership = payload
             .membership()
@@ -460,29 +462,26 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Outcome, Error> {
         let author = trigger.header.public_key;
         let scope = trigger.header.extensions.scope;
-        // A coordinated write's frames sign their position in their tip's log.
-        let log = rocky_core::TipLog {
-            scope: scope.domain,
-            tip: trigger.header.extensions.tip,
-        };
-        // Members fence a coordinated write by its signed log position.
-        if let Some(position) = membership.entry {
-            use super::coordinated::cut::{Fence, fence};
-            match fence(self.held_cuts(log), position) {
-                Fence::Live => {}
-                Fence::Cut => {
-                    self.reject(trigger.hash).await?;
-                    return Ok(Outcome::Rejected("a frame names a cut position".into()));
-                }
-                Fence::Abandoned => {
-                    let frame = self
-                        .frame(trigger.hash)
-                        .await?
-                        .ok_or_else(|| denied("missing pending operation"))?;
-                    self.abandon_frame(&frame).await?;
-                    return Ok(Outcome::Applied);
-                }
-            }
+        // A coordinated write's frames sign their position in their tip's
+        // log; its author's carry record moves a carried write's.
+        let coordinate = self.coordinate_of(
+            trigger.hash,
+            author,
+            scope.domain,
+            trigger.header.extensions.tip,
+            membership.entry,
+        )?;
+        // A write the owner's recovery abandoned is held, never applied.
+        if let Some((log, position)) = coordinate
+            && self
+                .recovery(log)?
+                .is_some_and(|recovery| recovery.abandons(position))
+        {
+            let frame = self
+                .frame(trigger.hash)
+                .await?
+                .ok_or_else(|| denied("missing pending operation"))?;
+            return self.hold_abandoned(&frame, time).await;
         }
         let required = match self.required_members(membership, scope, time).await {
             Ok(required) => required,
@@ -546,11 +545,9 @@ impl<A: RowApplication> Inner<A> {
         }
         let resolution = members
             .first()
-            .map(|(frame, _, _)| self.row_payload(frame).map(|payload| payload.reauthors()))
-            .transpose()?
-            .flatten();
-        for (frame, _, _) in &members {
-            if self.row_payload(frame)?.reauthors() != resolution {
+            .and_then(|(_, payload, _)| payload.reauthors());
+        for (_, payload, _) in &members {
+            if payload.reauthors() != resolution {
                 return self
                     .reject_members(&hashes, "bundle members disagree on held resolution")
                     .await;
@@ -559,16 +556,19 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("SAVEPOINT bundle", ()).await?;
         let result = async {
             let mut actual = Vec::new();
-            for (frame, writes, grants) in &members {
-                let rows = self.materialize(frame, writes, grants).await?;
+            for (frame, payload, grants) in &members {
+                let (rows, admission) = self
+                    .materialize(frame, payload.writes(), grants, Some(payload))
+                    .await?;
                 actual.extend(
                     rows.iter()
                         .map(|(change, _)| change.clone())
                         .filter(apply::changes),
                 );
-                let key = self.member_key(&frame.operation()?.header.extensions)?;
+                let key = self.member_key(&frame.operation_ref()?.header.extensions)?;
                 self.record_key(key).await?;
-                self.write_materialized(frame, rows).await?;
+                self.write_materialized(frame, rows, admission, Some(payload))
+                    .await?;
             }
             // The candidate of every held partition together.
             self.app
@@ -579,7 +579,7 @@ impl<A: RowApplication> Inner<A> {
         match result {
             Ok(()) => {
                 self.conn.execute("RELEASE bundle", ()).await?;
-                if let Some(position) = membership.entry {
+                if let Some((log, position)) = coordinate {
                     let ids = members
                         .iter()
                         .map(|(frame, _, _)| frame.id())
@@ -588,11 +588,18 @@ impl<A: RowApplication> Inner<A> {
                 }
                 Ok(Outcome::Applied)
             }
-            Err(error) if retryable(&error) => Err(error),
             Err(error) => {
                 self.conn.execute("ROLLBACK TO bundle", ()).await?;
                 self.conn.execute("RELEASE bundle", ()).await?;
-                self.reject_members(&hashes, &error.to_string()).await
+                match error {
+                    Error::Rejected(reason) if reason == identity::LEDGER_WAITS => {
+                        Ok(Outcome::Waiting)
+                    }
+                    error if identity::receipts::semantic_refusal(&error) => {
+                        self.reject_members(&hashes, &error.to_string()).await
+                    }
+                    error => Err(error),
+                }
             }
         }
     }
@@ -602,7 +609,7 @@ impl<A: RowApplication> Inner<A> {
         membership: &Membership,
         time: u64,
     ) -> Result<Outcome, Error> {
-        let operation = trigger.operation()?;
+        let operation = trigger.operation_ref()?;
         let required = self
             .required_members(membership, operation.header.extensions.scope, time)
             .await?;
@@ -631,7 +638,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 Member::Settled(Some(frame)) | Member::Pending(frame) => frame,
             };
-            if frame.operation()?.header.public_key != operation.header.public_key {
+            if frame.operation_ref()?.header.public_key != operation.header.public_key {
                 return Err(denied("held bundle members have different authors"));
             }
             let payload = self.membership_of(&frame, index, membership)?;
@@ -738,12 +745,19 @@ impl<A: RowApplication> Inner<A> {
         bundle: &BTreeSet<Hash>,
         time: u64,
     ) -> Result<Option<BundleMember>, Error> {
-        let grants = self.verify_frame(frame, time)?;
-        let payload = self.membership_of(frame, index, expected)?;
-        if !self.dependencies_ready(frame, bundle).await? {
+        if !self.frame_schema_ready(frame)? {
             return Ok(None);
         }
-        Ok(Some((frame.clone(), payload.into_writes(), grants)))
+        let grants = self.verify_frame(frame, time)?;
+        let payload = self.membership_of(frame, index, expected)?;
+        if !self
+            .own_chain_ready(&frame.operation_ref()?.header, bundle)
+            .await?
+            || !self.dependencies_ready(frame, bundle).await?
+        {
+            return Ok(None);
+        }
+        Ok(Some((frame.clone(), payload, grants)))
     }
     /// Decrypts a member and checks it carries `expected` at `index`.
     fn membership_of(
@@ -752,12 +766,12 @@ impl<A: RowApplication> Inner<A> {
         index: usize,
         expected: &Membership,
     ) -> Result<RowPayload, Error> {
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
         let key = self.member_key(&operation.header.extensions)?;
         let payload = RowPayload::decode(&decrypt(
             &key.key,
             &encode(&operation.header.extensions)?,
-            &frame.body,
+            frame.body_bytes(),
         )?)?;
         match payload.membership() {
             Some(membership)
@@ -788,8 +802,53 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-type BundleMember = (
-    EncryptedFrame,
-    Vec<RowWrite>,
-    Vec<rocky_core::ResourceGrant>,
-);
+type BundleMember = (EncryptedFrame, RowPayload, Vec<rocky_core::ResourceGrant>);
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub(crate) async fn apply_ready_bundle_for_test(
+        &self,
+        frames: &[EncryptedFrame],
+    ) -> Result<String, Error> {
+        let time = now()?;
+        let mut inner = self.inner.lock().await;
+        transaction!(inner, |inner| {
+            let operation = frames[0].operation_ref()?;
+            let payload = inner.row_payload(&frames[0])?;
+            let membership = payload.membership().expect("bundle membership");
+            let hashes = frames
+                .iter()
+                .map(EncryptedFrame::id)
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let required = inner
+                .required_members(membership, operation.header.extensions.scope, time)
+                .await?;
+            assert_eq!(required.len(), frames.len());
+            for (index, opening) in required {
+                let Member::Pending(frame) = inner
+                    .member(
+                        opening.author.unwrap_or(operation.header.public_key),
+                        &opening,
+                    )
+                    .await?
+                else {
+                    panic!("required pending member");
+                };
+                assert!(hashes.contains(&frame.id()?));
+                // Actual signature/authority, membership and chain/dependency gates.
+                assert!(
+                    inner
+                        .open_member(&frame, index, membership, &hashes, time)
+                        .await?
+                        .is_some()
+                );
+            }
+            Ok(
+                match inner.apply_bundle(operation, membership, time).await? {
+                    Outcome::Rejected(reason) => reason,
+                    _ => panic!("expected bundle rejection"),
+                },
+            )
+        })
+    }
+}

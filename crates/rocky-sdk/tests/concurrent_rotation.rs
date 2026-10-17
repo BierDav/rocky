@@ -203,6 +203,7 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     let mut options = open(&directory, &hub, "a");
     options.schema = LIST_SCHEMA;
     let a = Device::new(Database::create(options, None)?)?;
+    a.follow_main().await;
     partition(&a, "partition_create").await;
     write(&a, "before").await;
     let b = join(root, &hub, "b", &a, json!({"kind":"issuer"}), LIST_SCHEMA).await?;
@@ -227,7 +228,26 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         .await;
     write(&a, "a").await;
     write(&b, "b").await;
+    // Each issuer's base after its own rotation is what its reader
+    // imports; their two seals race and resolve when they meet. Sealing
+    // offline keeps the issuers apart, as the rotations were.
+    for issuer in [&a, &b] {
+        issuer
+            .ok(json!({"type":"networking_control","enabled":false}))
+            .await;
+        issuer.seal_and_compact().await;
+    }
+    for issuer in [&a, &b] {
+        issuer
+            .ok(json!({"type":"networking_control","enabled":true}))
+            .await;
+    }
     for (device, original) in [(&carol, &a), (&dave, &b)] {
+        // A reader that switched tips retries every issuer; the one that
+        // revoked it stays out of reach here, as the scenario requires.
+        original
+            .ok(json!({"type":"networking_control","enabled":false}))
+            .await;
         device.ok(json!({"type":"renew"})).await;
         device
             .ok(json!({"type":"peer_remove","node":original.node().await}))
@@ -236,6 +256,9 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
             .sync()
             .await
             .map_err(|e| format!("reader sync: {e}"))?;
+        original
+            .ok(json!({"type":"networking_control","enabled":true}))
+            .await;
     }
     assert_eq!(rows(&carol, "parts").await, ["b", "before"]);
     assert_eq!(rows(&dave, "parts").await, ["a", "before"]);

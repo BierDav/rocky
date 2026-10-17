@@ -25,7 +25,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
         }
         let body = body.ok_or_else(|| denied("payload retention is required"))?;
         let frame = EncryptedFrame::bare(header_bytes.to_vec(), body.to_bytes());
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
         if operation.hash != hash
             || operation.header.to_bytes() != header.to_bytes()
             || header.extensions.scope != *log

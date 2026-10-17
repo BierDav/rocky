@@ -373,11 +373,13 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
 }
 
 #[tokio::test]
-async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
+async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
     use crate::coordinated::{Action, Result as LogResult};
     use crate::machine::Outcome;
     use openraft::storage::RaftLogStorageExt;
-    use rocky_credentials::{CutPoint, CutStatement, SignedCut};
+    use rocky_credentials::{
+        LogPoint, Recovery, SEAL_FORMAT, SealAction, SealStatement, SignedSeal,
+    };
     let (genesis, executor, scope, authority) = certified();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
@@ -405,31 +407,31 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
         store.apply([entry]).await.unwrap().remove(0).unwrap()
     }
     let head = store.log_head(tip_log(scope)).await.unwrap();
-    let anchor = CutPoint {
+    let anchor = LogPoint {
         position: 0,
         running: head.genesis,
     };
-    let record = SignedCut::sign(
-        CutStatement {
-            log: tip_log(scope),
-            sequence: 1,
-            previous: None,
-            verified: anchor,
-            retained: anchor,
-            replaced: anchor,
-            epoch: head.epoch,
-            issued: time,
+    let seal = SignedSeal::sign(
+        SealStatement {
+            format: SEAL_FORMAT,
+            scope: tip_log(scope).scope,
+            tip: tip_log(scope).tip,
+            frontier: Vec::new(),
+            action: SealAction::Continue { schema: [5; 32] },
+            recovery: Some(Recovery {
+                retained: anchor,
+                replaced: anchor,
+            }),
         },
         &authority,
     )
     .unwrap();
-    let cut = Action::Cut {
-        record: record.to_bytes().unwrap(),
-        authority: vec![7; 64],
+    let recover = Action::Recover {
+        seal: seal.to_bytes().unwrap(),
     };
-    let admitted = write(&mut store, request(&executor, cut.clone()), 1, time).await;
-    let Outcome::Coordinated(LogResult::Cut { position: 1, .. }) = admitted else {
-        panic!("cut {admitted:?}")
+    let admitted = write(&mut store, request(&executor, recover.clone()), 1, time).await;
+    let Outcome::Coordinated(LogResult::Committed { position: 1, .. }) = admitted else {
+        panic!("recovery {admitted:?}")
     };
     let after = store.log_head(tip_log(scope)).await.unwrap();
     drop(store);
@@ -442,11 +444,9 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
     let head = store.log_head(tip_log(scope)).await.unwrap();
     assert_eq!(head, after);
-    let retained = head.cut.unwrap();
-    assert_eq!(retained.digest, record.digest().unwrap());
-    assert_eq!(retained.authority, vec![7; 64]);
+    assert_eq!(head.terminal.unwrap().digest, seal.id().unwrap());
     assert_eq!(
-        write(&mut store, request(&executor, cut), 2, time).await,
+        write(&mut store, request(&executor, recover), 2, time).await,
         admitted
     );
 }

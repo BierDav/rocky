@@ -38,6 +38,9 @@ fn changed() -> UpdatePolicy {
 #[serde(deny_unknown_fields)]
 pub struct TableDefinition {
     pub name: String,
+    /// The mergeable table whose grants this table follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_like: Option<String>,
     pub class: TableClass,
     pub columns: Vec<ColumnDefinition>,
     pub primary_key: Vec<String>,
@@ -398,6 +401,7 @@ impl TableDefinition {
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(LogicalTable {
             sql_name: name.clone(),
+            granted_like: self.granted_like.clone(),
             class: self.class,
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
             auto_generate: false,

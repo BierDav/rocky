@@ -2,15 +2,81 @@
 use super::*;
 
 impl<A: RowApplication> Inner<A> {
-    /// Members recover entry evidence from complete retained bundles. The
-    /// requesting trusted node checks the hashes against its coordinator.
-    pub(super) async fn recovered_entries(
+    /// Evidence in retained frames and undecided durable storage. A receiver
+    /// verifies the whole chain against its coordinator before applying it.
+    pub(super) async fn collectible_entries(
         &self,
-        peer: PublicKey,
-        credentials: &CredentialChain,
+        peer: Option<(PublicKey, &CredentialChain)>,
         log: TipLog,
         after: u64,
     ) -> Result<Vec<CommittedEntry>, Error> {
+        let mut found: BTreeMap<u64, CommittedEntry> = self
+            .recovered_entries(peer, log, after)
+            .await?
+            .into_iter()
+            .map(|entry| (entry.position, entry))
+            .collect();
+        for entry in self
+            .entries(log, &["staged", "assigned", "stored"])
+            .await?
+            .into_iter()
+            .filter(|entry| entry.position > after)
+        {
+            let (frames, voids) = if entry.state == "stored" {
+                decode_bounded::<(Vec<EncryptedFrame>, Vec<SignedVoid>)>(
+                    &entry.frames,
+                    MAX_SECURE_BYTES,
+                )?
+            } else {
+                let ids = decode_bounded::<Vec<Hash>>(&entry.frames, MAX_SECURE_BYTES)?;
+                let frames = self.own_frames(&ids).await?;
+                let voids = self.voids_before(&frames).await?;
+                (frames, voids)
+            };
+            let ids = ids_of(&frames)?;
+            if let Some((peer, credentials)) = peer {
+                for frame in &frames {
+                    self.authorize_log_peer(peer, credentials, frame.scope()?, log)?;
+                }
+                if frames
+                    .iter()
+                    .any(|frame| self.authorize_log_frame(peer, log, frame).is_err())
+                {
+                    continue;
+                }
+            }
+            if let Some(held) = found.get(&entry.position)
+                && held.hash != entry.hash
+            {
+                return Err(denied(
+                    "invalid committed evidence: conflicting stored entries",
+                ));
+            }
+            found.entry(entry.position).or_insert(CommittedEntry {
+                position: entry.position,
+                hash: entry.hash,
+                carry: entry.carry,
+                ids,
+                before: None,
+                frames,
+                voids,
+            });
+        }
+        Ok(found.into_values().take(MAX_CATCH_UP_ENTRIES).collect())
+    }
+    /// Members recover entry evidence from complete retained bundles. The
+    /// requesting trusted node checks the hashes against its coordinator;
+    /// without a `peer` this node collects what it holds itself.
+    pub(super) async fn recovered_entries(
+        &self,
+        peer: Option<(PublicKey, &CredentialChain)>,
+        log: TipLog,
+        after: u64,
+    ) -> Result<Vec<CommittedEntry>, Error> {
+        let authorize = |scope| match peer {
+            Some((peer, credentials)) => self.authorize_log_peer(peer, credentials, scope, log),
+            None => Ok(()),
+        };
         let staged = self.staged().await?;
         let mut candidates = BTreeMap::new();
         let mut cursor = Vec::new();
@@ -34,8 +100,19 @@ impl<A: RowApplication> Inner<A> {
                 if frame.scope()?.domain != log.scope || staged.contains(&frame.id()?) {
                     continue;
                 }
-                let operation = frame.operation()?;
-                if operation.header.extensions.tip != log.tip {
+                let operation = frame.operation_ref()?;
+                // A carried write's frames are placed by their carry record;
+                // the log they sign no longer holds them.
+                if operation.header.extensions.tip != log.tip
+                    && self
+                        .carry_of(
+                            frame.id()?,
+                            operation.header.public_key,
+                            log.scope,
+                            operation.header.extensions.tip,
+                        )?
+                        .is_none_or(|carry| carry.statement.tip != log.tip)
+                {
                     continue;
                 }
                 if self
@@ -48,10 +125,18 @@ impl<A: RowApplication> Inner<A> {
                 let Some(membership) = payload.membership() else {
                     continue;
                 };
-                let Some(position) = membership.entry.filter(|position| *position > after) else {
+                let Some((at, position)) = self.coordinate(&frame)? else {
                     continue;
                 };
-                self.authorize_peer(peer, credentials, frame.scope()?)?;
+                if at != log || position <= after {
+                    continue;
+                }
+                authorize(frame.scope()?)?;
+                if let Some((peer, _)) = peer
+                    && self.authorize_log_frame(peer, log, &frame).is_err()
+                {
+                    continue;
+                }
                 let frames = match self.members_of(&frame).await {
                     Ok(Ok(frames)) => frames,
                     Ok(Err(_)) => continue,
@@ -60,8 +145,16 @@ impl<A: RowApplication> Inner<A> {
                     }
                     Err(error) => return Err(error),
                 };
+                if let Some((peer, _)) = peer
+                    && frames
+                        .iter()
+                        .any(|frame| self.authorize_log_frame(peer, log, frame).is_err())
+                {
+                    continue;
+                }
+                let mut agree = true;
                 for (index, member) in frames.iter().enumerate() {
-                    self.authorize_peer(peer, credentials, member.scope()?)?;
+                    authorize(member.scope()?)?;
                     if staged.contains(&member.id()?)
                         || self.stored_status(member.id()?).await?.as_deref() != Some("applied")
                     {
@@ -71,23 +164,34 @@ impl<A: RowApplication> Inner<A> {
                     let Some(other) = member_payload.membership() else {
                         return Err(denied("recovery bundle member is missing"));
                     };
+                    // Members agree on the signed coordinate and on where
+                    // it resolves; a mismatching candidate is no evidence.
+                    let member_operation = member.operation_ref()?;
                     if other.transaction != membership.transaction
                         || other.members != membership.members
-                        || other.entry != Some(position)
+                        || other.entry != membership.entry
                         || usize::from(other.index) != index
                         || member.scope()?.domain != log.scope
-                        || member.operation()?.header.extensions.tip != log.tip
+                        || member_operation.header.extensions.tip != operation.header.extensions.tip
+                        || member_operation.header.public_key != operation.header.public_key
+                        || self.coordinate(member)? != Some((log, position))
                     {
-                        return Err(denied("recovery bundle members disagree"));
+                        agree = false;
+                        break;
                     }
+                }
+                if !agree {
+                    continue;
                 }
                 let ids = ids_of(&frames)?;
                 let hash = entry_hash(log, position, &ids)?;
+                let carry = self.entry_carry(log, position, &ids);
                 candidates
                     .entry((position, hash))
                     .or_insert(CommittedEntry {
                         position,
                         hash,
+                        carry,
                         ids,
                         before: None,
                         voids: self.voids_before(&frames).await?,

@@ -16,15 +16,29 @@ use rocky_core::RowApplication;
 /// because async closures would make the callers' futures lose `Send`.
 macro_rules! transaction {
     (@commit $inner:expr, |$name:ident| $body:expr) => {{
+        transaction!(@attempt $inner, false, |$name| $body)
+    }};
+    // Only offer/acknowledgment bookkeeping may preserve committed frontiers.
+    (@cache_neutral $inner:expr, |$name:ident| $body:expr) => {{
+        let owner = &mut *$inner;
+        let result = transaction!(@attempt owner, true, |$name| $body);
+        if result.is_ok() { owner.checkpoint_if_due().await; }
+        result
+    }};
+    (@attempt $inner:expr, $neutral:expr, |$name:ident| $body:expr) => {{
         let owner = &mut *$inner;
         let mut attempt = 0;
         loop {
+            if !$neutral { owner.invalidate_frontiers(); }
             let result = match owner.conn.execute("BEGIN IMMEDIATE", ()).await {
                 Ok(_) => {
                     owner.untouch();
                     let result: ::core::result::Result<_, $crate::Error> = async {
                         let $name = &mut *owner;
-                        $body
+                        let body_result: ::core::result::Result<_, $crate::Error> = async { $body }.await;
+                        let value = body_result?;
+                        $name.finish_admission_revision().await?;
+                        Ok(value)
                     }
                     .await;
                     $crate::storage::finish(&owner.conn, result).await
@@ -55,6 +69,9 @@ impl<A: RowApplication> Inner<A> {
         attempt: usize,
         result: Result<T, Error>,
     ) -> Option<Result<T, Error>> {
+        if result.is_err() {
+            self.invalidate_context();
+        }
         match result {
             Err(error) if retryable(&error) => {
                 #[cfg(test)]
@@ -74,6 +91,7 @@ impl<A: RowApplication> Inner<A> {
                 if self.touched()
                     && let Err(error) = self.publish_revision().await
                 {
+                    self.invalidate_context();
                     return Some(Err(error));
                 }
                 Some(Ok(value))

@@ -59,6 +59,7 @@ pub(crate) fn schema() -> LogicalSchema {
         update_policy: UpdatePolicy::Changed,
         tables: vec![LogicalTable {
             sql_name: "notes".into(),
+            granted_like: None,
             class: TableClass::Mergeable,
             create_sql: NOTES.into(),
             auto_generate: false,

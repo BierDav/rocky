@@ -41,6 +41,8 @@ class IssuerRecoveryTest {
         val opened = mutableListOf<RockyDatabase>()
         try {
             val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
+            a.tips.createBookmark("main")
+            a.tips.follow("main")
             list = a.repository.createList("Groceries")
             val b = join(File(root, "b"), a.pairDevice()).withRoom(File(root, "b")).also { opened += it }.joined()
             assertTrue(b.isIssuer)
@@ -55,6 +57,8 @@ class IssuerRecoveryTest {
             a.share(b, d)
             a.add("Milk")
             assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            // A credential installed without enrollment follows nothing until the application says so.
+            d.tips.follow("main")
             assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), b.titles())
 
@@ -67,6 +71,9 @@ class IssuerRecoveryTest {
             assertEquals(expiring.revocations.statements + 1uL, b.session().revocations.statements)
             assertTrue(b.peers().none { it.node == creator })
 
+            // A device joining after the rotation starts the list from a base at a seal.
+            b.tips.seal()
+            b.tips.compact()
             val c = join(File(root, "c"), b.pairing(writer)).withRoom(File(root, "c")).also { opened += it }.joined()
             // Revocation rotated the list's secret; the second issuer shares the new epoch with the device
             // enrolled since, which starts the list from its checkpoint, as it rejects the revoked creator's frames.

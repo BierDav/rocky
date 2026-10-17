@@ -1,7 +1,11 @@
 # 10. Stuck recovery
 
-Status: partial; collection and owner-signed cuts in `rocky-coordinator` and
-`rocky-secure` implemented; the SDK, API, Kotlin and guides are not. See [evidence](10-stuck-recovery-evidence.md).
+Status: superseded by [phase 19](19-recovery-as-a-bookmark-move.md).
+Collection stays as implemented here; the owner-signed cut is replaced by the
+owner's recovery seal, which has the SDK, JSON, Kotlin surfaces and guide this
+phase lacked, and phase 10's gate passes with it
+([phase 19 evidence](19-recovery-as-a-bookmark-move-evidence.md)). See
+[evidence](10-stuck-recovery-evidence.md).
 Owner: `rocky-coordinator` recovery operation; `rocky-secure` admission and
 projection; `rocky-sdk` recovery flow. Depends on
 [phase 9](09-coordinated-writes.md). Follow the

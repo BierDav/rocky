@@ -25,7 +25,7 @@ fn bookmark(erp: &Erp, from: Option<TipId>, to: TipId) -> TipStatement {
 }
 /// The owner seals `device`'s followed tip at what it holds and moves
 /// `main` on; returns the seal and the statements for other devices.
-async fn seal(erp: &Erp, device: &Device) -> (SignedSeal, Vec<TipStatement>) {
+pub(super) async fn seal(erp: &Erp, device: &Device) -> (SignedSeal, Vec<TipStatement>) {
     let replica = &device.replica;
     let tip = replica.followed_tip().await;
     let schema = replica
@@ -41,6 +41,7 @@ async fn seal(erp: &Erp, device: &Device) -> (SignedSeal, Vec<TipStatement>) {
             tip,
             frontier: replica.seal_frontier(erp.domain, false).await.unwrap(),
             action: SealAction::Continue { schema },
+            recovery: None,
         },
         &erp.publisher,
     )
@@ -226,12 +227,22 @@ async fn a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_i
         .unsigned_existence_bases(erp.domain)
         .await
         .unwrap();
-    assert_eq!(unsigned.len(), 1);
-    let signed = SignedExistenceBase::sign(unsigned[0].clone(), &erp.publisher).unwrap();
-    a.replica
-        .install_signed_existence_base(signed)
-        .await
+    assert_eq!(unsigned.len(), 2);
+    let empty = unsigned
+        .iter()
+        .find(|base| base.base.scope == erp.scope("customers"))
         .unwrap();
+    assert_eq!(empty.seal, sealed.id().unwrap());
+    assert_eq!(empty.base.rows, 0);
+    assert!(empty.base.identities.is_empty());
+    assert!(empty.cut.logs.is_empty());
+    for statement in unsigned {
+        let signed = SignedExistenceBase::sign(statement, &erp.publisher).unwrap();
+        a.replica
+            .install_signed_existence_base(signed)
+            .await
+            .unwrap();
+    }
 
     // C joins after the records were released: it holds items only and
     // imports the signed base instead of the log.
@@ -240,6 +251,25 @@ async fn a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_i
         .await;
     follow(&erp, &c, &[created, statements].concat()).await;
     import_base(&erp, &a, &c, "lists").await;
+    let d = erp
+        .open(
+            &dir.path().join("d.db"),
+            &PrivateKey::new(),
+            14,
+            &["orders"],
+        )
+        .await;
+    follow(&erp, &d, &a.replica.tip_statements(None, 32).await.unwrap()).await;
+    import_base(&erp, &a, &d, "customers").await;
+    let empty = d
+        .replica
+        .installed_existence_base(erp.scope("customers"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(empty.basis, ExistenceBasis::Signed(_)));
+    assert_eq!(empty.descriptor().unwrap().rows, 0);
+    assert!(empty.cut().unwrap().logs.is_empty());
     let base = c
         .replica
         .installed_existence_base(lists)

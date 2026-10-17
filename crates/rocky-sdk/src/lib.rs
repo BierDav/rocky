@@ -25,6 +25,7 @@ mod status;
 mod sync;
 #[cfg(test)]
 mod test_directory;
+mod tip_schemas;
 mod tips;
 pub mod transport;
 mod typed;

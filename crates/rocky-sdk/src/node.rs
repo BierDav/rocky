@@ -1,7 +1,6 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
-mod adoption;
 mod coordinated;
 mod delivery;
 mod discovery;
@@ -10,6 +9,8 @@ mod live_links;
 mod mesh;
 mod partition;
 mod registry;
+mod schema_publication;
+mod schemas;
 mod shared;
 mod status;
 mod tip_nodes;
@@ -246,6 +247,8 @@ pub(crate) struct Node {
     granted: std::sync::Mutex<Vec<ResourceScope>>,
     pub vault: Vault,
     pub settings: Mutex<Shared<Settings>>,
+    schema_fetch: Mutex<()>,
+    schema_acquisition: std::sync::Mutex<schemas::Acquisition>,
     pub path: PathBuf,
     pub online: AtomicBool,
     /// Set by logout; `purge` also removes local data at close.
@@ -309,8 +312,6 @@ pub(crate) struct Node {
     /// The schema the application declares, which may be older or newer
     /// than the installed generation's.
     declared: crate::schema::Schema,
-    /// Peers whose baselines this process compared, by generation.
-    compared: std::sync::Mutex<std::collections::BTreeSet<(PublicKey, String)>>,
     /// Generations whose wider profile grants this process asked an issuer
     /// for once.
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
@@ -385,7 +386,8 @@ impl Node {
             service: None,
             mailbox: Mutex::new(None),
             declared: settings_schema,
-            compared: Default::default(),
+            schema_fetch: Mutex::new(()),
+            schema_acquisition: Default::default(),
             widened: Default::default(),
         }
     }
@@ -416,7 +418,10 @@ impl Node {
             .collect())
     }
     /// How the application's schema stands to the installed generation's.
-    pub fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
+    pub async fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
+        if self.replica.followed_bookmark().await.is_none() {
+            return Ok(crate::DeclaredSchema::Ahead);
+        }
         settings.application(&self.declared)
     }
     /// The migration this device publishes, or waits for while the
@@ -438,10 +443,12 @@ impl Node {
                 published,
             }));
         }
-        Ok((self.application(settings)? == crate::DeclaredSchema::Ahead
-            && crate::generation::migrates(&self.declared, settings.schema.version)
-            && !settings.may_migrate(&self.domain())?)
-        .then_some(crate::MigrationStatus::FullAccessRequired))
+        Ok(
+            (self.application(settings).await? == crate::DeclaredSchema::Ahead
+                && crate::generation::migrates(&self.declared, settings.generation)
+                && !settings.may_migrate(&self.domain())?)
+            .then_some(crate::MigrationStatus::FullAccessRequired),
+        )
     }
     /// Every granted scope, the registry's included: what sync covers.
     fn scopes(&self) -> Vec<ResourceScope> {
@@ -928,7 +935,21 @@ impl Node {
             }
             "network" => Ok(serde_json::to_value(self.observed_network().await?)?),
             "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
-            "sql" | "next_id" | "move_row" => self.sql_call(client, kind, request).await,
+            "sql" | "next_id" | "move_row" => {
+                let begins = kind == "sql"
+                    && request["sql"]
+                        .as_str()
+                        .is_some_and(|sql| sql.trim().to_ascii_uppercase().starts_with("BEGIN"));
+                match self.sql_call(client, kind, request).await {
+                    // An authority change ends the cached session; nothing
+                    // is open before a transaction begins, so begin again.
+                    Err(error) if begins && is_authority(&error) => {
+                        *client.reader.lock().await = None;
+                        self.sql_call(client, kind, request).await
+                    }
+                    other => other,
+                }
+            }
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "devices" => self.devices().await,
             "device_label" => self.label(request).await,
@@ -1241,8 +1262,7 @@ impl Node {
             settings.save(&self.path)?;
         }
         let fresh = keys.len();
-        self.apply(&settings.revocations, &settings.credentials, keys)
-            .await?;
+        self.apply(&mut settings, keys).await?;
         self.activity.record(
             "renewed",
             json!({
@@ -1334,8 +1354,8 @@ impl Node {
                 .set_retention_policy(scope, serde_json::from_value(policy.clone())?)
                 .await?;
         }
+        // A base forms only at a seal, through `compact`; this prunes behind it.
         if request["maintain"] == true {
-            self.replica.checkpoint(scope).await?;
             self.replica.prune(scope).await?;
         }
         let status = self.replica.checkpoint_status(scope).await?;
@@ -1508,18 +1528,20 @@ impl Node {
     /// table rebuild under way.
     async fn generation(&self) -> Result<Value, Failure> {
         let settings = self.settings.lock().await;
-        let application = self.application(&settings)?;
+        let application = self.application(&settings).await?;
         let migration = self.migration(&settings).await?;
-        let waiting_for_issuer = !settings.issuer() && application == crate::DeclaredSchema::Ahead;
+        let followed = self.replica.followed_bookmark().await.is_some();
+        let waiting_for_issuer =
+            followed && !settings.issuer() && application == crate::DeclaredSchema::Ahead;
         drop(settings);
         let status = self.replica.generations().await?;
         let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema});
         Ok(json!({
             "manifest": HEXLOWER.encode(&status.manifest),
             "current": generation(status.current),
-            "previous": status.previous.iter().map(|(previous, _)| generation(*previous)).collect::<Vec<_>>(),
+            "pending": self.replica.pending_schema().await?.map(|pending| json!({"tip": HEXLOWER.encode(&pending.tip.0), "manifest": HEXLOWER.encode(&pending.manifest)})),
+            "reason": (!followed).then_some("follow_required"),
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
-            "baseline": status.baseline,
             "application": application,
             "waiting_for_issuer": waiting_for_issuer,
             "held": self.replica.held_changes().await?.len(),
@@ -1554,8 +1576,7 @@ impl Node {
         draft.drop_revoked_deliveries();
         draft.save(&self.path)?;
         *settings = draft;
-        self.apply(&settings.revocations, &settings.credentials, keys)
-            .await?;
+        self.apply(&mut settings, keys).await?;
         for partition in settings.partitions(&self.domain())? {
             let address = crate::groups::record_key(&partition.record.address);
             if rotation.groups.contains_key(&address) {
@@ -1577,14 +1598,22 @@ impl Node {
     /// first.
     async fn apply(
         &self,
-        revocations: &RevocationSet,
-        chain: &CredentialChain,
+        settings: &mut Shared<Settings>,
         mut keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
     ) -> Result<(), Failure> {
-        self.replica.learn_revocations(revocations).await?;
+        let chain = settings.credentials.clone();
+        self.replica
+            .learn_revocations(&settings.revocations)
+            .await?;
         self.replica.renew_credentials(chain.clone()).await?;
         if let Some(service) = &self.service {
-            service.certify(chain);
+            service.certify(&chain);
+        }
+        // A line node is certified again from the renewed identity links,
+        // under the settings the caller holds.
+        if let Err(error) = self.refresh_line_node(settings).await {
+            self.activity
+                .record_changed("line_node_failed", json!({"error": error.to_string()}));
         }
         keys.sort_by_key(|(_, epoch, _)| *epoch);
         for (name, generation, key) in keys {
@@ -1670,8 +1699,7 @@ impl Node {
                 .lock()
                 .map_err(|_| "scope catalog poisoned")?
                 .len();
-            self.apply(&settings.revocations, &settings.credentials, keys)
-                .await?;
+            self.apply(&mut settings, keys).await?;
             for partition in settings.partitions(&self.domain())? {
                 self.hold_keys(&settings, &partition).await?;
             }
@@ -1702,8 +1730,7 @@ impl Node {
                     .rotate(&self.vault)?
                     .ok_or("exposure rotation intent disappeared")?;
                 settings.save(&self.path)?;
-                self.apply(&settings.revocations, &settings.credentials, keys)
-                    .await?;
+                self.apply(&mut settings, keys).await?;
                 for partition in settings.partitions(&self.domain())? {
                     self.hold_keys(&settings, &partition).await?;
                 }
@@ -1962,6 +1989,13 @@ impl Node {
                     .values()
                     .filter_map(crate::scheduling::Retry::deadline),
             )
+            .chain(
+                self.schema_acquisition
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retry
+                    .deadline(),
+            )
             .min()
     }
     /// One worker per link; only pending work has a retry timer.
@@ -2086,6 +2120,12 @@ impl Node {
         if !self.online.load(Ordering::SeqCst) {
             return Ok((json!({"state": "networking_disabled"}), false));
         }
+        if self.replica.private_schema().await? {
+            let released = self.relay_schema_publication(transport).await?;
+            if !released {
+                return Ok((json!({"state":"schema_publication_pending"}), true));
+            }
+        }
         if automatic
             && retry_only
             && {
@@ -2101,6 +2141,12 @@ impl Node {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .is_empty()
+            && !self
+                .schema_acquisition
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retry
+                .ready()
         {
             return Ok((
                 self.sync_status.borrow().clone(),
@@ -2141,7 +2187,7 @@ impl Node {
                 .widened
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(settings.manifest.clone());
+                .insert(HEXLOWER.encode(&settings.domain()?.manifest().hash()));
         if widen || settings.expires() < now()?.saturating_add(settings.ttl / 2) {
             let renewed = self.renew(Some(transport), false, None, false).await;
             if let Err(error) = &renewed {
@@ -2399,7 +2445,9 @@ impl Node {
             }
             break;
         }
-        let (mut connected, mut first, mut retry) = (0, None, false);
+        let catalog_changed = self.acquire_schemas(transport).await?;
+        let schema_changed = self.follow_schema().await?;
+        let (mut connected, mut first, mut retry) = (0, None, catalog_changed || schema_changed);
         for (peer, _, generation, result) in results {
             {
                 let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2933,12 +2981,6 @@ impl Node {
             .record_partial(peer.to_hex(), bootstrapped);
         reconcile.close().await?;
         upstream.link.drain().await?;
-        if let Err(error) = self.compare_baselines(transport, peer, contact).await {
-            self.activity.record(
-                "baseline_unknown",
-                json!({"peer": peer.to_hex(), "error": error.to_string()}),
-            );
-        }
         Ok((retry, sync::Transfer::default()))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
@@ -2967,6 +3009,24 @@ impl Node {
             }
             Protocol::Renew => {
                 answer(stream, async |request| {
+                    if let Some(bytes) = request.strip_prefix(b"rocky.sdk.staged-close.v1\n") {
+                        let outcome = self
+                            .replica
+                            .relay_staged_close(bytes, &coordinated::LinkPeers(self))
+                            .await?;
+                        return Ok(serde_json::to_vec(&outcome)?);
+                    }
+                    if let Some(bytes) = request.strip_prefix(crate::tip_schemas::PROTOCOL) {
+                        if self.replica.private_schema().await? {
+                            return Ok(b"null".to_vec());
+                        }
+                        let request: crate::tip_schemas::Request = serde_json::from_slice(bytes)?;
+                        return Ok(self
+                            .replica
+                            .tip_schema(request.manifest)
+                            .await?
+                            .unwrap_or_else(|| b"null".to_vec()));
+                    }
                     if let Some(reply) = self.forward_enrollment(Protocol::Renew, &request).await? {
                         return Ok(reply);
                     }
@@ -2978,11 +3038,8 @@ impl Node {
                     {
                         return Ok(reply);
                     }
-                    let settings = self.settings.lock().await.clone();
-                    // Every device serves its generations: all of it is public.
-                    if request == crate::generation::OFFER {
-                        return settings.offer();
-                    }
+                    let mut settings = self.settings.lock().await.clone();
+                    settings.bootstrap = Some(self.enrollment_bootstrap().await?);
                     // Any node answers another node of its own identity.
                     if let Some(asked) = request.strip_prefix(crate::enrollment::IDENTITY) {
                         let reply = settings.answer_identity(&self.vault, asked)?;
@@ -3008,8 +3065,7 @@ impl Node {
                         if !added.is_empty() {
                             draft.save(&self.path)?;
                             *current = draft;
-                            self.apply(&current.revocations, &current.credentials, Vec::new())
-                                .await?;
+                            self.apply(&mut current, Vec::new()).await?;
                             for partition in current.partitions(&self.domain())? {
                                 self.hold_keys(&current, &partition).await?;
                             }
@@ -3551,8 +3607,8 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
     }
 }
 /// A replica refusal that names its own code: `sealed`,
-/// `coordinator_unavailable` and the cut refusals.
-fn cut_refusal(error: &Failure) -> Option<&rocky_secure::CutRefusal> {
+/// `coordinator_unavailable`, `behind`, `stale_recovery` and `abandoned`.
+fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
     match error.downcast_ref::<Error>()? {
         Error::Application(error) => error.downcast_ref(),
         _ => None,
@@ -3573,8 +3629,14 @@ pub fn error(error: &Failure) -> Value {
         ("revocation_set_full", false)
     } else if error.is::<Refused>() {
         ("rejected", false)
-    } else if let Some(refusal) = cut_refusal(error) {
-        (refusal.code, refusal.code == "coordinator_unavailable")
+    } else if let Some(refusal) = replica_refusal(error) {
+        (
+            refusal.code,
+            matches!(
+                refusal.code,
+                "coordinator_unavailable" | "behind" | "recovery_pending"
+            ),
+        )
     } else if let Some(coordinated) = error.downcast_ref::<coordinated::Coordinated>() {
         coordinated.code()
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
@@ -3634,7 +3696,7 @@ mod error_tests {
         )
     }
     fn refusal(code: &'static str) -> Failure {
-        Box::new(Error::Application(Box::new(rocky_secure::CutRefusal {
+        Box::new(Error::Application(Box::new(rocky_secure::Refusal {
             code,
             message: "refused".into(),
         })))
@@ -3647,9 +3709,7 @@ mod error_tests {
             code(refusal("coordinator_unavailable")),
             ("coordinator_unavailable".into(), true)
         );
-        for cut in ["abandoned", "cut_conflict", "cut_base_missing"] {
-            assert_eq!(code(refusal(cut)), (cut.into(), false));
-        }
+        assert_eq!(code(refusal("abandoned")), ("abandoned".into(), false));
         let sealed: Failure = Box::new(rocky_core::CoordinationError::Sealed);
         assert_eq!(code(sealed), ("sealed".into(), false));
     }

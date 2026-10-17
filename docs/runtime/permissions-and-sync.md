@@ -39,9 +39,9 @@ encryption-key fingerprints and generations, never secret keys. The runtime has
 no key distribution or membership protocol; the SDK's
 [enrollment and renewal](sdk-enrollment.md) distribute keys.
 
-Frames use row format 10 and name a `rocky_core::TipId`; the local graph resolves
+Frames use row format 11 and name a `rocky_core::TipId`; the local graph resolves
 that tip to its schema manifest. The encrypted file identity is
-`rocky.encrypted-replica.v25` and binds the followed tip and node key. Earlier
+`rocky.encrypted-replica.v32` and binds the followed tip and node key. Earlier
 frame and file formats are refused.
 
 ## Row admission and keys
@@ -59,8 +59,8 @@ Mergeable changes to permission-controlling fields are denied. Such changes
 use the [encrypted strong command path](encrypted-commands.md), which checks
 caller and executor row/field authority over every generated effect.
 `Invoke`, `Execute` and `PublishSchema` are distinct protocol rights, but this
-row API never treats them as row-write authority. Signed schema publication is
-currently restricted to the root publisher, with no delegated publication API.
+row API never treats them as row-write authority. Schema publication follows the authority rules for
+[seals and migration openings](tips-and-bookmarks.md).
 
 Installing a key requires whole-scope, whole-row read authority. A partially
 selected read grant cannot obtain a shared encryption key. Different scopes
@@ -118,6 +118,13 @@ drop only unflushed local work and unacknowledged receipts
 ([design rationale](write-concurrency.md#durability-and-exposure)).
 A group's flush runs after the replica lock is released, so readers and the
 next group do not wait behind it ([write concurrency](write-concurrency.md#encrypted-path)).
+
+Committed scope frontiers are cached under the replica lock. Ordinary write
+attempts invalidate them before execution; transaction-local reads never enter
+the cache. Graph, workspace and schema changes, and failed attempts, also clear
+field-path caches. Only offer and peer-acknowledgment bookkeeping preserve a
+committed frontier; authorization, staged privacy and durability are checked on
+every transfer.
 
 Incoming receipt first commits original ciphertext and forwarding obligations;
 `network::pull` and recovery import receive a whole page per call.

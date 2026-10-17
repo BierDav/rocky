@@ -276,6 +276,7 @@ impl NativeSession {
             Message::Checkpoints(
                 CheckpointMessage::Pruned { scope, .. }
                 | CheckpointMessage::CheckpointOffer { scope }
+                | CheckpointMessage::SealOffer { scope, .. }
                 | CheckpointMessage::CheckpointPull { scope, .. },
             ) => vec![*scope],
             Message::Checkpoints(CheckpointMessage::ArchiveBegin { signed }) => {

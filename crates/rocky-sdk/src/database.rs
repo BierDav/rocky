@@ -577,6 +577,13 @@ impl Session {
     pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"seal","close":close})).await
     }
+    /// The owner recovers the followed tip when no in-sync node of its
+    /// coordinated log can append: one `continue` seal that abandons the
+    /// committed entries no reachable device holds. See
+    /// `docs/runtime/stuck-recovery.md`.
+    pub async fn recover(&self) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"recover"})).await
+    }
     /// The owner signs the minimum of trusted acknowledgments that makes a
     /// seal on the genesis line final.
     pub async fn set_genesis_minimum(
@@ -827,7 +834,6 @@ async fn identity(
             if settings.logged_out {
                 return Err("this device logged out; join the domain again".into());
             }
-            crate::rollout::confirm(&settings, path, schema, setup.confirmation.as_deref()).await?;
             let vault = settings.vault(secrets);
             let link = match network {
                 Some(network) => {
@@ -836,17 +842,11 @@ async fn identity(
                 }
                 None => None,
             };
-            // Another application schema: a local rebuild or the domain's
-            // next generation, saved before the replica opens. An older one
-            // opens the installed database unchanged.
-            if settings.application(schema)? == crate::DeclaredSchema::Ahead {
-                let transport = link.as_ref().map(|(transport, _)| &**transport);
-                if let Err(error) = settings.evolve(path, &vault, schema, transport).await {
-                    if let Some((transport, true)) = &link {
-                        transport.close().await;
-                    }
-                    return Err(error);
-                }
+            if settings.application(schema)? == crate::DeclaredSchema::Current
+                && settings.schema != *schema
+            {
+                settings.schema = schema.clone();
+                settings.save(path)?;
             }
             Ok((settings, link))
         }
@@ -939,105 +939,9 @@ pub(crate) async fn retain(
     Ok(())
 }
 
-/// Runs the migrations of the generation this issuer signed, above
-/// application version `from`, in one SQL transaction of any size. It
-/// commits as the staged publication of the generation: consecutive
-/// bundles, and the record that marks it done. Nothing leaves this device
-/// before: the network starts after the open. See
-/// `docs/runtime/generations.md#migrations`.
-async fn migrate(
-    directory: &Path,
-    settings: &mut Settings,
-    vault: &crate::secrets::Vault,
-    path: &Path,
-    from: u32,
-) -> Result<(), Failure> {
-    let schema = settings.schema.clone();
-    if !crate::generation::migrates(&schema, from) {
-        return crate::generation::Migration::remove(path);
-    }
-    let domain = settings.domain()?;
-    // Every partition the domain knows is migrated here, or none is.
-    if !settings.may_migrate(&domain)? {
-        return Err(
-            "a migration needs an issuer that reads and writes every partition of the domain"
-                .into(),
-        );
-    }
-    let replica = EncryptedReplica::open_upgrading(
-        directory.join("rocky.sqlite"),
-        domain.app.clone(),
-        settings.config(vault, &domain)?,
-        settings.upgrade(&domain)?,
-    )
-    .await?;
-    attach(&replica, settings, vault, &domain, path).await?;
-    let publication = publication(&domain);
-    if !replica
-        .publications()
-        .await?
-        .iter()
-        .any(|done| done.id == publication)
-    {
-        let session = replica
-            .session(
-                settings
-                    .granted(&domain)
-                    .into_iter()
-                    .filter(|scope| *scope != domain.registry())
-                    .collect(),
-            )
-            .await?;
-        // A migration is bounded by the transaction's time alone.
-        let sql = session
-            .sql(rocky_secure::SqlOptions {
-                transaction_timeout: rocky_secure::MAX_TRANSACTION_TIMEOUT,
-                statement_budget: rocky_secure::MAX_TRANSACTION_TIMEOUT,
-                captured_rows: usize::MAX,
-                captured_bytes: usize::MAX,
-                ..Default::default()
-            })
-            .await?;
-        sql.run("BEGIN IMMEDIATE", Vec::new()).await?;
-        for migration in schema
-            .migrations
-            .iter()
-            .filter(|migration| migration.version > from && migration.version <= schema.version)
-        {
-            for (number, step) in migration.statements.iter().enumerate() {
-                let ran = match step {
-                    crate::schema::MigrationStep::Sql(statement) => {
-                        sql.run(statement, Vec::new()).await.map(|_| ())
-                    }
-                    crate::schema::MigrationStep::Insert { insert, select } => {
-                        insert_rows(&sql, domain.logical(), insert, select).await
-                    }
-                };
-                if let Err(error) = ran {
-                    sql.cancel().await;
-                    return Err(format!(
-                        "migration to version {} failed at statement {}: {error}",
-                        migration.version,
-                        number + 1
-                    )
-                    .into());
-                }
-            }
-        }
-        sql.commit_publication(publication).await?;
-        drop((sql, session));
-        replica.flush().await?;
-    }
-    drop(replica);
-    crate::generation::Migration::remove(path)
-}
-/// The staged publication of the migration into `domain`'s generation.
-pub(crate) fn publication(domain: &crate::domain::Domain) -> rocky_core::Commitment {
-    rocky_core::commitment("rocky.sdk.migration.v2", &domain.manifest().hash())
-}
 /// Inserts a row of `table` for each row of `select`, with the next id of
 /// its partition, inside the open transaction.
-async fn insert_rows(
+pub(crate) async fn insert_rows(
     sql: &rocky_secure::SecureSql<rocky_core::TypedRows>,
     schema: &rocky_core::LogicalSchema,
     table: &str,
@@ -1200,6 +1104,27 @@ async fn run(
     {
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
     }
+    // A removal is confirmed before the network starts or anything changes.
+    if matches!(setup.install, Install::Installed) {
+        let settings = Settings::load(&path)?;
+        if rocky_secure::installed_tip_schema(
+            &directory.join("rocky.sqlite"),
+            settings.domain()?.scope,
+            settings.publisher,
+            None,
+        )
+        .await?
+        .is_some()
+        {
+            crate::rollout::confirm(
+                &settings,
+                &path,
+                &setup.schema,
+                setup.confirmation.as_deref(),
+            )
+            .await?;
+        }
+    }
     let (mut settings, link) = identity(&path, &setup, network).await?;
     // Envelopes shared after enrollment wait at the inviter: the intent
     // stays until one exchange with it.
@@ -1236,9 +1161,30 @@ async fn run(
                 settings.credentials = renewed.chain;
             }
         }
-        // The migrations of a generation this issuer signed.
-        if let Some(pending) = crate::generation::Migration::read(&path)? {
-            migrate(&directory, &mut settings, &vault, &path, pending.from).await?;
+        // The commit may also have advanced the bookmark past the pending
+        // tip on the same schema.
+        if let Some(pending) = settings.pending.clone()
+            && let Some(installed) = rocky_secure::installed_tip_schema(
+                &directory.join("rocky.sqlite"),
+                settings.domain()?.scope,
+                settings.publisher,
+                Some(pending.tip),
+            )
+            .await?
+            && (installed.tip == pending.tip
+                || (installed.continues && installed.manifest == pending.manifest))
+        {
+            let manifest = installed.manifest;
+            if manifest != pending.manifest {
+                return Err("pending schema differs from committed workspace".into());
+            }
+            let record = crate::tip_schemas::Record::parse(&installed.record)?;
+            let domain = record.domain(&settings, manifest)?;
+            settings.schema = record.schema;
+            settings.generation = record.generation;
+            settings.prepare_schema(&vault, &domain)?;
+            settings.pending = None;
+            settings.save(&path)?;
         }
         let domain = settings.domain()?;
         // A restored file is rebound to this device's identity first.
@@ -1249,22 +1195,36 @@ async fn run(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
                 settings.config(&vault, &domain)?,
-                settings.upgrade(&domain)?,
                 restored.predecessor,
             )
             .await?;
             std::fs::remove_file(&marker)?;
             replica
-        } else {
-            EncryptedReplica::open_upgrading(
+        } else if let Some(bootstrap) = &settings.bootstrap {
+            bootstrap.verify(&settings)?;
+            EncryptedReplica::open_following(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
                 settings.config(&vault, &domain)?,
-                settings.upgrade(&domain)?,
+                bootstrap.graph.clone(),
+                bootstrap.followed.clone(),
+            )
+            .await?
+        } else {
+            EncryptedReplica::open(
+                directory.join("rocky.sqlite"),
+                domain.app.clone(),
+                settings.config(&vault, &domain)?,
             )
             .await?
         };
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
+        replica
+            .record_current_schema(
+                crate::tip_schemas::Record::new(&settings.schema, settings.generation).bytes()?,
+            )
+            .await?;
+        settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
         #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
         let mut service: Option<crate::owner::Service> = None;
@@ -1316,6 +1276,10 @@ async fn run(
         node.complete_revocation().await?;
         node.refresh_importing().await?;
         node.try_ensure_tip_node().await;
+        if matches!(setup.install, Install::Installed) {
+            node.publish_schema_at_open(setup.confirmation.as_deref())
+                .await?;
+        }
         Ok::<_, Failure>(())
     }
     .await

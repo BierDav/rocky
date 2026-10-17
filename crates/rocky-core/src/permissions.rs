@@ -231,6 +231,14 @@ impl RowWrite {
 pub trait RowApplication: Send + Sync + 'static {
     /// Immutable compiled definition, verified and cached when a replica opens.
     fn manifest(&self) -> crate::ApplicationManifest;
+    /// An owned semantic validator for one exact authenticated source definition.
+    /// Used for original held rows; it supplies no current authority or projection.
+    fn source_application(
+        &self,
+        _definition: &crate::ApplicationManifest,
+    ) -> Result<Box<dyn RowApplication>, String> {
+        Err("source row validation is unavailable".into())
+    }
     /// Immutable ACL-controlling fields of this definition; the runtime may cache them.
     fn permission_fields(&self) -> BTreeSet<Commitment>;
     fn validate_changes(&self, changes: &[RowChange]) -> Result<(), String>;

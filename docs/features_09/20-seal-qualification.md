@@ -1,10 +1,19 @@
 # 20. Seal qualification
 
-Status: proposed; not started.
+Status: in progress (2026-10-21); application implementation started, device
+scenarios not yet executed.
 Owner: `examples/shoppinglist-app` and its qualification harness. Depends on
 [phases 17](17-schema-changes-through-seals.md) and
 [19](19-recovery-as-a-bookmark-move.md). Follow the
 [execution contract](README.md#agent-execution-contract).
+
+The owner authorized phase20 to proceed after core code acceptance and the
+current-source checks. The exact 100,000-row migration test has a suite-timing
+exemption; its full workload, assertions and 600 s timeout remain. Linux ARM
+fallback execution is outside this qualification's release gate. Neither
+decision claims the old e2e timing run passed or the fallback was executed.
+The earlier intermittent rollback failure remains unexplained; retain the
+failure-only diagnostics and investigate/reproduce it if it recurs.
 
 ## Inputs and objective
 

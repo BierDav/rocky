@@ -3,14 +3,27 @@
 Status: accepted roadmap (2026-10-14). Phases 1–9, 11 and 13 are
 implemented, with [accepted limitations](#accepted-limitations) and
 [phase 13's own](13-identities-and-domain-credentials.md); each phase's
-evidence records its verification. Phase 10 is partial: collection and owner-signed
-cuts work in `rocky-coordinator` and `rocky-secure`, without the SDK, Kotlin
-API or guides ([evidence](10-stuck-recovery-evidence.md));
-[phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phases 12
+evidence records its verification. Phase 10 is superseded: its collection stays and
+[phase 19](19-recovery-as-a-bookmark-move.md) replaced its cuts with the
+owner's recovery seal. Phases 12
 and 18 are skipped. Phase 14 is in progress: all slices are implemented, and
-[two gate gaps remain](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
+[gate status](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented)
+records the issuer-switch repair and remaining schema/custody qualification.
 Phase 15 is implemented ([evidence](15-lazy-compaction-evidence.md)).
 Phase 16 is implemented ([evidence](16-kept-seals-and-views-evidence.md)).
+Phase 17's repaired core and later code deltas have independent acceptance.
+The owner authorized phase20 to proceed with a timing exemption for the exact
+100,000-row migration test and without Linux ARM fallback execution as a gate.
+The earlier service failure remains unexplained and will be investigated if
+it recurs; the latest service and package checks pass
+([current gates](17-schema-changes-through-seals-qualification.md#round49-acceptance-and-current-source-checks)).
+The [round38 restoration record](17-original-prefix-restoration-evidence.md) tracks
+the exact original-prefix repair and real-service prerequisites; it does not
+accept the whole roadmap or start phase 20.
+Phases 14 and 19 share the repaired readiness path and await current-format
+requalification; phase20 application work is now in progress. The earlier
+100,000-row e2e passes are baseline evidence
+([phase 19 evidence](19-recovery-as-a-bookmark-move-evidence.md)).
 Phases 14–17, 19 and 20 replace
 generations' transitions, the mergeable horizon and recovery cuts with
 [sealed forks](#generations-as-sealed-forks).
@@ -41,12 +54,13 @@ still sync:
   the user before Rocky signs it.
 - **Migrations have no size limit.** They run in one local transaction on
   an issuer that can read and write every partition of the tables involved,
-  and leave as many bundles as they need. They need no coordinator: issuers
-  that migrate concurrently converge, apart from rows both insert into a
-  table keyed by `id`.
-- **No remnants.** Manifests are fetched when a frame needs one and dropped
-  when no retained frame does. Transitions no longer carry an admission
-  horizon, and the cut mechanism of
+  and leave as many bundles as they need. Concurrent migrations resolve as
+  seal and bookmark races; only the winning tip's rows reach the projection,
+  including rows keyed by `id`. Coordinated sources release the successor
+  only after the exact closing terminal has verified finality.
+- **No remnants.** Schemas are fetched only for authenticated requirements
+  on the followed path, retained frames, kept seals or held changes, and
+  dropped when no such requirement remains. Transitions and the cut mechanism of
   [decision 0066](../decisions/0066-breaking-generations.md) is removed.
 - **Coordinated writes on ordinary rows.** Writes that must not race, such
   as sequential invoice numbers, are bundles that every connected trusted
@@ -70,21 +84,17 @@ versions are tolerated belong to the application, not to Rocky.
   a new name, such as `category2`; renaming is a removal and an addition. An
   app that must keep old versions from misreading a name enforces a minimum
   app version itself.
-- **Adopt on discovery.** A device that meets a newer generation fetches its
-  schema and publisher-signed manifest, verifies them and migrates its
-  database to it with the existing backfill and switch, before it applies
-  that generation's frames. No chain of transitions is needed.
+- **Follow a bookmark.** A device fetches and installs the schemas required
+  by its authenticated followed path. Peer discovery grants no schema
+  authority; a device following nothing never changes schema.
 - **The same schema everywhere.** Removed tables and fields are dropped on
   every device that runs the new generation, with their constraints; nothing
   is frozen, emptied in place or filled with synthetic values.
-- **Re-adding converges.** A generation that re-adds a removed name
-  records its signing time as a baseline, the earliest if several issuers
-  signed it. Every device ignores writes to the
-  field stamped before it, and a device adopting the generation pulls again
-  the frames of that field's tables stamped after it. The
-  [lazy compaction](../runtime/lazy-compaction.md) finalizes sealed history:
-  each copy uses the seal's frontier or imports its checkpoint. Nothing
-  requires a participant declaration before compaction.
+- **Re-adding converges.** Frames cross the intersection of fields on every
+  tip from their source to the live tip. A field removed at B and re-added
+  at C never receives a value from A, including through an imported base.
+  [Lazy compaction](../runtime/lazy-compaction.md) finalizes history at
+  seals, without participant declarations.
 - **No device inventory.** Rocky never needs to know how many devices exist
   or whether two of them share a key. Every rule here is applied by each
   copy on its own state; seals carry no device inventory.
@@ -100,8 +110,8 @@ versions are tolerated belong to the application, not to Rocky.
 - **No split brain.** A coordinated write is committed once every trusted
   node in the coordinator's in-sync set stored it, and the set has at least
   the domain's minimum size. A domain whose whole set is permanently cut off
-  is stuck until the domain owner signs a recovery cut; Rocky accepts this.
-- **The coordinator holds no data.** Per domain it keeps the in-sync set, the
+  is stuck until the domain owner signs a recovery seal; Rocky accepts this.
+- **The coordinator holds no data.** Per tip it keeps the in-sync set, the
   log head and commit index with a bounded hash window: a few KiB, constant
   over time, with lazy membership and no heartbeats.
 - **Old apps may join** a newer household when the protocol is compatible;
@@ -111,23 +121,7 @@ versions are tolerated belong to the application, not to Rocky.
 
 ## Accepted limitations
 
-- **A split schema is undefined.** Issuers that sign different schemas on
-  the same generation fork the lineage: each device adopts the branch it
-  meets first and refuses the other, and nothing joins the branches again.
-  What a device applies of the other branch's writes is not specified.
-  Issuers running one application release sign one generation, so a split
-  needs a bug, two releases rolled out at once or a malicious issuer.
-  [Phase 17](17-schema-changes-through-seals.md) removes this limitation.
-- **Two migration runs may duplicate rows.** Issuers that migrate apart each
-  run the migrations. Updates meet by latest wins and rows keyed by name
-  merge, but an `insert` step into a table keyed by `id` adds each row once
-  per run. Rocky neither detects nor removes the duplicates: the application
-  must prevent them, for example by using the
-  [coordinator](../runtime/coordinated-log.md)
-  ([decision 0071](../decisions/0071-staged-migration-publication.md)).
-  [Phase 17](17-schema-changes-through-seals.md) removes this limitation.
-
-From [phase 14](14-seals-and-bookmarks.md) on, sealed forks accept these:
+Sealed forks ([phase 14](14-seals-and-bookmarks.md) on) accept these.
 
 - **A frontier may never fill.** A seal names a frontier its sealer need not
   hold. If every holder of frames through it quits, no device builds,
@@ -260,11 +254,9 @@ recovery to one operation. Their briefs hold the details.
 - An inspection API shows developers the graph, bookmarks, kept seals and
   checkpoints.
 
-This supersedes, once the phases land, the settled items above on adopting
-on discovery, transitions, re-add baselines, the horizon's guarantees and
-the coordinator's single log per domain, the first two accepted limitations
-and [phase 10](10-stuck-recovery.md)'s cuts. Existence logs
-stay and are compacted at seals.
+Sealed forks replace adopting on discovery, transitions, re-add baselines,
+the mergeable horizon and recovery cuts. Existence logs stay and are compacted
+at seals. Phase 20 qualifies the Kotlin and shopping integration.
 
 ## Reserved decision records
 

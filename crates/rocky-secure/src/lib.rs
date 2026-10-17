@@ -10,29 +10,31 @@ mod replica;
 mod store;
 mod wire;
 pub use replica::{
-    AuditReport, BaseReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus,
+    AuditReport, Buffered, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
     CiphertextPage, CommittedEntry, CompactReport, CompactionStatus, Companion, CoordinatedCommit,
-    CoordinatedEntry, CoordinatedError, CoordinatedStatus, CurrentValue, CustodySummary,
-    CutEvidence, CutProposal, CutRefusal, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT,
-    EncryptedReplica, EntryPeers, EvictReport, ExistenceBaseAttachment, ExistenceBasePage,
-    ExistenceBasis, ExistenceEvent, ExistencePage, ExistenceRecord, FrameReplay, FrontierLog,
-    GenerationStatus, GenerationStep, HeldChange, HeldField, HeldKind, HeldRow, HeldSeal, Holding,
-    KeptSeals, KeyMaterial, LineNode, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES,
-    MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE,
-    MAX_GENERATIONS, MAX_PAGE_CUTS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS,
-    PLAN_ROWS, PeerFuture, PeerLag, PeerScopeFrontier, ProjectionPlan, PruneBlock, PruneReport,
-    PrunedPage, Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus,
-    RemotePage, ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig,
-    ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit, SecureConfig, SecurePage,
-    SecureRows, SecureSession, SecureSnapshot, SecureSql, SecureTransaction, SessionStatus,
-    SetSummary, SignedCheckpoint, SignedVoid, Slot, TipDevice, TipNodeObservation, TipObservation,
-    TipStatement, UpdateMode, Upgrade, entry_hash,
+    CoordinatedEntry, CoordinatedError, CoordinatedStatus, CoveredMark, CurrentValue,
+    CustodySummary, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT, EncryptedReplica, EntryPeers,
+    EvictReport, ExistenceBaseAttachment, ExistenceBasePage, ExistenceBasis, ExistenceEvent,
+    ExistencePage, ExistenceRecord, FrameReplay, FrontierLog, GenerationStatus, HeldChange,
+    HeldField, HeldKind, HeldRow, HeldSeal, Holding, InstalledTipSchema, KeptSeals, KeyMaterial,
+    LineNode, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS,
+    MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_PLACEMENTS,
+    MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, MigrationMembership,
+    MigrationStorage, PLAN_ROWS, PeerFuture, PeerLag, PeerScopeFrontier, PendingSchema, Placement,
+    PlacementPage, PlacementRequest, ProjectionPlan, PruneBlock, PruneReport, PrunedPage,
+    Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, Refusal, RemotePage,
+    ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig,
+    SchemaStage, ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit,
+    SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
+    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, Slot,
+    StagedCloseStatus, TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode,
+    entry_hash, installed_tip_schema,
 };
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::{
     Capability, CredentialChain, Hash, MAX_CREDENTIAL_DEPTH, PrivateKey, PublicKey, Revocation,
-    RevocationSet, SignedCapability, SignedManifest, SignedRevocation, SignedTransition,
+    RevocationSet, SignedCapability, SignedManifest, SignedRevocation,
 };
 pub use rocky_storage::sql::{
     AbortReason, Certainty, MAX_SAVEPOINTS, MAX_TRANSACTION_TIMEOUT, SqlError, SqlOptions,
@@ -116,6 +118,9 @@ thread_local! {
     /// Apply transactions this test thread's replicas may still start
     /// before the pending pass is interrupted between two of them.
     static APPLY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static BINDING_TRACE: std::cell::RefCell<Option<Vec<(usize, usize, usize)>>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_PAYLOAD_TRACE: std::cell::RefCell<Option<Vec<(EncryptedFrame, usize)>>> = const { std::cell::RefCell::new(None) };
+    static AUTHOR_PAYLOAD_FRAME: std::cell::Cell<Option<Hash>> = const { std::cell::Cell::new(None) };
 }
 /// Spends one apply transaction of the thread's budget; false once it ran out.
 #[cfg(test)]
@@ -133,6 +138,8 @@ fn apply_allowed() -> bool {
 #[cfg(test)]
 mod tests;
 
+#[doc(hidden)]
+pub use replica::last_in_place_switch_changes;
 pub use replica::{check_replica_format, local_row_counts};
 
 /// One-way reference used by durable peer metadata.

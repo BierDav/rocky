@@ -45,7 +45,32 @@ impl Node {
     /// saved node of the line, else a newly certified one. Readers hold no
     /// author range and write nothing.
     pub(crate) async fn ensure_tip_node(&self) -> Result<(), Failure> {
-        if !self.replica.line_node_needed().await {
+        self.tip_node(false).await
+    }
+    /// After a schema switch a registered line node is certified again, so
+    /// its grants name the tables the installed definition adds.
+    pub(crate) async fn refresh_tip_node(&self) -> Result<(), Failure> {
+        self.tip_node(true).await
+    }
+    async fn tip_node(&self, refresh: bool) -> Result<(), Failure> {
+        // Serializes number reservations with grants and renewals.
+        let mut settings = self.settings.lock().await;
+        self.line_node(&mut settings, refresh).await
+    }
+    /// [`Self::refresh_tip_node`] for a caller that holds the settings.
+    pub(crate) async fn refresh_line_node(
+        &self,
+        settings: &mut Shared<Settings>,
+    ) -> Result<(), Failure> {
+        self.line_node(settings, true).await
+    }
+    async fn line_node(
+        &self,
+        settings: &mut Shared<Settings>,
+        refresh: bool,
+    ) -> Result<(), Failure> {
+        let needed = self.replica.line_node_needed().await;
+        if !needed && !refresh {
             return Ok(());
         }
         let Some((scope, _)) = self.replica.followed_bookmark().await else {
@@ -57,8 +82,6 @@ impl Node {
             .await?
             .line_root(self.replica.followed_tip().await)?;
         let line = HEXLOWER.encode(&line.0);
-        // Serializes number reservations with grants and renewals.
-        let mut settings = self.settings.lock().await;
         let Some(range) = settings.identity_links().authors()? else {
             return Ok(());
         };
@@ -72,17 +95,46 @@ impl Node {
         if saved.format != FORMAT {
             return Err("unsupported line node format".into());
         }
-        for node in saved.nodes.iter().rev().filter(|node| node.line == line) {
+        let identity = settings.identity(&self.vault)?;
+        let grants =
+            |chain: &CredentialChain| chain.0.last().map(|leaf| leaf.capability.grants.clone());
+        let indexes: Vec<_> = (0..saved.nodes.len())
+            .rev()
+            .filter(|index| saved.nodes[*index].line == line)
+            .collect();
+        for index in indexes {
+            let key = PrivateKey::from_bytes(&saved.nodes[index].key);
+            // A schema change may grant new tables: the same node and
+            // number are certified again for the installed definition.
+            if let Some(author) = saved.nodes[index]
+                .credentials
+                .authors()?
+                .and_then(|range| range.single())
+            {
+                let current = settings.certify_node(
+                    &*identity,
+                    settings.identity_links(),
+                    &self.domain(),
+                    (key.public_key(), author),
+                )?;
+                if grants(&current) != grants(&saved.nodes[index].credentials) {
+                    saved.nodes[index].credentials = current;
+                    self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
+                }
+            }
             let node = rocky_secure::LineNode {
-                key: PrivateKey::from_bytes(&node.key),
-                credentials: node.credentials.clone(),
+                key,
+                credentials: saved.nodes[index].credentials.clone(),
             };
             // A saved node that crossed a fork or expired is not reused.
             if self.replica.register_line_node(node).await.is_ok() {
                 return Ok(());
             }
         }
-        let identity = settings.identity(&self.vault)?;
+        // The genesis line writes under the original node.
+        if !needed {
+            return Ok(());
+        }
         let author = if settings.stored_identity {
             let mut draft = (**settings).clone();
             let author = draft.reserve_line_author()?;

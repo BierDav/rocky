@@ -38,48 +38,147 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Err(error) => Err(error),
         }
     }
-    /// Before this node takes anything of a continuation's log, it holds and
-    /// applied every entry the sealed tip's log committed before its
-    /// terminal one: the state the continuation's writes compute on. An
-    /// unopened parent log, or one the coordinator dropped, has nothing to
-    /// verify.
+    /// Before this node takes anything of a tip's log, it holds and applied
+    /// every entry the log of the tip it starts from committed before the
+    /// seal it starts at, or that a recovery retained: the state the tip's
+    /// writes compute on. That holds for a continuation and for a branch
+    /// opened on a seal that ended its log. An unopened parent log, or one
+    /// the coordinator dropped, has nothing to verify.
     pub(super) async fn hold_sealed_entries(
         &self,
         log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<(), CoordinatedError> {
-        let parent = {
+        // The parent tip, the seal the tip starts at, and whether it opens a
+        // branch.
+        let start = {
             let inner = self.inner.lock().await;
-            let mut parent = None;
+            let mut start = None;
             if let Some(graph) = inner.graphs.get(&log.scope) {
                 for seal in &graph.seals {
                     if seal.successor().map_err(credential)? == Some(log.tip) {
-                        parent = Some(seal.statement.tip);
+                        start = Some((seal.clone(), false));
+                    }
+                }
+                for opening in &graph.openings {
+                    if opening.tip().map_err(credential)? == log.tip {
+                        let seal = graph
+                            .seal_by_id(opening.statement.seal)
+                            .map_err(credential)?;
+                        start = Some((seal.clone(), true));
                     }
                 }
             }
-            parent
+            start
         };
-        let Some(tip) = parent else {
+        let Some((seal, branch)) = start else {
             return Ok(());
         };
         let parent = TipLog {
             scope: log.scope,
-            tip,
+            tip: seal.statement.tip,
         };
         let head = coordinator.log_head(parent).await.map_err(coordination)?;
-        if head.terminal.is_none() {
-            return Ok(());
-        }
-        let through = head.commit.saturating_sub(1);
-        if self.inner.lock().await.log_state(parent).await?.0 < through {
-            Box::pin(self.resolve(parent, coordinator, peers)).await?;
+        if let Some(terminal) = head.terminal
+            && (!branch || terminal.digest == seal.id().map_err(credential)?)
+        {
+            let mut through = head.commit.saturating_sub(1);
+            if let Some(recovery) = seal.statement.recovery {
+                through = through.min(recovery.retained.position);
+            }
             if self.inner.lock().await.log_state(parent).await?.0 < through {
-                return Err(CoordinatedError::Behind);
+                match Box::pin(self.resolve(parent, coordinator, peers)).await {
+                    Ok(_) => {}
+                    Err(CoordinatedError::Behind) if branch => {}
+                    Err(error) => return Err(error),
+                }
+                if !branch && self.inner.lock().await.log_state(parent).await?.0 < through {
+                    return Err(CoordinatedError::Behind);
+                }
+            }
+            let migration = branch
+                && matches!(seal.statement.action, rocky_credentials::SealAction::Close)
+                && {
+                    let inner = self.inner.lock().await;
+                    let graph = inner.graph_for(log.scope)?;
+                    graph.schema(log.tip).map_err(credential)?
+                        != graph.schema_any(parent.tip).map_err(credential)?
+                };
+            if migration {
+                self.require_inherited(parent, log.tip).await?;
+            } else {
+                self.require_applied(parent).await?;
             }
         }
-        self.require_applied(parent).await
+        let inner = self.inner.lock().await;
+        if !inner.seal_rebootstraps(log.scope).await?.is_empty() {
+            return Err(CoordinatedError::Behind);
+        }
+        let scopes = inner.readiness_scopes(log.scope).await?;
+        if inner
+            .seal_waits(log.scope, &seal, None, &scopes, true)
+            .await?
+            .is_some()
+        {
+            return Err(inner.missing_placement(log.scope));
+        }
+        Ok(())
+    }
+    /// A migration inherits the signed frontier, while the terminal fixes
+    /// the source log's committed extent. Later frames have a held disposition.
+    async fn require_inherited(
+        &self,
+        parent: TipLog,
+        target: TipId,
+    ) -> Result<(), CoordinatedError> {
+        let inner = self.inner.lock().await;
+        let graph = inner.graph_for(parent.scope)?;
+        for entry in inner.entries(parent, &["committed"]).await? {
+            let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
+            for id in ids {
+                if let Some(frame) = inner.frame(id).await? {
+                    let header = frame.operation_ref()?.header.clone();
+                    let e = &header.extensions;
+                    let inherited = inner.visible_frame(
+                        graph,
+                        e.tip,
+                        e.author.ok_or_else(|| denied("inherited author missing"))?,
+                        e.author_sequence,
+                        target,
+                    )?;
+                    let status = inner.status(id).await?;
+                    if (inherited && status != ReceiveStatus::Applied)
+                        || (!inherited && status != ReceiveStatus::Held)
+                    {
+                        return Err(CoordinatedError::Behind);
+                    }
+                } else {
+                    // Retained held bytes and authenticated void positions are
+                    // durable dispositions. Missing inherited history is checked
+                    // by seal_waits below, including verified replay bases.
+                    let held = collect_rows(inner.conn.query(
+                        "SELECT 1 FROM secure_held_frames WHERE hash=?1 UNION ALL SELECT 1 FROM secure_voids WHERE hash=?1",
+                        [id.as_bytes().to_vec()],
+                    ).await.map_err(Error::from)?).await?;
+                    if held.is_empty() {
+                        let scopes = inner.readiness_scopes(parent.scope).await?;
+                        let seal = graph
+                            .seal(parent.tip)
+                            .map_err(credential)?
+                            .ok_or(CoordinatedError::Behind)?;
+                        if inner
+                            .seal_waits(parent.scope, seal, None, &scopes, true)
+                            .await?
+                            .is_some()
+                        {
+                            return Err(inner.missing_placement(parent.scope));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     /// Whether a terminal entry took `entry`'s position.
     pub(super) async fn ended(
@@ -109,6 +208,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(CoordinatedError::Conflict);
         };
         let continuation = self.inner.lock().await.continuation(log, terminal)?;
+        // A recovery that abandoned entries left the state the write was
+        // computed on: it is held for re-authoring, never carried.
+        if self.inner.lock().await.abandoning(log)? {
+            self.void_own(log, entry, true).await?;
+            return Err(CoordinatedError::Sealed);
+        }
         match continuation {
             Some(tip) if tip != log.tip => {
                 let next = TipLog {
@@ -143,7 +248,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .execute(
-                    "UPDATE secure_entries SET log=?,state='carried',position=0,pending=NULL,append=NULL WHERE log=? AND hash=?",
+                    "UPDATE secure_entries SET log=?,state='carried',position=0,pending=NULL,append=NULL,carry=NULL WHERE log=? AND hash=?",
                     [encode(&next)?, encode(&log)?, entry.hash.to_vec()],
                 )
                 .await?;
@@ -175,6 +280,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let Some(entry) = carried.into_iter().next() else {
             return Err(denied("no coordinated write is carried into this log").into());
         };
+        // A recovery that abandoned entries of the log it was carried from
+        // left the state it was computed on.
+        if self.inner.lock().await.recovered_from_abandoning(log)? {
+            self.void_own(log, &entry, true).await?;
+            return Err(CoordinatedError::Sealed);
+        }
         // A continuation whose seal lost hands the write to the winner's.
         let canonical = self.inner.lock().await.canonical(log)?;
         if canonical != log.tip {
@@ -243,6 +354,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let bundle = entry
             .bundle
             .ok_or_else(|| Error::Corrupt("carried entry without its bundle".into()))?;
+        // Its frames keep the coordinate they sign; in a tip graph the
+        // author's record names where they are retried.
+        let carry = {
+            let inner = self.inner.lock().await;
+            match inner.graphs.contains_key(&log.scope) {
+                true => Some(inner.sign_carry(log, &ids).await?),
+                false => None,
+            }
+        };
+        let carry = match carry {
+            Some(Some(carry)) => Some(carry),
+            Some(None) => {
+                self.void_own(log, &entry, true).await?;
+                return Err(CoordinatedError::Sealed);
+            }
+            None => None,
+        };
         {
             let mut inner = self.inner.lock().await;
             transaction!(inner, |inner| {
@@ -263,7 +391,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner
                     .conn
                     .execute(
-                        "INSERT INTO secure_entries VALUES(?,?,1,'staged',?,?,NULL,NULL,?)",
+                        "INSERT INTO secure_entries VALUES(?,?,1,'staged',?,?,NULL,NULL,?,NULL)",
                         [
                             encode(&log)?,
                             hash.to_vec(),
@@ -273,6 +401,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         ],
                     )
                     .await?;
+                if let Some(carry) = &carry {
+                    inner
+                        .conn
+                        .execute(
+                            "UPDATE secure_entries SET carry=? WHERE log=? AND hash=?",
+                            [
+                                carry.to_bytes().map_err(credential)?,
+                                encode(&log)?,
+                                hash.to_vec(),
+                            ],
+                        )
+                        .await?;
+                }
                 for id in &ids {
                     inner
                         .conn

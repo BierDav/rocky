@@ -547,12 +547,12 @@ async fn items_follow_the_list_existence_log_without_the_list_scope() {
         held,
         vec![vec![SqlValue::Blob(encode(&erp.scope("items")).unwrap())]]
     );
-    let digest = |device: &Device| {
-        let replica = device.replica.clone();
-        let scope = erp.scope("items");
-        async move { replica.checkpoint(scope).await.unwrap().statement.rows }
-    };
-    assert_eq!(digest(&a).await, digest(&b).await);
+    // Both hold the same items rows.
+    let scope = erp.scope("items");
+    assert_eq!(
+        a.replica.snapshot(scope).await.unwrap().rows,
+        b.replica.snapshot(scope).await.unwrap().rows
+    );
 }
 
 #[tokio::test]
@@ -979,4 +979,119 @@ async fn holders_and_non_holders_agree_when_a_held_parent_is_hidden_or_evicted()
     assert_eq!(rows(&sa, listed).await, orders);
 }
 
+mod scan_order;
 mod seals;
+
+#[tokio::test]
+async fn warmed_header_scans_keep_existence_and_placement_counts_distinct() {
+    let erp = Erp::new();
+    let dir = TempDir::new().unwrap();
+    let device = erp
+        .open(
+            &dir.path().join("header-counts.db"),
+            &PrivateKey::new(),
+            11,
+            &TABLES,
+        )
+        .await;
+    let (_, frames) = commit(
+        &erp.sql(&device).await,
+        &[("INSERT INTO lists(title,id) VALUES('counted',?id)", vec![])],
+    )
+    .await;
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let header: p2panda_core::Header<crate::wire::Extensions> =
+        crate::decode(frame.header_bytes()).unwrap();
+    let author = header.extensions.author.unwrap();
+    let position = header.extensions.author_sequence;
+    assert_eq!(header.extensions.existence, 1);
+    let scope = erp.scope("lists");
+    let scopes = [(scope, None)];
+    let held = BTreeSet::from([scope]);
+    let inner = device.replica.inner.lock().await;
+    inner.stored_header_memo_limits(8, 1 << 20);
+    let warm = inner
+        .scan_positions_for_test(erp.domain, &scopes, &held, &BTreeSet::new())
+        .await
+        .unwrap();
+    assert!(warm.2.is_empty());
+    let stats = inner.stored_header_memo_stats();
+    let counted = inner
+        .scan_positions_for_test(erp.domain, &scopes, &held, &held)
+        .await
+        .unwrap();
+    assert_eq!(counted.0[&author], BTreeSet::from([position]));
+    assert_eq!(counted.1[&(scope, author)], position);
+    assert_eq!(counted.2[&(scope, author)][&position], 1);
+    assert_eq!(inner.stored_header_memo_stats(), stats);
+    inner
+        .conn
+        .execute("SAVEPOINT counted_header", ())
+        .await
+        .unwrap();
+    inner.conn.execute("INSERT INTO secure_voids(scope,author,sequence,hash,header) SELECT scope,author,sequence,hash,header FROM secure_operations", ()).await.unwrap();
+    inner
+        .conn
+        .execute("DELETE FROM secure_operations", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        inner
+            .scan_positions_for_test(erp.domain, &scopes, &held, &held)
+            .await
+            .unwrap(),
+        counted
+    );
+    inner
+        .conn
+        .execute("DELETE FROM secure_voids", ())
+        .await
+        .unwrap();
+    inner
+        .conn
+        .execute(
+            "INSERT INTO secure_placements VALUES(?,?,?,?,?,?)",
+            crate::storage::bindings(vec![
+                SqlValue::Blob(crate::encode(&erp.domain).unwrap()),
+                SqlValue::Integer(i64::from(author)),
+                SqlValue::Integer(position as i64),
+                SqlValue::Blob(crate::encode(&scope).unwrap()),
+                SqlValue::Blob(frame.id().unwrap().as_bytes().to_vec()),
+                SqlValue::Blob(frame.header_bytes().to_vec()),
+            ]),
+        )
+        .await
+        .unwrap();
+    let placed = inner
+        .scan_positions_for_test(erp.domain, &scopes, &BTreeSet::new(), &held)
+        .await
+        .unwrap();
+    assert_eq!(placed.0, counted.0);
+    assert!(placed.1.is_empty());
+    assert!(
+        placed.2.is_empty(),
+        "a positive signed count is not placement custody"
+    );
+    assert!(
+        inner
+            .scan_positions_for_test(erp.domain, &scopes, &held, &held)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert_eq!(inner.stored_header_memo_stats(), stats);
+    inner
+        .conn
+        .execute("ROLLBACK TO counted_header", ())
+        .await
+        .unwrap();
+    inner
+        .conn
+        .execute("RELEASE counted_header", ())
+        .await
+        .unwrap();
+    drop(inner);
+    device.replica.audit(scope).await.unwrap();
+}

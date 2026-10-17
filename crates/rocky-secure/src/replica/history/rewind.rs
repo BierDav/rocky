@@ -84,13 +84,11 @@ pub(in crate::replica) struct Rewind {
 }
 impl Rewind {
     /// The seal's mark and scope `id`'s bound there.
-    pub(in crate::replica) fn at(&self, id: i64) -> (i64, i64) {
-        let bound = self
-            .bounds
+    pub(in crate::replica) fn at(&self, id: i64) -> Option<(i64, i64)> {
+        self.bounds
             .iter()
             .find(|(known, _)| *known == id)
-            .map_or(0, |(_, bound)| *bound);
-        (self.mark, bound)
+            .map(|(_, bound)| (self.mark, *bound))
     }
 }
 
@@ -186,11 +184,23 @@ impl<A: RowApplication> Inner<A> {
         &self,
         seal: Commitment,
     ) -> Result<Option<Rewind>, Error> {
+        self.kept_at(seal, Some(self.manifest)).await
+    }
+    /// Kept `seal`'s mark and bounds under `manifest`, or under any schema:
+    /// views read its frozen copies, whichever schema kept them.
+    pub(in crate::replica) async fn kept_at(
+        &self,
+        seal: Commitment,
+        manifest: Option<Commitment>,
+    ) -> Result<Option<Rewind>, Error> {
         match collect_rows(
             self.conn
                 .query(
-                    "SELECT mark,bounds FROM secure_kept_marks WHERE seal=? AND manifest=?",
-                    [seal.to_vec(), self.manifest.to_vec()],
+                    "SELECT mark,bounds FROM secure_kept_marks WHERE seal=?1 AND (?2 IS NULL OR manifest=?2)",
+                    bindings(vec![
+                        SqlValue::Blob(seal.to_vec()),
+                        manifest.map_or(SqlValue::Null, |manifest| SqlValue::Blob(manifest.to_vec())),
+                    ]),
                 )
                 .await?,
         )
@@ -235,8 +245,20 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("kept seal".into()));
             };
             let seal = checkpoint::row_of(seal)?;
+            // Its rows are restored unfiltered: a path that removed a field
+            // since, even one re-added in the same schema, replays instead.
             if path.contains(&seal)
                 && manifest.as_slice() == self.manifest.as_slice()
+                && !self
+                    .path_fields(
+                        domain,
+                        self.graph_for(domain)?
+                            .seal_by_id(seal)
+                            .map_err(credential)?
+                            .statement
+                            .tip,
+                    )?
+                    .strips(&self.definition)
                 && self.finalized_depth(domain, seal).await?.is_some()
             {
                 return Ok(Some(Rewind {
@@ -281,8 +303,9 @@ impl<A: RowApplication> Inner<A> {
     /// positions through `bound`: rows changed since are restored from
     /// history, the operations in `(bound, through]` replay on top, those
     /// of the followed tip only for a `tip` switch, and only rows that
-    /// differ from the live ones are written and projected. Returns the
-    /// row ids of every row it looked at.
+    /// differ from the live ones are written and projected. `ledger` holds
+    /// the identity marks of the kept state. Returns the row ids of every
+    /// row it looked at.
     pub(in crate::replica) async fn rewind_rows(
         &mut self,
         scope: ResourceScope,
@@ -290,6 +313,7 @@ impl<A: RowApplication> Inner<A> {
         (mark, bound): (i64, i64),
         through: i64,
         tip: bool,
+        mut ledger: identity::IdentityLedger,
     ) -> Result<BTreeSet<i64>, Error> {
         let blob = encode(&scope)?;
         self.conn
@@ -319,9 +343,12 @@ impl<A: RowApplication> Inner<A> {
                     scope,
                     id,
                     Overlay::Rewind,
+                    self.workspace.tip,
                     (cursor, through),
                     STEP_OPERATIONS,
                     &mut fold,
+                    &mut ledger,
+                    checkpoint::ReplayMode::Mint,
                 )
                 .await?
             {

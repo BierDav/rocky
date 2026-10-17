@@ -39,6 +39,11 @@ frames, also after a restart or recovery import; other writes conflict.
 `RowWrite::assigned` lists fields an update republishes although unchanged.
 Each needs a row/field grant like a changed one.
 
+Authoring keeps the complete final signed frame's payload from its existing
+materialization opening through that frame's storage, then drops it. Original
+writes, live admission checks and later held-resolution authority checks retain
+their order. A later frame or transaction retry opens its payload afresh.
+
 A [coordinated write](coordinated-writes.md) is a bundle committed with
 `SecureSql::commit_coordinated`: its frames carry their log position and no
 peer receives them before the domain's coordinated log commits the entry;
@@ -56,6 +61,10 @@ Each frame carries the bundle's member list, every entry sealed under its own
 member's scope key. A receiver applies together all members it can open, may
 read and holds; it waits while one of them is missing. Members of other
 partitions do not block it.
+
+During one application attempt, each opened payload stays paired with its
+exact signed member. All members must agree on held re-authoring before any
+rows materialize; row, proof, authority and current SQL checks still run.
 
 | Receiver | Result |
 | --- | --- |
@@ -119,7 +128,7 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v9`; any other version is refused. Each hello declares the
+`rocky.link.v14`; any other version is refused. Each hello declares the
 generation its sender runs, since a credential chain names none: a replica
 sends a peer only frames of generations it admits, and a sync that meets a
 newer one [adopts it](adopting-generations.md). Every request runs as a

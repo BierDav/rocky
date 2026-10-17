@@ -130,6 +130,9 @@ impl<A: RowApplication> Inner<A> {
             else {
                 continue;
             };
+            // Each table the statement reads, its own scope's state only;
+            // a partitioned table's concrete partitions are checked apart.
+            self.require_scope_readable(projected.scope).await?;
             if typed.partitioned(projected) {
                 continue;
             }

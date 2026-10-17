@@ -96,11 +96,16 @@ impl<'de> Deserialize<'de> for Chain {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedFrame {
     #[serde(with = "serde_bytes")]
-    pub(crate) header: Vec<u8>,
+    header: Vec<u8>,
     #[serde(with = "serde_bytes")]
-    pub(crate) body: Vec<u8>,
+    body: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chain: Option<Chain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) migration: Option<crate::replica::MigrationMembership>,
+    /// The verified operation of these immutable bytes, once decoded.
+    #[serde(skip)]
+    decoded: std::sync::OnceLock<Box<Operation<Extensions>>>,
 }
 impl EncryptedFrame {
     /// A frame without its chain, as storage and a session page hold it.
@@ -109,6 +114,23 @@ impl EncryptedFrame {
             header,
             body,
             chain: None,
+            migration: None,
+            decoded: std::sync::OnceLock::new(),
+        }
+    }
+    pub(crate) fn header_bytes(&self) -> &[u8] {
+        &self.header
+    }
+    pub(crate) fn body_bytes(&self) -> &[u8] {
+        &self.body
+    }
+    /// The frame with another body, as a test tampers with one.
+    #[cfg(test)]
+    pub(crate) fn with_body(&self, body: Vec<u8>) -> Self {
+        Self {
+            body,
+            decoded: std::sync::OnceLock::new(),
+            ..self.clone()
         }
     }
     pub(crate) fn with_chain(mut self, chain: Chain) -> Self {
@@ -120,6 +142,7 @@ impl EncryptedFrame {
     pub(crate) fn with_header(&self, header: Vec<u8>) -> Self {
         Self {
             header,
+            decoded: std::sync::OnceLock::new(),
             ..self.clone()
         }
     }
@@ -129,7 +152,7 @@ impl EncryptedFrame {
     }
     /// The digest the signed header names its chain by.
     pub(crate) fn chain_digest(&self) -> Result<Commitment, Error> {
-        Ok(self.operation()?.header.extensions.chain)
+        Ok(self.operation_ref()?.header.extensions.chain)
     }
     /// The author's chain, which must be the one the header names.
     pub(crate) fn chain(&self) -> Result<&Chain, Error> {
@@ -140,11 +163,20 @@ impl EncryptedFrame {
     }
     /// Bytes a page or a retention bound counts for the frame: its header
     /// and body with their encoding, without the chain.
+    pub(crate) fn stored_bytes(&self) -> Result<u64, Error> {
+        u64::try_from(self.header.len())
+            .ok()
+            .and_then(|n| n.checked_add(self.body.len() as u64))
+            .ok_or_else(|| denied("stored frame length overflow"))
+    }
     pub fn weight(&self) -> usize {
         self.header
             .len()
             .saturating_add(self.body.len())
             .saturating_add(32)
+            .saturating_add(self.migration.as_ref().map_or(0, |proof| {
+                encode(proof).map_or(usize::MAX, |bytes| bytes.len())
+            }))
     }
     /// The frame with its chain, for a transport outside a native session.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
@@ -166,12 +198,26 @@ impl EncryptedFrame {
         Ok(frame)
     }
     pub fn id(&self) -> Result<Hash, Error> {
-        Ok(self.operation()?.hash)
+        Ok(self.operation_ref()?.hash)
     }
     pub fn scope(&self) -> Result<ResourceScope, Error> {
-        Ok(self.operation()?.header.extensions.scope)
+        Ok(self.operation_ref()?.header.extensions.scope)
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
+        self.operation_ref().cloned()
+    }
+    /// The verified operation, decoded once per frame: its bytes never change.
+    pub(crate) fn operation_ref(&self) -> Result<&Operation<Extensions>, Error> {
+        if let Some(operation) = self.decoded.get() {
+            return Ok(operation);
+        }
+        let _ = self.decoded.set(Box::new(self.verified_operation()?));
+        self.decoded
+            .get()
+            .map(|operation| &**operation)
+            .ok_or_else(|| Error::Corrupt("decoded frame".into()))
+    }
+    fn verified_operation(&self) -> Result<Operation<Extensions>, Error> {
         let digest = Hash::new(
             [
                 &(self.header.len() as u64).to_le_bytes()[..],
@@ -194,6 +240,29 @@ impl EncryptedFrame {
     }
     fn decode_operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
+        check_header(&header)?;
+        let operation = Operation {
+            hash: header.hash(),
+            header,
+            body: Some(Body::new(&self.body)),
+        };
+        validate_operation(&operation)
+            .map_err(|_| denied("invalid operation signature or payload"))?;
+        Ok(operation)
+    }
+}
+
+/// A row frame's signed header without its body: what a placement shows.
+pub(crate) fn verified_header(bytes: &[u8]) -> Result<Header<Extensions>, Error> {
+    let header: Header<Extensions> = decode(bytes)?;
+    check_header(&header)?;
+    p2panda_core::validate_header(&header).map_err(|_| denied("invalid header signature"))?;
+    Ok(header)
+}
+
+/// The row format and authenticated metadata every row header satisfies.
+fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
+    {
         if header.extensions.row_format != ROW_FORMAT {
             return Err(denied("unsupported row frame format"));
         }
@@ -217,14 +286,7 @@ impl EncryptedFrame {
         {
             return Err(denied("invalid operation metadata"));
         }
-        let operation = Operation {
-            hash: header.hash(),
-            header,
-            body: Some(Body::new(&self.body)),
-        };
-        validate_operation(&operation)
-            .map_err(|_| denied("invalid operation signature or payload"))?;
-        Ok(operation)
+        Ok(())
     }
 }
 
@@ -354,8 +416,14 @@ impl RowPayload {
         Ok(())
     }
     pub(crate) fn decode(plaintext: &[u8]) -> Result<Self, Error> {
-        Self::check_formats(plaintext)?;
-        let envelope: WitnessBody = decode(plaintext)?;
+        // A payload that does not decode is refused naming its format.
+        let envelope: WitnessBody = match decode(plaintext) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                Self::check_formats(plaintext)?;
+                return Err(error);
+            }
+        };
         if envelope.version != 1 {
             return Err(denied("unsupported creation witness format"));
         }
@@ -367,7 +435,13 @@ impl RowPayload {
         {
             return Err(denied("invalid creation witness envelope"));
         }
-        let body: BundleBody = decode(&envelope.body)?;
+        let body: BundleBody = match decode(&envelope.body) {
+            Ok(body) => body,
+            Err(error) => {
+                Self::check_formats(plaintext)?;
+                return Err(error);
+            }
+        };
         if body.version != 5 {
             return Err(denied("unsupported bundle version"));
         }
@@ -442,6 +516,9 @@ impl RowPayload {
     }
     pub(crate) fn membership(&self) -> Option<&Membership> {
         self.membership.as_ref()
+    }
+    pub(crate) fn writes(&self) -> &[RowWrite] {
+        &self.writes
     }
     pub(crate) fn into_writes(self) -> Vec<RowWrite> {
         self.writes

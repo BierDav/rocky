@@ -59,13 +59,24 @@ statement and readmit the identity.
 
 `EncryptedReplica` holds a set, given in `SecureConfig.revocations` and
 persisted in `secure_metadata`; reopening keeps the union of both.
+Open first verifies the stored graph, projection and admission evidence under
+the retained set. It then applies new supplied statements through the ordinary
+atomic revocation transaction before returning: the set, bookmark resolution,
+projection, replay ledger and signed admission head commit together. A failure
+inside that transaction preserves the old state. A later notification or
+settling failure can return an error after the consistent new state committed;
+reopening uses that committed set. Retrying the first open transaction always
+uses the original supplied set, including when expired retained statements are
+pruned.
+
 `learn_revocations` merges another set; when its set changed it ends every
 session and cursor and re-admits pending frames. Chains and frames verify under
 the held set:
 
 - every frame of a revoked author is refused, earlier ones included; rows of
   that author a device did not hold arrive by checkpoint. A replica never
-  sends such a frame, so one that relayed them still reconciles with peers;
+  sends such a frame or its [placement](lazy-compaction.md) header, so one
+  that relayed them still reconciles with peers;
 - frames of every other author are admitted whenever they were signed;
 - confirmed command results and historical checkpoints verify with no
   revocation at the time they were issued, since a receipt anchors them.
@@ -109,7 +120,7 @@ Revocation is an authority fact, independent of links or networking controls.
 
 ## Limits
 
-- Until [phase 8](../features_07/08-concurrent-rotation.md), two issuers
+- Until [phase 8](../old/features_07/08-concurrent-rotation.md), two issuers
   rotating one scope at once end in "key differs from retained crypto state"
   where the second key arrives. Concurrent revocations of devices reading
   disjoint scopes merge.
@@ -117,7 +128,7 @@ Revocation is an authority fact, independent of links or networking controls.
 - Recorded access selects scopes precisely at any issuer. Unrecorded devices
   rotate all collection keys and known partition secrets held here; only
   their node is named. Non-issuer delegation provenance remains unrecorded
-  ([phase 7](../features_07/07-registry-revocation.md)).
+  ([phase 7](../old/features_07/07-registry-revocation.md)).
 - A member learns statements from any peer, but the keys a revocation
   rotated only from an issuer's renewal; without one its rows wait for them.
 - Devices whose clocks straddle a day boundary near an expiry hold different
@@ -132,9 +143,9 @@ Revocation is an authority fact, independent of links or networking controls.
 | `Revocation` | `app`, `issuer` (the signing identity), `time`, `nodes`, `identities`, `capabilities`; ID `rocky.revocation.id.v3` |
 | `SignedRevocation` | The signer's issuer `chain`, empty for the owner, and its signature `rocky.revocation.v3`; at most 8 KiB |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
-| Live link handshake | `rocky.link.v9`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
-| Checkpoint statement | Format 15, `revocations` digest of its signer |
-| Encrypted replica | `rocky.encrypted-replica.v25`; `secure_metadata.revocations` |
+| Live link handshake | `rocky.link.v14`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
+| Checkpoint statement | Format 16, `revocations` digest of its signer |
+| Encrypted replica | `rocky.encrypted-replica.v32`; `secure_metadata.revocations` |
 
 ## Qualification
 

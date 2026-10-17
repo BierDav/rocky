@@ -136,7 +136,39 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.chain = Chain::new(credentials.clone())?;
         inner.config.credentials = credentials;
-        inner.node_author = Some(identity::NodeAuthor::new(&inner.config)?);
+        // The renewed chain is the original node's; a line node of another
+        // line keeps authoring there.
+        let original = identity::NodeAuthor::new(&inner.config)?;
+        let root = inner
+            .config
+            .manifest
+            .verify(inner.config.publisher)
+            .map_err(credential)?
+            .hash();
+        inner
+            .line_nodes
+            .insert(rocky_credentials::genesis_tip(root), original.clone());
+        if inner
+            .node_author
+            .as_ref()
+            .is_none_or(|author| author.key.public_key() == inner.config.node.public_key())
+        {
+            let on_genesis = match &inner.workspace.followed {
+                Some((domain, _)) => inner
+                    .graph_for(*domain)
+                    .and_then(|graph| {
+                        graph
+                            .line_root(inner.workspace.tip)
+                            .map_err(credential)
+                            .map(|line| line == graph.genesis())
+                    })
+                    .unwrap_or(true),
+                None => true,
+            };
+            if on_genesis {
+                inner.node_author = Some(original);
+            }
+        }
         let readable =
             |key: &KeyMaterial| grants.iter().any(|grant| readable_grant(grant, key.scope));
         inner.config.keys.retain(readable);

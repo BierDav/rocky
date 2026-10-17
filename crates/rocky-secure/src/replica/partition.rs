@@ -70,7 +70,7 @@ impl<A: RowApplication> Inner<A> {
         tuple: Option<&PartitionTuple>,
     ) -> Result<(), Error> {
         if let Some(tuple) = tuple {
-            return self.check_tuple(scope, tuple);
+            return self.check_retained_tuple(scope, tuple);
         }
         if self.partitioned(scope) {
             return Err(denied(
@@ -149,6 +149,27 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// A removed table has no current descriptor. Its authenticated address
+    /// stays structural; restoring its descriptor checks the columns again.
+    fn check_retained_tuple(
+        &self,
+        scope: ResourceScope,
+        tuple: &PartitionTuple,
+    ) -> Result<(), Error> {
+        if self.tables.contains(&scope.table) {
+            return self.check_tuple(scope, tuple);
+        }
+        if tuple
+            .scope(scope.domain, scope.table)
+            .map_err(|error| denied(&error.to_string()))?
+            != scope
+            || !self.domains.contains(&scope.domain.domain)
+            || scope.domain.app != self.definition.app
+        {
+            return Err(denied("invalid retained partition address"));
+        }
+        Ok(())
+    }
     pub(super) async fn load_partitions(&mut self) -> Result<(), Error> {
         for row in rows(&self.conn, "SELECT scope,tuple FROM secure_partitions").await? {
             let [SqlValue::Blob(scope), SqlValue::Blob(tuple)] = row.as_slice() else {
@@ -156,7 +177,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let scope = decode(scope)?;
             let tuple = decode(tuple)?;
-            self.check_tuple(scope, &tuple)?;
+            self.check_retained_tuple(scope, &tuple)?;
             self.partitions.insert(scope, tuple);
         }
         Ok(())
@@ -169,14 +190,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(());
         };
         let scope = operation.header.extensions.scope;
-        {
-            let inner = self.inner.lock().await;
-            if inner.partitions.get(&scope) == Some(&tuple) {
-                return Ok(());
-            }
-            inner.verify_frame(frame, now()?)?;
-        }
-        self.register_partition(scope, tuple).await
+        self.register_partition_address(scope, tuple, Some(frame))
+            .await
     }
     /// The prospective own-id partition. It is a log-derived candidate, not a reservation;
     /// the write transaction still allocates and verifies the identity.
@@ -247,8 +262,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         tuple: PartitionTuple,
     ) -> Result<(), Error> {
+        self.register_partition_address(scope, tuple, None).await
+    }
+    async fn register_partition_address(
+        &self,
+        scope: ResourceScope,
+        tuple: PartitionTuple,
+        frame: Option<&EncryptedFrame>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.check_tuple(scope, &tuple)?;
+        if let Some(frame) = frame {
+            if inner.partitions.get(&scope) == Some(&tuple) {
+                return Ok(());
+            }
+            inner.verify_frame(frame, now()?)?;
+            inner.check_retained_tuple(scope, &tuple)?;
+        } else {
+            inner.check_tuple(scope, &tuple)?;
+        }
         inner
             .config
             .credentials
@@ -324,6 +355,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(false);
         }
         for scope in self.partitions.keys().filter(|scope| scope.table == table) {
+            self.require_scope_readable(*scope).await?;
             if !self.holds(*scope).await?
                 || !self.can_read_key(*scope, &self.local_grants(now()?)?)
                 || !self.config.keys.iter().any(|key| key.scope == *scope)

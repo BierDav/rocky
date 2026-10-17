@@ -1,5 +1,7 @@
 //! Graph admission, constant-row-cost sealing and line isolation.
 use super::*;
+mod frontiers;
+mod refresh;
 use crate::storage::rows;
 use rocky_core::TipId;
 use rocky_credentials::{
@@ -212,6 +214,7 @@ async fn seal(f: &Fixture, replica: &Replica) -> SignedSeal {
             action: SealAction::Continue {
                 schema: f.app().definition().hash(),
             },
+            recovery: None,
         },
         &f.publisher,
     )
@@ -235,6 +238,7 @@ fn branch(f: &Fixture, seal: &SignedSeal) -> (TipId, Vec<TipStatement>) {
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: f.manifest.verify(f.publisher.public_key()).unwrap().hash(),
             scope: f.public.domain,
             seal: seal.id().unwrap(),
             minimum_in_sync: 1,

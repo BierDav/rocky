@@ -261,21 +261,16 @@ impl Node {
                     current: crate::Generation {
                         schema: generation.current.schema,
                     },
-                    previous: generation
-                        .previous
-                        .into_iter()
-                        .map(|(generation, manifest)| GenerationRecord {
-                            generation: crate::Generation {
-                                schema: generation.schema,
-                            },
-                            manifest: HEXLOWER.encode(&manifest),
-                        })
-                        .collect(),
-                    baseline: generation.baseline,
-                    application: self.application(&settings)?,
+                    pending: self.replica.pending_schema().await?.map(|pending| {
+                        PendingGeneration {
+                            tip: HEXLOWER.encode(&pending.tip.0),
+                            manifest: HEXLOWER.encode(&pending.manifest),
+                        }
+                    }),
+                    application: self.application(&settings).await?,
                     migration: self.migration(&settings).await?,
                     waiting_for_issuer: !settings.issuer()
-                        && self.application(&settings)? == crate::DeclaredSchema::Ahead,
+                        && self.application(&settings).await? == crate::DeclaredSchema::Ahead,
                     rebuilding: generation.plan.map(|plan| RebuildProgress {
                         schema: HEXLOWER.encode(&plan.schema),
                         filled: plan.filled as u64,
@@ -423,14 +418,18 @@ impl Node {
         let result = if skip.is_some() {
             Ok((json!({"state":"idle"}), false))
         } else {
-            self.run_sync_pass(
-                transport.ok_or(ServiceError::NetworkRequired("sync"))?,
-                automatic,
-                retry_only,
-                &peers,
-                first_attempt_id,
-            )
-            .await
+            let transport = transport.ok_or(ServiceError::NetworkRequired("sync"))?;
+            let before = self.replica.followed_tip().await;
+            let result = self
+                .run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
+                .await;
+            // A pass that switched the followed tip syncs the new tip once more.
+            if result.is_ok() && self.replica.followed_tip().await != before {
+                self.run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
+                    .await
+            } else {
+                result
+            }
         };
         // A received move may have switched this device to another line.
         if result.is_ok() {

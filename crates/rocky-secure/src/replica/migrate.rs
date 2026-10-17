@@ -104,6 +104,17 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         readers: &BTreeMap<String, Commitment>,
     ) -> Result<(), Error> {
+        self.record_plan_as(schema, domain, readers, false).await
+    }
+    /// `record_plan`; `rebuild` projects again an unchanged schema, as after
+    /// a tip switch whose path filtered stored rows.
+    pub(super) async fn record_plan_as(
+        &self,
+        schema: &LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+        rebuild: bool,
+    ) -> Result<(), Error> {
         let incompatible = |reason: String| Error::Incompatible(reason);
         let descriptor = schema
             .canonical()
@@ -135,7 +146,8 @@ impl<A: RowApplication> Inner<A> {
         match rocky_core::classify(&installed, schema)
             .map_err(|refusal| incompatible(refusal.to_string()))?
         {
-            SchemaChange::Unchanged => return Ok(()),
+            SchemaChange::Unchanged if !rebuild => return Ok(()),
+            SchemaChange::Unchanged => {}
             SchemaChange::Local | SchemaChange::Additive { .. } => {}
         }
         // Local tables hold application data no stored row restores: they
@@ -203,6 +215,29 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    /// Drops the pending plan and its shadow tables inside the caller's
+    /// transaction.
+    pub(super) async fn discard_plan(&mut self) -> Result<(), Error> {
+        let Some(record) = self.plan_record().await? else {
+            return Ok(());
+        };
+        for table in record.schema.mergeable() {
+            self.conn
+                .execute(
+                    format!(
+                        "DROP TABLE IF EXISTS {}",
+                        quoted(&physical(&table.sql_name, true))
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        self.conn
+            .execute("DELETE FROM secure_projection_plan", ())
+            .await?;
+        self.workspace.shadow = None;
+        Ok(())
+    }
     /// The pending plan's progress.
     pub(super) async fn plan_status(&self) -> Result<Option<ProjectionPlan>, Error> {
         let Some(record) = self.plan_record().await? else {
@@ -252,6 +287,17 @@ impl<A: RowApplication> Inner<A> {
         let Some(record) = self.plan_record().await? else {
             return Ok(false);
         };
+        if let Some((scope, _, _, target)) = self.schema_switch_intent().await?
+            && self
+                .graph_for(scope)?
+                .schema_any(target)
+                .map_err(credential)?
+                != self.manifest
+        {
+            return Err(denied(
+                "a staged schema switch resumes only with its target schema",
+            ));
+        }
         let installed = self
             .installed_typed()
             .await?
@@ -489,7 +535,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Verifies every shadow table against the stored rows, then replaces
     /// the installed tables with them, inside the caller's transaction.
-    async fn switch(&self, record: &Record, shadow: &Typed) -> Result<(), Error> {
+    async fn switch(&mut self, record: &Record, shadow: &Typed) -> Result<(), Error> {
         for table in &shadow.tables {
             self.verify_shadow(shadow, table).await?;
         }
@@ -546,6 +592,9 @@ impl<A: RowApplication> Inner<A> {
             self.install_history_for(&projected).await?;
         }
         self.end_switch_history(&projected, switching).await?;
+        // Rows rebuilt as the follow moves on project into the new tables.
+        self.workspace.shadow = None;
+        self.workspace.typed = Some(Arc::new(projected));
         self.finish_switch(record).await
     }
     /// A local table keeps its rows; only its indexes
@@ -586,7 +635,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// Records the new tables as installed and ends the plan.
-    async fn finish_switch(&self, record: &Record) -> Result<(), Error> {
+    async fn finish_switch(&mut self, record: &Record) -> Result<(), Error> {
         let descriptor = record
             .schema
             .canonical()
@@ -611,6 +660,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         self.cause(crate::observe::Cause::Rebuild);
+        self.finish_schema_switch().await?;
         Ok(())
     }
     /// The shadow table holds exactly the live stored rows of its scope.
@@ -714,7 +764,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.inner.lock().await.plan_status().await
     }
     /// Runs a pending plan step by step; other work proceeds between steps.
-    pub(super) async fn run_plan(&self) -> Result<(), Error> {
+    pub(crate) async fn run_plan(&self) -> Result<(), Error> {
         loop {
             let mut inner = self.inner.lock().await;
             if !inner.plan_step().await? {

@@ -42,12 +42,38 @@ async fn open(f: &Fixture, path: &Path, node: &PrivateKey) -> (Replica, Credenti
         credentials,
     )
 }
+/// Exchanges tip graphs as a link does: each side follows `main` once it
+/// exists, and `source` learns which tip `target` follows.
+async fn share_graph(
+    f: &Fixture,
+    source: &Replica,
+    (target, key, credentials): (&Replica, &PrivateKey, &CredentialChain),
+) {
+    exchange_graphs(source, target, f.public.domain).await;
+    source
+        .admit_peer(key.public_key(), credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+}
+/// Tells `server` which tip `client`, whose node key is `key`, follows.
+async fn introduce(
+    server: &Replica,
+    client: &Replica,
+    key: &PrivateKey,
+    credentials: &CredentialChain,
+) {
+    server
+        .admit_peer(key.public_key(), credentials, client.followed_tip().await)
+        .await
+        .unwrap();
+}
 /// One complete pass from `source` to `target`; the target acknowledges what it applied.
 async fn sync(
     f: &Fixture,
     source: &Replica,
     target: (&Replica, &PrivateKey, &CredentialChain),
 ) -> Vec<ResourceScope> {
+    share_graph(f, source, target).await;
     let (replica, key, credentials) = target;
     let mut cursor = None;
     loop {
@@ -92,13 +118,24 @@ async fn all_rows(f: &Fixture, replica: &Replica) -> BTreeMap<Commitment, RowFie
             .snapshot_page(f.public, cursor, MAX_SNAPSHOT_ROWS)
             .await
             .unwrap();
-        assert!(page.complete);
+        // An unfinished import never reads as complete.
+        let importing = replica
+            .rebootstrap_progress(f.public)
+            .await
+            .unwrap()
+            .is_some();
+        assert_eq!(page.complete, !importing);
         rows.extend(page.rows);
         cursor = page.next;
         if cursor.is_none() {
             return rows;
         }
     }
+}
+/// Seals what `replica` holds and compacts there; returns the base.
+async fn compacted(f: &Fixture, replica: &Replica) -> SignedCheckpoint {
+    seal_and_compact(replica, &f.publisher, f.public.domain).await;
+    replica.checkpoint(f.public).await.unwrap()
 }
 async fn count(replica: &Replica, sql: &str) -> i64 {
     match rows(&replica.inner.lock().await.conn, sql).await.unwrap()[0][0] {
@@ -122,7 +159,7 @@ fn policy(required: &[&PrivateKey], behind: &[&PrivateKey]) -> RetentionPolicy {
 }
 
 #[tokio::test]
-async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
+async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("a.db");
@@ -143,38 +180,34 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
         .await
         .unwrap();
     let expected = all_rows(&f, &replica).await;
-    // Each fault rolls its step back; the file must reopen, pass the audit
-    // and continue from the last committed step.
-    for (stage, skip) in [
-        (Stage::Begin, 0),
-        (Stage::Replay, 0),
-        (Stage::Replay, 2),
-        (Stage::Seal, 0),
-        (Stage::Install, 1),
-    ] {
-        replica.inject_stage_fault(stage, skip).await;
-        assert!(
-            matches!(
-                replica.checkpoint(f.public).await,
-                Err(Error::InjectedFailure)
-            ),
-            "{stage:?}"
-        );
-        drop(replica);
-        replica = open(&f, &path, &node).await.0;
-        replica.audit(f.public).await.unwrap();
-        assert_eq!(all_rows(&f, &replica).await, expected);
-    }
+    // No base forms anywhere but at a seal.
+    assert!(matches!(
+        replica.checkpoint(f.public).await,
+        Err(Error::Rejected(_))
+    ));
+    let genesis = replica.followed_tip().await;
+    seal_main(&replica, &f.publisher, f.public.domain).await;
+    // The fault rolls the scope's compaction back; the file must reopen,
+    // pass the audit and compact again.
+    replica.inject_stage_fault(Stage::Compact, 0).await;
+    assert!(matches!(
+        replica.compact(f.public.domain, 0).await,
+        Err(Error::InjectedFailure)
+    ));
+    drop(replica);
+    replica = open(&f, &path, &node).await.0;
+    replica.audit(f.public).await.unwrap();
+    assert_eq!(all_rows(&f, &replica).await, expected);
+    assert!(replica.checkpoint(f.public).await.is_err());
+    replica.compact(f.public.domain, 0).await.unwrap();
     let signed = replica.checkpoint(f.public).await.unwrap();
     let statement = &signed.statement;
     assert_eq!(signed.signer(), node.public_key());
-    assert_eq!(
-        statement.tip,
-        rocky_credentials::genesis_tip(f.app().definition().hash())
-    );
+    assert_eq!(statement.tip, genesis);
+    assert!(statement.seal.is_some());
     assert_eq!(statement.schema, 1);
     assert_eq!(statement.revocations, crate::tests::unrevoked());
-    assert_eq!(statement.key_epoch.generation, 1);
+    assert_eq!(statement.key_epoch().unwrap().generation, 1);
     assert_eq!((statement.sequence, statement.previous), (1, None));
     assert_eq!(statement.frontier.len(), 1);
     assert_eq!(statement.frontier[0].author, node.public_key());
@@ -182,19 +215,19 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     // Stamps are hybrid time: the checkpoint's clock is its last frame's.
     assert_eq!(statement.operations, 42);
     assert_eq!(statement.clock, statement.frontier[0].clock);
-    assert_eq!((statement.rows.count, statement.tombstones), (40, 1));
-    assert_eq!(statement.creations.count, 40);
+    // Compaction keeps live rows only; the deleted row is dead at the seal.
+    assert_eq!((statement.rows.count, statement.tombstones), (39, 0));
+    assert_eq!(statement.creations.count, 39);
     assert_eq!(statement.handles.count, 42);
     // Nobody acknowledged anything: every covered operation is a sole copy.
     assert_eq!(statement.custody.superseded, 0);
     assert_eq!(statement.custody.sole.count, 42);
     let report = replica.audit(f.public).await.unwrap();
     assert_eq!(report.checkpoint, Some(signed.id().unwrap()));
-    assert_eq!(
-        (report.operations, report.rows, report.replayed),
-        (42, 40, 0)
-    );
-    // Nothing new: the same checkpoint. One more operation: the next in the chain.
+    assert_eq!((report.rows, report.replayed), (39, 0));
+    // Nothing new: the same base. One more operation replays over it, and
+    // the next seal's base follows it in the chain.
+    replica.compact(f.public.domain, 0).await.unwrap();
     assert_eq!(
         replica.checkpoint(f.public).await.unwrap().id().unwrap(),
         signed.id().unwrap()
@@ -204,38 +237,57 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
         .await
         .unwrap();
     assert_eq!(replica.audit(f.public).await.unwrap().replayed, 1);
-    // A sealed checkpoint whose install was interrupted is finished by open.
-    replica.inject_stage_fault(Stage::Install, 0).await;
-    assert!(replica.checkpoint(f.public).await.is_err());
-    assert!(
-        replica
-            .checkpoint_status(f.public)
-            .await
-            .unwrap()
-            .in_progress
-    );
-    drop(replica);
-    replica = open(&f, &path, &node).await.0;
-    assert!(
-        !replica
-            .checkpoint_status(f.public)
-            .await
-            .unwrap()
-            .in_progress
-    );
+    seal_and_compact(&replica, &f.publisher, f.public.domain).await;
     let next = replica.checkpoint(f.public).await.unwrap();
     assert_eq!(next.statement.sequence, 2);
     assert_eq!(next.statement.previous, Some(signed.id().unwrap()));
-    assert_eq!(next.statement.rows.count, 41);
+    assert_eq!(next.statement.rows.count, 40);
     drop(replica);
     let replica = open(&f, &path, &node).await.0;
     assert_eq!(replica.audit(f.public).await.unwrap().replayed, 0);
     assert_eq!(all_rows(&f, &replica).await.len(), 40);
+    // The deleted row was dead at the seal: compaction released it.
     assert_eq!(
         replica.companion(f.public, id(4)).await.unwrap(),
-        Companion::Deleted
+        Companion::Unavailable
     );
 }
+
+/// Imports `source`'s no-frames base of the keyless private scope into
+/// `target`: signed, canonical, no pages, no key installed.
+async fn import_no_frames(
+    f: &Fixture,
+    source: &Replica,
+    (target, key, credentials): (&Replica, &PrivateKey, &CredentialChain),
+) -> SignedCheckpoint {
+    source
+        .admit_peer(key.public_key(), credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = source
+        .checkpoint_offer(key.public_key(), credentials, f.private)
+        .await
+        .unwrap()
+        .expect("a no-frames base");
+    assert!(offered.statement.no_frames());
+    assert_eq!(offered.statement.key_epoch(), None);
+    crate::tests::assert_signed_empty(&offered);
+    target.begin_rebootstrap(offered.clone()).await.unwrap();
+    let (_, cursor, complete) = target
+        .rebootstrap_progress(f.private)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((cursor, complete), (None, true));
+    let report = target.finish_rebootstrap(f.private).await.unwrap();
+    assert_eq!(report.checkpoint, offered.id().unwrap());
+    assert_eq!(report.superseded, 0);
+    assert!(target.key_epochs(f.private).await.is_empty());
+    offered
+}
+
+/// The public scope's base row: the first scope state of these fixtures.
+const PUBLIC_BASE: &str = "scope=(SELECT MIN(id) FROM secure_scope_state)";
 
 #[tokio::test]
 async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
@@ -258,7 +310,10 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         a.prune(f.public).await.unwrap(),
         blocked(PruneBlock::NoCheckpoint)
     );
-    a.checkpoint(f.public).await.unwrap();
+    compacted(&f, &a).await;
+    // The base is flushed before any operation it covers may go.
+    let (commit, durable, _) = a.watermark().await;
+    assert_eq!(commit, durable);
     assert_eq!(
         a.prune(f.public).await.unwrap(),
         blocked(PruneBlock::NoPolicy)
@@ -274,9 +329,6 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
             blocked: Some(PruneBlock::SoleCopy { .. })
         }
     ));
-    // The checkpoint is flushed before any operation it covers may go.
-    let (commit, durable, _) = a.watermark().await;
-    assert_eq!(commit, durable);
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
@@ -288,9 +340,13 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     // A checkpoint that no longer verifies blocks pruning.
     let signed = {
         let inner = a.inner.lock().await;
-        let stored = rows(&inner.conn, "SELECT signed FROM secure_checkpoints")
-            .await
-            .unwrap();
+        // The public base; the keyless private scope has its own.
+        let stored = rows(
+            &inner.conn,
+            &format!("SELECT signed FROM secure_checkpoints WHERE {PUBLIC_BASE}"),
+        )
+        .await
+        .unwrap();
         let rocky_core::SqlValue::Blob(signed) = stored[0][0].clone() else {
             panic!("missing checkpoint");
         };
@@ -299,7 +355,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         inner
             .conn
             .execute(
-                "UPDATE secure_checkpoints SET signed=?",
+                format!("UPDATE secure_checkpoints SET signed=?1 WHERE {PUBLIC_BASE}"),
                 [tampered.to_bytes().unwrap()],
             )
             .await
@@ -316,7 +372,10 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         .lock()
         .await
         .conn
-        .execute("UPDATE secure_checkpoints SET signed=?", [signed])
+        .execute(
+            format!("UPDATE secure_checkpoints SET signed=?1 WHERE {PUBLIC_BASE}"),
+            [signed],
+        )
         .await
         .unwrap();
     // A failure in the second batch keeps the first one pruned and the file whole.
@@ -387,8 +446,8 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         .await
         .unwrap();
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
-    a.checkpoint(f.public).await.unwrap();
-    assert_eq!(a.prune(f.public).await.unwrap().pruned, 1);
+    seal_main(&a, &f.publisher, f.public.domain).await;
+    assert_eq!(a.compact(f.public.domain, 0).await.unwrap().pruned, 1);
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
     a.audit(f.public).await.unwrap();
 }
@@ -418,12 +477,12 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
         .await
         .unwrap();
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
+    compacted(&f, &a).await;
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
-    a.checkpoint(f.public).await.unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
-    let before = all_rows(&f, &a).await;
+    let before = a.snapshot(f.public).await.unwrap().rows;
     // The original creation and deletion frames come back late.
     for frame in [&created, &deleted] {
         assert_eq!(
@@ -431,13 +490,13 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
             ReceiveStatus::Pruned
         );
     }
-    // An edit that predates the deletion applies to the tombstone only.
-    assert_eq!(a.receive(concurrent).await.unwrap(), ReceiveStatus::Applied);
-    assert_eq!(all_rows(&f, &a).await, before);
+    // An edit that predates the deletion names a creation compaction
+    // released with the dead row: it waits, and changes nothing.
     assert_eq!(
-        a.companion(f.public, id(1)).await.unwrap(),
-        Companion::Deleted
+        a.receive(concurrent).await.unwrap(),
+        ReceiveStatus::PendingDependencies
     );
+    assert_eq!(a.snapshot(f.public).await.unwrap().rows, before);
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
     // A retried handle from before the pruned_prefix never authors again.
     let operations = count(&a, "SELECT COUNT(*) FROM secure_handles").await;
@@ -466,7 +525,7 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
         operations
     );
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
-    assert_eq!(all_rows(&f, &a).await, before);
+    assert_eq!(a.snapshot(f.public).await.unwrap().rows, before);
     // An acknowledgment for a pruned operation is accepted and records nothing.
     a.acknowledge(
         b_key.public_key(),
@@ -508,10 +567,10 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
         .unwrap();
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_handles").await, 3);
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
+    compacted(&f, &a).await;
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
-    a.checkpoint(f.public).await.unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
     // Only the newest handle survives; the audit checks the handle digest.
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_handles").await, 1);
@@ -554,19 +613,20 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
             .await
             .unwrap();
     }
-    a.author_buffered(handle(100), update(&f, 2, "base", None), vec![])
-        .await
-        .unwrap();
     a.author_buffered(handle(101), insert(&f, 300, "from a"), vec![])
         .await
         .unwrap();
     sync(&f, &a, (&b, &keys[1], &b_credentials)).await;
+    let signed = compacted(&f, &a).await;
     a.set_retention_policy(f.public, policy(&[&keys[1]], &[&keys[2]]))
         .await
         .unwrap();
-    let signed = a.checkpoint(f.public).await.unwrap();
-    assert_eq!(a.prune(f.public).await.unwrap().pruned, 47);
+    assert_eq!(a.prune(f.public).await.unwrap().pruned, 46);
     a.author(handle(102), update(&f, 0, "base", Some("after")), vec![])
+        .await
+        .unwrap();
+    // Deleted after the seal, so its tombstone is still held.
+    a.author(handle(100), update(&f, 2, "base", None), vec![])
         .await
         .unwrap();
     // C's unsent edits: an update, a new row, an edit of a row A deleted, and
@@ -595,11 +655,12 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         .id()
         .unwrap();
     // B was online and acknowledged everything: it is not behind and converges.
+    share_graph(&f, &a, (&b, &keys[1], &b_credentials)).await;
     let pruned_prefix = a
         .pruned_page(keys[1].public_key(), &b_credentials, f.public, None)
         .await
         .unwrap();
-    assert_eq!(pruned_prefix.logs, vec![(keys[0].public_key(), 46)]);
+    assert_eq!(pruned_prefix.logs, vec![(keys[0].public_key(), 45)]);
     assert!(!b.behind_pruned(&pruned_prefix).await.unwrap());
     assert_eq!(
         sync(&f, &a, (&b, &keys[1], &b_credentials)).await,
@@ -622,6 +683,12 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         .unwrap();
         let client = async {
             let mut session = session;
+            // C learns the seal and follows `main` on, then says so.
+            session.sync_tip_graph(&c).await.unwrap();
+            if c.followed_bookmark().await.is_none() {
+                c.follow_bookmark(f.public.domain, "main").await.unwrap();
+            }
+            session.sync_tip_graph(&c).await.unwrap();
             assert!(
                 session
                     .pull(&c, vec![f.public], None, MAX_SECURE_FRAME / 2)
@@ -648,7 +715,8 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
             assert_eq!(report.pending, vec![]);
             assert_eq!(report.rejected.len(), 1);
             assert_eq!(report.rejected[0].0, collision);
-            assert!(report.rejected[0].1.contains("row identity already exists"));
+            // A created the row before the seal C's insert comes late to.
+            assert!(report.rejected[0].1.contains("behind the finalized seal"));
             break;
         };
         // A failed import leaves the old state; the file reopens and audits.
@@ -661,6 +729,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     }
     assert_eq!(c.rebootstrap_progress(f.public).await.unwrap(), None);
     c.audit(f.public).await.unwrap();
+    import_no_frames(&f, &a, (&c, &keys[2], &c_credentials)).await;
     // C now syncs the frames after the checkpoint and A receives C's edits.
     assert!(!c.behind_pruned(&pruned_prefix).await.unwrap());
     sync(&f, &a, (&c, &keys[2], &c_credentials)).await;
@@ -691,14 +760,14 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     a.audit(f.public).await.unwrap();
     assert_eq!(all_rows(&f, &c).await, rows);
     // C checkpoints on top of the imported one and can prune in turn.
-    let next = c.checkpoint(f.public).await.unwrap();
+    let next = compacted(&f, &c).await;
     assert_eq!(next.statement.sequence, 2);
     assert_eq!(next.statement.previous, Some(signed.id().unwrap()));
     assert_eq!(next.signer(), keys[2].public_key());
 }
 
 #[tokio::test]
-async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_original_signer() {
+async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
@@ -707,7 +776,8 @@ async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_origi
     a.author(handle(1), insert(&f, 1, "retained"), vec![])
         .await
         .unwrap();
-    let original = a.checkpoint(f.public).await.unwrap();
+    let original = compacted(&f, &a).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     b.begin_rebootstrap(original.clone()).await.unwrap();
     let page = a
         .checkpoint_page(
@@ -723,14 +793,15 @@ async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_origi
     assert!(page.next.is_none());
     b.stage_checkpoint_page(page).await.unwrap();
     b.finish_rebootstrap(f.public).await.unwrap();
-
-    let offered = b
-        .checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(offered.signer(), b_key.public_key());
-    assert_eq!(offered.statement.rows, original.statement.rows);
+    introduce(&b, &a, &a_key, &a_credentials).await;
+    // A base is signed where it forms, at a seal: its signer is not offered
+    // its own signature back.
+    assert!(
+        b.checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let c_key = PrivateKey::new();
     let reader_grants = f
         .full()
@@ -747,6 +818,7 @@ async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_origi
     let c = EncryptedReplica::open(dir.path().join("c.db"), f.app(), config)
         .await
         .unwrap();
+    share_graph(&f, &a, (&c, &c_key, &c_credentials)).await;
     c.begin_rebootstrap(original.clone()).await.unwrap();
     let page = a
         .checkpoint_page(
@@ -761,7 +833,10 @@ async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_origi
         .unwrap();
     c.stage_checkpoint_page(page).await.unwrap();
     c.finish_rebootstrap(f.public).await.unwrap();
-    // A read-only peer cannot replace the signature, but may serve the cut to others.
+    introduce(&c, &a, &a_key, &a_credentials).await;
+    share_graph(&f, &b, (&c, &b_key, &b_credentials)).await;
+    introduce(&c, &b, &b_key, &b_credentials).await;
+    // Holders serve it onward, a read-only one too, unchanged.
     assert!(
         c.checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
             .await
@@ -774,16 +849,7 @@ async fn a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_origi
         .unwrap()
         .unwrap();
     assert_eq!(forwarded.id().unwrap(), original.id().unwrap());
-
-    // A retries against the same stable offer; own-signed imports remain refused.
-    let retry = b
-        .checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(offered.id().unwrap(), retry.id().unwrap());
     assert!(a.begin_rebootstrap(original).await.is_err());
-    a.begin_rebootstrap(offered).await.unwrap();
 }
 
 #[tokio::test]
@@ -801,7 +867,8 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     c.author(handle(50), insert(&f, 50, "mine"), vec![])
         .await
         .unwrap();
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
+    share_graph(&f, &a, (&c, &c_key, &c_credentials)).await;
     let before = all_rows(&f, &c).await;
     // A statement that was changed after signing.
     let mut forged = signed.clone();
@@ -840,7 +907,7 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     a.author(handle(60), insert(&f, 60, "newer"), vec![])
         .await
         .unwrap();
-    a.checkpoint(f.public).await.unwrap();
+    compacted(&f, &a).await;
     assert!(
         a.checkpoint_page(
             c_key.public_key(),
@@ -856,7 +923,7 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
 }
 
 #[tokio::test]
-async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
+async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
@@ -866,11 +933,9 @@ async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
         .author(handle(0), insert(&f, 0, "first"), vec![])
         .await
         .unwrap();
-    let size = frame.operation().unwrap().header.to_bytes().len() + frame.body.len();
+    let size = frame.operation().unwrap().header.to_bytes().len() + frame.body_bytes().len();
     a.set_retention_limits(RetentionLimits {
-        checkpoint_operations: 8,
-        soft_bytes: 30 * size,
-        hard_bytes: 60 * size,
+        hard_bytes: 40 * size,
         ..RetentionLimits::default()
     })
     .await
@@ -878,28 +943,32 @@ async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
-    // With an acknowledging peer, maintenance keeps history inside the bound.
+    // With an acknowledging peer, compacting at a seal now and then keeps
+    // history inside the bound.
     let mut peak = 0;
-    for index in 1..160 {
+    crate::tests::check_frontier_cache(&a, f.public).await;
+    for index in 1..80 {
         a.author_buffered(handle(index), insert(&f, index, "row"), vec![])
             .await
             .unwrap();
-        if index % 8 == 0 {
+        if index % 10 == 0 {
             sync(&f, &a, (&b, &b_key, &b_credentials)).await;
+            seal_and_compact(&a, &f.publisher, f.public.domain).await;
         }
         peak = peak.max(a.checkpoint_status(f.public).await.unwrap().retained_bytes);
     }
     let status = a.checkpoint_status(f.public).await.unwrap();
     assert_eq!(status.maintenance_error, None);
-    assert!(peak <= 60 * size as u64, "{peak}");
-    assert!(status.checkpoint.unwrap().statement.operations > 100);
+    assert!(peak <= 40 * size as u64, "{peak}");
+    assert!(status.checkpoint.unwrap().statement.operations > 60);
     assert!(!status.pruned_prefix.is_empty());
-    assert!(count(&a, "SELECT COUNT(*) FROM secure_operations").await < 60);
+    crate::tests::check_frontier_cache(&a, f.public).await;
+    assert!(count(&a, "SELECT COUNT(*) FROM secure_operations").await < 40);
     a.audit(f.public).await.unwrap();
     // Without acknowledgments nothing may be pruned: the hard bound answers
     // with a retryable error instead of losing anything.
     let mut refused = None;
-    for index in 160..300 {
+    for index in 80..200 {
         if let Err(error) = a
             .author_buffered(handle(index), insert(&f, index, "row"), vec![])
             .await
@@ -911,11 +980,12 @@ async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
     let (index, error) = refused.expect("backpressure");
     assert!(matches!(error, Error::Backpressure) && error.is_retryable());
     assert_eq!(a.lookup_mutation(handle(index)).await.unwrap(), None);
-    assert!(a.checkpoint_status(f.public).await.unwrap().retained_bytes <= 60 * size as u64);
+    crate::tests::check_frontier_cache(&a, f.public).await;
+    assert!(a.checkpoint_status(f.public).await.unwrap().retained_bytes <= 40 * size as u64);
     // Acknowledgments release it; the same handle then commits once.
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
-    a.checkpoint(f.public).await.unwrap();
-    assert!(a.prune(f.public).await.unwrap().pruned > 0);
+    seal_main(&a, &f.publisher, f.public.domain).await;
+    assert!(a.compact(f.public.domain, 0).await.unwrap().pruned > 0);
     a.author(handle(index), insert(&f, index, "row"), vec![])
         .await
         .unwrap();
@@ -953,10 +1023,10 @@ async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
         )
         .await
         .unwrap();
+    compacted(&f, &a).await;
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
-    a.checkpoint(f.public).await.unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
     // A cannot tell a pruned dependency from a missing one: the frame waits.
     assert_eq!(
@@ -971,9 +1041,7 @@ async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
     a.audit(f.public).await.unwrap();
 }
 
-const CRASH_STEPS: [&str; 7] = [
-    "begin", "replay", "seal", "install", "prune", "import", "switch",
-];
+const CRASH_STEPS: [&str; 4] = ["compact", "prune", "import", "switch"];
 /// Fixed keys, so that the parent reopens what the child wrote.
 fn crash_keys() -> (Fixture, [PrivateKey; 3]) {
     (
@@ -988,6 +1056,7 @@ async fn crash_rebootstrap(
     source: &Replica,
     target: (&Replica, &PrivateKey, &CredentialChain),
 ) -> Result<RebootstrapReport, Error> {
+    share_graph(f, source, target).await;
     let (replica, key, credentials) = target;
     let signed = source.checkpoint(f.public).await?;
     let checkpoint = signed.id()?;
@@ -1042,17 +1111,18 @@ async fn checkpoint_crash_child() {
         .unwrap();
     let target = (&c, &keys[2], &c_credentials);
     match step.as_str() {
-        "begin" => a.inject_stage_exit(Stage::Begin, 0).await,
-        "replay" => a.inject_stage_exit(Stage::Replay, 1).await,
-        "seal" => a.inject_stage_exit(Stage::Seal, 0).await,
-        "install" => a.inject_stage_exit(Stage::Install, 0).await,
+        "compact" => {
+            seal_main(&a, &f.publisher, f.public.domain).await;
+            a.inject_stage_exit(Stage::Compact, 0).await;
+            let _ = a.compact(f.public.domain, 0).await;
+        }
         "prune" => {
-            a.checkpoint(f.public).await.unwrap();
+            seal_main(&a, &f.publisher, f.public.domain).await;
             a.inject_stage_exit(Stage::Prune, 1).await;
-            let _ = a.prune(f.public).await;
+            let _ = a.compact(f.public.domain, 0).await;
         }
         "import" | "switch" => {
-            a.checkpoint(f.public).await.unwrap();
+            compacted(&f, &a).await;
             if step == "import" {
                 c.inject_stage_exit(Stage::Import, 1).await;
             } else {
@@ -1062,7 +1132,6 @@ async fn checkpoint_crash_child() {
         }
         other => panic!("unknown crash step {other}"),
     }
-    let _ = a.checkpoint(f.public).await;
     // The fault exits the process; reaching this line is a failure.
     std::process::exit(1);
 }
@@ -1103,7 +1172,7 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
             "{step}"
         );
         // The interrupted work completes from what was committed.
-        a.checkpoint(f.public).await.unwrap();
+        compacted(&f, &a).await;
         assert_eq!(a.prune(f.public).await.unwrap().blocked, None, "{step}");
         assert_eq!(
             count(&a, "SELECT COUNT(*) FROM secure_operations").await,
@@ -1115,6 +1184,7 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
             .unwrap();
         assert_eq!(report.reapplied.len(), 1, "{step}");
         assert!(report.rejected.is_empty(), "{step}");
+        import_no_frames(&f, &a, (&c, &keys[2], &c_credentials)).await;
         sync(&f, &c, (&a, &keys[0], &a_credentials)).await;
         let rows = all_rows(&f, &a).await;
         assert_eq!(rows.len(), 41, "{step}");
@@ -1147,10 +1217,11 @@ async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
         .await
         .unwrap();
     sync(&f, &writer, (&reader, &reader_key, &reader_credentials)).await;
-    let signed = reader.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &reader).await;
     assert_eq!(signed.signer(), reader_key.public_key());
     assert_eq!(signed.statement.rows.count, 1);
     let (target, target_credentials) = open(&f, &dir.path().join("target.db"), &target_key).await;
+    share_graph(&f, &reader, (&target, &target_key, &target_credentials)).await;
     let error = target.begin_rebootstrap(signed).await.unwrap_err();
     assert!(error.to_string().contains("write authority"));
     assert!(
@@ -1161,14 +1232,17 @@ async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
             .is_none()
     );
     assert!(all_rows(&f, &target).await.is_empty());
+    // Nor does the reader offer a base it lacks the authority to sign.
     assert!(
         reader
             .checkpoint_offer(target_key.public_key(), &target_credentials, f.public)
             .await
-            .is_err()
+            .unwrap()
+            .is_none()
     );
     // The same rows from a writer pass authority and stage normally.
-    let signed = writer.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &writer).await;
+    share_graph(&f, &writer, (&target, &target_key, &target_credentials)).await;
     target.begin_rebootstrap(signed).await.unwrap();
     assert!(
         target
@@ -1187,7 +1261,11 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
     let target_key = PrivateKey::new();
     let (writer, _) = open(&f, &dir.path().join("writer.db"), &writer_key).await;
     let (target, _) = open(&f, &dir.path().join("target.db"), &target_key).await;
-    let signed = writer.checkpoint(f.public).await.unwrap();
+    writer
+        .author(handle(1), insert(&f, 1, "base"), vec![])
+        .await
+        .unwrap();
+    let signed = compacted(&f, &writer).await;
     let expires = writer.inner.lock().await.config.credentials.expires();
     target
         .verify_checkpoint_at_for_test(&signed, expires - 1)
@@ -1219,16 +1297,10 @@ async fn maintenance_waits_for_a_scope_being_imported() {
     a.author(handle(0), insert(&f, 0, "source"), vec![])
         .await
         .unwrap();
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
     b.author(handle(1), insert(&f, 1, "held"), vec![])
         .await
         .unwrap();
-    b.set_retention_limits(RetentionLimits {
-        checkpoint_operations: 2,
-        ..RetentionLimits::default()
-    })
-    .await
-    .unwrap();
     b.begin_rebootstrap(signed).await.unwrap();
     for index in 2..6 {
         b.author(handle(index), insert(&f, index, "row"), vec![])
@@ -1237,7 +1309,7 @@ async fn maintenance_waits_for_a_scope_being_imported() {
     }
     b.maintain_checkpoint_for_test(f.public).await;
     let status = b.checkpoint_status(f.public).await.unwrap();
-    assert!(status.checkpoint.is_none() && !status.in_progress);
+    assert!(status.checkpoint.is_none());
     // The owner's intent holds back a scope that holds no rows yet.
     let (c, _) = open(&f, &dir.path().join("c.db"), &PrivateKey::new()).await;
     c.set_importing([f.public].into()).await;
@@ -1282,9 +1354,10 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
             .await
             .unwrap();
     }
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
     let path = dir.path().join("b.db");
     let (b, b_credentials) = open(&f, &path, &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     b.begin_rebootstrap(signed.clone()).await.unwrap();
     let revisions = b.observe_revision();
     let first = page_of(&a, (&b_key, &b_credentials), &signed, None).await;
@@ -1313,6 +1386,8 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
     }
     let report = b.finish_rebootstrap(f.public).await.unwrap();
     assert_eq!(report.checkpoint, signed.id().unwrap());
+    // With the public base installed the keyless scope needs its own.
+    import_no_frames(&f, &a, (&b, &b_key, &b_credentials)).await;
     assert_eq!(all_rows(&f, &b).await, all_rows(&f, &a).await);
     let status = b.checkpoint_status(f.public).await.unwrap();
     assert_eq!(
@@ -1342,8 +1417,9 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
             .await
             .unwrap();
     }
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     b.begin_rebootstrap(signed.clone()).await.unwrap();
     let first = page_of(&a, (&b_key, &b_credentials), &signed, None).await;
     let second = page_of(&a, (&b_key, &b_credentials), &signed, first.next).await;
@@ -1385,8 +1461,10 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
             .await
             .unwrap();
     }
-    a.checkpoint(f.public).await.unwrap();
+    compacted(&f, &a).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    // Enrollment hands the joiner the graph and the bookmark to follow.
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     let (mut session, mut serving) = network::link::testing::sessions(
         (&b, b_key.clone(), b_credentials),
         (&a, a_key.clone(), a_credentials),
@@ -1425,12 +1503,13 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
             .await
             .unwrap();
     }
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
     let later = a
         .author(handle(41), insert(&f, 41, "later"), vec![])
         .await
         .unwrap();
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     b.begin_rebootstrap(signed.clone()).await.unwrap();
     let mut after = None;
     let first = page_of(&a, (&b_key, &b_credentials), &signed, after).await;
@@ -1459,6 +1538,7 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
     }
     let report = b.finish_rebootstrap(f.public).await.unwrap();
     assert_eq!(report.reapplied.len(), 1);
+    import_no_frames(&f, &a, (&b, &b_key, &b_credentials)).await;
     let rows = all_rows(&f, &b).await;
     assert_eq!(rows.len(), 42);
     assert!(rows.contains_key(&id(41)) && rows.contains_key(&id(50)));
@@ -1480,11 +1560,12 @@ async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
             .await
             .unwrap();
     }
-    let signed = a.checkpoint(f.public).await.unwrap();
+    let signed = compacted(&f, &a).await;
     for (source, target, peer) in [
         (&a, &b, (&keys[1], &b_credentials)),
         (&b, &c, (&keys[2], &c_credentials)),
     ] {
+        share_graph(&f, source, (target, peer.0, peer.1)).await;
         target.begin_rebootstrap(signed.clone()).await.unwrap();
         let mut after = None;
         loop {
@@ -1496,9 +1577,16 @@ async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
             }
         }
         target.finish_rebootstrap(f.public).await.unwrap();
+        // B relays A's original no-frames statement without a key.
+        let empty = import_no_frames(&f, source, (target, peer.0, peer.1)).await;
+        assert_eq!(
+            empty.id().unwrap(),
+            a.checkpoint(f.private).await.unwrap().id().unwrap()
+        );
     }
     assert_eq!(all_rows(&f, &c).await, all_rows(&f, &a).await);
     c.audit(f.public).await.unwrap();
+    c.audit(f.private).await.unwrap();
 }
 
 #[tokio::test]
@@ -1537,10 +1625,18 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
         EncryptedReplica::open(directory.path().join("mixed.sqlite"), fixture.app(), config)
             .await
             .unwrap();
-    let signed = replica.checkpoint(fixture.public).await.unwrap();
+    replica
+        .author(handle(1), insert(&fixture, 1, "base"), vec![])
+        .await
+        .unwrap();
+    let signed = compacted(&fixture, &replica).await;
     replica
         .verify_checkpoint_at_for_test(&signed, now().unwrap())
         .await
         .unwrap();
     assert_eq!(signed.signer(), node.public_key());
 }
+
+mod no_frames;
+
+mod audit;

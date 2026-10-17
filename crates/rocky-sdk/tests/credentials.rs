@@ -426,8 +426,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let path = root.join("a/identity.json");
     let mut saved: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     let manifest = SignedManifest::from_bytes(
-        &data_encoding::HEXLOWER
-            .decode(saved["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
+        &data_encoding::HEXLOWER.decode(saved["genesis"].as_str().ok_or("genesis")?.as_bytes())?,
     )?;
     let statement = Revocation {
         app: manifest
@@ -580,7 +579,7 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
             domain,
             manifest: SignedManifest::from_bytes(
                 &data_encoding::HEXLOWER
-                    .decode(creator["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
+                    .decode(creator["genesis"].as_str().ok_or("genesis")?.as_bytes())?,
             )?,
             credentials: issued(root, user, "model")?,
             keys: keys

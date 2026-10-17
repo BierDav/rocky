@@ -21,6 +21,15 @@ class Tips internal constructor(private val client: RockyClient) {
      */
     suspend fun seal(close: Boolean = false): TipStatus = TipStatus.decode(call("seal") { put("close", close) })
 
+    /**
+     * The owner recovers the followed tip when no in-sync node of its coordinated log can append: after collecting
+     * what reachable devices hold, one `continue` seal abandons the committed entries nobody holds, and every bookmark
+     * on the tip follows it. Abandoned writes return to their authors as held changes. Fails [RockyException]
+     * `rejected` on another device or when this device holds every entry (then [seal]), and `stale_recovery` when the
+     * log moved meanwhile.
+     */
+    suspend fun recover(): TipStatus = TipStatus.decode(call("recover"))
+
     /** Opens a separate line on [seal]; [minimumInSync] is the domain's coordinated-log minimum, which a device cannot infer. */
     suspend fun open(seal: String, minimumInSync: UInt): String {
         require(minimumInSync > 0u) { "minimumInSync must be positive" }
@@ -215,7 +224,7 @@ enum class TipAuthority { OWNER, TRUSTED, ISSUER }
  * A [revoked] seal's signer was revoked; it takes part in no race. A [final] seal was committed by its tip's
  * coordinated log and acknowledged by enough trusted nodes; it beats every other seal of its tip. [checkpoints]
  * lists the checkpoints of its state a device may rebootstrap from. [held] says how this device holds its state,
- * which a branch opening needs; null when it is shallow here.
+ * which a branch opening needs; null when it is shallow here. [recovery] is set on the owner's recovery of a stuck tip.
  */
 data class TipSeal(
     val id: String,
@@ -228,7 +237,11 @@ data class TipSeal(
     val final: Boolean,
     val checkpoints: List<TipCheckpoint>,
     val held: TipHeld? = null,
+    val recovery: TipRecovery? = null,
 )
+
+/** The owner's recovery: it abandons the committed entries of its tip's log after [retained] through [replaced]. */
+data class TipRecovery(val retained: ULong, val replaced: ULong)
 
 /** How a device holds a seal's state: [KEPT] in history tables, a [CHECKPOINT] base there, or its [LIVE] tables now. */
 enum class TipHeld { KEPT, CHECKPOINT, LIVE }
@@ -245,7 +258,7 @@ data class TipCheckpoint(
     val authority: TipAuthority,
     val rows: ULong,
 )
-data class TipOpening(val id: String, val seal: String, val minimumInSync: UInt)
+data class TipOpening(val id: String, val seal: String, val schema: String, val minimumInSync: UInt)
 data class BookmarkMove(val id: String, val from: String?, val to: String?, val authority: TipAuthority, val revoked: Boolean)
 
 /** A move that lost a race along its bookmark's path, named `main/1`, `main/2`; its tip stays a branch. */
@@ -296,9 +309,12 @@ data class TipInspection(
                         )
                     },
                     it.nullableText("held")?.let { held -> TipHeld.valueOf(held.uppercase()) },
+                    (it["recovery"] as? JsonObject)?.let { recovery ->
+                        TipRecovery(recovery.unsigned("retained"), recovery.unsigned("replaced"))
+                    },
                 )
             },
-            value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },
+            value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("schema"), it.text("minimum_in_sync").toUInt()) },
             value.objects("bookmarks").map {
                 TipBookmark(
                     it.text("name"),

@@ -16,14 +16,14 @@ Existing policies survive reopening.
 The native session `retention` request names `collection`; optional `policy`
 replaces its policy with `required`, `behind` (node public keys), `copies` and
 `window`. The response includes the policy, covered/uncovered operation counts,
-`pruned_prefix` and maintenance error. `maintain = true` completes checkpoint creation
-and pruning under those rules. Kotlin exposes `session.retention(collection,
+`pruned_prefix` and maintenance error. `maintain = true` completes pruning
+behind the scope's base under those rules; a base forms only when the
+[tips `compact` action](lazy-compaction.md#compacting) installs one at a seal. Kotlin exposes `session.retention(collection,
 policy, maintain)`.
 
 `retention_limits` reads or replaces the open replica's limits via `limits`.
-Kotlin exposes `session.retentionLimits(limits)`. Defaults are 1,024 operations
-per checkpoint, 32 MiB soft bytes, 64 MiB hard bytes, and 65,536 retained
-mutation handles. These limits are not persisted: configure them after every
+Kotlin exposes `session.retentionLimits(limits)`. Defaults are 64 MiB hard
+bytes and 65,536 retained mutation handles. These limits are not persisted: configure them after every
 open. Invalid limits and policies fail. See
 [encrypted checkpoints](encrypted-checkpoints.md) for backpressure and pruning
 blocks, and [replica roles](replica-roles.md) for custody requirements.

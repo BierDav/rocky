@@ -65,7 +65,10 @@ Secure specifics:
   encryption AAD. A bundle seals each member's signing key with its opening,
   and every member is signed by the node.
 - An insert must bind its `id`'s author to the frame's authenticated node number
-  and exceed the permanent sequence mark for that author and scope. Duplicates
+  and exceed that author's own-birth mark in that partition; carries never
+  raise it. Exact
+  previously admitted births and carries use the
+  [admission evidence rules](admission-evidence.md). Duplicates
   settle first; refused frames and rolled-back transactions never advance the
   mark. Marks survive pruning, eviction, rebuild and reopen, and checkpoints
   sign them with the incarnation rows and creation stamps.
@@ -119,6 +122,12 @@ whole transaction rolls back.
 | Key deleted and inserted again | Delete of the old `id` and insert of a new `id` |
 | Key deleted | Permanent tombstones of the visible and other held incarnations at that key |
 | Equal rows | Nothing |
+
+Deletion identifies each live incarnation by its validated numeric `id` and
+stored key binding. It emits the visible delete once, even when added nullable
+or defaulted columns make the SQL image differ from the sparse stored image.
+Other live IDs at that concrete scope/key retain their original before images
+and empty deletion masks; indexed tombstones add no delete.
 
 The typed table shows the live incarnation with the greatest creation stamp at
 each natural key; a private key-to-incarnation index, maintained in the same
@@ -183,11 +192,13 @@ changed nothing is recorded too. Raise `SqlOptions::captured_rows` and
 `captured_bytes` for it; the transaction timeout still applies.
 
 `EncryptedReplica::publications()` lists each record with its bundles and how
-many leading ones some peer's frontier holds. A publication's retained frames
-do not count toward `RetentionLimits::hard_bytes` until they are pruned:
-writes that deliver it, such as renewing members, must not wait for it. The
-SDK commits [migrations](generations.md#migrations) this way
-([decision 0071](../decisions/0071-staged-migration-publication.md)).
+many leading ones some peer's frontier holds. Generic publications remain
+subject to `RetentionLimits::hard_bytes`. Only an authenticated migration stage
+can journal an issuer-endorsed descriptor and exact frame inclusion proofs for
+the separate migration-history account. Endorsement happens after SQL commit,
+outside the transaction, before any private candidate is exposed. The SDK
+commits [migrations](generations.md#migrations) this way; see
+[decision 0071](../decisions/0071-staged-migration-publication.md).
 
 ## Qualification
 

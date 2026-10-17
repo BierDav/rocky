@@ -2,6 +2,9 @@
 
 Status: implemented; the log by phase 8, coordinated writes by phase 9.
 Date: 2026-10-14.
+Revised 2026-10-18 for scoped custody and sealed-frontier readiness; the repair's
+[qualification and independent acceptance](../features_09/17-schema-changes-through-seals-evidence.md#qualification)
+are recorded separately.
 
 ## Context
 
@@ -44,6 +47,15 @@ bundles. Nodes catch up from peers before joining; members receive only committe
 entries. Neither this metadata log nor its trusted-node designation grants row
 access. The coordinator cannot verify a storage promise against application data.
 
+A trusted node may coordinate its authorized scopes without holding every scope
+in the domain. Entry storage refuses before durable storage or acknowledgment
+unless every frame's scope has a whole-row Read or Custody grant. Neither replica
+role nor possession of a key substitutes for that grant. Readiness at an inherited
+seal may use verified author-signed header placements for scopes outside custody;
+held scopes still require their payloads and applied state. An unproved partition
+returns `custody_required` without disclosing its tuple. See
+[finalization](../runtime/lazy-compaction.md#finalizing).
+
 A proposer stages its bundle in one flushed local transaction on caught-up state,
 unsent, and records the append before calling the coordinator. The entry hash
 commits to the log, the position and the bundle's frame ids; frames carry the
@@ -60,18 +72,20 @@ the metadata-only `rocky_core::DomainLog` port.
 ## Consequences
 
 A permanently lost in-sync set needs explicit owner recovery (phase 10); a
-minority never synthesizes a successful write. Trusted nodes must acknowledge
+minority never synthesizes a successful write. Recovery now uses
+[phase 19's owner seal](../features_09/19-recovery-as-a-bookmark-move.md).
+Trusted nodes must acknowledge
 only durable, unapplied bundles. Node identities need durable sequence allocation,
 and head reads distinguish assigned from committed positions.
 
 Raft store/snapshots use only format 4, refusing other formats. Phase 10
 adds the genesis anchor to the log head for fresh-node reconstruction. The signed
 bootstrap and request envelope keep their current shapes; log actions add new
-operations. Coordinated writes set the encrypted file identity to
-`rocky.encrypted-replica.v18` and the live-link handshake to `rocky.link.v3`, which
-adds the entry message family; other versions are refused. The current log machine
+operations. The current encrypted file identity is
+`rocky.encrypted-replica.v32` and the live-link handshake is `rocky.link.v14`,
+including header placement requests; other versions are refused. The current log machine
 fixes trusted-key, minute-rate and deadline caps; changing those caps requires a new
-store format. Commands still exist until
-phase 11; recovery cuts are phase 10. See [the log guide](../runtime/coordinated-log.md),
+store format. Phase 11 removed commands; phase 19 replaces phase 10's recovery
+cuts. See [the log guide](../runtime/coordinated-log.md),
 [coordinated writes](../runtime/coordinated-writes.md) and
 [phase 9](../features_09/09-coordinated-writes.md).

@@ -58,14 +58,12 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
     let frontier = ScopeFrontier {
         scope,
         logs: Vec::new(),
-        cuts: 0,
     };
     vec![
         RowMessage::Pull {
             scopes: vec![scope],
             after: None,
             quota: 1024,
-            cuts: Vec::new(),
         }
         .into(),
         RowMessage::Range {
@@ -79,12 +77,16 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
             scope,
             frames: Vec::new(),
             voids: Vec::new(),
-            cuts: Vec::new(),
         }
         .into(),
         RowMessage::FrontierQuery { scope }.into(),
         CheckpointMessage::Pruned { scope, after: None }.into(),
         CheckpointMessage::CheckpointOffer { scope }.into(),
+        CheckpointMessage::SealOffer {
+            scope,
+            seal: [0; 32],
+        }
+        .into(),
         CheckpointMessage::CheckpointPull {
             scope,
             checkpoint: [0; 32],
@@ -206,7 +208,6 @@ async fn transcript_case(custody: bool) {
             frontiers: vec![ScopeFrontier {
                 scope: asked,
                 logs: vec![],
-                cuts: 0,
             }],
             partitions: vec![],
             proofs: vec![],
@@ -251,7 +252,6 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         frontiers: vec![ScopeFrontier {
             scope,
             logs: vec![],
-            cuts: 0,
         }],
         partitions: vec![],
         proofs,
@@ -437,7 +437,6 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
             frontiers: vec![ScopeFrontier {
                 scope,
                 logs: vec![],
-                cuts: 0,
             }],
             partitions: vec![(scope, f.tuple("customers", 1))],
             proofs: vec![(
@@ -582,5 +581,109 @@ async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_ses
         } else {
             assert!(resolved.is_err());
         }
+    }
+}
+
+/// A no-frames base of a concrete partition moves to a custodian that
+/// proves its tuple, while an unproved reader's offers of it get the
+/// common refusal; a partitioned table's own scope signs none.
+#[tokio::test]
+async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(1);
+    // The server reads the partition without its key and holds no history.
+    let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
+    let scope = f.scope("customers", 1);
+    server
+        .register_partition(scope, f.tuple("customers", 1))
+        .await
+        .unwrap();
+    server.install_key(f.key("products", 0)).await.unwrap();
+    crate::tests::seal_and_compact(&server, &f.publisher, f.domain).await;
+    let base = server.checkpoint(scope).await.unwrap();
+    assert!(base.statement.no_frames());
+    assert_eq!(base.statement.partition, Some(f.tuple("customers", 1)));
+    let sealed = base.statement.seal.unwrap();
+    let no_frames: Vec<_> = crate::storage::rows(
+        &server.inner.lock().await.conn,
+        "SELECT signed FROM secure_checkpoints",
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .filter_map(|row| match &row[0] {
+        rocky_core::SqlValue::Blob(bytes) => Some(SignedCheckpoint::from_bytes(bytes).unwrap()),
+        _ => None,
+    })
+    .filter(|signed| signed.statement.no_frames())
+    .map(|signed| signed.statement.scope)
+    .collect();
+    assert_eq!(no_frames, vec![scope]);
+    // A custodian that proves the tuple imports it, by either offer.
+    let custodian = open(&f, root.path(), "custodian.db", &[Right::Custody]).await;
+    custodian
+        .register_partition(scope, f.tuple("customers", 1))
+        .await
+        .unwrap();
+    crate::tests::exchange_graphs(&server, &custodian, f.domain).await;
+    let (node, credentials) = {
+        let inner = custodian.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    server
+        .admit_peer(node, &credentials, custodian.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = server
+        .checkpoint_offer(node, &credentials, scope)
+        .await
+        .unwrap()
+        .expect("a no-frames partition base");
+    assert_eq!(offered.id().unwrap(), base.id().unwrap());
+    let at_seal = server
+        .seal_checkpoint_offer(node, &credentials, scope, sealed)
+        .await
+        .unwrap()
+        .expect("the same base at its seal");
+    assert_eq!(at_seal.id().unwrap(), base.id().unwrap());
+    custodian.begin_rebootstrap(offered).await.unwrap();
+    custodian.finish_rebootstrap(scope).await.unwrap();
+    assert_eq!(
+        custodian.checkpoint(scope).await.unwrap().id().unwrap(),
+        base.id().unwrap()
+    );
+    assert!(custodian.key_epochs(scope).await.is_empty());
+    // A reader that guesses the tuple learns nothing a missing scope hides.
+    let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
+    let unknown = ResourceScope {
+        encryption: [203; 32],
+        ..scope
+    };
+    for (known, missing) in [
+        (
+            CheckpointMessage::CheckpointOffer { scope }.into(),
+            CheckpointMessage::CheckpointOffer { scope: unknown }.into(),
+        ),
+        (
+            CheckpointMessage::SealOffer {
+                scope,
+                seal: sealed,
+            }
+            .into(),
+            CheckpointMessage::SealOffer {
+                scope: unknown,
+                seal: sealed,
+            }
+            .into(),
+        ),
+    ] {
+        let known = refusal(&member, &server, known).await;
+        let missing = refusal(&member, &server, missing).await;
+        assert_eq!(known, missing);
+        assert!(known.0.contains(HOLDING_DENIED));
+        assert_eq!(known.1, 0);
     }
 }

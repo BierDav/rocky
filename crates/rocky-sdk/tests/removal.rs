@@ -1,6 +1,6 @@
 //! Removal: a generation drops tables and fields on every device that
-//! adopts it, and one that adds a name again ignores the writes stamped
-//! before its baseline; an unsent change it would split is held. See
+//! follows it. A removed-and-readded name filters earlier values through
+//! the schema path; an unsent change it would split is held. See
 //! `docs/runtime/removal.md` and `docs/runtime/held-changes.md`.
 mod common;
 use common::{Device, Failure, introduce};
@@ -125,6 +125,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -214,7 +215,8 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn devices_that_explicitly_open_a_readded_field_agree_on_it() -> Result<(), Failure> {
+async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> Result<(), Failure>
+{
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -223,18 +225,18 @@ async fn devices_that_explicitly_open_a_readded_field_agree_on_it() -> Result<()
         open(&directory("a"), NOTED, network("a")),
         None,
     )?)?;
+    a.follow_main_migrating().await;
     let join = |name: &str, invitation: &str| -> Result<Device, Failure> {
         Device::new(Database::join(
             open(&directory(name), NOTED, network(name)),
             invitation,
         )?)
     };
-    // c is a second issuer; d writes; f takes d's frame.
+    // c is a second issuer; d writes offline; e keeps the first rows.
     let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
     let d = join("d", &a.invite().await)?;
     let e = join("e", &a.invite().await)?;
-    let f = join("f", &a.invite().await)?;
-    for member in [&c, &d, &e, &f] {
+    for member in [&c, &d, &e] {
         introduce(&a, member).await;
     }
     introduce(&c, &d).await;
@@ -252,105 +254,86 @@ async fn devices_that_explicitly_open_a_readded_field_agree_on_it() -> Result<()
         json!({"title": "bread", "completed": false, "note": "stale"}),
     )
     .await;
-    // e keeps its original rows while the issuer signs the removal.
-    c.sync().await.expect("sync");
-    d.sync().await.expect("sync");
-    e.sync().await.expect("sync retained base");
-    // a removes the note; c explicitly opens the signed schema.
+    for member in [&c, &d, &e] {
+        member.sync().await.expect("sync");
+    }
+    for member in [&c, &d, &e] {
+        member
+            .ok(json!({"type": "networking_control", "enabled": false}))
+            .await;
+    }
+    // A (note) -> B (no note) -> C (note again), each a `continue` seal.
     a.close().await;
-    let a = Device::new(common::confirmed(open(
+    let removed = Device::new(common::confirmed(open(
         &directory("a"),
         &version(common::SCHEMA, 2),
-        network("a"),
-    ))?)?;
-    c.close().await;
-    let c = Device::new(common::confirmed(open(
-        &directory("c"),
-        &version(common::SCHEMA, 2),
-        network("c"),
-    ))?)?;
-    c.sync().await.expect("sync");
-    assert_eq!(generation(&c).await["current"]["schema"], 2);
-    e.close().await;
-    let e = Device::new(Database::open(open(
-        &directory("e"),
-        &version(common::SCHEMA, 2),
-        network("e"),
-    ))?)?;
-    // Offline, a adds the note again, then stays away.
-    a.close().await;
-    Device::new(Database::open(open(
-        &directory("a"),
-        &version(NOTED, 3),
         None,
-    ))?)?
-    .close()
-    .await;
-    // d, at the first generation, writes the note after that baseline and
-    // sends it to f. It then opens the signed second schema from c.
-    // Its offered first-tip frame stays local; c refuses that tip.
-    d.set(3, &apples, "note", json!("late")).await;
-    introduce(&d, &f).await;
-    let _ = f.sync().await;
-    d.close().await;
-    let d = Device::new(Database::open(open(
-        &directory("d"),
-        &version(common::SCHEMA, 2),
-        network("d"),
     ))?)?;
-    let _ = d.sync().await;
-    assert_eq!(generation(&d).await["current"]["schema"], 2);
-    assert_eq!(generation(&d).await["held"], 0);
-    assert_eq!(generation(&c).await["current"]["schema"], 2);
-
-    // c explicitly opens the third schema. The unfollowed first-tip write
-    // cannot be fetched on this tip; a current-tip edit re-authors its value.
+    let removed_manifest = generation(&removed).await["manifest"]
+        .as_str()
+        .ok_or("manifest")?
+        .to_owned();
+    removed.close().await;
     let a = Device::new(Database::open(open(
         &directory("a"),
         &version(NOTED, 3),
         network("a"),
     ))?)?;
-    c.close().await;
-    let c = Device::new(Database::open(open(
-        &directory("c"),
-        &version(NOTED, 3),
-        network("c"),
-    ))?)?;
-    c.sync().await.expect("sync");
-    assert_eq!(generation(&c).await["current"]["schema"], 3);
+    assert_eq!(generation(&a).await["current"]["schema"], 3);
     let notes = "SELECT title, note FROM items ORDER BY title";
     let empty = json!([[text("apples"), {"type": "null"}], [text("bread"), {"type": "null"}]]);
+    assert_eq!(rows(&a, notes).await, empty);
+    // d, still at A, writes the note after the removal was sealed.
+    d.set(3, &apples, "note", json!("late")).await;
+
+    // c follows `main` from A to C at once: B's schema is on the path.
+    hub.record("c");
+    c.ok(json!({"type":"networking_control", "enabled":true}))
+        .await;
+    c.sync().await.expect("sync");
+    assert_eq!(generation(&c).await["current"]["schema"], 3);
+    let request = serde_json::to_vec(
+        &json!({"manifest":data_encoding::HEXLOWER.decode(removed_manifest.as_bytes())?}),
+    )?;
+    assert!(
+        hub.transcript("c")
+            .windows(request.len())
+            .any(|bytes| bytes == request),
+        "B must be fetched from the only provider, which follows C"
+    );
+
     assert_eq!(rows(&c, notes).await, empty);
-    // Two fresh edits also order after d's single old edit when wall clocks tie.
-    a.set(4, &apples, "note", json!("reauthoring")).await;
-    a.set(5, &apples, "note", json!("current")).await;
-    c.sync().await.expect("sync current tip");
+    // d's late write crosses B: its note reaches no device, d's included.
+    d.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
+    d.sync().await.expect("sync");
+    assert_eq!(generation(&d).await["current"]["schema"], 3);
+    // The unsent write touched only the removed field: it is held whole,
+    // for d's application, and dropping it writes nothing.
+    let held = d.ok(json!({"type": "held_changes"})).await;
+    assert_eq!(held["count"], 1, "{held}");
+    assert_eq!(held_field(&held, "items", "note")["value"], text("late"));
+    d.ok(json!({"type": "drop_held", "id": held["changes"][0]["id"]}))
+        .await;
+    assert_eq!(generation(&d).await["held"], 0);
+    for device in [&a, &c, &d] {
+        device.sync().await.expect("sync");
+        assert_eq!(rows(device, notes).await, empty);
+    }
+    // A write at C carries the field again.
+    a.set(4, &apples, "note", json!("current")).await;
     let expected = json!([[text("apples"), text("current")], [text("bread"), {"type": "null"}]]);
-    assert_eq!(rows(&c, notes).await, expected);
-    // Explicit target opens verify the same definition through their lineage.
-    d.close().await;
-    e.close().await;
-    let d = Device::new(Database::open(open(
-        &directory("d"),
-        &version(NOTED, 3),
-        network("d"),
-    ))?)?;
-    let e = Device::new(Database::open(open(
-        &directory("e"),
-        &version(NOTED, 3),
-        network("e"),
-    ))?)?;
+    // e held the first rows with their notes; following strips them.
+    e.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     for device in [&c, &d, &e] {
-        device
-            .ok(json!({"type": "networking_control", "enabled": true}))
-            .await;
         device.sync().await.expect("sync");
     }
     for device in [&a, &c, &d, &e] {
         assert_eq!(generation(device).await["current"]["schema"], 3);
         assert_eq!(rows(device, notes).await, expected);
     }
-    for device in [&c, &d, &e, &f, &a] {
+    for device in [&c, &d, &e, &a] {
         device.close().await;
     }
     Ok(())
@@ -389,6 +372,7 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -553,6 +537,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     let root = common::identity::small_directory()?;
     let directory = root.path();
     let a = Device::new(Database::create(open(directory, SHELVED, None), None)?)?;
+    a.follow_main_migrating().await;
     create(&a, 1, "shelves", json!({"label": "pantry"})).await;
     create(
         &a,
@@ -596,7 +581,6 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     );
     assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
-    assert!(!directory.join("migration.json").exists());
     let changed = UNSHELVED.replace(r#""version":2"#, r#""version":3"#);
     let stale = confirmation(Database::open_confirmed(
         open(directory, &changed, None),
@@ -641,6 +625,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -669,6 +654,8 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     assert!(schema_of(&b_dir)?.1.contains(&"category".into()));
     let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
     let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
+    introduce(&a, &b).await;
+    b.sync().await.expect("follow the issuer's removal");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["waiting_for_issuer"], false);
     a.close().await;
@@ -684,6 +671,7 @@ async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partit
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    a.follow_main_migrating().await;
     let peer_dir = root.path().join("peer");
     let peer = Device::new(Database::join(
         open(&peer_dir, SHELVED, network("peer")),
@@ -722,6 +710,7 @@ async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partit
     schema["tables"][0]["primary_key"] = json!(["list", "key"]);
     let before = schema.to_string();
     let b = Device::new(Database::create(open(&b_dir, &before, None), None)?)?;
+    b.follow_main_migrating().await;
     for (handle, list) in [(1, "first"), (2, "second")] {
         b.ok(json!({"type":"partition_create", "table":"items", "values":[text(list)]}))
             .await;

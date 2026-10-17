@@ -118,6 +118,9 @@ fun main(args: Array<String>) = runBlocking {
     val root = File(args.single()).also { it.mkdirs() }
     val directory = File(root, "database")
     var db = RockyDatabase.local(directory, schema)
+    // The application defines the bookmark it follows; Rocky defines none.
+    db.tips.createBookmark("main")
+    db.tips.follow("main")
     check(db.network().attachment == rocky.AttachmentState.Detached)
     val a = db.openSession()
     val b = db.openSession()

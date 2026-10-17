@@ -64,6 +64,13 @@ const ACTIVE: &str = "EXISTS(SELECT 1 FROM secure_kept_marks) AND COALESCE((SELE
 pub(super) fn history_name(table: &str) -> String {
     format!("secure_history_{table}")
 }
+pub(super) fn migration_parent_name(publication: Commitment, index: usize) -> String {
+    let hex: String = publication
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("secure_frozen_migration_{hex}_{index}")
+}
 
 /// One live table and its history table.
 pub(super) struct History {
@@ -286,6 +293,50 @@ pub(crate) struct Bulk {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) async fn freeze_migration_parents(
+        &self,
+        stage: &super::staging::SchemaStage,
+    ) -> Result<(), Error> {
+        let typed = self
+            .workspace
+            .typed
+            .as_ref()
+            .ok_or_else(|| denied("migration parents require typed tables"))?;
+        for (index, table) in stage.parents.iter().enumerate() {
+            let table = typed
+                .by_name(table)
+                .ok_or_else(|| denied("unknown migration parent table"))?;
+            let frozen = migration_parent_name(stage.publication, index);
+            self.conn
+                .execute(
+                    format!(
+                        "CREATE TABLE {} AS SELECT * FROM {}",
+                        quoted(&frozen),
+                        quoted(&table.table.sql_name)
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn drop_migration_parents(
+        &self,
+        stage: &super::staging::SchemaStage,
+    ) -> Result<(), Error> {
+        for index in 0..stage.parents.len() {
+            self.conn
+                .execute(
+                    format!(
+                        "DROP TABLE IF EXISTS {}",
+                        quoted(&migration_parent_name(stage.publication, index))
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        Ok(())
+    }
     fn histories(&self) -> Vec<History> {
         self.workspace
             .typed
@@ -338,6 +389,20 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(())
+    }
+    /// Refreshes capture after additive DDL without copying any history rows.
+    pub(super) async fn refresh_history_for(&self, typed: &Typed) -> Result<(), Error> {
+        for history in History::of(typed) {
+            for event in ["insert", "update", "delete"] {
+                self.conn
+                    .execute(
+                        format!("DROP TRIGGER IF EXISTS {}", history.trigger(event)),
+                        (),
+                    )
+                    .await?;
+            }
+        }
+        self.install_history_for(typed).await
     }
     async fn kept(&self) -> Result<bool, Error> {
         Ok(!rows(&self.conn, "SELECT 1 FROM secure_kept_marks LIMIT 1")
@@ -593,7 +658,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Forgets kept `seal` and drops its frozen copies; the caller prunes
     /// the history it alone needed.
-    async fn release_seal(&self, seal: Commitment) -> Result<(), Error> {
+    pub(super) async fn release_seal(&self, seal: Commitment) -> Result<(), Error> {
         for table in self.kept_tables(seal).await? {
             if let Some(frozen) = table.frozen {
                 self.conn
@@ -669,7 +734,10 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         };
         let mut bounds = Vec::new();
-        for (_, id) in self.domain_scopes(domain).await? {
+        for (scope, id) in self.domain_scopes(domain).await? {
+            if !self.has_scope_key(scope) {
+                continue;
+            }
             let bound = match collect_rows(
                 self.conn
                     .query(
@@ -725,25 +793,49 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .iter()
             .any(|(known, _)| *known == seal)
+            && self.kept_covers(domain, seal).await?
         {
             return Ok(Some(HeldSeal::Kept));
         }
         if self.live_at(domain, seal).await? {
             return Ok(Some(HeldSeal::Live));
         }
-        // A replay base there, or a state pulled from a node that keeps it.
+        // A replay base there, or a state pulled from a node that keeps it
+        // that still passes the import checks.
         let scopes = self.domain_scopes(domain).await?;
         let mut based = !scopes.is_empty();
         for (_, id) in scopes {
             based &= self.base_seal(id).await? == Some(seal)
-                || self.pulled_seal(id).await? == Some(seal);
+                || self.available_pulled_seal(id).await? == Some(seal);
         }
         Ok(based.then_some(HeldSeal::Checkpoint))
+    }
+    async fn kept_covers(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
+        let Some(kept) = self.kept_at(seal, None).await? else {
+            return Ok(false);
+        };
+        for (scope, id) in self.domain_scopes(domain).await? {
+            if self.has_scope_key(scope) && kept.at(id).is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     /// The statements that bind a read-only connection to kept `seal`:
     /// temporary views with the live tables' names and shape, and the
     /// application's views over them.
     pub(super) async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
+        let domain = self
+            .graphs
+            .iter()
+            .find(|(_, graph)| graph.seal_by_id(seal).is_ok())
+            .map(|(scope, _)| *scope)
+            .ok_or_else(|| denied("unknown seal"))?;
+        if !self.kept_covers(domain, seal).await? {
+            return Err(denied(
+                "this node does not keep every readable scope at that seal",
+            ));
+        }
         let mark = self
             .kept_marks()
             .await?

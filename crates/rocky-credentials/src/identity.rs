@@ -64,7 +64,7 @@ pub enum Purpose {
     Capability,
     /// A revocation statement.
     Revocation,
-    /// Another statement its authority requires: a manifest, a transition,
+    /// Another statement its authority requires: a manifest, a tip statement,
     /// a renewal answer or a request proving the identity.
     Statement,
 }

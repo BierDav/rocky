@@ -75,7 +75,9 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<EncryptedFrame, Error> {
         let frame = EncryptedFrame::bare(header, body);
         let chain = self.stored_chain(frame.chain_digest()?).await?;
-        Ok(frame.with_chain(chain))
+        let mut frame = frame.with_chain(chain);
+        frame.migration = self.migration_membership(frame.id()?).await?;
+        Ok(frame)
     }
     /// Removes every chain nothing names any more. Runs in the transaction
     /// that removed operations, so no

@@ -73,7 +73,11 @@ private class DeviceProcess {
             "schema" -> Json.parseToJsonElement(ShoppingSchema.json())
 
             "create" -> opened(directory()) {
-                RockyDatabase.create(directory(), ShoppingSchema, loopback(), automaticSync = false)
+                RockyDatabase.create(directory(), ShoppingSchema, loopback(), automaticSync = false).also {
+                    it.tips.createBookmark("main")
+                    it.tips.follow("main")
+                    it.tips.setGenesisMinimum(1u)
+                }
             }
 
             "join" -> opened(directory()) {

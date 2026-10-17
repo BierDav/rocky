@@ -12,7 +12,7 @@ has had a cryptographic audit.
 `rocky-credentials` depends on `rocky-core` only. It opens no database and no
 endpoint: everything it does is keys and bytes.
 
-- Signed types: `SignedManifest`, `SignedTransition`, `SignedCapability`,
+- Signed types: `SignedManifest`, `SignedSeal`, `SignedTipOpening`, `SignedCapability`,
   `CredentialChain`, `Endorsement`, `SignedRevocation` and the
   `RevocationSet` of them a device holds ([revocations](revocations.md)).
   [Node author numbers](credential-primitives.md#principal-ranges-and-node-authors),
@@ -301,7 +301,7 @@ revoke at the same time.
 | Identity request | 1 | `rocky.credentials.identity-request.v1`, signed by the new node and its identity for an answering node; the answer (`rocky.credentials.identity-answer.v1`) is sealed to a one-time X25519 key |
 | Capability extension | 4 | `authors`, `device`, `node`, `partitions` and `issues`; see [the chain format](credential-primitives.md#chain-format) |
 | Author binding | 2 | `rocky.credentials.author-binding.v2`, with the link's `issues` flag |
-| Endorsement | | The signer's issuer links and signature in `SignedManifest` (`rocky.signed-manifest.v2`), `SignedTransition` (`rocky.signed-transition.v2`), `SignedExistenceBase` (`rocky.existence-base.v1`, format 1) and `DiscoverySecret` (`rocky.discovery-secret.v2`) |
+| Endorsement | | The signer's issuer links and signature in `SignedManifest` (`rocky.signed-manifest.v2`), `SignedExistenceBase` (`rocky.existence-base.v1`, format 1) and `DiscoverySecret` (`rocky.discovery-secret.v2`) |
 | Contact URI | 2 | `issuer` and `enrollment_only` flags; `issuer` written only by issuers |
 | Capability | 2 | Signed under `rocky.capability.v2`, id `rocky.capability.id.v2`; no manifest; extension body 4 ([chain format](credential-primitives.md#chain-format)) |
 | Revocation statement and set | 3 | See [revocations](revocations.md#formats) |

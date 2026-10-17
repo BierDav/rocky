@@ -1,66 +1,102 @@
 # 0071: Staged migration publication
 
-Status: accepted and implemented
-([phase 7](../features_09/07-migrations-at-any-size.md)), with
-[accepted limitations](../features_09/README.md#accepted-limitations).
-Date: 2026-10-14.
-
-## Context
-
-A schema's `migrations` ran in one SQL transaction that committed as one
-bundle, so a migration changed at most 2,048 rows. The issuer also signed a
-step holding new required fields nullable, migrated and only then signed the
-generation that requires them
-([decision 0070](0070-confirmed-rollouts-and-the-end-of-cuts.md)). A schema
-that evolves over decades must fill a new field of any table, however large
-([features_09](../features_09/README.md)).
+Status: accepted; phase 17 implementation under qualification.
+Date: 2026-10-14; refined 2026-10-18.
 
 ## Decision
 
-- **Sign, then migrate.** An issuer whose application declares a schema
-  with migrations above its installed version first asks its issuers for
-  the generation; one already signed is adopted and nothing runs. Otherwise
-  it writes `migration.json` (the version it migrates from), signs the
-  schema, and at open, before the network starts, runs the migrations in one
-  local SQL transaction in that generation. Required fields need no
-  intermediate nullable step: rows read their default until migrated.
-- **Who migrates.** Only an issuer that holds the key of, and reads and
-  writes, every partition the domain knows signs such a generation. Another
-  device keeps the domain's generation; its status reports
-  `full_access_required`.
-- **A staged publication.** `SecureSql::commit_publication` commits the
-  transaction's net change as consecutive ordinary bundles within the bundle
-  bounds, parents before children, all stamped at that commit. Bundle `n`'s
-  handle is `rocky.secure-publication.v1` over the publication and `n`; the
-  SDK's publication is `rocky.sdk.migration.v2` over the generation's
-  manifest. The record of the publication commits in the same transaction
-  and is the done mark: a crash before it repeats the migration, after it
-  repeats nothing, and a repeated commit returns the recorded frames.
-- **Publication** is ordinary sync: the frames are retained and pushed or
-  pulled until peers hold them. Progress counts the leading bundles some
-  peer's frontier holds. A publication's frames do not count toward the
-  retained-history bound until they are pruned; otherwise a migration larger
-  than the bound would refuse the writes that deliver it, such as renewing
-  members into its generation.
-- **Concurrent issuers converge without coordination,** except inserted rows
-  keyed by `id`. Updates meet by latest wins; rows an `insert` step adds
-  merge when the table is keyed by name, since equal keys are one row.
+A migration runs once in one local SQL transaction on a fresh migration tip.
+The issuer first signs a close of its followed source tip, an opening with the
+new manifest, and a forward bookmark move. The private stage freezes only the
+parent tables the SQL names. Its publication identity is
+`rocky.sdk.migration.v3(target_tip)`; bundles retain ordinary row-frame encoding
+and application semantics. See [0075](0075-generations-as-sealed-forks.md).
 
-## Consequences
+Staging rechecks the followed open source, bookmark, absence of another private
+publication and exact signed frontier under the same replica guard that admits
+the statements and freezes the parents. An intervening source write refuses the
+unchanged candidate before mutation; preparing and signing again includes the
+new frontier. Withdrawing an interrupted private switch validates its intent
+and installed source application before changing the live graph.
 
-The encrypted replica records publications and their frames, so its file
-identity moves to `rocky.encrypted-replica.v19`; v17 and v18 files are refused.
-`migration.json` holds only `from`. A migration of `n` rows retains roughly
-3 KB per row of history until it is pruned, outside the retained bound. A
-projection switch recreates partitioned tables from their stored rows, since
-a shadow fills from one scope.
+The SQL commit journals projection changes, operations, existence records,
+outbox, handles, revision, publication completion and an exact unsigned
+migration descriptor. A paged disk-backed Merkle-sum tree binds its frames;
+construction keeps one page and a logarithmic stack in memory rather than
+another publication-sized array.
 
-Accepted limitation: an `insert` step's ids derive from the issuer's own
-creation log. A row's id is an author number and a sequence, bound by the
-publisher's author binding and creation proof, and each author's births must
-continue its log; ids derived from the generation, step and selected key
-would need a new identity class. Two issuers that insert into a table keyed
-by `id` add each row twice. Migration SQL cannot call
-`rocky_next_id`, which the SQL authorizer refuses.
-See [generations](../runtime/generations.md#migrations) and
-[secure SQL](../runtime/secure-sql.md#staged-publications).
+After commit, the opening signer's `IdentityProvider` endorses those exact
+journaled bytes outside every database transaction. An unavailable signer
+leaves the committed candidate private. Reopen retries the same intent without
+running SQL again. An uncoordinated publication releases after endorsement;
+a coordinated publication additionally requires the existing terminal-finality
+proof for its exact closing seal. Descriptor endorsement supplies no terminal
+acknowledgment and lowers no line minimum.
+
+## Authenticated storage account
+
+`MigrationPublicationStatement` format 1 binds the domain, target tip, exact
+opening and parent close, target schema, publication identity, designated node
+and credential-bound author number, frame count, retained frame bytes and one
+ordered Merkle-sum root. Only the exact opening identity can endorse it. The
+opening must be a migration successor, with a different schema on a close and
+the inherited signed minimum. The designated node's initial domain-wide
+sequence is `0..N`; later sequences and other authors receive ordinary capacity.
+
+Each ciphertext carries a bounded inclusion proof committing to its index,
+exact frame hash and stored header-plus-ciphertext length. Internal nodes bind
+child hashes, counts and checked byte sums. An empty migration has zero count,
+zero bytes and the domain-separated empty root. Descriptor/proof verification
+allocates no storage proportional to an advertised extent.
+
+One immutable statement is allowed per publication. Equivalent endorsements
+are idempotent; different valid statements create a bounded equivocation record
+and stop further acquisition, without another account. Graph authority and
+digest ordering alone select the migration winner.
+
+For retained operations, `T` is their header-plus-ciphertext bytes and `M` is
+the bytes with verified migration membership. Ordinary admission requires
+`T - M + incoming <= 67,108,864`, using checked arithmetic. Migration admission
+requires the descriptor and exact proof; a generic `commit_publication` record
+confers no exemption. Transfer framing and proof bytes also consume existing
+page, frame and session budgets.
+
+Insertion, classification, counters and outbox commit together. Every operation
+deletion debits its account in the same transaction, including prune, checkpoint
+import, eviction and branch disposal. Retained frames keep self-contained proofs
+when neighboring leaves disappear. A compact publication identity remains after
+pruning. Open-time and explicit audits verify provenance and reconcile counters.
+Descriptor, proof, index and support history are migration storage, rather than
+free disk. Disk-full and durability failures remain normal failures.
+
+## Acquisition and privacy
+
+Only required followed-path history or explicit local retained evidence permits
+an exact descriptor lookup. No discovery message triggers unrelated branch
+acquisition. A missing descriptor leaves acquisition pending. Keyless custodians
+verify descriptor, proof, frame signature, scope and custody rights without
+opening ciphertext, and never report applied full-node custody. Descriptors
+contain aggregate volume, never public bundle-member lists or partition maps.
+
+Bundle dependency, field, existence and path-filter checks remain unchanged.
+Progressive bundle application is permitted; global completion requires all
+indices and authenticated totals. Partial readers use their authorized scope
+frontiers and do not claim global completion.
+
+Losing or revoked retained history keeps its provenance account until legitimate
+pruning or disposal. It never projects into a winner or becomes automatic
+re-authoring work. Source writes beyond the signed close remain held and gain
+no migration exemption. Checkpoints remain exclusively at seals.
+
+## Formats and qualification
+
+The replica file is `rocky.encrypted-replica.v32`, live link `rocky.link.v14`.
+Previous versions are refused. Row frame 11, bundle payload 5 and opening 2 are
+unchanged. No coordinator payload or storage format changes.
+
+The issuer endorsement proves authorization of exact initial frames; it cannot
+prove that arbitrary SQL produced them. A malicious authorized issuer can endorse
+a harmful or large migration. An ordinary node cannot manufacture that authority.
+
+See [phase 17 evidence](../features_09/17-schema-changes-through-seals-evidence.md)
+for current qualification results and the unchanged 100,000-row gate.

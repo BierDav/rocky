@@ -112,6 +112,9 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
 
     assert_eq!(listed(&b, &node).await["revoked"], true);
     assert!(b.call(json!({"type":"revoke","node":node})).await.is_err());
+    // A device joining after the rotation reads earlier rows from a base
+    // at a seal, without the rotated-out key.
+    b.seal_and_compact().await;
     let w = join(
         root,
         &hub,

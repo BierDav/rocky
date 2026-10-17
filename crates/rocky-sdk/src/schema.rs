@@ -13,11 +13,6 @@ pub struct Schema {
     pub views: Vec<rocky_core::LogicalView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_policy: Option<rocky_core::UpdatePolicy>,
-    /// Tables granted like another: each grant of a profile on the value
-    /// also covers the key. Declared when the key table is added; see
-    /// `docs/runtime/generations.md#tables-granted-like-another`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub granted_like: BTreeMap<String, String>,
     /// SQL the first issuer to sign the schema's generation runs once, after
     /// signing it; see `docs/runtime/generations.md#migrations`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -144,6 +139,17 @@ impl Schema {
         }
     }
 
+    pub(crate) fn granted_like(&self) -> BTreeMap<String, String> {
+        self.tables
+            .iter()
+            .filter_map(|table| {
+                table
+                    .granted_like
+                    .as_ref()
+                    .map(|like| (table.name.clone(), like.clone()))
+            })
+            .collect()
+    }
     /// Each table follows one mergeable table that follows none.
     fn validate_granted_like(&self) -> Result<(), Failure> {
         let mergeable = |name: &str| {
@@ -151,11 +157,12 @@ impl Schema {
                 .iter()
                 .any(|table| table.name == name && table.class == rocky_core::TableClass::Mergeable)
         };
-        for (table, like) in &self.granted_like {
+        let followers = self.granted_like();
+        for (table, like) in &followers {
             if table == like
                 || !mergeable(table)
                 || !mergeable(like)
-                || self.granted_like.contains_key(like)
+                || followers.contains_key(like)
             {
                 return Err(format!(
                     "{table} cannot be granted like {like}: both must be distinct mergeable tables, and {like} granted like none"

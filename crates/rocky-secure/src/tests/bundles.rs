@@ -1,3 +1,4 @@
+pub(super) mod payload;
 use super::*;
 use crate::storage::rows;
 
@@ -687,7 +688,7 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
     }
     assert_eq!(live(&dave, f.public).await, 40);
     // Replay of bundle members reproduces the checkpointed projection.
-    dave.checkpoint(f.public).await.unwrap();
+    compacted_base(&dave, &f.publisher, f.public).await;
     assert_eq!(dave.audit(f.public).await.unwrap().replayed, 0);
 
     // Another node's custody lets the public members be pruned.

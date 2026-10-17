@@ -57,10 +57,11 @@ private val ShoppingSchemaV6 = schema("shopping", version = 6) {
 }
 
 /**
- * A household of version 6 moves to version 7: the trusted device that opens it first runs the migration. A full
- * member enrolled under version 6 keeps syncing while its app stays at version 6: its database moves to version 7,
- * the item it had not synced arrives, and its new items read the default position. Updated, it edits links it was
- * never granted by name. See `docs/runtime/shopping-schema-7.md`.
+ * A household of version 6 moves to version 7: the trusted device follows `main`, and opening version 7 there closes
+ * `main`, opens the migration's tip and runs the migration. A full member enrolled under version 6 follows `main` too:
+ * its database moves to version 7 while its app stays at version 6. The item it wrote before the migration and never
+ * sent returns to it as a held change, which its app re-authors; its new items read the default position. Updated,
+ * it edits links it was never granted by name. See `docs/runtime/shopping-schema-7.md`.
  */
 class SchemaUpgradeTest {
     private fun RockyDatabase.reconciled(): Boolean = runBlocking {
@@ -76,6 +77,10 @@ class SchemaUpgradeTest {
         var a: RockyDatabase? = RockyDatabase.create(trusted, ShoppingSchemaV6, trustedTransport(), automaticSync = false)
         var b: RockyDatabase? = null
         try {
+            // The application defines the bookmark it follows; a migration's opening inherits the signed minimum.
+            a!!.tips.createBookmark("main")
+            a.tips.follow("main")
+            a.tips.setGenesisMinimum(1u)
             b = RockyDatabase.join(member, ShoppingSchemaV6, a!!.pairing(NodeKind.Full.profile).uri, PeerTransport.Iroh.isolated(), automaticSync = false)
             val list = a.partitions.nextId("lists")
             a.write {
@@ -92,7 +97,7 @@ class SchemaUpgradeTest {
             a.list(list).share(listOf(b.session().node))
             assertTrue(b.reconciled())
             assertTrue(b.reconciled())
-            // Never reaches the trusted device under version 6.
+            // Written before the migration's closing seal and never sent: it does not cross the migration.
             b.write { execute("INSERT INTO items(list, key, title, completed, id) VALUES(?, ?, ?, ?, ?)", list, "late", "Late", false, nextId("items", list)) }
             b.close()
             b = null
@@ -108,13 +113,19 @@ class SchemaUpgradeTest {
                 val links = roomA.itemCategories().observe(list).first().map { link -> items.single { it.id == link.item }.title to link.category }
                 assertEquals(setOf("Milk" to dairy, "Bread" to bakery), links.toSet())
 
-                // The member's app stays at version 6: its database adopts version 7 and keeps syncing.
+                // The member's app stays at version 6: following `main` moves its database to version 7.
                 b = RockyDatabase.resume(member, ShoppingSchemaV6, PeerTransport.Iroh.isolated(), automaticSync = false)
                 b.addPeer(a.contact().uri)
-                // The first sync meets version 7 and adopts it; the next reconciles.
                 b.syncOnce()
                 assertTrue(b.reconciled())
                 assertEquals("behind", b.generation().getValue("application").jsonPrimitive.content)
+                // Its write across the migration is held; its app re-authors it on the new tip.
+                val held = b.heldChanges()
+                assertEquals(1, held.count)
+                b.reauthor(held.changes.single().id) {
+                    execute("INSERT INTO items(list, key, title, completed, id) VALUES(?, ?, ?, ?, ?)", list, "late", "Late", false, nextId("items", list))
+                }
+                assertEquals(0, b.heldChanges().count)
                 b.write { execute("INSERT INTO items(list, key, title, completed, id) VALUES(?, ?, ?, ?, ?)", list, "jam", "Jam", false, nextId("items", list)) }
                 assertTrue(b.reconciled())
                 val received = roomA.items().all(list)

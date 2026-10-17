@@ -45,9 +45,14 @@ storage and encrypted recovery-key packages remain separate mechanisms.
    fresh author's log; restore does not create a new identity for an uncertain
    coordinated append or synthesize its outcome.
 
+Phase 17 specifies that a backup carries the replica's
+[admission evidence](admission-evidence.md#backup-and-restore) and that
+adopting it records a finite, authenticated cut of the predecessor's journal;
+the archive and inventory formats stay unchanged (implementation pending).
+
 A permanently lost in-sync set needs the separate
-[Phase 10 recovery contract](../features_09/10-stuck-recovery.md). Database
-backup does not replace coordinator durability or authorize a recovery cut.
+[stuck recovery](stuck-recovery.md). Database backup does not replace
+coordinator durability or authorize a recovery seal.
 
 ## Qualification
 

@@ -1,9 +1,9 @@
 use rocky_core::{AppId, DomainId, MeshId, PrincipalKind, Scope, TipId};
 use rocky_credentials::{
     AuthorMark, AuthorRange, Authority, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement,
-    CredentialChain, Extended, Extension, PrivateKey, RevocationSet, SEAL_FORMAT, SealAction,
-    SealStatement, SignedBookmarkMove, SignedCapability, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, encode, genesis_tip,
+    CredentialChain, Extended, Extension, LogPoint, PrivateKey, Recovery, RevocationSet,
+    SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedCapability, SignedSeal,
+    SignedTipOpening, TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, encode, genesis_tip,
 };
 
 fn graph() -> TipGraph {
@@ -29,6 +29,7 @@ fn seal(graph: &TipGraph, tip: TipId, sequence: u64, owner: &PrivateKey) -> Sign
             action: SealAction::Continue {
                 schema: graph.genesis_schema,
             },
+            recovery: None,
         },
         owner,
     )
@@ -57,6 +58,7 @@ fn opening(graph: &TipGraph, seal: &SignedSeal, owner: &PrivateKey) -> SignedTip
     SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: graph.schema_any(seal.statement.tip).unwrap(),
             scope: graph.scope,
             seal: seal.id().unwrap(),
             minimum_in_sync: 2,
@@ -92,7 +94,7 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
         .unwrap()
         .verify(owner.public_key(), &graph)
         .unwrap();
-    for format in [0, 2, u32::MAX] {
+    for format in [0, 3, u32::MAX] {
         let mut other = signed.clone();
         other.statement.format = format;
         assert!(other.verify(owner.public_key(), &graph).is_err());
@@ -356,18 +358,16 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
 }
 
 #[test]
-fn schema_changes_partial_and_node_authority_and_invalid_frontiers_are_refused() {
+fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontiers_are_refused() {
     let owner = PrivateKey::new();
     let user = PrivateKey::new();
     let graph = graph();
     let mut statement = seal(&graph, graph.genesis(), 1, &owner).statement;
     statement.action = SealAction::Continue { schema: [8; 32] };
-    assert!(
-        SignedSeal::sign(statement.clone(), &owner)
-            .unwrap()
-            .verify(owner.public_key(), &graph)
-            .is_err()
-    );
+    SignedSeal::sign(statement.clone(), &owner)
+        .unwrap()
+        .verify(owner.public_key(), &graph)
+        .unwrap();
     statement.action = SealAction::Close;
     SignedSeal::sign(statement.clone(), &owner)
         .unwrap()
@@ -898,3 +898,382 @@ fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
         vec![&owners]
     );
 }
+
+#[test]
+fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entries() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let mut graph = graph();
+    let point = |position, byte| LogPoint {
+        position,
+        running: [byte; 32],
+    };
+    let recovered = |recovery| SealStatement {
+        recovery: Some(recovery),
+        ..seal(&graph, graph.genesis(), 3, &owner).statement
+    };
+    let recovery = Recovery {
+        retained: point(2, 1),
+        replaced: point(5, 2),
+    };
+    let signed = SignedSeal::sign(recovered(recovery), &owner).unwrap();
+    signed.verify(owner.public_key(), &graph).unwrap();
+    assert_eq!(
+        signed.verify_recovery(owner.public_key()).unwrap(),
+        &recovery
+    );
+    assert!(signed.verify_recovery(trusted.public_key()).is_err());
+    assert!(
+        seal(&graph, graph.genesis(), 3, &owner)
+            .verify_recovery(owner.public_key())
+            .is_err()
+    );
+    // A trusted identity's or an issuer's recovery is refused.
+    for chain in [
+        trusted_chain(&graph, &owner, &trusted),
+        issuer_chain(&owner, &trusted),
+    ] {
+        let other = SignedSeal::endorse(recovered(recovery), &trusted, &chain).unwrap();
+        assert!(other.verify(owner.public_key(), &graph).is_err());
+        assert!(other.verify_recovery(owner.public_key()).is_err());
+    }
+    // A recovery keeps a prefix of the commit it ends and continues.
+    for invalid in [
+        Recovery {
+            retained: point(6, 1),
+            replaced: point(5, 2),
+        },
+        Recovery {
+            retained: point(5, 1),
+            replaced: point(5, 2),
+        },
+    ] {
+        assert!(SignedSeal::sign(recovered(invalid), &owner).is_err());
+    }
+    let closing = SealStatement {
+        action: SealAction::Close,
+        ..recovered(recovery)
+    };
+    assert!(SignedSeal::sign(closing, &owner).is_err());
+
+    graph.seals.push(signed);
+    for (position, abandoned) in [(2, false), (3, true), (5, true), (6, false)] {
+        assert_eq!(
+            graph.abandons(graph.genesis(), position).unwrap(),
+            abandoned
+        );
+    }
+}
+
+#[test]
+fn bookmarks_on_a_recovered_tip_follow_the_recovery_and_explicit_moves_come_first() {
+    let owner = PrivateKey::new();
+    let mut graph = graph();
+    let genesis = graph.genesis();
+    for name in ["main", "release", "dev"] {
+        graph
+            .moves
+            .push(movement(&graph, name, None, Some(genesis), &owner));
+    }
+    // `dev` moved to a branch first.
+    let base = seal(&graph, genesis, 1, &owner);
+    graph.seals.push(base.clone());
+    let opened = opening(&graph, &base, &owner);
+    graph.openings.push(opened.clone());
+    let continued = base.successor().unwrap().unwrap();
+    graph.moves.push(movement(
+        &graph,
+        "dev",
+        Some(genesis),
+        Some(opened.tip().unwrap()),
+        &owner,
+    ));
+    // An ordinary seal does not move a bookmark by itself.
+    assert_eq!(graph.bookmark("main").unwrap(), Some(genesis));
+    graph.moves.push(movement(
+        &graph,
+        "main",
+        Some(genesis),
+        Some(continued),
+        &owner,
+    ));
+    graph.moves.push(movement(
+        &graph,
+        "release",
+        Some(genesis),
+        Some(continued),
+        &owner,
+    ));
+    let point = |position| LogPoint {
+        position,
+        running: [position as u8; 32],
+    };
+    let recovered = SignedSeal::sign(
+        SealStatement {
+            recovery: Some(Recovery {
+                retained: point(1),
+                replaced: point(2),
+            }),
+            ..seal(&graph, continued, 2, &owner).statement
+        },
+        &owner,
+    )
+    .unwrap();
+    graph.seals.push(recovered.clone());
+    let resumed = recovered.successor().unwrap();
+    assert_eq!(graph.bookmark("main").unwrap(), resumed);
+    assert_eq!(graph.bookmark("release").unwrap(), resumed);
+    assert_eq!(graph.bookmark("dev").unwrap(), Some(opened.tip().unwrap()));
+    // An explicit move off the recovered tip still resolves first.
+    graph
+        .moves
+        .push(movement(&graph, "release", Some(continued), None, &owner));
+    assert_eq!(graph.bookmark("release").unwrap(), None);
+    assert_eq!(graph.bookmark("main").unwrap(), resumed);
+}
+
+#[test]
+fn recovery_finality_binds_the_exact_replaced_head_and_keeps_the_signed_quorum() {
+    use rocky_credentials::{
+        GENESIS_LINE_FORMAT, GenesisLineStatement, SealFinality, SignedGenesisLine, TerminalAck,
+    };
+    let owner = PrivateKey::new();
+    let mut graph = graph();
+    let tip = graph.genesis();
+    let recovery = Recovery {
+        retained: LogPoint {
+            position: 1,
+            running: [1; 32],
+        },
+        replaced: LogPoint {
+            position: 3,
+            running: [3; 32],
+        },
+    };
+    let ordinary = seal(&graph, tip, 1, &owner);
+    let seal = SignedSeal::sign(
+        SealStatement {
+            recovery: Some(recovery),
+            ..ordinary.statement
+        },
+        &owner,
+    )
+    .unwrap();
+    let id = seal.id().unwrap();
+    graph.seals.push(seal.clone());
+    graph.genesis_lines.push(
+        SignedGenesisLine::sign(
+            GenesisLineStatement {
+                format: GENESIS_LINE_FORMAT,
+                scope: graph.scope,
+                minimum_in_sync: 2,
+            },
+            &owner,
+        )
+        .unwrap(),
+    );
+    let nodes = [trusted_node(&graph, &owner), trusted_node(&graph, &owner)];
+    let signed = |(position, running)| {
+        nodes
+            .iter()
+            .map(|node| {
+                let mut statement = ack(&graph, &seal, node).statement;
+                statement.position = position;
+                statement.running = running;
+                TerminalAck::sign(statement, &node.0, node.1.clone()).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    for point in [(5, [9; 32]), (4, [9; 32])] {
+        let proof = SealFinality::new(graph.scope, id, signed(point));
+        assert!(
+            graph
+                .verify_finality(&proof, owner.public_key(), None)
+                .is_err()
+        );
+    }
+    let running = rocky_core::coordinated_chain(recovery.replaced.running, 4, id);
+    let mut proof = SealFinality::new(graph.scope, id, signed((4, running)));
+    graph
+        .verify_finality(&proof, owner.public_key(), None)
+        .unwrap();
+    proof.acknowledgments.pop();
+    assert!(
+        graph
+            .verify_finality(&proof, owner.public_key(), None)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_seal_in_the_parent_format_without_recovery_is_refused() {
+    #[derive(serde::Serialize)]
+    struct ParentStatement {
+        format: u32,
+        scope: Scope,
+        tip: TipId,
+        frontier: Vec<AuthorMark>,
+        action: SealAction,
+    }
+    #[derive(serde::Serialize)]
+    struct ParentSeal {
+        statement: ParentStatement,
+        endorsement: rocky_credentials::Endorsement,
+    }
+    let owner = PrivateKey::new();
+    let graph = graph();
+    let statement = ParentStatement {
+        format: 1,
+        scope: graph.scope,
+        tip: graph.genesis(),
+        frontier: vec![],
+        action: SealAction::Continue {
+            schema: graph.genesis_schema,
+        },
+    };
+    let endorsement = rocky_credentials::Endorsement::sign(
+        &owner,
+        &CredentialChain::default(),
+        "rocky.seal.v1",
+        &statement,
+    )
+    .unwrap();
+    let bytes = encode(&ParentSeal {
+        statement,
+        endorsement,
+    })
+    .unwrap();
+    assert!(SignedSeal::from_bytes(&bytes).is_err());
+}
+
+#[test]
+fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority() {
+    let graph = graph();
+    let owner = PrivateKey::new();
+    let identity = PrivateKey::new();
+    let node = PrivateKey::new();
+    let grant = Authority::owner(&owner)
+        .issue_trusted(
+            identity.public_key(),
+            graph.scope,
+            vec![],
+            AuthorRange::ALL,
+            (100, 1000, 0),
+        )
+        .unwrap();
+    let chain = CredentialChain(vec![grant])
+        .certify(&identity, node.public_key(), 1)
+        .unwrap();
+    assert_eq!(
+        chain
+            .trusted_node(owner.public_key(), graph.scope, node.public_key(), None)
+            .unwrap(),
+        identity.public_key()
+    );
+    let (grants, partitions) = chain
+        .verify_selectors(
+            owner.public_key(),
+            node.public_key(),
+            &RevocationSet::new(),
+            200,
+        )
+        .unwrap();
+    assert!(grants.is_empty());
+    assert!(partitions.is_empty());
+}
+
+fn carry(
+    graph: &TipGraph,
+    from: TipId,
+    tip: TipId,
+    ids: Vec<[u8; 32]>,
+) -> rocky_credentials::CarryStatement {
+    rocky_credentials::CarryStatement {
+        format: rocky_credentials::CARRY_FORMAT,
+        scope: graph.scope,
+        from: (from, 2),
+        tip,
+        position: 1,
+        ids,
+    }
+}
+
+#[test]
+fn carry_records_name_one_continuation_entry_and_the_deepest_wins() {
+    use rocky_credentials::SignedCarry;
+    let owner = PrivateKey::new();
+    let mut graph = graph();
+    let a = graph.genesis();
+    let ac = seal(&graph, a, 1, &owner);
+    let c = ac.successor().unwrap().unwrap();
+    graph.seals.push(ac);
+    let cd = seal(&graph, c, 1, &owner);
+    let d = cd.successor().unwrap().unwrap();
+    graph.seals.push(cd.clone());
+    let branch = opening(&graph, &cd, &owner);
+    graph.openings.push(branch.clone());
+    let (node, chain) = trusted_node(&graph, &owner);
+    let ids = vec![[1; 32], [2; 32]];
+    // One position, sorted unique ids, another tip, the frame cap.
+    for invalid in [
+        rocky_credentials::CarryStatement {
+            position: 2,
+            ..carry(&graph, a, c, ids.clone())
+        },
+        carry(&graph, a, a, ids.clone()),
+        carry(&graph, a, c, vec![[2; 32], [1; 32]]),
+        carry(&graph, a, c, vec![[1; 32], [1; 32]]),
+        carry(&graph, a, c, Vec::new()),
+        carry(&graph, a, c, (0..65u8).map(|byte| [byte; 32]).collect()),
+    ] {
+        assert!(SignedCarry::sign(invalid, &node, chain.clone()).is_err());
+    }
+    let to_c = SignedCarry::sign(carry(&graph, a, c, ids.clone()), &node, chain.clone()).unwrap();
+    let to_d = SignedCarry::sign(carry(&graph, a, d, ids.clone()), &node, chain.clone()).unwrap();
+    let decoded = SignedCarry::from_bytes(&to_d.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, to_d);
+    // Only a trusted node signs one; the signature covers the statement.
+    let stranger = PrivateKey::new();
+    let forged =
+        SignedCarry::sign(carry(&graph, a, d, ids.clone()), &stranger, chain.clone()).unwrap();
+    assert!(
+        graph
+            .verify_carry(&forged, owner.public_key(), None)
+            .is_err()
+    );
+    graph.carries.push(to_d.clone());
+    graph.verify_carry(&to_d, owner.public_key(), None).unwrap();
+    graph.carries.push(to_c.clone());
+    graph.verify_carry(&to_c, owner.public_key(), None).unwrap();
+    for id in &ids {
+        assert_eq!(
+            graph.carry_of(id, node.public_key(), a).unwrap(),
+            Some(&to_d)
+        );
+        assert_eq!(graph.carry_of(id, stranger.public_key(), a).unwrap(), None);
+        assert_eq!(graph.carry_of(id, node.public_key(), c).unwrap(), None);
+    }
+    // Other frames at an occupied entry conflict; a branch is no target.
+    let conflicting =
+        SignedCarry::sign(carry(&graph, a, d, vec![[3; 32]]), &node, chain.clone()).unwrap();
+    graph.carries.push(conflicting.clone());
+    assert!(
+        graph
+            .verify_carry(&conflicting, owner.public_key(), None)
+            .is_err()
+    );
+    let sideways = SignedCarry::sign(
+        carry(&graph, a, branch.tip().unwrap(), ids.clone()),
+        &node,
+        chain,
+    )
+    .unwrap();
+    assert!(
+        graph
+            .verify_carry(&sideways, owner.public_key(), None)
+            .is_err()
+    );
+}
+
+#[path = "tips/schemas.rs"]
+mod schemas;

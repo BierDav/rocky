@@ -1,9 +1,9 @@
 # 14. Seals, tips and bookmarks
 
 Status: in progress. Slices 1–7 are implemented, with
-[evidence](14-seals-and-bookmarks-evidence.md). The completion gate passes
-except through the SDK with issuer devices, which cannot switch to another
-line's tip, and the shopping example's schema upgrade test fails; see
+[evidence](14-seals-and-bookmarks-evidence.md). Phase 19 repairs automatic SDK issuer switching through graph-backed state
+acquisition; final qualification is recorded in its evidence. The shopping
+example's schema upgrade test remains a phase-17 gap; see
 [what remains](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
 Revised 2026-10-15 for tips and branches.
 Owner: `rocky-credentials` seal, tip and bookmark statements; `rocky-secure`

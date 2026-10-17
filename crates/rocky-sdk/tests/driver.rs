@@ -1208,11 +1208,15 @@ async fn local_write_latency() -> Result<(), Failure> {
 #[tokio::test]
 async fn an_older_room_application_validates_the_schema_it_declares() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    create(open(root.path(), None), None)
-        .await?
-        .database
-        .close()
+    let created = create(open(root.path(), None), None).await?.database;
+    for action in ["create", "follow"] {
+        call(
+            &created,
+            json!({"type": "tips", "action": action, "name": "main"}),
+        )
         .await?;
+    }
+    created.close().await?;
     // The issuer's next application version adds a nullable rank.
     let newer = SHOPPING
         .replace(r#""version":3"#, r#""version":4"#)

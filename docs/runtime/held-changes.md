@@ -1,17 +1,35 @@
 # Held changes
 
 A device may commit changes that touch a table or field a newer
-[generation](generations.md) [removes](removal.md) before it learns of the
+[schema](generations.md) [removes](removal.md) before it learns of the
 removal. Sending such a change half would split its transaction; holding its
 frames would block the author logs behind them. Instead, when the device
-adopts the generation, the change is held whole, its frames are voided and
+follows its bookmark to that schema, the change is held whole, its frames are voided and
 its effects rolled back; a newer application version re-authors or drops it.
 [Decision 0069](../decisions/0069-held-changes-and-void-records.md) records why.
 
-Sealed-tip late writes and abandoned bookmark lines also produce held changes.
+Writes past a migration's closing seal, a losing tip's writes and abandoned
+bookmark lines also produce held changes.
 Their original signed frames are syncable by every readable holder; see
 [tips and bookmarks](tips-and-bookmarks.md#late-and-held-writes). The void rules
 below apply to never-offered local removal changes.
+
+Holding validates complete original images against the exact authenticated
+source tip's cataloged definition, including its partition tuple and immutable
+incarnation. Both complete typed images must bind to the write's canonical
+business key. Removed fields keep their original names, values and write masks.
+The installed compiled app handles matching definitions directly; a different
+definition requires its `RowApplication::source_application` capability.
+Typed rows read the current manifest's replicated shapes without retaining an
+old app or installing a historical SQL projection. Unsupported adapters refuse;
+missing source definitions must be acquired before retry. Current credentials,
+readable custody and both current and source ACL fields remain mandatory.
+
+A retained settled original may also prove a link in the original node's
+[restoration obligation](replica-roles.md#eviction). This does not apply it on a
+rollback line, resolve its held change, make it an ordinary dependency, or
+release a private schema publication. Historical byte verification does not
+renew its author's authority; new intake and authoring retain their usual gates.
 
 ## What is held
 
@@ -21,16 +39,22 @@ the first page of a checkpoint covering it, or a recovery package. Pages and
 packages are marked offered in a flushed transaction before they are sent.
 Pruning and eviction drop the mark with the frame.
 
-When a device adopts a generation that removes a table or field, each bundle
-whose every frame was never offered is held when any of its writes:
+When a device follows a schema that removes a table or field, its own bundles
+visible at the target whose every frame was never offered are held when any
+write is incompatible along that frame's path to the target:
 
-- names a table the generation removed, or
+- names a table the schema removed, or
 - writes a field it removed to other than the field's default (NULL, or the
   typed column's declared default).
 
 A never-offered bundle that depends on a held one (it saw its rows) is held
 with it. A bundle with any offered frame is not held: receivers apply its
-kept fields, [field by field](removal.md#frames-and-checkpoint-pages).
+kept fields, [field by field](removal.md#the-path-filter).
+
+Changing the followed bookmark leaves source-line writes there, unsent until
+return; it does not turn dev test rows into work to re-author on `main`.
+A move of the followed bookmark holds only source-visible frames the target
+excludes. Pending schema switches and reopening preserve that distinction.
 
 ## Holding
 
@@ -63,7 +87,7 @@ backlink and clock.
 
 Range pages, pushes on sessions and live links, and transfer pages carry the
 records their frames continue after. The file identity is
-`rocky.encrypted-replica.v25` and link handshake `rocky.link.v9`, as
+`rocky.encrypted-replica.v32` and link handshake `rocky.link.v14`, as
 [coordinated writes](coordinated-writes.md) set them; other versions are
 refused.
 

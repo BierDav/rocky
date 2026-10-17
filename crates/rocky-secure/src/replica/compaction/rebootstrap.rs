@@ -60,10 +60,67 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         Ok(match self.base_seal(id).await? {
             Some(seal) => self.path_index(scope.domain, seal)?.is_none(),
-            None => false,
+            None => {
+                self.graphs.contains_key(&scope.domain) && self.has_pruned_prefix(scope).await?
+            }
         })
     }
-    pub(super) async fn seal_rebootstraps(
+    /// Read admission of `scope`: the workspace-wide blockers, then only
+    /// this scope's own state. A scope another scope's rebootstrap waits
+    /// for stays readable; one that waits itself reads only the verified
+    /// pages of a direct import. Authoring keeps `require_workspace_base`.
+    pub(in crate::replica) async fn require_scope_readable(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        let domain = scope.domain;
+        let waits = || denied("the workspace waits for a verified seal rebootstrap");
+        if self.graphs.contains_key(&domain) {
+            for (_, id) in self.domain_scopes(domain).await? {
+                if self.unsealed_import(id).await? {
+                    return Err(waits());
+                }
+            }
+        }
+        if self.compaction_lost(domain).await?.is_some() {
+            return Err(waits());
+        }
+        if self
+            .seal_rebootstraps(domain)
+            .await?
+            .iter()
+            .all(|need| need.scope != scope)
+            || self.authenticated_direct_import(scope).await?
+        {
+            return Ok(());
+        }
+        Err(waits())
+    }
+    pub(in crate::replica) async fn require_workspace_base(
+        &self,
+        domain: Scope,
+    ) -> Result<(), Error> {
+        if self.graphs.contains_key(&domain) {
+            // An evicted scope reads as unavailable; its own log returning
+            // holds back only authoring.
+            for (_, id) in self.domain_scopes(domain).await? {
+                if self.unsealed_import(id).await? {
+                    return Err(denied(
+                        "the workspace waits for a verified seal rebootstrap",
+                    ));
+                }
+            }
+        }
+        if self.compaction_lost(domain).await?.is_some()
+            || !self.seal_rebootstraps(domain).await?.is_empty()
+        {
+            return Err(denied(
+                "the workspace waits for a verified seal rebootstrap",
+            ));
+        }
+        Ok(())
+    }
+    pub(in crate::replica) async fn seal_rebootstraps(
         &self,
         domain: Scope,
     ) -> Result<Vec<SealRebootstrap>, Error> {
@@ -75,13 +132,37 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .map(|seal| seal.id().map_err(credential))
             .collect::<Result<Vec<_>, _>>()?;
+        let unverified = self.unverified_scopes(domain).await?;
         let mut needs = Vec::new();
-        for (scope, id) in self.domain_scopes(domain).await? {
+        for (scope, id) in self.readiness_scopes(domain).await? {
+            let unknown = unverified.iter().any(|(candidate, _)| *candidate == scope);
             let pruned = self.has_pruned_prefix(scope).await?;
-            let needed = match self.base_seal(id).await? {
-                Some(seal) => !path.contains(&seal),
-                None => pruned,
+            let base = match id {
+                Some(id) => self.base_seal(id).await?,
+                None => None,
             };
+            let anchored = match id {
+                Some(id) => self.has_seal_anchor(id).await?,
+                None => false,
+            };
+            let missing = if unknown || anchored {
+                match (id, self.path_seals(domain)?.last()) {
+                    (Some(id), Some(seal)) => self.replay_has_gaps(scope, id, seal).await?,
+                    (None, Some(seal)) => self
+                        .seal_waits(domain, seal, None, &[(scope, id)], true)
+                        .await?
+                        .is_some(),
+                    (_, None) => false,
+                }
+            } else {
+                false
+            };
+            let needed = unknown
+                || (anchored && missing)
+                || match base {
+                    Some(seal) => !path.contains(&seal),
+                    None => pruned,
+                };
             if !needed {
                 continue;
             }
@@ -100,7 +181,10 @@ impl<A: RowApplication> Inner<A> {
                     .await?
                     .and_then(|base| base.seal())
                     .is_some_and(|seal| !path.contains(&seal));
-            let replay = match (released, pruned) {
+            if unknown && !missing && !pruned && base.is_none_or(|seal| path.contains(&seal)) {
+                continue;
+            }
+            let replay = match (released, pruned || missing) {
                 (true, _) => FrameReplay::Unavailable,
                 (false, false) => FrameReplay::Local,
                 (false, true) => FrameReplay::Peers,
@@ -124,6 +208,11 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
         reset: bool,
     ) -> Result<(), Error> {
+        if reset {
+            self.clear_seal_anchor(id).await?;
+        } else {
+            self.anchor_seal_coverage(scope, id).await?;
+        }
         self.clear_checkpoints(scope, id).await?;
         for table in ["secure_seal_bounds", "secure_seal_drops"] {
             self.conn
@@ -143,11 +232,12 @@ impl<A: RowApplication> Inner<A> {
                 [id],
             )
             .await?;
-        // The frames replayed from the start raise the identity marks again.
+        // The frames replayed from the start fold the replay ledger again;
+        // permanent marks and admission evidence stay.
         for sql in [
             "DELETE FROM secure_rows WHERE scope=?",
             "DELETE FROM secure_move_rows WHERE scope=?",
-            "DELETE FROM secure_identity_marks WHERE scope=?",
+            "DELETE FROM secure_identity_ledger WHERE scope=?",
         ] {
             self.conn.execute(sql, [blob.clone()]).await?;
         }
@@ -162,6 +252,28 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         self.reproject(scope).await
     }
+    /// Inside the caller's transaction, installs the pulled state of every
+    /// scope that needs a seal rebootstrap and has one at a seal of the
+    /// path. Install checks it again; a refused state is dropped and its
+    /// scope stays listed. Returns whether any state installed.
+    pub(in crate::replica) async fn install_needed_pulled(
+        &mut self,
+        domain: Scope,
+    ) -> Result<bool, Error> {
+        let mut installed = false;
+        for need in self.seal_rebootstraps(domain).await? {
+            let Some(id) = self.find_scope_id(need.scope).await? else {
+                continue;
+            };
+            if let Some(seal) = self.pulled_seal(id).await?
+                && self.path_index(domain, seal)?.is_some()
+            {
+                installed |= self.install_pulled(need.scope, id).await?
+                    == checkpoint::pulled::PulledInstall::Installed;
+            }
+        }
+        Ok(installed)
+    }
     /// Inside the caller's transaction, once every held scope's base sits at
     /// a seal of the path or was dropped for a replay: a domain whose
     /// compacted seal lost forgets its finalized seals, which it finalizes
@@ -171,11 +283,23 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         domain: Scope,
     ) -> Result<bool, Error> {
+        self.install_needed_pulled(domain).await?;
+        self.fault(checkpoint::Stage::Settle)?;
         if !self.seal_rebootstraps(domain).await?.is_empty() {
             return Ok(false);
         }
+
         if self.compaction_lost(domain).await?.is_none() {
             return Ok(true);
+        }
+        for (scope, id) in self.domain_scopes(domain).await? {
+            let based = match self.base_seal(id).await? {
+                Some(seal) => self.path_index(domain, seal)?.is_some(),
+                None => false,
+            };
+            if !based {
+                self.anchor_seal_coverage(scope, id).await?;
+            }
         }
         let blob = encode(&domain)?;
         for sql in [

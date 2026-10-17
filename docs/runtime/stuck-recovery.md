@@ -1,124 +1,179 @@
 # Stuck recovery
 
-A coordinated domain is stuck when every node of its in-sync set is lost: the
-coordinator knows the commit index, but no reachable trusted node holds it.
-[Coordinated writes](coordinated-writes.md#catch-up) first collect the missing
-entries from any device that still holds them. What no device holds is
-abandoned only by an owner-signed cut ([decision 0074](../decisions/0074-owner-signed-recovery-cuts.md)).
-[Phase 19](../features_09/19-recovery-as-a-bookmark-move.md) replaces the cut
-with one owner `continue` seal that lists the abandoned entries.
+Phase 19's final qualification is recorded in its
+[evidence](../features_09/19-recovery-as-a-bookmark-move-evidence.md).
 
-## The cut
+A tip's [coordinated log](coordinated-log.md) is stuck when no node of its
+in-sync set can append any more: the coordinator knows the commit, but no
+reachable trusted node holds it. Recovery first collects what any device
+still holds. What nobody holds is abandoned only by one owner `continue`
+seal of the tip, the recovery seal ([phase 19](../features_09/19-recovery-as-a-bookmark-move.md),
+[decision 0075](../decisions/0075-generations-as-sealed-forks.md#tips-seals-and-bookmarks)).
+Only the stuck tip's log is involved; other tips' logs never see it.
 
-A `rocky_credentials::SignedCut` names the exact head it replaces `(a, r_a,
-epoch)`, the retained prefix end `(c, h_c)`, the last position its proposer
-verified `(k, r_k)`, its sequence in the log and the previous cut's digest.
-The domain's control authority signs it; the same key holds a publisher-rooted
-issuer chain granting whole-scope writes over every scope of the domain, or
-is the publisher itself. The chain travels beside the record as its
-authority; together they are a `CutEvidence`.
+## Collect first
 
-The [coordinator](coordinated-log.md#owner-signed-cuts) commits the cut as the
-entry at `a+1` whose hash is the record's digest, so positions are never
-reused: `c+1..=a` stay abandoned and new entries start at `a+2`. The in-sync
-set empties, so every trusted node applies the cut before it writes again.
+[Coordinated writes](coordinated-writes.md#catch-up) rebuild missing
+committed entries from complete bundles any reachable device retains,
+members included, and from those this node holds itself. Entries are
+checked against the coordinator's hash window. A node that catches up
+rejoins without any signature.
 
-## Proposing and submitting
+## The recovery seal
 
-`EncryptedReplica::cut_proposal` first collects what reachable devices hold,
-then proposes a cut of the exact head that retains this node's position. It
-refuses with `Behind` until the node holds every earlier cut and the prefix
-the last one retained, and with `Conflict` while an entry is pending. Its base
-report lists each projected scope of the domain and whether its verified
-checkpoint survives the cut; one that does not fails closed with
-`cut_base_missing` after the cut. The report covers this node's own bases;
-peer bases are classified when offered for import.
+A recovery seal is a `continue` seal (`SealStatement`) whose `recovery`
+names two points of the tip's log:
 
-`CutProposal::sign` signs with the owner's key and pairs the issuer chain.
-`submit_cut` checks the owner locally, flushes the record, then sends it.
-A lost reply keeps it, and the next resolution sends the same record again;
-a refused one is discarded unless the head's window shows it was admitted.
-The node admits and rolls back the cut once the coordinator commits it.
-
-## Fencing
-
-Every device keeps every verified cut of a log, in order; a record whose
-predecessor is missing waits. A frame whose signed bundle position `p` lies
-in a held range `c < p ≤ a` is consumed without effect: its status becomes
-`abandoned`, its author log continues and checkpoints cover it, but it is
-never projected. A later write to a row only an abandoned frame created is
-consumed the same way. A frame naming a cut's own position is refused.
-
-| Message | Cut records |
+| Field | Meaning |
 | --- | --- |
-| Range pull | The frontier states the cut count held; the page carries the rest before its frames |
-| Subscription pull | The request states held counts per log; the page carries the rest |
-| Push | The records the peer's frontier lacks, before the frames |
-| Checkpoint offer | The records the offered checkpoint's binding names |
+| `retained` | The end of the prefix that stays: position `c` and the running hash after it |
+| `replaced` | The exact commit the seal ends: position `a` and its running hash |
 
-So every holder of a frame after a cut holds the cut. Trusted nodes take cuts
-from the coordinator head only; members take them from peers. Keyless custody
-relays them with frames.
+It abandons every committed entry of that tip's log at a position `p` with
+`c < p ≤ a`, whoever wrote it. The coordinator never learns a committed
+entry's author, so the seal names the positions. Each frame signs its tip
+and position; a coordinated write carried across `continue` seals keeps its
+frames and gains its author's signed
+[carry record](coordinated-writes.md#carry-records) naming the continuation
+position it committed at. Frames are located by that record when present,
+which identifies them on every device. Only the owner signs a
+recovery seal; one endorsed through any chain is refused. Owner seals
+outrank every other seal of the tip, except one already
+[final](seal-finality.md).
 
-## Checkpoint binding
+Its frontier is the proposer's, per author, after collection: frames
+beyond it walk to the continuation as late frames, as after any `continue`
+seal. Frames of abandoned entries never apply, wherever they sit.
 
-A checkpoint statement (format 15) records `coordinated: { cuts, cut,
-highest }`: the number and digest of the applied cuts of its tip's log and
-the highest entry position among the frames it covers. Against the held cuts
-it is clean when, for every held cut it did not apply, `highest ≤ c`; a cut
-count with another digest is another history and taints it. A binding naming
-more cuts than the device holds is refused as not ready until they arrive.
+## At the coordinator
 
-No checkpoint is sealed over a tainted base, and the verified import refuses
-a tainted checkpoint. A base compacted at a seal is classified the same
-way; a device never falls back to an older base.
+`DomainLog::recover` (`Action::Recover`) carries the encoded seal. The
+coordinator commits it as the log's terminal entry only when:
 
-## Rollback
+- the domain's control authority signed it directly;
+- it names this log's tip, and `replaced` equals the commit and running hash;
+- `retained` chains through the hash window to the commit; a prefix ending
+  before the window is endorsed by the owner's signature alone.
 
-Admitting a record starts five steps. Each commits its work with its progress
-in `secure_cut_work`; observers are notified after the commit, and a crash
-resumes at the cursor when the replica opens again.
+It is the one terminal entry committed without the in-sync set. Once a log
+committed any entry, an ordinary seal or a move's `close` is committed only
+from a node of the in-sync set, which holds every committed entry; a
+trusted node outside it catches up and joins first. So nothing but the
+owner's recovery ends a stuck log. A retry of the committed recovery
+answers the same commit; another terminal is `Sealed`; a head that moved
+is `StaleHead`, and the owner collects and signs again.
 
-1. **Admit.** Verify the record, its authority and its place after the held
-   cuts; store it with the work row and flush. Fencing applies from here.
-2. **Classify.** In pages of 256, mark applied frames in the abandoned range
-   `abandoned` and drop the log's entries there. A retry of their mutation
-   handle reports `abandoned` instead of success.
-3. **Rebase each scope.** A clean base runs the ordinary rebuild, which skips
-   abandoned frames; rows, projection and revision change in that
-   transaction. A tainted base installs a durable guard instead.
-4. **Head.** A node that holds the retained prefix at `c` records the cut's
-   position and running hash; otherwise it stays `Behind`.
-5. **Finish.** The work row is deleted.
+## Recovering
 
-Readmitting a held record changes nothing. A second record of a held sequence
-is refused with `cut_conflict`: the owner signed two histories, which Rocky
-detects but cannot repair.
+| Kotlin | Rust | JSON `tips` action | Returns |
+| --- | --- | --- | --- |
+| `tips.recover()` | `Session::recover` | `recover` | the tip status |
 
-## Guarded scopes
+The owner's device follows the stuck tip with its coordinated log
+composed. It collects (`EncryptedReplica::recovery_proposal`), signs the
+seal at its frontier and publishes it alone; every bookmark on the tip
+without an explicit move follows the recovery's continuation. The call is
+refused (`rejected`) on any other device or on a sealed tip.
+`retained == replaced`, including zero, is allowed: a fully collected log
+may still have full, unreachable membership or pending work.
+`stale_recovery` means the log moved meanwhile. `recovery_pending` is
+retryable: the exact signed action is durable and waits for commitment proof;
+the application does not need to sign a second action.
 
-A guarded scope refuses writes and sync with `cut_base_missing` and reports
-itself behind, so sync rebootstraps it. Importing a clean checkpoint through
-the verified import (`begin_rebootstrap`, pages, `finish_rebootstrap`) lifts the
-guard in the switch transaction; ordinary local writes made since replay on
-top. Reads still return the stored rows until then. With no clean base
-anywhere the scope stays guarded: Rocky does not endorse a tainted base, and
-replacing the domain is the application's decision.
+A replica without the SDK builds the seal from `recovery_proposal` and
+publishes it with `publish_tip_statements_through`.
 
-## Catch-up across a cut
+## On every device
 
-A trusted node at `c` moves straight to `a+1`. Positions before the hash
-window are verified only by a held cut: the served entries must chain from
-the node's own running hash to `h_c`, checked before any of them applies.
+- **Admission.** Every device waits for a verified finality record at the
+  line's owner-signed minimum of distinct trusted nodes. Acknowledgments
+  bind position `a + 1` and `coordinated_chain(replaced.running, a + 1,
+  seal_digest)`, as well as scope, tip and continuation. Trusted nodes inspect
+  and acknowledge pending candidates without activating them. Candidates
+  travel separately from the admitted graph. Offline members keep their last
+  admitted state until proof arrives. A verified proof needs no coordinator
+  call, including after the ended log leaves retention.
+- **Genesis authority.** Provision the genesis line once with the owner's
+  configured minimum (`Session::set_genesis_minimum`, JSON `genesis_minimum`)
+  before recovery. An absent signed minimum refuses submission; the runtime
+  never derives a weaker quorum from a coordinator response. Existing signed
+  minima are never lowered. A composed client alone is not
+  acknowledgment authority: a node needs an owner-direct trusted grant and
+  node certificate. The SDK certifies installed trust grants for this purpose;
+  a grant with no row permissions gives no row access.
+- **Rollback.** In the transaction that admits the seal, every frame of an
+  abandoned entry this device applied or staged becomes `abandoned`: held
+  for re-authoring and offered as a [held change](held-changes.md) on every
+  device that may read it, so it returns to its author. The scopes they
+  changed are all rebuilt, including existence and constraints, and the
+  log's entries there are removed. A frame
+  arriving later is held on receipt. A later write to a row only an
+  abandoned write created has no effect.
+- **Handles.** A mutation handle of an abandoned write reports `abandoned`.
+- **Pending writes.** An own write the recovery aborted, or one carried
+  across it, was computed on state that included abandoned entries: it is
+  held, never carried into the continuation. These calculations are settled
+  in admission's transaction, including staged and already carried work;
+  resolution of the old log is not required.
+- **The continuation.** Before a trusted node takes anything of the
+  continuation's log, it holds the sealed log through `retained`, verified
+  against the window or, before it, against the retained hash. A branch
+  opened on a seal that ended its log needs the entries that seal covered
+  the same way.
+
+## Durability
+
+Publication journals the signed batch, flushed, before the coordinator
+sees it, and admits it with its rollback in one transaction after the
+terminal entry committed. A crash or a lost reply leaves the journal;
+`settle_tip_statements` sends the same bytes again and admits them. A
+received seal that this node cannot confirm, because it is outside the
+in-sync set and cannot catch up yet, waits in the journal until a later
+settlement through peers; it is never part of the graph meanwhile. The SDK
+settles at the start of every sync pass.
+
+## Checkpoints
+
+With a tip graph a replay base sits only at a seal: no checkpoint is cut or
+imported beside one, so no base can hold an abandoned write. A base
+compacted at the recovery seal excludes them. A device whose compacted
+seal lost rebootstraps at the winning seal as
+[lazy compaction](lazy-compaction.md#rebootstrap) describes.
+
+## Limits
+
+- A member admits the owner's recovery without asking the coordinator. If
+  another seal ended the log first and is not final yet, the member resolves
+  to the recovery until that seal's finality record arrives.
+- A node keeps at most 32 received batches waiting; a peer resends others.
+- Collection rebuilds only complete retained bundles.
+- An undecided own write is classified by the position it was staged at.
 
 ## Formats
 
-| Format | Identity |
-| --- | --- |
-| Encrypted replica | `rocky.encrypted-replica.v25` |
-| Checkpoint statement | 15 |
-| Live link | `rocky.link.v9` |
-| Cut statement | `rocky.coordinated-cut.v2`, naming its tip's log |
-| Coordinator store and snapshot | 9 |
+Seal statements carry `recovery`; the coordinator's `Action::Recover`
+replaced `Action::Cut`. Replicas journal pending batches in
+`secure_pending_tips` and record entry positions in
+`secure_entry_frames`, moved by carry records in the graph. Cut records, the cut chain, cut guards and the
+checkpoint's coordinated binding are gone.
 
-Every other version is refused.
+## Durable submission and unavailable bases
+
+The exact signed seal and dependent batch are validated, journaled and flushed
+before an external commitment call. Every retry keeps the same bytes, including
+a lost reply followed by an unavailable head or a partially submitted batch.
+Admission replaces its unresolved remainder atomically, preserving ownership.
+An invalid batch is skipped without losing its submission bytes or blocking later
+batches. Pending candidates are absent from graph inspection and graph pages.
+
+A pruned base without a seal, or at a seal outside the followed path, cannot
+serve reads or authoring. Graph metadata can still be admitted and queues a
+pull of its target seal; the workspace waits for a verified replacement or
+complete frame replay. This survives reopening and does not expose the old
+checkpoint's abandoned effects. Checkpoint build/install and import completion
+recheck the graph, so an ordinary checkpoint started earlier cannot cross this
+boundary unnoticed.
+
+Branch writes require the complete inherited seal frontier, including ordinary
+frames, or a verified held seal/checkpoint. Ancestor serving is bounded by the
+branch's inherited frontier and never splits a bundle.

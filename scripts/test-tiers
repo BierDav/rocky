@@ -268,6 +268,31 @@ def run_nextest(source, tier, expr, tests):
     return timed, failed, wall
 
 
+def run_tier(source, config, tier, expr, tests):
+    """Keep explicitly exempt tests functional, outside the suite's clock."""
+    exemption = config.tiers[tier].get("suite-exempt-filter")
+    if not exemption:
+        run = run_unit(source, tests) if tier == "unit" else run_nextest(source, tier, expr, tests)
+        return (*run, 0.0)
+    if tier == "unit":
+        fail("unit tests cannot be exempt from the suite budget")
+    exempt_expr = f"({expr}) & ({exemption})"
+    exempt = source.list(exempt_expr, ignored="all" if tier == "e2e" else "default")
+    keys = {(suite["binary-id"], name) for suite, name in exempt}
+    regular = [(suite, name) for suite, name in tests if (suite["binary-id"], name) not in keys]
+    timed, failed, wall = [], [], 0.0
+    if regular:
+        timed, failed, wall = run_nextest(source, tier, f"({expr}) & !({exemption})", regular)
+    exempt_wall = 0.0
+    if exempt:
+        print(f"test-tiers: {tier}: {len(exempt)} suite-budget-exempt tests from {source.name}; "
+              "failures and nextest timeouts still apply", flush=True)
+        extra_timed, extra_failed, exempt_wall = run_nextest(source, tier, exempt_expr, exempt)
+        timed += extra_timed
+        failed += extra_failed
+    return timed, failed, wall, exempt_wall
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("tier", choices=TIERS)
@@ -286,7 +311,7 @@ def main():
     REPORTS.mkdir(parents=True, exist_ok=True)
 
     problems = []
-    timed_all, wall_total, factors = [], 0.0, []
+    timed_all, wall_total, exempt_total, factors = [], 0.0, 0.0, []
     for source in sources:
         tests = source.list(expr, ignored="all" if tier == "e2e" else "default")
         if args.list:
@@ -298,14 +323,12 @@ def main():
         if not tests:
             continue
         before = load()
-        if tier == "unit":
-            timed, failed, wall = run_unit(source, tests)
-        else:
-            timed, failed, wall = run_nextest(source, tier, expr, tests)
+        timed, failed, wall, exempt_wall = run_tier(source, config, tier, expr, tests)
         factors.append(load_factor(before, load()))
         problems += [f"failed: {f}" for f in failed]
         timed_all += timed
         wall_total += wall
+        exempt_total += exempt_wall
         with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
             for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
                 report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
@@ -328,6 +351,9 @@ def main():
     scaled = wall_total / factor
     print(f"test-tiers: {tier}: {len(timed_all)} passed, wall {show(wall_total)}, "
           f"{show(scaled)} at load x{factor:.1f}, budget {show(suite_budget)}")
+    if exempt_total:
+        print(f"test-tiers: {tier}: additional exempt wall {show(exempt_total)}; "
+              f"total elapsed {show(wall_total + exempt_total)}")
     if scaled > suite_budget:
         problems.append(f"the {tier} suite took {show(scaled)} scaled by load, "
                         f"over its {show(suite_budget)} budget")

@@ -27,12 +27,15 @@ suite = "10s"
 # The Rust driver projection and secure checkpoint custody regressions use real
 # SQLite and sessions; the existing integration filters include them.
 # No filter change or exception is needed.
+# Round48 checkpoint byte/signature fixtures use the crypto integration budget.
 [integration]
 per-test = "2s"
 suite = "5m"
 filter = '''
     kind(test)
+    | (package(rocky-secure) & test(/^replica::checkpoint::backend_vectors::/))
     | (package(rocky-secure) & test(/^tests::/))
+    | (package(rocky-secure) & test(/^replica::coordinated::abandoned::tests::/))
     | (package(rocky-secure) & test(/^network::(holdings|contacts)::tests::/))
     | (package(rocky-secure) & test(/^network::link::integration_tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
@@ -60,10 +63,23 @@ filter = '''
 # features_09 phase 7's full-size migration: 100,000 rows seeded and filled by
 # migrations and pulled by a member, 481 s alone; see
 # docs/features_09/07-migrations-at-any-size.md#evidence.
+# features_09 phase 17's coordinated recovery regression commits the real
+# 1,025-entry hash window before signing: 45.3 s alone in the e2e profile.
+# features_09 core prerequisites: real-voter migration and QUIC restarts took
+# 4.606 s alone. Rollback crosses the real 256-operation retention window
+# and real transport deadlines; round38 passes in 45.919 s after the
+# original 71.398 s restoration failure. Budgets and retention remain unchanged.
 [e2e]
 suite = "15m"
+# Owner-authorized 2026-10-21: run the full migration in both builds outside
+# the combined suite clock. Its assertions and existing 600 s timeout remain.
+suite-exempt-filter = '''
+    binary_id(=rocky-sdk::migrations)
+    & test(=a_migration_of_100000_rows_converges_on_every_member)
+'''
 filter = '''
-    (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
+    (package(rocky-secure) & test(=tests::coordinated::recovery::regressions::collects_every_entry_across_the_real_hash_window_before_recovery_is_signed))
+    | (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
     | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
     | test(/::soak_/)
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
@@ -127,7 +143,8 @@ filter = '''
     ))
     | (binary_id(rocky-sdk::service) & (
           test(=a_registered_service_domain_commits_ordinary_rows_and_closes)
-        | test(=a_device_granted_execute_registers_and_executes_without_being_an_issuer)
+        | test(=migration::real_voters_release_a_private_migration_without_reopening_the_publisher)
+        | test(=rollback::a_compacted_member_waits_for_the_owners_kept_rollback_seal)
     ))
     | (binary_id(rocky-sdk::shopping_release) & (
           test(=a_device_joining_after_a_move_starts_the_list_from_a_checkpoint)

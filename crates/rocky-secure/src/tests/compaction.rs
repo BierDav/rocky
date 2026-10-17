@@ -11,6 +11,21 @@ use rocky_credentials::{
 
 pub(super) type Replica = EncryptedReplica<TypedRows>;
 
+/// Empty state is a signed fact at this seal, with no invented operations.
+pub(super) fn assert_empty_checkpoint(signed: &crate::SignedCheckpoint, seal: Commitment) {
+    signed.verify_signature().unwrap();
+    let statement = &signed.statement;
+    assert_eq!(statement.seal, Some(seal));
+    assert_eq!(statement.operations, 0);
+    assert_eq!(statement.rows.count, 0);
+    assert_eq!(statement.tombstones, 0);
+    assert_eq!(statement.creations.count, 0);
+    assert_eq!(
+        statement.key_epoch(),
+        Some(rocky_core::KeyEpoch::new(1, &[41; 32]))
+    );
+}
+
 pub(super) async fn open(
     lineage: &Lineage,
     dir: &TempDir,
@@ -22,7 +37,7 @@ pub(super) async fn open(
             &dir.path().join(format!("{name}.db")),
             key,
             3,
-            Some(lineage.upgrade(1, 3)),
+            Some(lineage.projection(3)),
         )
         .await
         .unwrap()
@@ -66,6 +81,7 @@ pub(super) fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>
             action: SealAction::Continue {
                 schema: lineage.definition(3).hash(),
             },
+            recovery: None,
         },
         lineage.publisher(),
     )
@@ -418,13 +434,25 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
 
 /// Imports `source`'s replay base of `scope` into `target`, whose node key
 /// is `key`, page by page.
-async fn import_checkpoint(
+pub(super) async fn import_checkpoint(
     lineage: &Lineage,
     source: &Replica,
     target: &Replica,
     key: &PrivateKey,
     scope: ResourceScope,
 ) -> Commitment {
+    import_checkpoint_report(lineage, source, target, key, scope)
+        .await
+        .checkpoint
+}
+/// [`import_checkpoint`], returning the import's report.
+pub(super) async fn import_checkpoint_report(
+    lineage: &Lineage,
+    source: &Replica,
+    target: &Replica,
+    key: &PrivateKey,
+    scope: ResourceScope,
+) -> crate::RebootstrapReport {
     let credentials = lineage.credentials(3, key);
     source
         .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
@@ -456,11 +484,56 @@ async fn import_checkpoint(
             break;
         }
     }
-    target.finish_rebootstrap(scope).await.unwrap();
-    checkpoint
+    let report = target.finish_rebootstrap(scope).await.unwrap();
+    assert_eq!(report.checkpoint, checkpoint);
+    report
+}
+/// The highest-sequence retained operation of `scope`.
+pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> Hash {
+    let inner = replica.inner.lock().await;
+    let records = crate::storage::collect_rows(
+        inner
+            .conn
+            .query(
+                "SELECT hash FROM secure_operations WHERE scope=? ORDER BY sequence DESC LIMIT 1",
+                [encode(&scope).unwrap()],
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let [SqlValue::Blob(hash)] = records[0].as_slice() else {
+        panic!("operation");
+    };
+    Hash::from_bytes(hash.as_slice().try_into().unwrap())
+}
+/// `replica`'s live identity mark of `author` in `scope`.
+pub(super) async fn live_mark(replica: &Replica, scope: ResourceScope, author: u32) -> u32 {
+    let inner = replica.inner.lock().await;
+    let records = crate::storage::collect_rows(
+        inner
+            .conn
+            .query(
+                "SELECT sequence FROM secure_identity_marks WHERE scope=? AND author=?",
+                crate::storage::bindings(vec![
+                    SqlValue::Blob(encode(&scope).unwrap()),
+                    SqlValue::Integer(author.into()),
+                ]),
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    match records.first().map(Vec::as_slice) {
+        Some([SqlValue::Integer(sequence)]) => u32::try_from(*sequence).unwrap(),
+        None => 0,
+        other => panic!("{other:?}"),
+    }
 }
 /// The owner lists `replica`'s replay bases at seals in the graph.
-async fn list_checkpoints(lineage: &Lineage, replica: &Replica) -> Vec<TipStatement> {
+pub(super) async fn list_checkpoints(lineage: &Lineage, replica: &Replica) -> Vec<TipStatement> {
     let records: Vec<TipStatement> = replica
         .unlisted_checkpoints(lineage.domain)
         .await
@@ -506,7 +579,7 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     let report = b.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.compacted, Some(winner.id().unwrap()));
     let records = list_checkpoints(&lineage, &b).await;
-    assert_eq!(records.len(), 1);
+    assert_eq!(records.len(), 2);
 
     // A learns the winner and the record: its compacted seal lost.
     a.receive_tip_statements(&b.tip_statements(None, 32).await.unwrap())
@@ -516,17 +589,72 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     assert_eq!(status.rebootstrap, Some(sealed.id().unwrap()));
     let graph = a.tip_graph(lineage.domain).await.unwrap();
     let listed = graph.checkpoints_at(winner.id().unwrap()).unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].statement.signer, keys[1].public_key());
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|record| record.statement.signer == keys[1].public_key())
+    );
     let scope = lineage.scope("items");
     let needs = a.seal_rebootstraps(lineage.domain).await.unwrap();
-    assert_eq!(needs.len(), 1);
-    assert_eq!(needs[0].listed, vec![listed[0].statement.checkpoint]);
+    assert_eq!(needs.len(), 2);
+    for need in &needs {
+        let record = listed
+            .iter()
+            .find(|record| record.statement.table == need.scope)
+            .unwrap();
+        assert_eq!(need.listed, vec![record.statement.checkpoint]);
+    }
+    let listed_items = listed
+        .iter()
+        .find(|record| record.statement.table == scope)
+        .unwrap();
+    let tags = lineage.scope("tags");
+    b.admit_peer(
+        keys[0].public_key(),
+        &lineage.credentials(3, &keys[0]),
+        a.followed_tip().await,
+    )
+    .await
+    .unwrap();
+    let empty = b
+        .checkpoint_offer(
+            keys[0].public_key(),
+            &lineage.credentials(3, &keys[0]),
+            tags,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_empty_checkpoint(&empty, winner.id().unwrap());
+    let imported_empty = import_checkpoint(&lineage, &b, &a, &keys[0], tags).await;
+    assert_eq!(imported_empty, empty.id().unwrap());
+    assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 0);
 
+    // The winner's marks cover only the identities its own state created,
+    // below y's, which A still holds and has applied.
+    let offered = b
+        .checkpoint_offer(
+            keys[0].public_key(),
+            &lineage.credentials(3, &keys[0]),
+            scope,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let [mark] = offered.statement.identities.as_slice() else {
+        panic!("{:?}", offered.statement.identities);
+    };
+    let late = live_mark(&a, scope, mark.author).await;
+    assert!(mark.sequence < late, "{mark:?} {late}");
+    let y = last_operation(&a, scope).await;
     // It imports the listed checkpoint; its frames the winner left out
     // apply again on top as late frames.
-    let imported = import_checkpoint(&lineage, &b, &a, &keys[0], scope).await;
-    assert_eq!(imported, listed[0].statement.checkpoint);
+    let report = import_checkpoint_report(&lineage, &b, &a, &keys[0], scope).await;
+    assert_eq!(report.checkpoint, listed_items.statement.checkpoint);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert!(report.reapplied.contains(&y), "{report:?}");
+    assert_eq!(live_mark(&a, scope, mark.author).await, late);
     assert!(a.finish_seal_rebootstrap(lineage.domain).await.unwrap());
     let status = a.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.rebootstrap, None);
@@ -584,8 +712,41 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     b.receive_tip_statements(&statements).await.unwrap();
     a.receive_tip_statements(&statements).await.unwrap();
     let needs = a.seal_rebootstraps(lineage.domain).await.unwrap();
-    assert_eq!(needs.len(), 1);
-    assert_eq!(needs[0].replay, crate::FrameReplay::Peers);
+    assert_eq!(needs.len(), 2);
+    assert_eq!(
+        needs
+            .iter()
+            .find(|need| need.scope == scope)
+            .unwrap()
+            .replay,
+        crate::FrameReplay::Peers
+    );
+    let tags = lineage.scope("tags");
+    assert_eq!(
+        needs.iter().find(|need| need.scope == tags).unwrap().replay,
+        crate::FrameReplay::Local
+    );
+    a.replay_at_seals(tags, false).await.unwrap();
+    assert!(
+        a.seal_rebootstraps(lineage.domain)
+            .await
+            .unwrap()
+            .iter()
+            .all(|need| need.scope != tags)
+    );
+    drop(a);
+    let a = lineage
+        .reopen(&dir.path().join("a.db"), &keys[0], 3, 3)
+        .await
+        .unwrap();
+    assert!(
+        a.seal_rebootstraps(lineage.domain)
+            .await
+            .unwrap()
+            .iter()
+            .all(|need| need.scope != tags)
+    );
+    assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 0);
     assert!(
         a.replay_at_seals(scope, false)
             .await
@@ -593,6 +754,14 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     );
     // A keeps what it holds and takes the pruned frames from B again.
     a.replay_at_seals(scope, true).await.unwrap();
+    assert_eq!(scalar(&a,"SELECT count(*) FROM secure_seal_anchors a JOIN secure_scope_state s ON s.id=a.scope WHERE s.scope=(SELECT scope FROM secure_evicted_logs LIMIT 1)").await,0);
+    assert!(
+        a.compaction_status(lineage.domain)
+            .await
+            .unwrap()
+            .waiting
+            .is_some()
+    );
     sync(&lineage, &b, &a, &keys[0]).await;
     a.restored(scope).await.unwrap();
     assert_eq!(
@@ -611,9 +780,9 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
 
 #[tokio::test]
 async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
-    let lineage = Lineage::new();
+    let lineage = Lineage::pinned(121);
     let dir = TempDir::new().unwrap();
-    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let keys = [122, 123].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
     follow_main(&lineage, &a).await;
@@ -634,8 +803,11 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
     )
     .await
     .unwrap();
+    let empty_seal = seal(&lineage, &a).await.id().unwrap();
+    a.compact(lineage.domain, 0).await.unwrap();
     insert(&a, "live", "kept").await;
     let mut plateau = None;
+    let mut admission: Option<receipts::Accounting> = None;
     for cycle in 1..=64 {
         churn(&a, 1, &format!("cycle{cycle}-")).await;
         if ![16, 64].contains(&cycle) {
@@ -653,6 +825,38 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
         let report = a.compact(lineage.domain, 0).await.unwrap();
         assert_eq!(report.blocked, Vec::new());
         assert!(report.pruned > 0);
+        let verified = crate::storage::collect_rows(
+            a.inner
+                .lock()
+                .await
+                .conn
+                .query(
+                    "SELECT s.scope,b.position,f.seal,c.signed FROM secure_seal_bounds b JOIN secure_scope_state s ON s.id=b.scope JOIN secure_finalized f ON f.depth=b.depth JOIN secure_checkpoints c ON c.scope=s.id",
+                    (),
+                )
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let [record] = verified.as_slice() else {
+            panic!("one current verification bound for the unchanged empty scope")
+        };
+        assert_eq!(
+            record[0],
+            SqlValue::Blob(encode(&lineage.scope("tags")).unwrap())
+        );
+        assert_eq!(record[1], SqlValue::Integer(0));
+        assert_eq!(
+            record[2],
+            SqlValue::Blob(report.compacted.unwrap().to_vec())
+        );
+        let SqlValue::Blob(bytes) = &record[3] else {
+            panic!("signed empty base")
+        };
+        let empty = crate::SignedCheckpoint::from_bytes(bytes).unwrap();
+        assert_eq!(empty.statement.scope, lineage.scope("tags"));
+        assert_empty_checkpoint(&empty, empty_seal);
         let counts = (
             stored(&a).await,
             scalar(&a, "SELECT count(*) FROM secure_stubs").await,
@@ -667,12 +871,21 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
             .await,
         );
         println!("seal compaction churn: cycles={cycle}; {counts:?}");
-        // One live row and its creation witness; nothing else retained.
-        assert_eq!(counts, ((1, 0), 1, 0, 0, 4, 1, 0));
+        // One live row, its creation witness and the latest empty-scope proof.
+        assert_eq!(counts, ((1, 0), 1, 0, 0, 4, 1, 1));
         if let Some(previous) = plateau {
             assert_eq!(previous, counts);
         }
         plateau = Some(counts);
+        let measured = receipts::accounting(&a, &dir.path().join("a.db"), cycle).await;
+        if let Some(previous) = admission {
+            assert_eq!(measured.entries - previous.entries, 48);
+            assert_eq!(measured.grants - previous.grants, 48);
+            assert_eq!(measured.chains - previous.chains, 48);
+            assert_eq!(measured.bounded, previous.bounded);
+            assert!(measured.logical_bytes - previous.logical_bytes >= 48 * 288);
+        }
+        admission = Some(measured);
     }
     assert_eq!(titles(&a).await, vec![vec![text("live"), text("kept")]]);
 }
@@ -708,3 +921,19 @@ async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched(
     let rows = session.run("SELECT label FROM tags", vec![]).await.unwrap();
     assert_eq!(rows.rows, vec![vec![text("kept")]]);
 }
+
+mod anchors;
+pub(in crate::tests) mod audit;
+mod deferred;
+mod eligibility;
+mod identities;
+mod own;
+mod partial_reads;
+mod provenance;
+mod readiness;
+mod receipts;
+mod replay_scope;
+mod returning;
+mod staged_switches;
+
+mod restoration;

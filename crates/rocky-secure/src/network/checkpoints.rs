@@ -35,8 +35,6 @@ pub(super) enum CheckpointMessage {
     },
     Checkpoint {
         signed: Option<Box<SignedCheckpoint>>,
-        /// The cut records the checkpoint's binding names.
-        cuts: Vec<CutEvidence>,
     },
     CheckpointPull {
         scope: ResourceScope,
@@ -79,7 +77,7 @@ impl NativeSession {
             self.ensure_holding(replica, &[scope]).await?;
             self.send(CheckpointMessage::SealOffer { scope, seal })
                 .await?;
-            let Some(signed) = self.offered(replica, scope).await? else {
+            let Some(signed) = self.offered(scope).await? else {
                 missing = true;
                 continue;
             };
@@ -91,7 +89,7 @@ impl NativeSession {
                 Some((staged, cursor, complete)) if staged == checkpoint => (cursor, complete),
                 _ => {
                     replica.begin_seal_pull(*signed).await?;
-                    (None, false)
+                    staged_progress(replica, scope).await?
                 }
             };
             if !self
@@ -128,6 +126,7 @@ impl NativeSession {
                 return Ok(false);
             }
         }
+        replica.finish_seal_rebootstrap(domain).await?;
         Ok(true)
     }
     /// Imports the peer's checkpoint of a scope and switches to it. An
@@ -154,7 +153,7 @@ impl NativeSession {
     ) -> Result<Option<RebootstrapReport>, Error> {
         self.ensure_holding(replica, &[scope]).await?;
         let signed = self
-            .checkpoint_offer(replica, scope)
+            .checkpoint_offer(scope)
             .await?
             .ok_or_else(|| denied("the peer offers no checkpoint"))?;
         self.import_within(replica, signed, quota).await
@@ -186,7 +185,7 @@ impl NativeSession {
             let scope = need.scope;
             if !need.listed.is_empty() {
                 self.ensure_holding(replica, &[scope]).await?;
-                if let Some(signed) = self.checkpoint_offer(replica, scope).await?
+                if let Some(signed) = self.checkpoint_offer(scope).await?
                     && need.listed.contains(&signed.id()?)
                 {
                     if self
@@ -240,7 +239,7 @@ impl NativeSession {
         self.ensure_holding(replica, scopes).await?;
         let mut offered = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            offered.push(match self.checkpoint_offer(replica, *scope).await? {
+            offered.push(match self.checkpoint_offer(*scope).await? {
                 Some(signed)
                     if signed.statement.seal.is_some()
                         || !replica.owns_checkpoint_signer(&signed).await =>
@@ -253,23 +252,20 @@ impl NativeSession {
         Ok(offered)
     }
     /// The peer's current checkpoint of `scope`, if it offers one.
-    async fn checkpoint_offer<A: RowApplication>(
+    async fn checkpoint_offer(
         &mut self,
-        replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<Option<Box<SignedCheckpoint>>, Error> {
         self.send(CheckpointMessage::CheckpointOffer { scope })
             .await?;
-        self.offered(replica, scope).await
+        self.offered(scope).await
     }
     /// The answer to an offer of `scope`.
-    async fn offered<A: RowApplication>(
+    async fn offered(
         &mut self,
-        replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<Option<Box<SignedCheckpoint>>, Error> {
-        let CheckpointMessage::Checkpoint { signed, cuts } =
-            self.reply::<CheckpointMessage>().await?
+        let CheckpointMessage::Checkpoint { signed } = self.reply::<CheckpointMessage>().await?
         else {
             return Err(denied("unexpected checkpoint offer response"));
         };
@@ -279,7 +275,6 @@ impl NativeSession {
         {
             return Err(denied("checkpoint outside subscription"));
         }
-        super::rows::receive_cuts(replica, &cuts, &[scope]).await?;
         Ok(signed)
     }
     async fn import_within<A: RowApplication>(
@@ -294,7 +289,7 @@ impl NativeSession {
             Some((staged, cursor, complete)) if staged == checkpoint => (cursor, complete),
             _ => {
                 replica.begin_rebootstrap(*signed).await?;
-                (None, false)
+                staged_progress(replica, scope).await?
             }
         };
         if !self
@@ -395,7 +390,7 @@ impl NativeSession {
             }));
         }
         self.ensure_holding(replica, &[scope]).await?;
-        let Some(signed) = self.checkpoint_offer(replica, scope).await? else {
+        let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };
         if signed.statement.seal.is_none() && replica.owns_checkpoint_signer(&signed).await {
@@ -471,6 +466,9 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: CheckpointMessage,
     ) -> Result<(), Error> {
+        if replica.private_schema().await? {
+            return Err(denied("schema publication is private"));
+        }
         match message {
             CheckpointMessage::Pruned { scope, after } => {
                 let page = replica
@@ -495,14 +493,8 @@ impl NativeSession {
                 let signed = replica
                     .checkpoint_offer(self.peer, &self.credentials, scope)
                     .await?;
-                let named = signed
-                    .as_ref()
-                    .map_or(0, |signed| signed.statement.coordinated.cuts);
-                let mut cuts = replica.cuts_for(&[scope], &[]).await?;
-                cuts.retain(|cut| cut.record.statement.sequence <= named);
                 self.send(CheckpointMessage::Checkpoint {
                     signed: signed.map(Box::new),
-                    cuts,
                 })
                 .await
             }
@@ -510,14 +502,8 @@ impl NativeSession {
                 let signed = replica
                     .seal_checkpoint_offer(self.peer, &self.credentials, scope, seal)
                     .await?;
-                let named = signed
-                    .as_ref()
-                    .map_or(0, |signed| signed.statement.coordinated.cuts);
-                let mut cuts = replica.cuts_for(&[scope], &[]).await?;
-                cuts.retain(|cut| cut.record.statement.sequence <= named);
                 self.send(CheckpointMessage::Checkpoint {
                     signed: signed.map(Box::new),
-                    cuts,
                 })
                 .await
             }
@@ -549,5 +535,37 @@ impl NativeSession {
             }
             _ => Err(denied("unexpected native request")),
         }
+    }
+}
+
+/// Where a just-begun import stands: a no-frames checkpoint stages complete.
+async fn staged_progress<A: RowApplication>(
+    replica: &EncryptedReplica<A>,
+    scope: ResourceScope,
+) -> Result<(Option<Commitment>, bool), Error> {
+    Ok(replica
+        .rebootstrap_progress(scope)
+        .await?
+        .map_or((None, false), |(_, cursor, complete)| (cursor, complete)))
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    #[test]
+    fn a_parent_checkpoint_offer_with_removed_metadata_is_refused() {
+        #[derive(Serialize)]
+        enum Parent {
+            Checkpoint {
+                signed: Option<Box<SignedCheckpoint>>,
+                cuts: Vec<()>,
+            },
+        }
+        let bytes = encode(&Parent::Checkpoint {
+            signed: None,
+            cuts: vec![],
+        })
+        .unwrap();
+        assert!(decode_bounded::<CheckpointMessage>(&bytes, MAX_SECURE_FRAME).is_err());
     }
 }

@@ -18,7 +18,9 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
         default["policy"],
         json!({"required": [], "behind": [], "copies": 1, "window": 256})
     );
+    device.follow_main().await;
     device.add(1, "sole copy").await;
+    device.seal_and_compact().await;
     let policy = json!({"required": [], "behind": [], "copies": 1, "window": 0});
     let status = device
         .ok(json!({"type": "retention", "collection": "items", "policy": policy, "maintain": true}))
@@ -31,7 +33,12 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
             .await
             .is_err()
     );
-    assert!(device.call(json!({"type": "retention_limits", "limits": {"checkpoint_operations": 0, "soft_bytes": 1, "hard_bytes": 1, "handles": 1}})).await.is_err());
+    assert!(
+        device
+            .call(json!({"type": "retention_limits", "limits": {"hard_bytes": 0, "handles": 1}}))
+            .await
+            .is_err()
+    );
     device.close().await;
     let device = Device::open(root.path(), None)?;
     assert_eq!(
@@ -53,6 +60,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     a.add(1, "base").await;
     let b = Device::join(
         &root.path().join("b"),
@@ -71,6 +79,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
         a.add(handle, &format!("row {handle}")).await;
     }
     b.sync().await.expect("custody sync");
+    a.seal_and_compact().await;
     let status = a
         .ok(
             json!({"type": "retention", "collection": "items", "policy": {
@@ -144,10 +153,12 @@ async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failur
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
     }
+    a.seal_and_compact().await;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
@@ -168,6 +179,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     a.add(1, "before revocation").await;
     let revoked = Device::join(
         &root.path().join("revoked"),
@@ -177,6 +189,8 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     revoked.sync().await.expect("initial bootstrap");
     a.ok(json!({"type": "revoke", "node": revoked.node().await}))
         .await;
+    // The base a joiner imports sits at a seal after the rotation.
+    a.seal_and_compact().await;
     let member_path = root.path().join("member");
     let member = Device::join(
         &member_path,
@@ -431,6 +445,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     a.add(1, "epoch one").await;
     let b_path = root.path().join("b");
     let b = Device::join(
@@ -451,6 +466,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         a.add(handle, title).await;
         revoked.close().await;
     }
+    a.seal_and_compact().await;
     b.ok(json!({"type": "renew"})).await;
     assert_eq!(
         b.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
@@ -501,7 +517,18 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         },
         None,
     )?)?;
+    a.follow_main().await;
     a.add(1, "first scope").await;
+    // Each scope has a base at the seal, so each is its own import.
+    a.ok(json!({
+        "type": "mutate",
+        "handle": vec![2; 32],
+        "payload": json!({"type": "create", "collection": "notes", "values": {"body": "second scope"}}).to_string().into_bytes(),
+        "entity": null,
+        "baseline": null,
+    }))
+    .await;
+    a.seal_and_compact().await;
     let gate = Arc::new(Gate {
         inner: hub.connector("member").start(false, [9; 32]).await?,
         allowed: tokio::sync::watch::channel(true).0,
@@ -698,10 +725,12 @@ async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> 
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
     }
+    a.seal_and_compact().await;
     let b = Arc::new(Device::join(
         &root.path().join("b"),
         &a.invite().await,
@@ -752,10 +781,12 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
+    a.follow_main().await;
     for handle in 0..60 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
     }
+    a.seal_and_compact().await;
     let b = Arc::new(Device::join(
         &root.path().join("b"),
         &a.invite().await,

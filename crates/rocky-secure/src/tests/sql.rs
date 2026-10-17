@@ -46,6 +46,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
     );
     LogicalTable {
         sql_name: name.into(),
+        granted_like: None,
         class: TableClass::Mergeable,
         create_sql: sql,
         auto_generate: false,
@@ -906,6 +907,58 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
 }
 
 #[tokio::test]
+async fn savepoint_rollback_and_cancellation_do_not_cache_uncommitted_frontiers() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let scopes = [t.items, t.salaries];
+    let replica = t
+        .open(
+            &dir.path().join("frontiers.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &scopes,
+        )
+        .await;
+    let session = sql(&replica, &scopes).await;
+    insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    let committed = replica.frontier(t.items).await.unwrap();
+    assert_eq!(committed.logs[0].applied, 1);
+    session.run("BEGIN", vec![]).await.unwrap();
+    session.run("SAVEPOINT child", vec![]).await.unwrap();
+    insert(
+        &session,
+        "INSERT INTO items VALUES('b','bananas',0)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session.transactional_frontier(t.items).await.unwrap(),
+        (committed.clone(), 0)
+    );
+    session.run("ROLLBACK TO child", vec![]).await.unwrap();
+    assert_eq!(
+        session.transactional_frontier(t.items).await.unwrap(),
+        (committed.clone(), 0)
+    );
+    session.run("RELEASE child", vec![]).await.unwrap();
+    session.cancel().await;
+    session.run("ROLLBACK", vec![]).await.unwrap();
+    assert_eq!(replica.inner.lock().await.frontier_cache_stats().1, 0);
+    assert_eq!(replica.frontier(t.items).await.unwrap(), committed);
+    assert_eq!(
+        select(&session, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(1)]]
+    );
+    session.run("BEGIN", vec![]).await.unwrap();
+    assert_eq!(session.transactional_frontier(t.items).await.unwrap().1, 0);
+    drop(session);
+    assert_eq!(replica.frontier(t.items).await.unwrap(), committed);
+}
+
+#[tokio::test]
 async fn a_handle_recovers_its_commit_after_restart_and_policies_shape_masks() {
     let t = Typed::new(UpdatePolicy::Assigned);
     let dir = TempDir::new().unwrap();
@@ -1544,7 +1597,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
         .await
         .unwrap();
     drop(session_sql);
-    replica.checkpoint(fixture.items).await.unwrap();
+    compacted_base(&replica, &fixture.publisher, fixture.items).await;
     replica.audit(fixture.items).await.unwrap();
     drop(replica);
     let replica = fixture
@@ -1718,7 +1771,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     let plaintext = crate::wire::decrypt(
         &fixture.key(fixture.items).key,
         &encode(&operation.header.extensions).unwrap(),
-        &frame.body,
+        frame.body_bytes(),
     )
     .unwrap();
     let mut extensions = operation.header.extensions;
@@ -1794,8 +1847,8 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     )
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
-    let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 15);
+    let signed = compacted_base(&peer, &fixture.publisher, fixture.items).await;
+    assert_eq!(signed.statement.format, 16);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 
@@ -1904,7 +1957,7 @@ async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replace
                 SqlValue::Integer(0)
             ]]
         );
-        let checkpoint = peer.checkpoint(fixture.items).await.unwrap();
+        let checkpoint = compacted_base(peer, &fixture.publisher, fixture.items).await;
         assert_eq!(
             checkpoint
                 .statement
@@ -1926,8 +1979,9 @@ async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replace
             &[fixture.items, fixture.salaries],
         )
         .await;
-    let signed = replicas[0].checkpoint(fixture.items).await.unwrap();
+    let signed = compacted_base(&replicas[0], &fixture.publisher, fixture.items).await;
     let checkpoint_id = signed.id().unwrap();
+    link_up(&replicas[0], &fresh, fixture.items.domain).await;
     fresh.begin_rebootstrap(signed).await.unwrap();
     let credentials = fixture.credentials(&fresh_node, fixture.full());
     let mut after = None;
@@ -1951,6 +2005,31 @@ async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replace
         after = next;
     }
     fresh.finish_rebootstrap(fixture.items).await.unwrap();
+    // The salaries scope's state at the seal is the source's verified base.
+    let imported = crate::tests::import_needed_bases(
+        &replicas[0],
+        &fresh,
+        &fresh_node,
+        &credentials,
+        fixture.items.domain,
+    )
+    .await;
+    assert_eq!(
+        imported
+            .iter()
+            .map(|signed| signed.statement.scope)
+            .collect::<Vec<_>>(),
+        vec![fixture.salaries]
+    );
+    assert_eq!(
+        imported[0].id().unwrap(),
+        replicas[0]
+            .checkpoint(fixture.salaries)
+            .await
+            .unwrap()
+            .id()
+            .unwrap()
+    );
     assert_eq!(
         sql(&fresh, &[fixture.items])
             .await
@@ -2012,7 +2091,7 @@ async fn multi_frame_relinks_verify_the_final_sql_projection() {
         .unwrap()
         .frames;
     assert!(frames.len() > 1);
-    replica.checkpoint(fixture.items).await.unwrap();
+    compacted_base(&replica, &fixture.publisher, fixture.items).await;
     replica.rebuild_projection(fixture.items).await.unwrap();
     assert_eq!(
         writer
@@ -2274,7 +2353,9 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         ids.push((item, salary));
         for scope in [fixture.items, fixture.salaries] {
             assert_eq!(
-                replica.checkpoint(scope).await.unwrap().signer(),
+                compacted_base(replica, &fixture.publisher, scope)
+                    .await
+                    .signer(),
                 nodes[index].public_key()
             );
         }
@@ -2302,7 +2383,7 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         .await
         .unwrap();
     let committed = writer.commit([202; 32]).await.unwrap().committed.unwrap();
-    let conflicting_checkpoint = forged.checkpoint(fixture.items).await.unwrap();
+    let conflicting_checkpoint = compacted_base(&forged, &fixture.publisher, fixture.items).await;
     drop(second);
     let second = open("second.sqlite", 1, 101).await;
     assert!(

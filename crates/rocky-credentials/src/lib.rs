@@ -4,9 +4,9 @@
 //! renewal messages. A runtime enforces
 //! what these verify. See `docs/runtime/credentials.md`.
 mod author_binding;
+mod carry;
 mod checkpoint_record;
 mod coordination;
-mod cut;
 mod delivery;
 mod discovery;
 mod enroll;
@@ -17,6 +17,8 @@ mod group;
 mod identity;
 mod issue;
 mod keys;
+mod migration;
+pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
 mod peer;
 mod revocation;
@@ -24,6 +26,7 @@ mod signed;
 mod tips;
 
 pub use author_binding::AuthorBinding;
+pub use carry::{CARRY_FORMAT, CarryStatement, MAX_CARRY_BYTES, MAX_CARRY_FRAMES, SignedCarry};
 pub use checkpoint_record::{
     CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement, SignedCheckpointRecord,
 };
@@ -31,7 +34,6 @@ pub use coordination::{
     CoordinationGrant, MAX_APPLICATION_NAME, SignedCoordinationGrant, SignedTenantAdmission,
     TenantAdmission,
 };
-pub use cut::{CutPoint, CutStatement, MAX_CUT_AUTHORITY_BYTES, MAX_CUT_BYTES, SignedCut};
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{
@@ -64,14 +66,14 @@ pub use revocation::{
 };
 pub use signed::{
     Capability, CredentialChain, Credentials, Endorsement, MAX_ENDORSEMENT_BYTES, SignedCapability,
-    SignedManifest, SignedTransition, Verified,
+    SignedManifest, Verified,
 };
 
 pub use tips::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, GENESIS_LINE_FORMAT,
-    GenesisLineStatement, MAX_BOOKMARK_NAME, SEAL_FORMAT, SealAction, SealStatement,
-    SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
-    TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
+    GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, Recovery, SEAL_FORMAT, SealAction,
+    SealStatement, SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening,
+    TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

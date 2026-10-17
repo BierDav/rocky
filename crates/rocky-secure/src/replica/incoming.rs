@@ -21,12 +21,26 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn row_payload(&self, frame: &EncryptedFrame) -> Result<RowPayload, Error> {
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
+        #[cfg(test)]
+        if crate::AUTHOR_PAYLOAD_FRAME.with(std::cell::Cell::get) == Some(operation.hash) {
+            crate::AUTHOR_PAYLOAD_TRACE.with(|trace| {
+                if let Some(trace) = trace.borrow_mut().as_mut()
+                    && let Some((_, count)) = trace
+                        .iter_mut()
+                        .rev()
+                        .find(|(seen, _)| seen.id().ok() == Some(operation.hash))
+                {
+                    *count += 1;
+                }
+            });
+        }
         let extension = &operation.header.extensions;
         let key = self
             .opening_key(extension.scope, extension.generation)
             .ok_or_else(|| denied("row payload key unavailable"))?;
-        let payload = RowPayload::decode(&decrypt(&key.key, &encode(extension)?, &frame.body)?)?;
+        let payload =
+            RowPayload::decode(&decrypt(&key.key, &encode(extension)?, frame.body_bytes())?)?;
         Ok(payload)
     }
 
@@ -109,24 +123,17 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         time: u64,
     ) -> Result<Outcome, Error> {
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
         // A bundle applies its members together; a later scan finds them settled.
         match self.stored_status(operation.hash).await?.as_deref() {
             Some("applied" | "abandoned" | "held") => return Ok(Outcome::Applied),
             Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
             _ => {}
         }
-        let reach = self.frame_reach(
-            operation.header.extensions.scope.domain,
-            operation.header.extensions.tip,
-            operation
-                .header
-                .extensions
-                .author
-                .ok_or_else(|| denied("node author number missing"))?,
-            operation.header.extensions.author_sequence,
-            operation.header.timestamp,
-        )?;
+        let reach = self.frame_reach(frame)?;
+        if !self.frame_schema_ready(frame)? {
+            return Ok(Outcome::Waiting);
+        }
         let grants = match if reach == tips::FrameReach::Held {
             self.verify_frame_authority(frame, time)
         } else {
@@ -153,7 +160,16 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Outcome::Waiting);
         }
         if reach == tips::FrameReach::Held {
+            if self.abandoned_write(frame)? {
+                return self.hold_abandoned(frame, time).await;
+            }
             return self.hold_closed_frame(frame, time).await;
+        }
+        if !self
+            .own_chain_ready(&operation.header, &BTreeSet::new())
+            .await?
+        {
+            return Ok(Outcome::Waiting);
         }
         match self.dependencies_ready(frame, &BTreeSet::new()).await {
             Ok(true) => {}
@@ -166,7 +182,7 @@ impl<A: RowApplication> Inner<A> {
         let plaintext = decrypt(
             &key.key,
             &encode(&operation.header.extensions)?,
-            &frame.body,
+            frame.body_bytes(),
         );
         let Ok(plaintext) = plaintext else {
             return Ok(Outcome::Waiting);
@@ -175,29 +191,37 @@ impl<A: RowApplication> Inner<A> {
         if let Ok(payload) = &payload
             && let Some(membership) = payload.membership()
         {
-            return Box::pin(self.apply_bundle(&operation, membership, time)).await;
+            return Box::pin(self.apply_bundle(operation, membership, time)).await;
         }
         self.conn.execute("SAVEPOINT pending", ()).await?;
         let materialized = match payload {
             Ok(payload) => {
-                self.materialize(frame, &payload.into_writes(), &grants)
+                self.materialize(frame, &payload.into_writes(), &grants, None)
                     .await
             }
             Err(error) => Err(error),
         };
         let result = match materialized {
-            Ok(rows) => {
+            Ok((rows, admission)) => {
                 async {
                     self.record_key(key).await?;
-                    self.write_materialized(frame, rows).await?;
+                    self.write_materialized(frame, rows, admission, None)
+                        .await?;
                     Ok(Outcome::Applied)
                 }
                 .await
             }
-            Err(error) => self
-                .reject(operation.hash)
-                .await
-                .map(|()| Outcome::Rejected(error.to_string())),
+            Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
+                self.conn.execute("ROLLBACK TO pending", ()).await?;
+                Ok(Outcome::Waiting)
+            }
+            Err(error) if identity::receipts::semantic_refusal(&error) => {
+                self.conn.execute("ROLLBACK TO pending", ()).await?;
+                self.reject(operation.hash)
+                    .await
+                    .map(|()| Outcome::Rejected(error.to_string()))
+            }
+            Err(error) => Err(error),
         };
         if result.is_err() {
             self.conn.execute("ROLLBACK TO pending", ()).await?;
@@ -235,11 +259,15 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         bundle: &BTreeSet<Hash>,
     ) -> Result<bool, Error> {
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
 
         let mut retired_creations = BTreeSet::new();
         // Behind a finalized base, a creation whose row is gone is retired.
-        if let Some(scope_id) = self
+        // A frame of another line stays as it was applied there.
+        if self.on_workspace_path(
+            operation.header.extensions.scope.domain,
+            operation.header.extensions.tip,
+        )? && let Some(scope_id) = self
             .find_scope_id(operation.header.extensions.scope)
             .await?
             && let Some(finalized) = self
@@ -254,12 +282,31 @@ impl<A: RowApplication> Inner<A> {
             && let Ok(plaintext) = decrypt(
                 &key.key,
                 &encode(&operation.header.extensions)?,
-                &frame.body,
+                frame.body_bytes(),
             )
             && let Ok(payload) = RowPayload::decode(&plaintext)
         {
-            let writes = payload.clone().into_writes();
-            for (row, creation) in payload.creations() {
+            // The live schema names rows through the path's fields.
+            let fields = self.path_fields(
+                operation.header.extensions.scope.domain,
+                operation.header.extensions.tip,
+            )?;
+            let writes: Vec<_> = payload
+                .clone()
+                .into_writes()
+                .iter()
+                .filter_map(|write| fields.project(write))
+                .collect();
+            // A table off the path applies nothing, so it creates nothing.
+            let creations = if fields
+                .tables
+                .contains(&operation.header.extensions.scope.table)
+            {
+                payload.creations()
+            } else {
+                Default::default()
+            };
+            for (row, creation) in creations {
                 let Some(write) = writes
                     .iter()
                     .find(|write| self.storage_row(&write.change).ok().as_ref() == Some(row))
@@ -317,7 +364,7 @@ impl<A: RowApplication> Inner<A> {
                     },
                 }
             };
-            let predecessor = dependency.operation()?;
+            let predecessor = dependency.operation_ref()?;
             if predecessor.header.extensions.scope != operation.header.extensions.scope
                 || predecessor.header.timestamp >= operation.header.timestamp
             {
@@ -330,7 +377,7 @@ impl<A: RowApplication> Inner<A> {
             if !bundle.contains(id) {
                 match self.status(*id).await? {
                     ReceiveStatus::Applied | ReceiveStatus::Abandoned => {}
-                    ReceiveStatus::Held if self.visible_held_in_workspace(&predecessor)? => {}
+                    ReceiveStatus::Held if self.visible_held_in_workspace(predecessor)? => {}
                     _ => return Ok(false),
                 }
             }

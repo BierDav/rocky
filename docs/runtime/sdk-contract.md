@@ -27,9 +27,10 @@ Replies contain `version: 2` and either `status: "ok", value: {...}` or
 `denied`, `unsupported_generation`, `missing_dependencies`, `missing_head`,
 `quota`, `corruption`, `conflict`, `closed`, `unknown_confirmation`,
 and `storage`. Coordinated writes, seals and bookmark moves
-add `sealed` (not retryable) and `coordinator_unavailable` (retryable), and
-owner-signed cuts `abandoned`, `cut_conflict` and `cut_base_missing` (not
-retryable); see [coordinated writes](coordinated-writes.md#failures) and
+add `sealed` (not retryable), `coordinator_unavailable` and `behind`
+(retryable); the owner's recovery adds `stale_recovery`, and a handle of a
+write it abandoned reports `abandoned` (not retryable); see
+[coordinated writes](coordinated-writes.md#failures) and
 [stuck recovery](stuck-recovery.md).
 Messages are diagnostic. Use codes/retryability, not message parsing. Unknown
 versions fail; malformed calls and unknown request fields fail explicitly.

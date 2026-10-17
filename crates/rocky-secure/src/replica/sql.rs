@@ -40,6 +40,7 @@ impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
         let inner = &mut *self.0;
         inner.strict_projection = false;
+        inner.invalidate_context();
         let conn = inner.conn.connection();
         if !conn.is_autocommit().unwrap_or(true) {
             let _ = conn.run_now("ROLLBACK");
@@ -52,6 +53,8 @@ impl<A: RowApplication> Drop for Held<A> {
     }
 }
 struct Lease<A: RowApplication> {
+    plan: Arc<Plan>,
+    writable: BTreeSet<usize>,
     held: Option<Held<A>>,
     /// Caller names of open savepoints and their capture marks.
     savepoints: Vec<(String, usize, Reserved)>,
@@ -84,6 +87,7 @@ pub struct SecureSql<A: RowApplication> {
     pub(super) cursors: Arc<std::sync::atomic::AtomicUsize>,
     /// The kept seal its reads see instead of the live tables.
     pub(super) seal: Option<Arc<super::SealViews>>,
+    parents: BTreeMap<String, String>,
 }
 impl<A: RowApplication> Drop for SecureSql<A> {
     fn drop(&mut self) {
@@ -125,6 +129,36 @@ fn engine(error: sqlite::Error) -> Error {
 }
 
 impl<A: RowApplication> SecureSession<A> {
+    /// A local migration session can read only its journaled frozen parents.
+    pub async fn migration_sql(
+        &self,
+        publication: Commitment,
+        options: SqlOptions,
+    ) -> Result<SecureSql<A>, Error> {
+        let mut sql = self.sql(options).await?;
+        let inner = self.replica.inner.lock().await;
+        let records = collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT stage FROM secure_staged_schema WHERE publication=? AND state='staged'",
+                    [publication.to_vec()],
+                )
+                .await?,
+        )
+        .await?;
+        let Some([SqlValue::Blob(bytes)]) = records.first().map(Vec::as_slice) else {
+            return Err(denied("migration publication is not staged"));
+        };
+        let stage: super::staging::SchemaStage = decode(bytes)?;
+        for (index, table) in stage.parents.iter().enumerate() {
+            sql.parents.insert(
+                format!("parent.{}", table.to_ascii_lowercase()),
+                history::migration_parent_name(publication, index),
+            );
+        }
+        Ok(sql)
+    }
     /// A SQL connection over the replica's installed typed tables.
     pub async fn sql(&self, options: SqlOptions) -> Result<SecureSql<A>, Error> {
         options.validate()?;
@@ -135,8 +169,9 @@ impl<A: RowApplication> SecureSession<A> {
             .typed
             .clone()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
-        let plan = typed.plan(&self.status.readable)?;
-        let writable = plan
+        let mut plan = typed.plan(&self.status.readable)?;
+        plan.bind_physical_columns(inner.conn.connection())?;
+        let writable: BTreeSet<usize> = plan
             .tables
             .iter()
             .enumerate()
@@ -153,12 +188,15 @@ impl<A: RowApplication> SecureSession<A> {
             })
             .map(|(index, _)| index)
             .collect();
+        let plan = Arc::new(plan);
         Ok(SecureSql {
             session: self.clone(),
-            plan: Arc::new(plan),
-            writable,
+            plan: plan.clone(),
+            writable: writable.clone(),
             options,
             lease: Arc::new(tokio::sync::Mutex::new(Lease {
+                plan,
+                writable,
                 held: None,
                 savepoints: Vec::new(),
                 implicit: false,
@@ -171,6 +209,7 @@ impl<A: RowApplication> SecureSession<A> {
             cancelled: Arc::default(),
             cursors: Arc::default(),
             seal: None,
+            parents: BTreeMap::new(),
         })
     }
 }
@@ -521,6 +560,9 @@ impl<A: RowApplication> SecureSql<A> {
             }
             Control::RollbackTo(name) => {
                 let index = position(&lease, &name)?;
+                if let Some(held) = &lease.held {
+                    held.0.invalidate_context();
+                }
                 self.engine(&lease, &format!("ROLLBACK TO rocky_user_{index}"))?;
                 let mark = lease.savepoints[index].1;
                 if let Some(held) = &lease.held {
@@ -613,8 +655,40 @@ impl<A: RowApplication> SecureSql<A> {
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
         let inner = self.session.replica.inner.clone().lock_owned().await;
+        inner.invalidate_frontiers();
         admit(&inner, &self.session)?;
+        for scope in &self.session.status.scopes {
+            inner.require_workspace_base(scope.domain).await?;
+        }
         inner.untouch();
+        let typed = inner
+            .workspace
+            .typed
+            .as_ref()
+            .ok_or_else(|| refused("no typed tables"))?;
+        let mut plan = typed.plan(&self.session.status.readable)?;
+        plan.bind_physical_columns(inner.conn.connection())?;
+        plan.allow_read_only(self.parents.values().cloned());
+        lease.writable = plan
+            .tables
+            .iter()
+            .enumerate()
+            .filter(|(_, table)| {
+                typed.by_name(&table.name).map_or(
+                    table.class == TableClass::LocalOnly,
+                    |projected| {
+                        self.session.status.writable.contains(&projected.scope)
+                            || typed.partitioned(projected)
+                                && self.session.status.writable.iter().any(|scope| {
+                                    scope.domain == projected.scope.domain
+                                        && scope.table == projected.scope.table
+                                })
+                    },
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        lease.plan = Arc::new(plan);
         let held = Held(inner);
         let conn = held.0.conn.connection();
         conn.run_now(sql).map_err(engine)?;
@@ -623,7 +697,7 @@ impl<A: RowApplication> SecureSql<A> {
             .lock()
             .map_err(|_| Error::Corrupt("capture poisoned".into()))?
             .arm(
-                self.plan.clone(),
+                lease.plan.clone(),
                 (self.options.captured_rows, self.options.captured_bytes),
             );
         lease.held = Some(held);
@@ -702,7 +776,7 @@ impl<A: RowApplication> SecureSql<A> {
             (sink.failure(), sink.tables_since(mark))
         };
         let ended = conn.is_autocommit().unwrap_or(true);
-        let outside = touched.iter().any(|table| !self.writable.contains(table));
+        let outside = touched.iter().any(|table| !lease.writable.contains(table));
         let mut poison = |reason: String, error: Error| {
             // `held` drops here and rolls back.
             if !single {
@@ -765,10 +839,16 @@ impl<A: RowApplication> SecureSql<A> {
         deadline: Instant,
     ) -> Result<sqlite::Result<Run>, Error> {
         admit(inner, &self.session)?;
-        // Typed tables keep their names here; the surface is still checked.
-        if let Err(rejection) = crate::statement::analyze(sql, |_| None) {
-            return Ok(Err(rejection.into()));
-        }
+        let analyzed = if self.parents.is_empty() {
+            crate::statement::analyze(sql, |_| None)
+        } else {
+            crate::statement::analyze_migration(sql, |name| self.parents.get(name).cloned())
+        };
+        let analyzed = match analyzed {
+            Ok(analyzed) => analyzed,
+            Err(rejection) => return Ok(Err(rejection.into())),
+        };
+        let sql = analyzed.sql.as_str();
         let conn = inner.conn.connection();
         let state = conn.session()?;
         let capture = conn.capture()?;
@@ -778,7 +858,7 @@ impl<A: RowApplication> SecureSql<A> {
             .gate
             .lock()
             .map_err(|_| poisoned())?
-            .arm(Some(self.plan.clone()));
+            .arm(Some(lease.plan.clone()));
         capture.lock().map_err(|_| poisoned())?.begin_statement();
         let budget = (Instant::now() + self.options.statement_budget).min(deadline);
         let result = conn
@@ -858,7 +938,7 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         qualification_kill("before");
-        let sealed = self.seal(inner, target, commit).await;
+        let sealed = self.seal(inner, &lease.plan, target, commit).await;
         inner.strict_projection = false;
         let committed = match sealed? {
             // `held` rolls the repeated transaction back.
@@ -869,10 +949,15 @@ impl<A: RowApplication> SecureSql<A> {
             }
             Sealed::Commit(committed) => committed,
         };
+        inner.finish_admission_revision().await?;
         let conn = inner.conn.connection();
         #[cfg(feature = "qualification")]
         if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|point| point == "during") {
             conn.qualification_exit_in_commit().map_err(Error::from)?;
+        }
+        #[cfg(test)]
+        if std::mem::take(&mut inner.fail_sql_commit) {
+            return Err(Error::InjectedFailure);
         }
         conn.run_now("COMMIT").map_err(Error::from)?;
         #[cfg(feature = "qualification")]
@@ -905,6 +990,7 @@ impl<A: RowApplication> SecureSql<A> {
     async fn seal(
         &self,
         inner: &mut Inner<A>,
+        plan: &Plan,
         target: Target,
         commit: Kind,
     ) -> Result<Sealed, Error> {
@@ -924,7 +1010,7 @@ impl<A: RowApplication> SecureSql<A> {
                 .map(|touched| touched.table)
                 .chain(sink.local_tables())
             {
-                inner.touch(&self.plan.tables[index].name);
+                inner.touch(&plan.tables[index].name);
             }
             inner.cause(crate::observe::Cause::Local);
             sink.disarm();
@@ -938,7 +1024,7 @@ impl<A: RowApplication> SecureSql<A> {
         let assigned_policy = typed.rows.schema().update_policy == UpdatePolicy::Assigned;
         let mut writes = Vec::new();
         for touched in touched {
-            let table = &self.plan.tables[touched.table];
+            let table = &plan.tables[touched.table];
             if table.class != TableClass::Mergeable {
                 continue;
             }
@@ -1009,29 +1095,76 @@ impl<A: RowApplication> SecureSql<A> {
             let fields = |image: &Vec<SqlValue>| typed.rows.fields(&projected.table, image);
             // A SQL deletion removes the natural key, including held hidden incarnations.
             if after.is_none() && before.is_some() {
+                let visible = RowChange {
+                    scope,
+                    row,
+                    before: before
+                        .as_ref()
+                        .map(fields)
+                        .transpose()
+                        .map_err(capture_error)?,
+                    after: None,
+                };
+                let visible_id = typed
+                    .rows
+                    .identity(&visible)
+                    .map_err(capture_error)?
+                    .ok_or_else(|| capture_error("missing visible incarnation identity".into()))?;
                 let held = collect_rows(inner.conn.query(
-                    "SELECT r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
+                    "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
                     [encode(&scope)?, row.to_vec()],
                 ).await?).await?;
-                let visible = before
-                    .as_ref()
-                    .map(fields)
-                    .transpose()
-                    .map_err(capture_error)?;
                 for held in held {
-                    let [SqlValue::Blob(bytes)] = held.as_slice() else {
+                    let [SqlValue::Blob(stored), SqlValue::Blob(bytes)] = held.as_slice() else {
                         return Err(Error::Corrupt("SQL deleted incarnation".into()));
                     };
                     let record: Materialized = decode(bytes)?;
-                    if !record.deleted && Some(&record.fields) != visible.as_ref() {
-                        writes.push(RowWrite::changed(RowChange {
-                            scope,
-                            row,
-                            before: Some(record.fields),
-                            after: None,
-                        }));
+                    if record.deleted {
+                        continue;
+                    }
+                    let candidate = RowChange {
+                        scope,
+                        row,
+                        before: Some(record.fields),
+                        after: None,
+                    };
+                    let id = typed
+                        .rows
+                        .identity(&candidate)
+                        .map_err(capture_error)?
+                        .ok_or_else(|| {
+                            capture_error("missing indexed incarnation identity".into())
+                        })?;
+                    let values = typed
+                        .rows
+                        .values(
+                            &projected.table,
+                            candidate.before.as_ref().ok_or_else(|| {
+                                capture_error("missing indexed incarnation image".into())
+                            })?,
+                        )
+                        .map_err(capture_error)?;
+                    let key = typed
+                        .rows
+                        .row_id(typed.domain.domain, &projected.table, &values)
+                        .map_err(capture_error)?;
+                    let incarnation = rocky_core::commitment(
+                        "rocky.row-incarnation.v2",
+                        &id.integer().to_le_bytes(),
+                    );
+                    if record.identity != Some(id.integer())
+                        || stored.as_slice() != incarnation
+                        || record.key != Some(row)
+                        || key != row
+                    {
+                        return Err(Error::Corrupt("SQL indexed incarnation binding".into()));
+                    }
+                    if id != visible_id {
+                        writes.push(RowWrite::changed(candidate));
                     }
                 }
+                writes.push(RowWrite::changed(visible));
+                continue;
             }
             let reinserted = touched.deleted && before.is_some() && after.is_some();
             let assigned = if before.is_none() || after.is_none() {
@@ -1199,5 +1332,25 @@ fn empty<A: RowApplication>(lease: &Lease<A>, state: SqlState) -> SecureRows {
 fn qualification_kill(point: &str) {
     if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|selected| selected == point) {
         std::process::exit(87);
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> SecureSql<A> {
+    pub(crate) async fn transactional_frontier(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(ScopeFrontier, usize), Error> {
+        let lease = self.lease.lock().await;
+        let held = lease.held.as_ref().ok_or(Error::Closed)?;
+        let frontier = held.0.tip_frontier(scope).await?;
+        Ok((frontier, held.0.frontier_cache_stats().1))
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub(crate) async fn fail_next_sql_commit(&self) {
+        self.inner.lock().await.fail_sql_commit = true;
     }
 }

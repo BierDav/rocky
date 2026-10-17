@@ -6,6 +6,7 @@
 use super::*;
 use crate::replica::{CommittedEntry, CoordinatedEntry, MAX_CATCH_UP_ENTRIES};
 use rocky_core::{LogPending, TipLog};
+use rocky_credentials::SignedCarry;
 
 /// Bytes of frames and voids in one store page; a larger frame goes alone.
 const PAGE_BYTES: usize = MAX_SECURE_FRAME / 2;
@@ -18,6 +19,8 @@ pub(super) enum EntryMessage {
         pending: LogPending,
         frames: Vec<EncryptedFrame>,
         voids: Vec<SignedVoid>,
+        /// The same on every page of an entry.
+        carry: Option<Box<SignedCarry>>,
         last: bool,
     },
     Committed {
@@ -30,7 +33,13 @@ pub(super) enum EntryMessage {
     },
 }
 /// An entry a peer is sending page by page.
-pub(super) type Receiving = (TipLog, LogPending, Vec<EncryptedFrame>, Vec<SignedVoid>);
+pub(super) type Receiving = (
+    TipLog,
+    LogPending,
+    Vec<EncryptedFrame>,
+    Vec<SignedVoid>,
+    Option<Box<SignedCarry>>,
+);
 
 impl NativeSession {
     /// Stores `entry` on the peer, which answers once it stored it durably
@@ -71,6 +80,7 @@ impl NativeSession {
                 pending: entry.pending.clone(),
                 frames,
                 voids,
+                carry: entry.carry.clone().map(Box::new),
                 last: index + 1 == count,
             })
             .await?;
@@ -109,6 +119,7 @@ impl NativeSession {
                 pending,
                 frames,
                 voids,
+                carry,
                 last,
             } => {
                 if pending.proposer != *self.peer.as_bytes() {
@@ -118,11 +129,12 @@ impl NativeSession {
                 if incomplete > 0 {
                     return Err(denied(crate::wire::INCOMPLETE_FRAME));
                 }
-                let receiving = self
-                    .entry
-                    .get_or_insert_with(|| (log, pending.clone(), Vec::new(), Vec::new()));
+                let receiving = self.entry.get_or_insert_with(|| {
+                    (log, pending.clone(), Vec::new(), Vec::new(), carry.clone())
+                });
                 if receiving.0 != log
                     || receiving.1 != pending
+                    || receiving.4 != carry
                     || receiving.2.len() + frames.len() > MAX_BUNDLE_FRAMES
                     || receiving.3.len() + voids.len() > MAX_BUNDLE_FRAMES
                 {
@@ -132,7 +144,7 @@ impl NativeSession {
                 receiving.2.extend(frames);
                 receiving.3.extend(voids);
                 if last {
-                    let (log, pending, frames, voids) =
+                    let (log, pending, frames, voids, carry) =
                         self.entry.take().ok_or_else(|| denied("entry page"))?;
                     let coordinator = replica
                         .domain_log()
@@ -144,6 +156,7 @@ impl NativeSession {
                                 pending,
                                 frames,
                                 voids,
+                                carry: carry.map(|carry| *carry),
                             },
                             coordinator.as_ref(),
                         )

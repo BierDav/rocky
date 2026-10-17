@@ -1,6 +1,8 @@
 //! Seals, tips and bookmarks through the JSON contract and `Session`. See
 //! `docs/runtime/tips-and-bookmarks.md`.
 mod common;
+#[path = "tips/schema_changes.rs"]
+mod schema_changes;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -148,16 +150,38 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
             .unwrap()
             .clone()
     };
+    let at_first = listed(&first);
+    assert_eq!(at_first.len(), 2);
+    let mut rows: Vec<_> = at_first
+        .iter()
+        .map(|record| record["rows"].as_u64().unwrap())
+        .collect();
+    rows.sort_unstable();
+    assert_eq!(rows, [0, 2]);
+    assert_ne!(at_first[0]["scope"], at_first[1]["scope"]);
     let at_second = listed(&second);
     assert_eq!(at_second.len(), 1);
-    assert_eq!(at_second[0]["authority"], "owner");
-    assert_eq!(at_second[0]["rows"], json!(3));
-    assert!(
-        at_second[0]["signer"]
-            .as_str()
-            .is_some_and(|signer| signer.len() == 64)
-    );
-    assert_eq!(listed(&first).len(), 1);
+    assert_eq!(at_second[0]["rows"], 3);
+    for record in at_first.iter().chain(&at_second) {
+        assert_eq!(record["authority"], "owner");
+        assert!(
+            record["signer"]
+                .as_str()
+                .is_some_and(|signer| signer.len() == 64)
+        );
+        let scope: rocky_core::ResourceScope =
+            serde_json::from_str(record["scope"].as_str().unwrap())?;
+        assert_eq!(
+            scope.domain,
+            serde_json::from_str::<rocky_core::Scope>(&a.database.scope())?
+        );
+    }
+    let empty = at_first.iter().find(|record| record["rows"] == 0).unwrap();
+    let changed = at_first.iter().find(|record| record["rows"] == 2).unwrap();
+    assert_eq!(at_second[0]["scope"], changed["scope"]);
+    assert_ne!(at_second[0]["scope"], empty["scope"]);
+    assert_ne!(at_second[0]["checkpoint"], changed["checkpoint"]);
+    // The unchanged empty registry keeps its signed base at the first seal.
     let items = ["bread/0", "eggs/1", "milk/0"];
     assert_eq!(a.items().await, items);
     a.close().await;
@@ -406,7 +430,7 @@ mod coordinated {
     use super::*;
     use rocky_coordinator::coordinated::{MemoryLog, MemoryLogClient};
     use rocky_core::{
-        Append, Commitment, CoordinationFuture, DomainLog, LogCut, LogHead, LogPending, LogResult,
+        Append, Commitment, CoordinationFuture, DomainLog, LogHead, LogPending, LogResult,
         LogTerminal, NodeKey, TipId, TipLog,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -449,8 +473,8 @@ mod coordinated {
         ) -> CoordinationFuture<'_, LogResult> {
             self.inner.acknowledge(log, pending)
         }
-        fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
-            self.inner.cut(log, cut)
+        fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult> {
+            self.inner.recover(log, seal)
         }
         fn acknowledge_terminal(
             &self,
@@ -1093,5 +1117,90 @@ async fn an_owner_pulls_a_seal_an_issuer_keeps_and_opens_a_branch_there() -> Res
     ok(&a, "create", json!({"name": "dev", "tip": tip})).await;
     ok(&a, "follow", json!({"name": "dev"})).await;
     assert_eq!(a.titles().await, ["milk"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_issuer_automatically_acquires_the_target_seal_when_main_changes_lines()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    let b_dir = root.path().join("b");
+    let b = Device::join(
+        &b_dir,
+        &a.invite_as(json!({"kind":"issuer"})).await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    main(&a).await;
+    ok(&a, "keep", json!({"kept":{"every":true}})).await;
+    a.add(1, "inherited").await;
+    let first = ok(&a, "seal", json!({})).await["tip"].clone();
+    b.sync().await.expect("issuer learns first seal");
+    ok(&b, "follow", json!({"name":"main"})).await;
+    a.add(2, "later line").await;
+    let second = ok(&a, "seal", json!({})).await["tip"].clone();
+    b.sync().await.expect("issuer learns second seal");
+    assert_eq!(
+        ok(&b, "compact", json!({"keep":0})).await["compacted"],
+        second
+    );
+    b.close().await;
+    let branch = ok(&a, "open", json!({"seal":first,"minimum_in_sync":1})).await["tip"].clone();
+    ok(&a, "move", json!({"name":"main","tip":branch})).await;
+    let b = Device::open(&b_dir, Some(Network::Owned(hub.connector("b"))))?;
+    for _ in 0..3 {
+        b.sync().await.expect("automatic target-state acquisition");
+    }
+    assert_eq!(ok(&b, "status", json!({})).await["tip"], branch);
+    assert_eq!(b.titles().await, ["inherited"]);
+    b.add(3, "issuer continues").await;
+    for _ in 0..2 {
+        b.sync().await.expect("issuer publication");
+        a.sync().await.expect("owner receives");
+    }
+    assert_eq!(a.titles().await, ["inherited", "issuer continues"]);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_compacts_a_close_with_only_registry_frames_after_the_last_item()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    main(&a).await;
+    a.add(1, "milk").await;
+    // Enrollment writes the issuer registry after the last application frame.
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    b.sync().await.expect("writer enrollment and rows");
+    assert_eq!(b.titles().await, ["milk"]);
+    let before = ok(&a, "status", json!({})).await["tip"].clone();
+    ok(&a, "seal", json!({"close":true})).await;
+    let inspected = ok(&a, "inspect", json!({})).await;
+    let close = seal_of(&inspected, before.as_str().ok_or("tip")?);
+    assert_eq!(close["action"], "close");
+    b.sync().await.expect("closed tip and registry placements");
+    let compacted = ok(&b, "compact", json!({"keep":0})).await;
+    assert_eq!(compacted["finalized"], close["id"], "{compacted}");
+    assert_eq!(compacted["compacted"], close["id"], "{compacted}");
+    assert_eq!(compacted["waiting"], Value::Null, "{compacted}");
+    assert_eq!(b.titles().await, ["milk"]);
+    b.close().await;
+    a.close().await;
     Ok(())
 }

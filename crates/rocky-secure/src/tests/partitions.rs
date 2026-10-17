@@ -21,7 +21,9 @@ impl Fixture {
         Self::build(true)
     }
     fn build(constrained: bool) -> Self {
-        let publisher = PrivateKey::new();
+        Self::build_with(constrained, PrivateKey::new())
+    }
+    fn build_with(constrained: bool, publisher: PrivateKey) -> Self {
         let mut definition = serde_json::json!({"format":6,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         if constrained {
             definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
@@ -232,6 +234,8 @@ impl Fixture {
         write
     }
 }
+mod admission;
+
 fn all() -> Vec<Right> {
     vec![
         Right::Read,
@@ -391,7 +395,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &crate::ScopeFrontier {
                 scope: f.scope("B"),
                 logs: vec![],
-                cuts: 0,
             },
             None,
             65536
@@ -406,7 +409,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &crate::ScopeFrontier {
                 scope: f.scope("A"),
                 logs: vec![],
-                cuts: 0,
             },
             None,
             65536,
@@ -414,7 +416,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .await
         .unwrap();
     assert_eq!(permitted.frames.len(), 1);
-    let cp = a.checkpoint(f.scope("A")).await.unwrap();
+    let cp = compacted_base(&a, &f.publisher, f.scope("A")).await;
     custody
         .verify_checkpoint_at_for_test(&cp, now().unwrap())
         .await
@@ -465,6 +467,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             inner.config.credentials.clone(),
         )
     };
+    link_up(&a, &restored, f.scope("A").domain).await;
     restored.begin_rebootstrap(cp.clone()).await.unwrap();
     let mut after = None;
     loop {
@@ -550,7 +553,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 15);
+    assert_eq!(cp.statement.format, 16);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);
@@ -659,6 +662,7 @@ async fn measure_200_partitions() {
     }
     let sync = started.elapsed();
     let started = std::time::Instant::now();
+    seal_and_compact(&writer, &f.publisher, f.scope("p001").domain).await;
     for index in 1..=200u8 {
         writer
             .checkpoint(f.scope(&format!("p{index:03}")))
@@ -1043,4 +1047,111 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
         .unwrap();
     sql.commit([2; 32]).await.unwrap();
     assert_eq!(constraint_state(&a, "B").await, before_b);
+}
+
+#[tokio::test]
+async fn an_unproved_partition_requires_custody_without_disclosing_its_header_or_tuple() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new();
+    let writer = f
+        .open(
+            &root.path().join("writer.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    let reader_key = PrivateKey::new();
+    let reader = f
+        .open(
+            &root.path().join("reader.sqlite"),
+            reader_key.clone(),
+            f.grant(Some(&["A"]), &[Right::Read]),
+            None,
+        )
+        .await;
+    f.key(&writer, "A", [1; 32]).await;
+    f.key(&writer, "secret-partition", [2; 32]).await;
+    f.key(&reader, "A", [1; 32]).await;
+    let visible = writer
+        .author_bundle([1; 32], vec![f.write("A", 1, 10)], vec![])
+        .await
+        .unwrap()
+        .remove(0);
+    let hidden = writer
+        .author_bundle([2; 32], vec![f.write("secret-partition", 2, 20)], vec![])
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        reader.receive(visible).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    seal_main(&writer, &f.publisher, f.domain).await;
+    exchange_graphs(&writer, &reader, f.domain).await;
+    let requests = reader.wanted_placements().await.unwrap();
+    let [request] = requests.as_slice() else {
+        panic!("{requests:?}")
+    };
+    let operation = hidden.operation().unwrap();
+    assert_eq!(request.author, operation.header.extensions.author.unwrap());
+    assert_eq!(request.from, operation.header.extensions.author_sequence);
+    assert_eq!(request.to, request.from);
+    let credentials = reader.inner.lock().await.config.credentials.clone();
+    let page = writer
+        .placement_page(
+            reader_key.public_key(),
+            &credentials,
+            &[f.scope("A")].into(),
+            *request,
+        )
+        .await
+        .unwrap();
+    // This variant carries neither signed headers nor credential chains or tuples.
+    assert!(matches!(page, crate::PlacementPage::CustodyRequired));
+    assert_eq!(reader.receive_placements(*request, page).await.unwrap(), 0);
+    struct NoPeers;
+    impl crate::EntryPeers for NoPeers {
+        fn store<'a>(
+            &'a self,
+            _: PublicKey,
+            _: &'a crate::CoordinatedEntry,
+        ) -> crate::PeerFuture<'a, ()> {
+            panic!("readiness must fail before entry storage")
+        }
+        fn committed(
+            &self,
+            _: rocky_core::TipLog,
+            _: u64,
+        ) -> crate::PeerFuture<'_, Vec<crate::CommittedEntry>> {
+            panic!("readiness must fail before catch-up")
+        }
+    }
+    let log = rocky_coordinator::coordinated::MemoryLog::new();
+    log.configure(f.domain, 1).unwrap();
+    let followed = rocky_core::TipLog {
+        scope: f.domain,
+        tip: reader.followed_tip().await,
+    };
+    assert!(matches!(
+        reader
+            .coordinated_slot(followed, &log.client(reader_key.public_key()), &NoPeers)
+            .await,
+        Err(crate::CoordinatedError::CustodyRequired)
+    ));
+    let inner = reader.inner.lock().await;
+    assert!(
+        crate::storage::rows(&inner.conn, "SELECT 1 FROM secure_placements")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let tuples = crate::storage::rows(&inner.conn, "SELECT tuple FROM secure_partitions")
+        .await
+        .unwrap();
+    assert_eq!(tuples.len(), 1);
+    assert_eq!(
+        tuples[0],
+        vec![SqlValue::Blob(encode(&f.tuple("A")).unwrap())]
+    );
 }

@@ -70,6 +70,34 @@ seals now:
 Keeping the latest seal on a device that reads every scope, such as an
 issuer, lets the others pull from it.
 
+### Pulled states
+
+A pulled state is a candidate base, not trusted state:
+
+- open and full audit check only its integrity: it decodes, names its row's
+  scope and seal, is signed, and a no-frames state stores nothing;
+- installing it repeats every import check inside the installing
+  transaction; a state that fails them is dropped and the install is
+  `Refused`, a committed outcome that leaves the scope waiting for a
+  rebootstrap, never an error that fails the follow or revocation;
+- storing evidence of the scope that a pulled
+  [no-frames state](encrypted-checkpoints.md#no-frames-checkpoints) excludes,
+  or whose coverage cannot be decided, stores the evidence and drops the
+  state in the same commit; a fetched state never refuses live data;
+- learning a revocation drops every pulled state that no longer passes the
+  import checks, in the revocation's commit.
+
+A pulled state may make a seal count as held, and stop a pull from asking
+for it, only while it passes the import checks now, judged without writing.
+It never stands in for live coverage: readiness and finalization count only an
+installed base. A scope that needs a pulled state at a seal of the path, with
+or without a pruned prefix, installs it in the transaction before readiness is
+judged; after a refusal the scope stays listed.
+
+Tampering with a pulled state is corruption everywhere and is never dropped
+silently. A state whose seal leaves the followed path stays cached and is
+not installed, and a state at a seal a revocation excluded is not usable.
+
 ## History tables
 
 Each application table `t` has one history table, `secure_history_t`. A

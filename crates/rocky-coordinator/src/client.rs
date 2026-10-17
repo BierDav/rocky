@@ -164,6 +164,25 @@ impl NetworkCoordinator {
         )
         .await
     }
+    /// Commits a terminal entry: a seal, or the owner's recovery.
+    fn terminal(
+        &self,
+        log: TipLog,
+        action: crate::coordinated::Action,
+    ) -> CoordinationFuture<'_, LogResult> {
+        Box::pin(async move {
+            match self.coordinated(log, action).await? {
+                Outcome::Coordinated(crate::coordinated::Result::Committed {
+                    position,
+                    running_hash,
+                }) => Ok(LogResult::Committed {
+                    position,
+                    running_hash,
+                }),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
     pub async fn coordinated_head(
         &self,
         log: TipLog,
@@ -357,40 +376,11 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
-    fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
-        Box::pin(async move {
-            let action = crate::coordinated::Action::Cut {
-                record: cut.record,
-                authority: cut.authority,
-            };
-            match self.coordinated(log, action).await? {
-                Outcome::Coordinated(crate::coordinated::Result::Cut {
-                    position,
-                    running_hash,
-                }) => Ok(LogResult::Committed {
-                    position,
-                    running_hash,
-                }),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
     fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult> {
-        Box::pin(async move {
-            match self
-                .coordinated(log, crate::coordinated::Action::Seal { terminal })
-                .await?
-            {
-                Outcome::Coordinated(crate::coordinated::Result::Committed {
-                    position,
-                    running_hash,
-                }) => Ok(LogResult::Committed {
-                    position,
-                    running_hash,
-                }),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
+        self.terminal(log, crate::coordinated::Action::Seal { terminal })
+    }
+    fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult> {
+        self.terminal(log, crate::coordinated::Action::Recover { seal })
     }
     fn acknowledge_terminal(
         &self,

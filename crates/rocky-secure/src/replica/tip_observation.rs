@@ -68,6 +68,44 @@ impl<A: RowApplication> Inner<A> {
             self.workspace.tip,
         )
     }
+    pub(super) async fn seal_frontier(
+        &self,
+        scope: Scope,
+        close: bool,
+    ) -> Result<Vec<AuthorMark>, Error> {
+        let graph = self.scope_graph(scope)?;
+        let pruned = if close {
+            rows(&self.conn, "SELECT scope FROM secure_scope_state").await?
+        } else {
+            Vec::new()
+        };
+        for record in pruned {
+            let [SqlValue::Blob(bytes)] = record.as_slice() else {
+                return Err(Error::Corrupt("scope".into()));
+            };
+            let resource: ResourceScope = decode(bytes)?;
+            if resource.domain == scope && self.has_pruned_prefix(resource).await? {
+                return Err(denied(
+                    "a close seal needs retained history; pruned logs have no author frontier",
+                ));
+            }
+        }
+        let mut marks = BTreeMap::<u32, u64>::new();
+        if let Some((_, inherited)) = Self::tip_parent(&graph, self.workspace.tip)? {
+            marks.extend(inherited.iter().map(|mark| (mark.author, mark.sequence)));
+        }
+        for header in self.domain_headers(scope).await? {
+            if self.visible_header(&graph, &header)? {
+                let author = header.author.ok_or_else(|| denied("node author missing"))?;
+                let mark = marks.entry(author).or_default();
+                *mark = (*mark).max(header.author_sequence);
+            }
+        }
+        Ok(marks
+            .into_iter()
+            .map(|(author, sequence)| AuthorMark { author, sequence })
+            .collect())
+    }
     async fn observed_devices(&self, scope: Scope) -> Result<Vec<TipDevice>, Error> {
         let mut peers = BTreeMap::<PeerId, BTreeMap<ResourceScope, Vec<FrontierLog>>>::new();
         for row in rows(
@@ -133,39 +171,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// they walk a `continue` seal as late frames. A `close` would hold
     /// them where others applied them, so it refuses pruned history.
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
-        let inner = self.inner.lock().await;
-        let graph = inner.scope_graph(scope)?;
-        let pruned = if close {
-            rows(&inner.conn, "SELECT scope FROM secure_scope_state").await?
-        } else {
-            Vec::new()
-        };
-        for record in pruned {
-            let [SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(Error::Corrupt("scope".into()));
-            };
-            let resource: ResourceScope = decode(bytes)?;
-            if resource.domain == scope && inner.has_pruned_prefix(resource).await? {
-                return Err(denied(
-                    "a close seal needs retained history; pruned logs have no author frontier",
-                ));
-            }
-        }
-        let mut marks = BTreeMap::<u32, u64>::new();
-        if let Some((_, inherited)) = Inner::<A>::tip_parent(&graph, inner.workspace.tip)? {
-            marks.extend(inherited.iter().map(|mark| (mark.author, mark.sequence)));
-        }
-        for header in inner.domain_headers(scope).await? {
-            if inner.visible_header(&graph, &header)? {
-                let author = header.author.ok_or_else(|| denied("node author missing"))?;
-                let mark = marks.entry(author).or_default();
-                *mark = (*mark).max(header.author_sequence);
-            }
-        }
-        Ok(marks
-            .into_iter()
-            .map(|(author, sequence)| AuthorMark { author, sequence })
-            .collect())
+        self.inner.lock().await.seal_frontier(scope, close).await
     }
     pub async fn tip_observation(&self, scope: Scope) -> Result<TipObservation, Error> {
         let inner = self.inner.lock().await;

@@ -53,6 +53,9 @@ class RoomGenerationsTest {
         try {
             val created = RockyDatabase.create(directory, schema, PeerTransport.Iroh.isolated(), automaticSync = false)
             try {
+                // The application follows the bookmark it defines; removals publish on it.
+                created.tips.createBookmark("main")
+                created.tips.follow("main")
                 val shop = room(directory, created)
                 try {
                     shop.shop().createList(ShopList("l1", "Groceries"), listOf(ShopItem("i1", "l1", "Milk", price = 1.5)))
@@ -93,6 +96,9 @@ class RoomGenerationsTest {
         try {
             val created = RockyDatabase.create(directory, schema, PeerTransport.Iroh.isolated(), automaticSync = false)
             try {
+                // The application follows the bookmark it defines; removals publish on it.
+                created.tips.createBookmark("main")
+                created.tips.follow("main")
                 val shop = room(directory, created)
                 try {
                     // No price: an unsent write of the removed column would be held.
@@ -103,7 +109,7 @@ class RoomGenerationsTest {
             } finally {
                 created.close()
             }
-            // The application's next version removes `items.price`; this issuer signs that generation.
+            // The application's next version removes `items.price`; this issuer publishes it on `main`.
             confirmed(directory).close()
 
             // The version 1 application opens the newer database and Room validates the tables it declares.

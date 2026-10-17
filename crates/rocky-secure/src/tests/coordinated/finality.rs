@@ -16,7 +16,7 @@ async fn trusted(fixture: &Fixture, name: &str) -> (PrivateKey, Replica) {
             &fixture.dir.path().join(format!("{name}.db")),
             (&identity, &key),
             3,
-            Some(lineage_upgrade(&fixture.lineage)),
+            None,
         )
         .await
         .unwrap();
@@ -64,13 +64,28 @@ async fn a_seal_its_log_committed_becomes_final_and_beats_a_later_owner_seal() {
         })
         .find(|rival| rival.id().unwrap() < committed.id().unwrap())
         .unwrap();
+    let statements = [
+        TipStatement::Seal(committed.clone()),
+        bookmark(&fixture.lineage, "main", Some(main.tip), Some(next)),
+    ];
+    // Tess follows `main` outside its in-sync set: without peers she can
+    // neither catch up nor end its log, and nothing changes.
+    let head = fixture.mesh.log.head(main).unwrap();
+    assert!(!head.member(tess.0.public_key()));
+    let error = tess
+        .1
+        .publish_tip_statements(&statements)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("behind:"), "{error}");
+    assert_eq!(fixture.mesh.log.head(main).unwrap(), head);
+    // Through them she catches up, joins and seals.
     tess.1
-        .publish_tip_statements(&[
-            TipStatement::Seal(committed.clone()),
-            bookmark(&fixture.lineage, "main", Some(main.tip), Some(next)),
-        ])
+        .publish_tip_statements_through(&statements, &fixture.mesh.peers(&fixture.lineage, &tess.0))
         .await
         .unwrap();
+    assert_eq!(tess.1.coordinated_status(main).await.unwrap().position, 1);
+    assert_eq!(tom.1.coordinated_status(main).await.unwrap().position, 0);
     // A member learns the rival first: by digest it wins there.
     let key = PrivateKey::new();
     let carol = open(&fixture.lineage, &fixture.dir, "carol", &key).await;

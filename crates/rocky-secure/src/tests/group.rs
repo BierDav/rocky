@@ -273,9 +273,10 @@ async fn a_received_page_shares_one_commit_and_refuses_frames_alone() {
                 .unwrap(),
         );
     }
-    let mut tampered = page[3].clone();
-    let last = tampered.body.len() - 1;
-    tampered.body[last] ^= 1;
+    let mut body = page[3].body_bytes().to_vec();
+    let last = body.len() - 1;
+    body[last] ^= 1;
+    let tampered = page[3].with_body(body);
     page.insert(4, tampered);
     let target_key = PrivateKey::new();
     let target = open(&f, &dir.path().join("b.db"), &target_key).await;

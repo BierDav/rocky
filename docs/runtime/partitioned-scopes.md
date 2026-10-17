@@ -62,8 +62,14 @@ groups, existence logs and command control remain refused, by the Kotlin builder
 and Room import as natively.
 
 Changing an existing table's group or renaming a group is refused by generation
-admission; a new table may join an existing group. Removing a table remains
-refused. Changing partition columns requires a new installation; generation admission
+admission; a new table may join an existing group. A schema on a sealed fork
+may remove a table. Its retained partition addresses still bind the exact
+domain, table and canonical tuple; incoming history still requires its source
+schema and signed credentials. Without the table's current descriptor, those
+addresses create no allocation binding or rows. Restoring the descriptor checks
+its partition columns again before restoring eligible births. See
+[admission evidence](admission-evidence.md).
+Changing partition columns requires a new installation; generation admission
 refuses to reinterpret existing rows under another scope.
 
 ## Group secrets

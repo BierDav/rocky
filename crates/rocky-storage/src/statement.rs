@@ -163,6 +163,7 @@ struct Resolver<'r, F> {
     tables: BTreeSet<String>,
     edits: Vec<(std::ops::Range<usize>, String)>,
     failure: Option<Rejection>,
+    migration: bool,
 }
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -175,6 +176,39 @@ impl<F: Fn(&str) -> Option<String>> Resolver<'_, F> {
     /// Resolves one table reference; `aliased` keeps the logical name
     /// visible to qualified columns when the statement gave no alias.
     fn table(&mut self, name: &ObjectName, aliased: bool) -> Result<(), Rejection> {
+        if let [
+            ObjectNamePart::Identifier(parent),
+            ObjectNamePart::Identifier(table),
+        ] = name.0.as_slice()
+            && self.migration
+            && parent.value.eq_ignore_ascii_case("parent")
+        {
+            let logical = table.value.to_ascii_lowercase();
+            if reserved(&logical) {
+                return denied(format!("parent table {logical}"));
+            }
+            let key = format!("parent.{logical}");
+            self.tables.insert(key.clone());
+            let physical = (self.physical)(&key)
+                .ok_or_else(|| Rejection::Denied(format!("unbound parent table {logical}")))?;
+            let start = self
+                .offsets
+                .range(parent.span)
+                .ok_or_else(|| Rejection::Unsupported("statement positions".into()))?
+                .start;
+            let end = self
+                .offsets
+                .range(table.span)
+                .ok_or_else(|| Rejection::Unsupported("statement positions".into()))?
+                .end;
+            let replacement = if aliased {
+                quoted(&physical)
+            } else {
+                format!("{} AS {}", quoted(&physical), quoted(&logical))
+            };
+            self.edits.push((start..end, replacement));
+            return Ok(());
+        }
         let Some(ident) = single(name) else {
             return denied(format!("qualified table name {name}"));
         };
@@ -214,6 +248,9 @@ impl<F: Fn(&str) -> Option<String>> Resolver<'_, F> {
         aliased: bool,
         returning: Option<&Vec<SelectItem>>,
     ) -> Result<(), Rejection> {
+        if single(name).is_none() {
+            return denied("a migration parent is read-only");
+        }
         self.table(name, aliased)?;
         let (Some(ident), Some(returning), false) = (single(name), returning, aliased) else {
             return Ok(());
@@ -322,6 +359,21 @@ impl<F: Fn(&str) -> Option<String>> Visitor for Resolver<'_, F> {
                 }
                 None => denied(format!("qualified function {}", function.name)),
             },
+            Expr::CompoundIdentifier(parts)
+                if self.migration
+                    && parts.len() == 3
+                    && parts[0].value.eq_ignore_ascii_case("parent") =>
+            {
+                let start = self.offsets.range(parts[0].span).map(|r| r.start);
+                let end = self.offsets.range(parts[1].span).map(|r| r.end);
+                match (start, end) {
+                    (Some(start), Some(end)) => {
+                        self.edits.push((start..end, quoted(&parts[1].value)));
+                        Ok(())
+                    }
+                    _ => unsupported("statement positions"),
+                }
+            }
             Expr::CompoundIdentifier(parts) if parts.len() > 2 => denied("schema-qualified column"),
             _ => Ok(()),
         };
@@ -338,6 +390,22 @@ impl<F: Fn(&str) -> Option<String>> Visitor for Resolver<'_, F> {
 pub fn analyze(
     sql: &str,
     physical: impl Fn(&str) -> Option<String>,
+) -> Result<Analyzed, Rejection> {
+    analyze_with(sql, physical, false)
+}
+
+/// Migration-only resolver: `parent.<table>` can be read, never written.
+/// The caller binds each parent name to its frozen read-only table.
+pub fn analyze_migration(
+    sql: &str,
+    physical: impl Fn(&str) -> Option<String>,
+) -> Result<Analyzed, Rejection> {
+    analyze_with(sql, physical, true)
+}
+fn analyze_with(
+    sql: &str,
+    physical: impl Fn(&str) -> Option<String>,
+    migration: bool,
 ) -> Result<Analyzed, Rejection> {
     if sql.len() > MAX_STATEMENT_BYTES {
         return unsupported("statement length");
@@ -383,6 +451,7 @@ pub fn analyze(
         tables: BTreeSet::new(),
         edits: Vec::new(),
         failure: None,
+        migration,
     };
     let _ = statement.visit(&mut resolver);
     if let Some(failure) = resolver.failure {
@@ -412,6 +481,31 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_parents_are_bound_by_position_and_cannot_be_written() {
+        let bind = |name: &str| (name == "parent.items").then(|| "secure_frozen_items".into());
+        let sql = "INSERT INTO items(title) SELECT parent.items.title FROM parent.items";
+        assert!(analyze(sql, bind).is_err());
+        let analyzed = analyze_migration(sql, bind).unwrap();
+        assert_eq!(
+            analyzed.tables,
+            BTreeSet::from(["items".into(), "parent.items".into()])
+        );
+        assert_eq!(
+            analyzed.sql,
+            "INSERT INTO items(title) SELECT \"items\".title FROM \"secure_frozen_items\" AS \"items\""
+        );
+        for sql in [
+            "DELETE FROM parent.items",
+            "UPDATE parent.items SET title='x'",
+            "INSERT INTO parent.items(title) VALUES('x')",
+            "SELECT * FROM main.items",
+        ] {
+            assert!(analyze_migration(sql, bind).is_err(), "{sql}");
+        }
+        assert!(analyze_migration("SELECT * FROM parent.missing", bind).is_err());
+    }
 
     fn names(name: &str) -> Option<String> {
         ["items", "tags"]

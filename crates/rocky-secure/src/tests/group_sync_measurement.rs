@@ -303,6 +303,8 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     frame_bytes(&reader, tables).await;
     let sampled = profile(&format!("checkpoint_{tables}"));
     let started = Instant::now();
+    // One seal; compacting installs every scope's base there.
+    seal_and_compact(&writer, &f.publisher, f.domain).await;
     let mut checkpoints = Vec::new();
     for scope in &scopes {
         checkpoints.push(writer.checkpoint(*scope).await.unwrap());
@@ -351,8 +353,43 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         .await;
     let reopen = started.elapsed();
     assert_rows(&reopened, &names, partitions).await;
-    for scope in &scopes {
-        reopened.audit(*scope).await.unwrap();
+    let retained = crate::storage::rows(
+        &reopened.inner.lock().await.conn,
+        "SELECT scope,count(*) FROM secure_operations GROUP BY scope",
+    )
+    .await
+    .unwrap();
+    let started_audit = Instant::now();
+    let reports = reopened.audit_scopes(&scopes).await.unwrap();
+    println!(
+        "P37 audit scopes={} elapsed_ms={}",
+        reports.len(),
+        started_audit.elapsed().as_millis()
+    );
+    assert_eq!(reports.len(), scopes.len());
+    for (((scope, report), expected_scope), checkpoint) in
+        reports.iter().zip(&scopes).zip(&checkpoints)
+    {
+        assert_eq!(scope, expected_scope);
+        let count = retained
+            .iter()
+            .find_map(|row| match row.as_slice() {
+                [SqlValue::Blob(stored), SqlValue::Integer(count)]
+                    if *stored == crate::encode(scope).unwrap() =>
+                {
+                    Some(*count as u64)
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            count, 1,
+            "actual authored and retained history of {scope:?}"
+        );
+        assert_eq!(report.operations, count);
+        assert_eq!(report.rows, 1);
+        assert_eq!(report.checkpoint, Some(checkpoint.id().unwrap()));
+        assert_eq!(report.replayed, 0);
     }
     let result = Measurement {
         open,

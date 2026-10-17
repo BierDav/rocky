@@ -281,9 +281,10 @@ were not run; no Kotlin or native ABI source changed.
 
 ### Limits after the integration
 
-- A carried write keeps its frames' tip and log position, the sealed tip's:
-  members cannot rebuild its entry evidence, and a cut of the continuation
-  could misjudge its fence. Re-signing it for the continuation is not done.
+- A carried write keeps its frames' tip and log position, the sealed tip's.
+  Phase 19 adds its author's signed carry record, which places the frames
+  at the continuation's entry on every device; the frames are not re-signed
+  ([carry records](../runtime/coordinated-writes.md#carry-records)).
 - Only a continuation's own sealed parent log is caught up, while retained;
   a branch tip's log checks nothing of its opening seal's log.
 - A trusted node that held nothing of a dropped ended log could join it
@@ -496,6 +497,22 @@ within the e2e tier's 10-minute test limit. `./scripts/lint`, `./scripts/check`
 and `sdks/kotlin/gradlew -p sdks/kotlin check` passed (see slice 7).
 
 ### What remains before phase 14 is implemented
+
+Current status (2026-10-18): round 7 rejected phase 17 acceptance. Shared
+follow/move and scoped-readiness repairs use replica v32 / link v14 and require
+the [current matrix and independent review](17-schema-changes-through-seals-qualification.md).
+The passes and failures below describe earlier trees, not current qualification.
+
+Update 2026-10-17: phase 19 repairs the issuer-switch prerequisite described
+below. Graph admission queues verified seal acquisition and keeps unavailable
+state unreadable until rebootstrap finishes.
+`rocky-sdk::tips an_issuer_automatically_acquires_the_target_seal_when_main_changes_lines`
+passed in isolation (0.64 s) and in the initial workspace run; it asserts a
+compacted issuer acquires the target state automatically and then writes. See
+[phase 19 qualification](19-recovery-as-a-bookmark-move-evidence.md). The
+historical blocker below records the original failure. Update 2026-10-18:
+the shopping schema upgrade and the custody release gate pass on the phase 17
+tree ([phase 17 qualification](17-schema-changes-through-seals-evidence.md#qualification)).
 
 - **Issuer devices cannot leave their line.** An SDK device enrolled as an
   issuer imports the domain registry from a checkpoint, so

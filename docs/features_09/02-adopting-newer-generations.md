@@ -37,7 +37,7 @@ whatever schema its app declares, and keeps syncing.
   device that learns an earlier one pulls again the frames stamped after it,
   as [removal](03-removal.md#settled) does for a re-added field.
 - **Migrate first.** The device migrates its database to that generation
-  with the existing [backfill and switch](../runtime/generations.md#plan-backfill-and-switch),
+  with the existing [backfill and switch](../runtime/generations.md#the-switch),
   durably and resumable, before it applies that generation's frames. It never
   runs the schema's `migrations`; their results arrive as signed writes.
 - **App newer than the database.** Opening with a newer app schema signs and

@@ -17,9 +17,6 @@ pub(crate) struct Domain {
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
     granted_like: BTreeMap<String, String>,
-    /// Ids of tables and fields earlier generations removed: grants that
-    /// still name them read as if they did not.
-    removed: BTreeSet<Commitment>,
 }
 impl Domain {
     pub fn new(
@@ -28,7 +25,14 @@ impl Domain {
         mesh: MeshId,
         domain: DomainId,
     ) -> Result<Self, Failure> {
-        Self::at(schema, publisher, mesh, domain, 1, &BTreeSet::new())
+        Self::at(
+            schema,
+            publisher,
+            mesh,
+            domain,
+            schema.version,
+            &BTreeSet::new(),
+        )
     }
     /// The domain at schema generation `generation`, where `added` holds
     /// the field ids transitions added to, or required of, tables that
@@ -113,42 +117,17 @@ impl Domain {
             app: TypedRows::new(logical, vec![domain])?.at_generation(generation, added)?,
             scope,
             tables,
-            granted_like: schema.granted_like.clone(),
-            removed: BTreeSet::new(),
+            granted_like: schema.granted_like(),
         })
     }
-    /// This domain, whose lineage removed the table and field ids
-    /// `removed`; a name added again is current.
-    pub fn removing(mut self, removed: BTreeSet<Commitment>) -> Self {
-        let logical = self.logical();
-        let current: BTreeSet<Commitment> = logical
-            .tables
-            .iter()
-            .flat_map(|table| {
-                table
-                    .columns
-                    .iter()
-                    .map(|column| logical.field_id(table, column))
-                    .chain([logical.table_id(table)])
-            })
-            .collect();
-        self.removed = removed.difference(&current).copied().collect();
-        self
-    }
-    /// Whether a generation removed the table or `table.field` `name`.
     fn removed(&self, name: &str) -> bool {
-        let logical = self.logical();
-        let kind = if name.contains('.') {
-            "field"
-        } else {
-            "entity"
-        };
-        self.removed.contains(&rocky_core::definition_item_id(
-            logical.publisher,
-            logical.app_id(),
-            kind,
-            name,
-        ))
+        match name.split_once('.') {
+            Some((table, column)) => self
+                .logical()
+                .table(table)
+                .is_none_or(|table| table.column(column).is_none()),
+            None => self.logical().table(name).is_none(),
+        }
     }
     /// Partition grants as this generation reads them: with the schema's
     /// `granted_like`, a whole-row grant on a followed table also selects
@@ -270,8 +249,7 @@ impl Domain {
             }
         }
     }
-    /// `profile` without the tables and columns earlier generations
-    /// removed; any other unknown name is still refused where it resolves.
+    /// Stored grants retain names; the current schema resolves only those it has.
     fn current(&self, profile: &Profile) -> Profile {
         let named = |scopes: &BTreeSet<String>| -> BTreeSet<String> {
             scopes

@@ -36,13 +36,12 @@ const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"on_conflict":"latest_wins"}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]},
- {"name":"item_categories","class":"mergeable","columns":[
+ {"name":"item_categories","granted_like":"items","class":"mergeable","columns":[
    {"name":"list","type":"integer","not_null":true},{"name":"item","type":"integer","not_null":true},{"name":"category","type":"integer","not_null":true}],
   "primary_key":["list","item","category"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"cascade"}]}
 ],
-"granted_like":{"item_categories":"items"},
 "migrations":[{"version":2,"statements":[
   "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))",
   {"insert":"item_categories","select":"SELECT list, id AS item, category FROM items WHERE category IS NOT NULL"},
@@ -231,6 +230,11 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
     let invitation = issuer
         .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
@@ -251,6 +255,11 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         )
         .await?;
     let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    // The list's base sits at a seal; the writer imports it.
+    issuer.call(json!({"type":"tips","action":"seal"})).await?;
+    issuer
+        .call(json!({"type":"tips","action":"compact"}))
+        .await?;
     issuer
         .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
         .await?;
@@ -510,6 +519,15 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    // An issuer's migration opening inherits the line's signed minimum.
+    issuer
+        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
+        .await?;
     // Raw grants name the three tables, as the shopping app's device kinds do.
     let grants: Vec<Value> = TABLES
         .iter()
@@ -576,6 +594,151 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = {list} AND i.list = {list} AND c.category = {dairy} ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
+    // Before updating, the writer's older application follows the migration
+    // and adds an item, which reaches the issuer.
+    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?;
+    behind.call(json!({"type":"sync"})).await?;
+    behind
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Jam')"),
+        )
+        .await?;
+    behind.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = {list} ORDER BY title"
+            ))
+            .await?,
+        [json!("Bread"), json!("Jam"), json!("Milk")]
+    );
+    behind.database.close().await?;
+    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
+    // The writer's grants never named `item_categories`; they follow `items`.
+    let bread = writer
+        .column(&format!(
+            "SELECT id FROM items WHERE list = {list} AND title = 'Bread'"
+        ))
+        .await?;
+    let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
+    writer
+        .insert(
+            "item_categories",
+            Some(&list),
+            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,{list},{bread},{dairy})"),
+        )
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer.column(&linked).await?,
+        [json!("Bread"), json!("Milk")]
+    );
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    // An issuer's migration opening inherits the line's signed minimum.
+    issuer
+        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
+        .await?;
+    // Raw grants name the three tables, as the shopping app's device kinds do.
+    let grants: Vec<Value> = TABLES
+        .iter()
+        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
+        .collect();
+    let invitation = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Weekly')",
+        )
+        .await?;
+    let dairy = issuer
+        .insert(
+            "categories",
+            Some(&list),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,{list},'Dairy')"),
+        )
+        .await?;
+    for (title, category) in [("Milk", dairy.as_str()), ("Bread", "NULL")] {
+        issuer
+            .insert(
+                "items",
+                Some(&list),
+                &format!("INSERT INTO items(id,list,title,category) VALUES(?,{list},'{title}',{category})"),
+            )
+            .await?;
+    }
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    issuer
+        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+            ))
+            .await?,
+        [json!("Milk"), json!("Bread")]
+    );
+    let linked = format!(
+        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = {list} AND i.list = {list} AND c.category = {dairy} ORDER BY i.title"
+    );
+    assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
+    // Before updating, the writer's older application follows the migration
+    // and adds an item, which reaches the issuer.
+    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?;
+    behind.call(json!({"type":"sync"})).await?;
+    behind
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Jam')"),
+        )
+        .await?;
+    behind.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = {list} ORDER BY title"
+            ))
+            .await?,
+        [json!("Bread"), json!("Jam"), json!("Milk")]
+    );
+    behind.database.close().await?;
     let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?;
     writer.call(json!({"type":"sync"})).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);

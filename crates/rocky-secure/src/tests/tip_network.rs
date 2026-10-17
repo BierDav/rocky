@@ -54,6 +54,7 @@ fn seal(f: &Fixture, sequence: u64) -> SignedSeal {
                 sequence,
             }],
             action: SealAction::Continue { schema: manifest },
+            recovery: None,
         },
         &f.publisher,
     )
@@ -63,6 +64,7 @@ fn opening(f: &Fixture, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
     SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: f.manifest.verify(f.publisher.public_key()).unwrap().hash(),
             scope: f.public.domain,
             seal: seal.id().unwrap(),
             minimum_in_sync: minimum,

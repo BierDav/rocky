@@ -34,9 +34,6 @@ data class Schema(
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
         if (migrations.isNotEmpty()) put("migrations", JsonArray(migrations.map { it.json() }))
-        tables.filter { it.grantedLike != null }.sortedBy { it.name }.takeIf { it.isNotEmpty() }?.let { followers ->
-            put("granted_like", buildJsonObject { followers.forEach { put(it.name, it.grantedLike) } })
-        }
     }.toString()
 
     /** Portable definition data, bound to the application's publisher. */
@@ -128,6 +125,7 @@ data class Table(
     }
     internal fun definition(): JsonObject = buildJsonObject {
         put("name", name)
+        grantedLike?.let { put("granted_like", it) }
         put("class", tableClass.wire)
         put("columns", JsonArray(columns.map { it.definition() }))
         put("primary_key", JsonArray(primaryKey.map(::JsonPrimitive)))

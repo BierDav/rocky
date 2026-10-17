@@ -13,21 +13,16 @@ late frames and losing-seal rebootstrap.
 ## What runs on its own
 
 After a group commit the replica runs a bounded maintenance step for its
-written scopes. Graph domains finalize ready seals but create no arbitrary-cut
-checkpoint: `compact(keep)` installs a base at a seal. Until someone compacts,
-a graph-domain join uses frames. Unchanged scopes keep their earlier seal base.
-
-Without a tip graph, maintenance still creates arbitrary-cut checkpoints. It
-starts after `checkpoint_operations` applied operations or at `soft_bytes`,
-and refreshes after a policy or key change. `checkpoint(scope)` completes
-checkpoint work, and `prune(scope)` completes pruning. `checkpoint_status`
+written scopes: it finalizes ready seals of the followed path. Every domain
+has a tip graph, so no checkpoint forms at an arbitrary cut; `compact(keep)`
+installs a base at a seal. Until someone compacts, a join uses frames.
+Unchanged scopes keep their earlier seal base. `checkpoint(scope)` returns
+the scope's base, and `prune(scope)` completes pruning. `checkpoint_status`
 reports the base, covered/uncovered operations, each log's `pruned_prefix`,
 retained bytes and the last `maintenance_error`.
 
 | `RetentionLimits` field | Default | Meaning |
 | --- | --- | --- |
-| `checkpoint_operations` | 1,024 | Applied operations that start an ordinary checkpoint |
-| `soft_bytes` | 32 MiB | Retained header/body bytes that start maintenance |
 | `hard_bytes` | 64 MiB | Retained bytes at which authoring/receipt backpressure, excluding staged publication frames |
 | `handles` | 65,536 | Newest mutation handles retained after pruning |
 
@@ -109,39 +104,111 @@ window, its retry is a new operation.
 ## Verifying a file
 
 Open replays the retained suffix over the verified base and compares it with
-the stored rows. `audit(scope)` checks retained operations, counters, handles,
-row sets and replay in batches under the replica lock.
+the stored rows. Every `audit(scope)` freshly checks migration accounts,
+the scope's retained operations, global counters, handles, admission evidence,
+all identity ledgers and NoFrames records before keyed row/base/frontier and
+suffix checks. Unknown and keyless scopes retain their operation report;
+zero rows/replay and an absent checkpoint do not assert keyed verification.
+
+The full holdings fixture has a private `cfg(test)` composition over the same
+production checks. One replica guard covers a finite nonempty, unique scope
+list in input order. Complete global checks run before any scratch replay and
+again after all scopes finish; every scope retains its own history and
+projection checks. It exposes no public batch capability or validation cache.
+
+Scratch replay keeps its existing page transactions and strict Check mode,
+which never mints missing grants or observations. On ordinary Result exits,
+verification restores temporary flags and attempts to clear only that scope's
+scratch. A verification error takes precedence if cleanup also fails; cleanup
+failure otherwise prevents success. This promises neither cancellation safety
+nor one SQL snapshot or all-or-nothing batch rollback. Existing transaction
+finalization may legitimately re-pin an older signed admission head to the
+stored revision; normal current-head verification leaves authority unchanged.
 
 ## The signed statement
 
 `SignedCheckpoint` contains a `CheckpointStatement`, the node signer and its
 credential chain, signed under `rocky.encrypted-checkpoint.v3`. Its identity
-is `rocky.encrypted-checkpoint.id.v3` over the bytes. Format **15** is the only
+is `rocky.encrypted-checkpoint.id.v3` over the bytes. Format **16** is the only
 accepted checkpoint format; there are no legacy readers or migrations.
 
 | Field | Binds |
 | --- | --- |
 | `seal` | The base's seal in a graph domain; absent for ordinary checkpoints without a graph |
 | `tip`, `schema` | The sealed tip and schema generation; the graph resolves its manifest |
-| `revocations`, `key_epoch`, `scope`, `partition` | Signer's revocation set, encryption epoch, scope and optional authenticated tuple |
+| `revocations`, `state`, `scope`, `partition` | Signer's revocation set, how the state is held (below), scope and optional authenticated tuple |
 | `sequence`, `previous` | Position in the scope's checkpoint chain and prior identity |
 | `frontier`, `clock`, `operations` | Per-author sequence/hash/clock, highest clock and covered count |
-| `identities` | Per-author identity high-water marks |
+| `identities` | Per author, `sequence` over all covered births and `own` over that author's own births only (`own ≤ sequence`); deleted rows and consumed births included, carries excluded from `own` |
 | `moves` | Count/digest of opaque move links in row records |
 | `rows`, `tombstones` | Count/digest of stored row records and tombstone count |
 | `creations`, `handles` | Creation witness and retained mutation-handle summaries |
 | `custody` | Covered acknowledgments, sole copies and recovery archives |
 | `coordinated` | The [coordinated-log binding](stuck-recovery.md#checkpoint-binding) |
 
-A statement carries no admitted or finalized declaration fields. The link
-and replica file stay `rocky.link.v9` and `rocky.encrypted-replica.v25` for
-this unpushed phase. Row frames remain format 11.
+`state` is `Keyed { key_epoch }` for rows sealed in pages under that epoch, or
+`NoFrames`: the scope's state at the seal holds no frame history at all,
+inherited history included. A `NoFrames` statement sits at a seal whose tip it
+names, with no operations, frontier, clock, identities, rows, tombstones,
+creations, moves or covered custody; it has no pages and no key epoch. See
+[no-frames checkpoints](#no-frames-checkpoints).
+
+A statement carries no admitted or finalized declaration fields. The current link
+and replica file are `rocky.link.v14` and `rocky.encrypted-replica.v32`. Row frames remain format 11.
+
+## No-frames checkpoints
+
+A scope this node holds without its key cannot be read, yet a joiner whose
+other scopes were pruned still has to verify it at a seal. When finalization
+checked such a scope at seal X and this replica holds no history of its own
+for it (no retained frame, void or placement visible at X, no applied, pruned
+or logged positions, rows or identities, and no earlier non-empty base),
+compaction signs a `NoFrames` base instead of skipping it. Covered keyless
+ciphertext stays deferred and signs nothing. The signer needs the usual
+checkpoint authority: whole-scope read plus a write right. Custody alone may
+import and relay the original statement, never originate one.
+
+Import stages a `NoFrames` record complete at once, with no pages, key,
+counters or acknowledgments, and authorizes pruning nothing. Offer, begin
+and finish check its shape, authority, seal and tip, and that no held
+history of the scope is visible at the seal. Open and full audit check each
+record in its own store: an installed base fully, with no rows, pages or
+stubs and no contradicting history; a staged import or
+[pulled state](kept-seals.md#pulled-states) for integrity only, since covered
+history may legitimately arrive before it is used. Under an installed base, a
+frame, void or placement of the scope that the seal includes is refused as a
+contradiction inside the transaction that would store it; frames after the
+seal follow the ordinary rules. The base supplies only its own scope's
+verified prefix through X for later seals: it places no other scope.
+
+### Exact coverage
+
+Whether a recorded no-frames fact at seal X includes a frame is decided by one
+operation, used for intake under an installed base, intake against a pulled
+state, origination, install and open and audit: the frame's author position
+must lie within X's own signed frontier, and its source tip must reach X's
+tip along structural ancestry, inheriting each opening seal's frontier.
+Which seal wins a tip today, or whether a revocation later excluded X, does
+not change the answer, so a later graph change cannot turn retained evidence
+beyond X into a contradiction. A frame whose binding cannot be decided counts
+as covered. Live visibility for applying frames is a separate rule.
+
+An import will also compare each incoming row's original creation
+provenance with this replica's known claims before any destructive step; see
+[admission evidence](admission-evidence.md#checkpoint-comparisons)
+(implementation pending).
 
 ## Design rationale
 
 Checkpoints are per scope because keys, read authority and custody are per
 scope. Set digests use LtHash16 with 1,024 lanes and SHA-256 of the accumulator,
 maintained transactionally so an ordinary checkpoint need not scan live rows.
+
+The target-scoped [SHA-2 backend](../features_09/17-sha2-backend-evidence.md)
+uses the upstream hardware dispatcher on supported little-endian AArch64
+families. Fixed pre-change vectors cover complete lanes, Sets, checkpoint
+signing bytes, signatures and IDs; labels, canonical encodings and formats
+are unchanged. Backend selection does not replace replay or authority checks.
 
 ## Limits
 

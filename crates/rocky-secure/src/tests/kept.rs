@@ -7,7 +7,7 @@ use crate::KeptSeals;
 use rocky_core::{Commitment, SqlValue};
 
 /// The rows `sql` reads through a session bound to `seal`.
-async fn at_seal(replica: &Replica, seal: Commitment, sql: &str) -> Vec<Vec<SqlValue>> {
+pub(super) async fn at_seal(replica: &Replica, seal: Commitment, sql: &str) -> Vec<Vec<SqlValue>> {
     let mut bound = session(replica).await;
     bound.bind_seal(seal).await.unwrap();
     let mut cursor = bound
@@ -40,6 +40,8 @@ fn rows(pairs: &[(&str, &str)]) -> Vec<Vec<SqlValue>> {
         .collect()
 }
 const TITLES: &str = "SELECT key,title FROM items ORDER BY key";
+
+mod admission;
 
 #[tokio::test]
 async fn kept_seals_show_their_rows_while_the_live_tables_move_on() {
@@ -291,7 +293,7 @@ async fn a_seal_before_a_removal_still_shows_the_removed_field_and_table() {
             &dir.path().join("alice.db"),
             &key,
             3,
-            Some(lineage.upgrade(1, 3)),
+            Some(lineage.projection(3)),
         )
         .await
         .unwrap();
@@ -326,14 +328,9 @@ async fn a_seal_before_a_removal_still_shows_the_removed_field_and_table() {
         [text("0001"), text("one"), text("noted"), SqlValue::Null]
     );
 
-    replica.inner.lock().await.generations_with_graph = true;
     assert!(
-        replica
-            .adopt_generation(
-                lineage.app(4),
-                lineage.config(4, &key),
-                lineage.upgrade(1, 4)
-            )
+        lineage
+            .advance(&replica, lineage.config(4, &key), 4)
             .await
             .unwrap()
     );
@@ -383,40 +380,44 @@ async fn pull_seal(
     key: &PrivateKey,
     seal: Commitment,
 ) {
-    let scope = lineage.scope("items");
-    let credentials = lineage.credentials(3, key);
-    source
-        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
-        .await
-        .unwrap();
-    let offered = source
-        .checkpoint_offer(key.public_key(), &credentials, scope)
-        .await
-        .unwrap()
-        .expect("a checkpoint");
-    assert_eq!(offered.statement.seal, Some(seal));
-    let checkpoint = offered.id().unwrap();
-    target.begin_seal_pull(offered).await.unwrap();
-    let mut after = None;
-    loop {
-        let page = source
-            .checkpoint_page(
-                key.public_key(),
-                &credentials,
-                scope,
-                checkpoint,
-                after,
-                64 * 1024,
-            )
+    for scope in target.seal_pull_scopes(lineage.domain, seal).await.unwrap() {
+        let credentials = lineage.credentials(3, key);
+        source
+            .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
             .await
             .unwrap();
-        after = page.next;
-        target.stage_checkpoint_page(page).await.unwrap();
-        if after.is_none() {
-            break;
+        let offered = source
+            .checkpoint_offer(key.public_key(), &credentials, scope)
+            .await
+            .unwrap()
+            .expect("a checkpoint");
+        assert_eq!(offered.statement.seal, Some(seal));
+        if scope == lineage.scope("tags") {
+            super::compaction::assert_empty_checkpoint(&offered, seal);
         }
+        let checkpoint = offered.id().unwrap();
+        target.begin_seal_pull(offered).await.unwrap();
+        let mut after = None;
+        loop {
+            let page = source
+                .checkpoint_page(
+                    key.public_key(),
+                    &credentials,
+                    scope,
+                    checkpoint,
+                    after,
+                    64 * 1024,
+                )
+                .await
+                .unwrap();
+            after = page.next;
+            target.stage_checkpoint_page(page).await.unwrap();
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(target.finish_seal_pull(scope).await.unwrap(), seal);
     }
-    assert_eq!(target.finish_seal_pull(scope).await.unwrap(), seal);
 }
 
 #[tokio::test]
@@ -466,6 +467,7 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
             minimum_in_sync: 1,
@@ -507,7 +509,8 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
         titles(&b).await,
         rows(&[("a", "after the first seal"), ("b", "two")])
     );
-    assert_eq!(scalar(&b, "SELECT count(*) FROM secure_pulled").await, 1);
+    assert_eq!(scalar(&b, "SELECT count(*) FROM secure_pulled").await, 2);
+    assert!(at_seal(&a, first, "SELECT key FROM tags").await.is_empty());
     b.follow_bookmark(lineage.domain, "dev").await.unwrap();
     // The pulled state became the replay base: no rebootstrap waits.
     assert_eq!(scalar(&b, "SELECT count(*) FROM secure_pulled").await, 0);
@@ -602,6 +605,7 @@ async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_si
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
             minimum_in_sync: 1,
@@ -681,7 +685,7 @@ async fn branch_writes_across_switches(lineage: Lineage) {
             &dir.path().join("alice.db"),
             (&identity, &node),
             3,
-            Some(lineage.upgrade(1, 3)),
+            Some(lineage.projection(3)),
         )
         .await
         .unwrap();
@@ -703,6 +707,7 @@ async fn branch_writes_across_switches(lineage: Lineage) {
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
             minimum_in_sync: 1,
@@ -837,11 +842,35 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
         Some(crate::HeldSeal::Checkpoint)
     );
     assert!(b.wanted_seals(lineage.domain).await.unwrap().is_empty());
-    assert_eq!(scalar(&a, "SELECT count(*) FROM secure_served").await, 1);
+    assert_eq!(scalar(&a, "SELECT count(*) FROM secure_served").await, 2);
+    let served = crate::storage::rows(
+        &a.inner.lock().await.conn,
+        "SELECT s.scope,v.signed FROM secure_served v JOIN secure_scope_state s ON s.id=v.scope",
+    )
+    .await
+    .unwrap();
+    assert_eq!(served.len(), 2);
+    for name in ["items", "tags"] {
+        let record = served
+            .iter()
+            .find(|record| record[0] == SqlValue::Blob(encode(&lineage.scope(name)).unwrap()))
+            .unwrap();
+        let SqlValue::Blob(bytes) = &record[1] else {
+            panic!("served checkpoint")
+        };
+        let signed = crate::SignedCheckpoint::from_bytes(bytes).unwrap();
+        assert_eq!(signed.statement.scope, lineage.scope(name));
+        assert_eq!(signed.statement.seal, Some(first));
+        signed.verify_signature().unwrap();
+        if name == "tags" {
+            super::compaction::assert_empty_checkpoint(&signed, first);
+        }
+    }
 
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
             minimum_in_sync: 1,

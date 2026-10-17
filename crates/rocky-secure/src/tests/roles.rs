@@ -2,7 +2,7 @@
 //! remote reads and interrupted transfers over the native transport.
 use super::*;
 use network::NativeSession;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 type Replica = EncryptedReplica<Employees>;
@@ -179,6 +179,17 @@ async fn connect_with(
     server: &Node,
     budget: usize,
 ) -> (NativeSession, tokio::task::JoinHandle<()>) {
+    // As a link's tip exchange does before rows move.
+    let domain = *server
+        .replica
+        .inner
+        .lock()
+        .await
+        .graphs
+        .keys()
+        .next()
+        .unwrap();
+    exchange_graphs(&node.replica, &server.replica, domain).await;
     let (near, far) = network::link::testing::tcp().await;
     let (session, mut served) = network::link::testing::sessions_over(
         near,
@@ -272,11 +283,11 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
     );
 
     // The device's frontier acknowledgment lets the full node prune.
+    compacted_base(&full.replica, &f.publisher, scope).await;
     full.replica
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
-    full.replica.checkpoint(scope).await.unwrap();
     let report = full.replica.prune(scope).await.unwrap();
     assert_eq!((report.pruned, report.blocked), (100, None));
     drop(session);
@@ -533,11 +544,11 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     );
     drop(session);
     server.await.unwrap();
+    compacted_base(&full.replica, &f.publisher, scope).await;
     full.replica
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
-    full.replica.checkpoint(scope).await.unwrap();
     assert!(full.replica.prune(scope).await.unwrap().pruned > 0);
 
     // Resubscribed: authoring waits for the own log, then everything converges.
@@ -702,7 +713,7 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
-    device.replica.checkpoint(scope).await.unwrap();
+    compacted_base(&device.replica, &f.publisher, scope).await;
     // A custody-only full node holds every frame but cannot apply them.
     let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
@@ -828,11 +839,11 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     for scope in &scopes {
         insert(&f, &full, *scope, 0..200, 2).await;
     }
+    compacted_base(&full.replica, &f.publisher, scopes[1]).await;
     full.replica
         .set_retention_policy(scopes[1], keep_one_copy())
         .await
         .unwrap();
-    full.replica.checkpoint(scopes[1]).await.unwrap();
     // Another reader acknowledged everything, so the full node prunes scope 1.
     let reader = open_node(
         &f,
@@ -926,13 +937,41 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
             .sync_scope(&device.replica, *scope, QUOTA)
             .await
             .unwrap();
+    }
+    drop(session);
+    server.await.unwrap();
+    // Scope 0 came as frames while scope 1's positions were pruned: its
+    // state at the seal is the full node's verified base.
+    let imported = crate::tests::import_needed_bases(
+        &full.replica,
+        &device.replica,
+        &device.key,
+        &device.credentials,
+        scopes[0].domain,
+    )
+    .await;
+    assert_eq!(
+        imported
+            .iter()
+            .map(|signed| signed.statement.scope)
+            .collect::<Vec<_>>(),
+        vec![scopes[0]]
+    );
+    assert_eq!(
+        imported[0].id().unwrap(),
+        full.replica
+            .checkpoint(scopes[0])
+            .await
+            .unwrap()
+            .id()
+            .unwrap()
+    );
+    for scope in &scopes[..2] {
         assert_eq!(
             all_rows(&device.replica, *scope).await,
             all_rows(&full.replica, *scope).await
         );
     }
-    drop(session);
-    server.await.unwrap();
 
     // A replacement full node starts from the existing one.
     let replacement = open_node(
@@ -954,6 +993,33 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     }
     drop(session);
     server.await.unwrap();
+    // Scopes that came as frames beside scope 1's pruned positions take
+    // the full node's verified bases at the seal.
+    let imported = crate::tests::import_needed_bases(
+        &full.replica,
+        &replacement.replica,
+        &replacement.key,
+        &replacement.credentials,
+        scopes[0].domain,
+    )
+    .await;
+    let needed: BTreeSet<_> = imported
+        .iter()
+        .map(|signed| signed.statement.scope)
+        .collect();
+    assert!(needed.contains(&scopes[0]));
+    assert!(needed.is_subset(&BTreeSet::from([scopes[0], scopes[2]])));
+    for signed in &imported {
+        assert_eq!(
+            signed.id().unwrap(),
+            full.replica
+                .checkpoint(signed.statement.scope)
+                .await
+                .unwrap()
+                .id()
+                .unwrap()
+        );
+    }
     for scope in &scopes {
         assert_eq!(
             all_rows(&replacement.replica, *scope).await,
@@ -1129,11 +1195,11 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         .unwrap();
     drop(session);
     server.await.unwrap();
+    compacted_base(&full.replica, &f.publisher, scope).await;
     full.replica
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
-    full.replica.checkpoint(scope).await.unwrap();
     assert_eq!(full.replica.prune(scope).await.unwrap().pruned, 500);
     insert(&f, &full, scope, 500..1000, 1).await;
     let mut sessions = 0;

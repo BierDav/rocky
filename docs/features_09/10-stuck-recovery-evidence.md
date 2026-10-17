@@ -1,8 +1,8 @@
 # Phase 10: stuck recovery evidence
 
-Status: partial. Collection, coordinator cuts, device fencing and rollback, and
-the secure-side proposal and submission are implemented; the SDK operation,
-API, Kotlin and guides are not. This is not a passing Phase 10 completion gate.
+Status: superseded by [phase 19](19-recovery-as-a-bookmark-move-evidence.md),
+which removed the cuts recorded below and passes this phase's gate with the
+owner's recovery seal. Collection remains. The rest of this record is history.
 
 ## Implemented slice
 

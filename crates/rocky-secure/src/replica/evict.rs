@@ -122,6 +122,9 @@ impl<A: RowApplication> Inner<A> {
         let blob = encode(&scope)?;
         let id = self.find_scope_id(scope).await?;
         let (rows, operations, done) = transaction!(self, |inner| {
+            inner
+                .replace_ledger(scope, identity::IdentityLedger::default())
+                .await?;
             let mut rows = 0;
             if let Some(id) = id {
                 for table in [
@@ -196,6 +199,7 @@ impl<A: RowApplication> Inner<A> {
             if done {
                 if let Some(id) = id {
                     for table in [
+                        "secure_seal_anchors",
                         "secure_applied",
                         "secure_stubs",
                         "secure_logs",
@@ -205,7 +209,6 @@ impl<A: RowApplication> Inner<A> {
                         "secure_rebootstrap_pages",
                         "secure_checkpoint_pages",
                         "secure_checkpoint_stubs",
-                        "secure_checkpoint_build_stubs",
                         "secure_compaction_live_creations",
                     ] {
                         inner
@@ -217,11 +220,13 @@ impl<A: RowApplication> Inner<A> {
                         .store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
                         .await?;
                 }
-                // Identity marks go too: the scope's creations apply again.
+                // Only the replay ledger goes: permanent marks, the summary
+                // and admission evidence stay, so returning frames this file
+                // admitted apply again and reuse stays refused.
                 for table in [
                     "secure_retention",
                     "secure_peer_frontiers",
-                    "secure_identity_marks",
+                    "secure_identity_ledger",
                 ] {
                     inner
                         .conn

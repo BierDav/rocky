@@ -126,6 +126,8 @@ pub struct LogicalView {
 pub struct LogicalTable {
     /// The table's identity, forever; see decision 0067.
     pub sql_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_like: Option<String>,
     pub class: TableClass,
     /// The ORM's own statement, naming `sql_name`.
     pub create_sql: String,
@@ -795,6 +797,7 @@ struct ReplicatedColumn<'a> {
     affinity: Affinity,
     not_null: bool,
     collation: Collation,
+    default: Option<&'a str>,
 }
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 struct ReplicatedUnique<'a> {
@@ -811,6 +814,7 @@ struct ReplicatedReference<'a> {
 struct ReplicatedTable<'a> {
     class: TableClass,
     name: &'a str,
+    granted_like: Option<&'a str>,
     key: Vec<ReplicatedColumn<'a>>,
     fields: Vec<ReplicatedColumn<'a>>,
     unique: Vec<ReplicatedUnique<'a>>,
@@ -832,6 +836,7 @@ fn replicated_column(column: &LogicalColumn) -> ReplicatedColumn<'_> {
         affinity: column.affinity,
         not_null: column.not_null,
         collation: column.collation,
+        default: column.default.as_deref(),
     }
 }
 fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> ReplicatedTable<'a> {
@@ -870,6 +875,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
     ReplicatedTable {
         class: table.class,
         name: &table.sql_name,
+        granted_like: table.granted_like.as_deref(),
         key: table.key().map(replicated_column).collect(),
         fields,
         unique,
@@ -919,6 +925,15 @@ impl LogicalSchema {
         let mut names = BTreeSet::new();
         for table in &self.tables {
             table.validate()?;
+            if let Some(like) = &table.granted_like
+                && (table.class != TableClass::Mergeable
+                    || like == &table.sql_name
+                    || self.table(like).is_none_or(|parent| {
+                        parent.class != TableClass::Mergeable || parent.granted_like.is_some()
+                    }))
+            {
+                return invalid(format!("{}: invalid granted_like {like}", table.sql_name));
+            }
             let mut partitions = BTreeSet::new();
             if table.partition_by.len() > 16
                 || table.partition_by.iter().any(|name| {
@@ -1374,6 +1389,7 @@ mod tests {
             update_policy: UpdatePolicy::Changed,
             tables: vec![LogicalTable {
                 sql_name: "items".into(),
+            granted_like: None,
                 class: TableClass::Mergeable,
                 create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`key`))".into(),
                 auto_generate: false,

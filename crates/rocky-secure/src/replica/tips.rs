@@ -1,17 +1,51 @@
 //! Durable, domain-scoped tip graph and the selected live workspace.
 use super::*;
+pub(super) mod refresh;
 use rocky_core::Scope;
 use rocky_credentials::{
-    SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedGenesisLine, SignedSeal,
-    SignedTipOpening, TipGraph,
+    SealFinality, SignedBookmarkMove, SignedCarry, SignedCheckpointRecord, SignedGenesisLine,
+    SignedSeal, SignedTipOpening, TipGraph,
 };
 
 /// Largest stored or exchanged tip statement: a finality record.
 pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = rocky_credentials::MAX_FINALITY_BYTES + 64;
 
+pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
+    graph
+        .seals
+        .iter()
+        .cloned()
+        .map(TipStatement::Seal)
+        .chain(graph.openings.iter().cloned().map(TipStatement::Opening))
+        .chain(graph.moves.iter().cloned().map(TipStatement::Bookmark))
+        .chain(
+            graph
+                .genesis_lines
+                .iter()
+                .cloned()
+                .map(TipStatement::GenesisLine),
+        )
+        .chain(graph.finalities.iter().cloned().map(TipStatement::Finality))
+        .chain(
+            graph
+                .checkpoints
+                .iter()
+                .cloned()
+                .map(|record| TipStatement::Checkpoint(Box::new(record))),
+        )
+        .chain(
+            graph
+                .carries
+                .iter()
+                .cloned()
+                .map(|record| TipStatement::Carry(Box::new(record))),
+        )
+        .collect()
+}
+
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tip_graphs(scope BLOB PRIMARY KEY,genesis BLOB NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_tip_statements(digest BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_tip_statements(digest BLOB PRIMARY KEY,statement BLOB NOT NULL,staged INTEGER NOT NULL DEFAULT 0 CHECK(staged IN(0,1))) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_followed_tip(id INTEGER PRIMARY KEY CHECK(id=1),scope BLOB NOT NULL,bookmark TEXT NOT NULL,tip BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_node_tips(scope BLOB NOT NULL,node BLOB NOT NULL,tip BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_line_nodes(line BLOB PRIMARY KEY,node BLOB NOT NULL UNIQUE) WITHOUT ROWID",
@@ -26,6 +60,8 @@ pub enum TipStatement {
     GenesisLine(SignedGenesisLine),
     Finality(SealFinality),
     Checkpoint(Box<SignedCheckpointRecord>),
+    /// Where a carried coordinated write committed.
+    Carry(Box<SignedCarry>),
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -36,6 +72,7 @@ impl TipStatement {
             Self::GenesisLine(s) => s.id(),
             Self::Finality(s) => s.id(),
             Self::Checkpoint(s) => s.id(),
+            Self::Carry(s) => s.id(),
         }
         .map_err(credential)
     }
@@ -47,6 +84,7 @@ impl TipStatement {
             Self::GenesisLine(s) => s.statement.scope,
             Self::Finality(s) => s.scope,
             Self::Checkpoint(s) => s.statement.scope,
+            Self::Carry(s) => s.statement.scope,
         }
     }
     pub fn append(&self, graph: &mut TipGraph) {
@@ -57,6 +95,7 @@ impl TipStatement {
             Self::GenesisLine(s) => graph.genesis_lines.push(s.clone()),
             Self::Finality(s) => graph.finalities.push(s.clone()),
             Self::Checkpoint(s) => graph.checkpoints.push((**s).clone()),
+            Self::Carry(s) => graph.carries.push((**s).clone()),
         }
     }
     pub(in crate::replica) fn verify(
@@ -79,6 +118,7 @@ impl TipStatement {
             // Acknowledgments are checked against the signers' validity
             // when admitted; a stored record keeps counting until revoked.
             (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
+            (Self::Carry(s), current) => graph.verify_carry(s, publisher, current),
         }
         .map_err(credential)
     }
@@ -111,49 +151,14 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(schema);
             }
         }
-        std::iter::once(self.manifest)
-            .chain(self.previous.iter().map(|previous| previous.manifest))
-            .find(|manifest| rocky_credentials::genesis_tip(*manifest) == tip)
-            .ok_or_else(|| Error::Incompatible("unknown tip".into()))
+        Err(Error::Incompatible("unknown tip".into()))
     }
-    /// Without a graph, explicit generations replace each other in place:
-    /// a frame of an earlier one this replica records belongs to the
-    /// workspace when it was stamped before the signed transition out of
-    /// its generation. Later frames of that tip are a peer that stayed.
-    pub(crate) fn explicit_frame(&self, tip: TipId, timestamp: u64) -> bool {
-        tip == self.workspace.tip
-            || self.previous.iter().any(|previous| {
-                rocky_credentials::genesis_tip(previous.manifest) == tip
-                    && timestamp < previous.ended
-            })
-    }
-    /// Whether a peer is offered this frame. Without a graph, a frame of an
-    /// earlier explicit generation only once its author's log, as held here,
-    /// ends on the followed tip: a write a switch left behind stays local.
     pub(super) async fn offered(
         &self,
         header: &p2panda_core::Header<Extensions>,
     ) -> Result<bool, Error> {
-        let e = &header.extensions;
-        if e.tip == self.workspace.tip || self.graphs.contains_key(&e.scope.domain) {
-            return Ok(true);
-        }
-        let last = collect_rows(
-            self.conn
-                .query(
-                    "SELECT header FROM secure_operations WHERE scope=? AND author=? ORDER BY sequence DESC LIMIT 1",
-                    [encode(&e.scope)?, header.public_key.as_bytes().to_vec()],
-                )
-                .await?,
-        )
-        .await?;
-        match last.first().map(Vec::as_slice) {
-            Some([SqlValue::Blob(bytes)]) => Ok(decode::<p2panda_core::Header<Extensions>>(bytes)?
-                .extensions
-                .tip
-                == self.workspace.tip),
-            _ => Ok(false),
-        }
+        self.graph_for(header.extensions.scope.domain)?;
+        Ok(!self.private_schema().await?)
     }
     pub(crate) fn same_tip_peer(&self, peer: PublicKey) -> Result<(), Error> {
         if self.peer_tip(peer) != Some(self.workspace.tip) {
@@ -165,60 +170,102 @@ impl<A: RowApplication> Inner<A> {
         if scope.app != self.definition.app || !self.domains.contains(&scope.domain) {
             return Err(denied("tip graph belongs to another domain"));
         }
-        Ok(self
-            .graphs
+        self.graphs
             .get(&scope)
             .cloned()
-            .unwrap_or_else(|| TipGraph::new(scope, self.manifest)))
+            .ok_or_else(|| denied("domain has no installed tip graph"))
     }
-    pub(crate) fn frame_reach(
+    /// Where a stored or received frame belongs. A write the owner's
+    /// recovery abandoned is held for its author.
+    pub(crate) fn frame_reach(&self, frame: &EncryptedFrame) -> Result<FrameReach, Error> {
+        if self.abandoned_write(frame)? {
+            return Ok(FrameReach::Held);
+        }
+        let operation = frame.operation_ref()?;
+        let extension = &operation.header.extensions;
+        self.frame_reach_at(
+            extension.scope.domain,
+            extension.tip,
+            extension
+                .author
+                .ok_or_else(|| denied("node author number missing"))?,
+            extension.author_sequence,
+            operation.header.timestamp,
+        )
+    }
+    pub(super) fn frame_reach_at(
         &self,
         scope: Scope,
         tip: TipId,
         author: u32,
         sequence: u64,
-        timestamp: u64,
+        _timestamp: u64,
     ) -> Result<FrameReach, Error> {
-        let Some(graph) = self.graphs.get(&scope) else {
-            return Ok(if self.explicit_frame(tip, timestamp) {
-                FrameReach::Live
-            } else {
-                FrameReach::Unfollowed
-            });
+        self.frame_reach_at_using(scope, tip, author, sequence, _timestamp, None)
+    }
+    pub(super) fn frame_reach_at_using(
+        &self,
+        scope: Scope,
+        tip: TipId,
+        author: u32,
+        sequence: u64,
+        _timestamp: u64,
+        mut context: Option<&mut refresh::RefreshGraphContext<'_>>,
+    ) -> Result<FrameReach, Error> {
+        let graph = self.graph_for(scope)?;
+        let active = match context.as_mut() {
+            Some(context) => context.schema_ok(scope, tip, true)?,
+            None => graph.schema(tip).is_ok(),
         };
-        if graph.schema(tip).is_err() && graph.schema_any(tip).is_ok() {
+        if !active
+            && match context.as_mut() {
+                Some(context) => context.schema_ok(scope, tip, false)?,
+                None => graph.schema_any(tip).is_ok(),
+            }
+        {
             return Ok(FrameReach::Held);
         }
-        if !self.visible_frame(graph, tip, author, sequence, self.workspace.tip)?
+        if !self.refresh_visible(graph, scope, tip, author, sequence, &mut context)?
             && self.abandoned_frame(scope, graph, tip, author, sequence)?
         {
             return Ok(FrameReach::Held);
         }
         // The active tip can be sealed while its bookmark waits for a move.
         if tip == self.workspace.tip {
-            return Ok(match graph.seal(tip).map_err(credential)? {
-                None => FrameReach::Live,
-                Some(seal)
-                    if seal
-                        .statement
-                        .frontier
-                        .iter()
-                        .any(|m| m.author == author && sequence <= m.sequence) =>
-                {
-                    FrameReach::Sealed
-                }
-                Some(seal)
-                    if matches!(seal.statement.action, rocky_credentials::SealAction::Close) =>
-                {
-                    FrameReach::Held
-                }
-                Some(_) => FrameReach::Unfollowed,
-            });
+            return Ok(
+                match match context.as_mut() {
+                    Some(context) => context.winner(scope, tip)?,
+                    None => graph.seal(tip).map_err(credential)?,
+                } {
+                    None => FrameReach::Live,
+                    Some(seal)
+                        if seal
+                            .statement
+                            .frontier
+                            .iter()
+                            .any(|m| m.author == author && sequence <= m.sequence) =>
+                    {
+                        FrameReach::Sealed
+                    }
+                    Some(seal)
+                        if matches!(
+                            seal.statement.action,
+                            rocky_credentials::SealAction::Close
+                        ) =>
+                    {
+                        FrameReach::Held
+                    }
+                    Some(_) => FrameReach::Unfollowed,
+                },
+            );
         }
         let mut cursor = tip;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
-            let Some(seal) = graph.seal(cursor).map_err(credential)? else {
+            let Some(seal) = (match context.as_mut() {
+                Some(context) => context.winner(scope, cursor)?,
+                None => graph.seal(cursor).map_err(credential)?,
+            }) else {
                 return Ok(if cursor == self.workspace.tip {
                     FrameReach::Live
                 } else {
@@ -230,7 +277,9 @@ impl<A: RowApplication> Inner<A> {
                 .frontier
                 .iter()
                 .any(|m| m.author == author && sequence <= m.sequence);
-            if included && self.visible_frame(graph, tip, author, sequence, self.workspace.tip)? {
+            if included
+                && self.refresh_visible(graph, scope, tip, author, sequence, &mut context)?
+            {
                 return Ok(FrameReach::Sealed);
             }
             match seal.successor().map_err(credential)? {
@@ -239,6 +288,20 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(FrameReach::Unfollowed)
+    }
+    fn refresh_visible(
+        &self,
+        graph: &TipGraph,
+        scope: Scope,
+        source: TipId,
+        author: u32,
+        sequence: u64,
+        context: &mut Option<&mut refresh::RefreshGraphContext<'_>>,
+    ) -> Result<bool, Error> {
+        match context.as_mut() {
+            Some(context) => context.visible::<A>(scope, source, author, sequence),
+            None => self.visible_frame(graph, source, author, sequence, self.workspace.tip),
+        }
     }
     fn abandoned_frame(
         &self,
@@ -257,30 +320,8 @@ impl<A: RowApplication> Inner<A> {
             .map(|movement| &movement.statement.name)
             .collect::<BTreeSet<_>>();
         for name in names {
-            let mut cursor = None;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                let mut winner = None;
-                for movement in graph.moves.iter().filter(|movement| {
-                    &movement.statement.name == name && movement.statement.from == cursor
-                }) {
-                    let target = match movement
-                        .statement
-                        .to
-                        .map(|tip| graph.canonical_tip(tip))
-                        .transpose()
-                    {
-                        Ok(target) => target,
-                        Err(_) => continue,
-                    };
-                    let digest = movement.id().map_err(credential)?;
-                    if winner.as_ref().is_none_or(|(known, _)| digest < *known) {
-                        winner = Some((digest, target));
-                    }
-                }
-                let Some((_, target)) = winner else { break };
-                if let (Some(from), Some(to)) = (cursor, target)
-                    && !graph.continues_any(from, to).map_err(credential)?
+            for (from, to) in graph.bookmark_path(name).map_err(credential)? {
+                if !graph.continues_any(from, to).map_err(credential)?
                     && graph.line_root(from).is_ok_and(|line| line == source_line)
                 {
                     let common = self.common_frontier(scope, from, to)?;
@@ -291,7 +332,6 @@ impl<A: RowApplication> Inner<A> {
                         return Ok(true);
                     }
                 }
-                cursor = target;
             }
         }
         Ok(false)
@@ -305,32 +345,70 @@ impl<A: RowApplication> Inner<A> {
         sequence: u64,
         target: TipId,
     ) -> Result<bool, Error> {
-        if let Some(seal) = graph.seal(target).map_err(credential)?
-            && !seal
-                .statement
-                .frontier
-                .iter()
-                .any(|mark| mark.author == author && sequence <= mark.sequence)
-        {
-            return Ok(false);
+        Self::frame_path(graph, source, target)?.admits(author, sequence)
+    }
+    /// The walk from `target` back to `source` that `visible_frame` checks a
+    /// frame against: the seal frontiers it must be inside, in order, and how
+    /// the walk ends. It depends only on the tips, not the frame.
+    pub(super) fn frame_path(
+        graph: &TipGraph,
+        source: TipId,
+        target: TipId,
+    ) -> Result<FramePath, Error> {
+        let mut bounds = Vec::new();
+        if let Some(seal) = graph.seal(target).map_err(credential)? {
+            bounds.push(seal.statement.frontier.clone());
         }
+        Self::walk_frame_path(graph, source, target, bounds, true)
+    }
+    /// Whether the state at exactly `seal` includes a frame: bounded by
+    /// that seal's own frontier and walked along its tip's structural
+    /// ancestry with the exact opening seals, whichever seal wins today.
+    /// Recorded facts such as a no-frames base are judged by this, never by
+    /// live visibility.
+    pub(super) fn covers_exact(
+        graph: &TipGraph,
+        source: TipId,
+        author: u32,
+        sequence: u64,
+        seal: &rocky_credentials::SignedSeal,
+    ) -> Result<bool, Error> {
+        let bounds = vec![seal.statement.frontier.clone()];
+        Self::walk_frame_path(graph, source, seal.statement.tip, bounds, false)?
+            .admits(author, sequence)
+    }
+    /// The walk back from `target` to `source`. With `canonical`, a
+    /// continuation of a seal that does not win its tip hides the frame.
+    fn walk_frame_path(
+        graph: &TipGraph,
+        source: TipId,
+        target: TipId,
+        mut bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
+        canonical: bool,
+    ) -> Result<FramePath, Error> {
         let mut cursor = target;
         let mut visited = BTreeSet::new();
-
         while visited.insert(cursor) {
             if cursor == source {
-                return Ok(true);
+                return Ok(FramePath {
+                    bounds,
+                    end: PathEnd::Visible,
+                });
             }
             let mut parent = None;
             for seal in &graph.seals {
                 if seal.successor().map_err(credential)? == Some(cursor) {
                     // Only the canonical continuation supplies live state.
-                    if graph
-                        .seal(seal.statement.tip)
-                        .map_err(credential)?
-                        .is_none_or(|winner| winner != seal)
+                    if canonical
+                        && graph
+                            .seal(seal.statement.tip)
+                            .map_err(credential)?
+                            .is_none_or(|winner| winner != seal)
                     {
-                        return Ok(false);
+                        return Ok(FramePath {
+                            bounds,
+                            end: PathEnd::Hidden,
+                        });
                     }
 
                     parent = Some(seal.statement.tip);
@@ -346,24 +424,25 @@ impl<A: RowApplication> Inner<A> {
                     let seal = graph
                         .seal_by_id(opening.statement.seal)
                         .map_err(credential)?;
-                    if !seal
-                        .statement
-                        .frontier
-                        .iter()
-                        .any(|m| m.author == author && sequence <= m.sequence)
-                    {
-                        return Ok(false);
-                    }
+                    bounds.push(seal.statement.frontier.clone());
                     parent = Some(seal.statement.tip);
                     break;
                 }
             }
             match parent {
                 Some(tip) => cursor = tip,
-                None => return Ok(false),
+                None => {
+                    return Ok(FramePath {
+                        bounds,
+                        end: PathEnd::Hidden,
+                    });
+                }
             }
         }
-        Err(denied("cyclic tip graph"))
+        Ok(FramePath {
+            bounds,
+            end: PathEnd::Cyclic,
+        })
     }
     pub(super) fn ensure_tip_writable(&self, scope: Scope) -> Result<(), Error> {
         if let Some((followed, name)) = &self.workspace.followed
@@ -389,42 +468,52 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn tip_frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
+        let committed = self.conn.connection().is_autocommit()?;
+        if committed && let Some(frontier) = self.cached_frontier(scope) {
+            return Ok(frontier);
+        }
+        let frontier = self.compute_tip_frontier(scope).await?;
+        if committed && self.conn.connection().is_autocommit()? {
+            self.cache_frontier(&frontier);
+        }
+        Ok(frontier)
+    }
+    pub(crate) async fn compute_tip_frontier(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<ScopeFrontier, Error> {
+        #[cfg(test)]
+        self.frontier_scans.fetch_add(1, Ordering::Relaxed);
         let mut positions = BTreeMap::<PublicKey, BTreeMap<u64, bool>>::new();
-        let records=collect_rows(self.conn.query("SELECT header,status FROM secure_operations WHERE scope=?1 UNION ALL SELECT header,'applied' FROM secure_voids WHERE scope=?1",[encode(&scope)?]).await?).await?;
-        let mut headers = Vec::with_capacity(records.len());
-        // Each author's last held position and its tip.
-        let mut last = BTreeMap::<PublicKey, (u64, TipId)>::new();
+        let records=collect_rows(self.conn.query("SELECT hash,header,status FROM secure_operations WHERE scope=?1 UNION ALL SELECT hash,header,'applied' FROM secure_voids WHERE scope=?1",[encode(&scope)?]).await?).await?;
+        let graph = self.graph_for(scope.domain)?;
+        let mut paths = BTreeMap::<TipId, FramePath>::new();
         for record in records {
-            let [SqlValue::Blob(bytes), SqlValue::Text(status)] = record.as_slice() else {
+            let [
+                SqlValue::Blob(hash),
+                SqlValue::Blob(bytes),
+                SqlValue::Text(status),
+            ] = record.as_slice()
+            else {
                 return Err(Error::Corrupt("frontier header".into()));
             };
-            let header: p2panda_core::Header<Extensions> = decode(bytes)?;
-            let entry = last
-                .entry(header.public_key)
-                .or_insert((header.seq_num, header.extensions.tip));
-            if header.seq_num >= entry.0 {
-                *entry = (header.seq_num, header.extensions.tip);
+            let hash = Hash::from_bytes(
+                hash.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("frontier hash".into()))?,
+            );
+            let header = self.stored_header(bytes)?;
+            if header.hash != hash {
+                return Err(Error::Corrupt("frontier header hash".into()));
             }
-            headers.push((header, status.clone()));
-        }
-        for (header, status) in headers {
-            let e = &header.extensions;
-            let visible = match self.graphs.get(&scope.domain) {
-                Some(graph) => self.visible_frame(
-                    graph,
-                    e.tip,
-                    e.author.ok_or_else(|| denied("node author missing"))?,
-                    e.author_sequence,
-                    self.workspace.tip,
-                )?,
-                None => {
-                    self.explicit_frame(e.tip, header.timestamp)
-                        && (e.tip == self.workspace.tip
-                            || last.get(&header.public_key).map(|(_, tip)| *tip)
-                                == Some(self.workspace.tip))
+            let author = header.author.ok_or_else(|| denied("node author missing"))?;
+            let path = match paths.entry(header.tip) {
+                std::collections::btree_map::Entry::Occupied(path) => path.into_mut(),
+                std::collections::btree_map::Entry::Vacant(path) => {
+                    path.insert(Self::frame_path(graph, header.tip, self.workspace.tip)?)
                 }
             };
-            if visible && (status != "held" || self.graphs.contains_key(&scope.domain)) {
+            if path.admits(author, header.author_sequence)? {
                 positions.entry(header.public_key).or_default().insert(
                     header.seq_num,
                     matches!(status.as_str(), "applied" | "abandoned" | "held"),
@@ -467,13 +556,10 @@ impl<A: RowApplication> Inner<A> {
         if logs.len() > MAX_CHECKPOINT_LOGS {
             return Err(denied("logs per scope quota"));
         }
-        Ok(ScopeFrontier {
-            scope,
-            cuts: self.held_cuts(self.tip_log(scope.domain)).len() as u64,
-            logs,
-        })
+        Ok(ScopeFrontier { scope, logs })
     }
     pub(super) async fn load_tip_graphs(&mut self) -> Result<(), Error> {
+        self.invalidate_context();
         let mut graphs = BTreeMap::new();
         for record in rows(&self.conn, "SELECT scope,genesis FROM secure_tip_graphs").await? {
             let [SqlValue::Blob(scope), SqlValue::Blob(genesis)] = record.as_slice() else {
@@ -484,6 +570,18 @@ impl<A: RowApplication> Inner<A> {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Error::Corrupt("genesis schema".into()))?;
+            if schema
+                != self
+                    .config
+                    .manifest
+                    .verify(self.config.publisher)
+                    .map_err(credential)?
+                    .hash()
+            {
+                return Err(Error::Corrupt(
+                    "tip graph differs from the domain root".into(),
+                ));
+            }
             self.known(schema)?;
             graphs.insert(scope, TipGraph::new(scope, schema));
         }
@@ -517,8 +615,15 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(credential)?;
         }
         self.graphs = graphs;
+        self.invalidate_context();
         self.workspace.followed = None;
-        self.workspace.tip = rocky_credentials::genesis_tip(self.manifest);
+        let root = self
+            .config
+            .manifest
+            .verify(self.config.publisher)
+            .map_err(credential)?
+            .hash();
+        self.workspace.tip = rocky_credentials::genesis_tip(root);
         if let Some(record) = rows(
             &self.conn,
             "SELECT scope,bookmark,tip FROM secure_followed_tip WHERE id=1",
@@ -536,11 +641,15 @@ impl<A: RowApplication> Inner<A> {
             };
             let scope: Scope = decode(scope)?;
             let tip: TipId = decode(tip)?;
-            self.graph_for(scope)?.schema(tip).map_err(credential)?;
+            if self.graph_for(scope)?.schema_any(tip).map_err(credential)? != self.manifest {
+                return Err(Error::Incompatible(
+                    "installed application differs from workspace schema".into(),
+                ));
+            }
             self.workspace.followed = Some((scope, name.clone()));
             self.workspace.tip = tip;
         }
-        let genesis = rocky_credentials::genesis_tip(self.manifest);
+        let genesis = rocky_credentials::genesis_tip(root);
         let original = identity::NodeAuthor::new(&self.config)?;
         self.line_nodes.entry(genesis).or_insert(original);
         self.conn
@@ -553,7 +662,11 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         if let Some((scope, _)) = self.workspace.followed.clone() {
-            self.select_line(scope, self.workspace.tip).await?;
+            if self.graph_for(scope)?.schema(self.workspace.tip).is_ok() {
+                self.select_line(scope, self.workspace.tip).await?;
+            } else {
+                self.node_author = None;
+            }
         }
         Ok(())
     }
@@ -564,23 +677,36 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         revocations: &rocky_credentials::RevocationSet,
     ) -> Result<bool, Error> {
+        self.invalidate_context();
         let mut changed = false;
         for graph in self.graphs.values_mut() {
             changed |= graph.exclude_revoked(revocations).map_err(credential)?;
         }
-        if changed
-            && let Some((scope, name)) = self.workspace.followed.clone()
-            && let Some(target) = self.graph_for(scope)?.bookmark(&name).map_err(credential)?
-            && target != self.workspace.tip
-        {
-            self.switch_tip(scope, &name, target).await?;
+        // A revoked signer's pulled states leave before any follow can
+        // install them, whether or not a graph changed.
+        self.revalidate_pulled().await?;
+        if changed && let Some((scope, name)) = self.workspace.followed.clone() {
+            self.follow_resolved(scope, &name).await?;
+        }
+        if changed {
+            self.invalidate_context();
         }
         if changed && let Some((scope, _)) = self.workspace.followed.clone() {
             self.revalidate_finalized(scope, true).await?;
         }
+        if changed {
+            for domain in self.graphs.keys().copied().collect::<Vec<_>>() {
+                self.reseed_domain_ledgers(domain).await?;
+            }
+        }
         Ok(changed)
     }
-    async fn store_followed(&self, scope: Scope, name: &str, tip: TipId) -> Result<(), Error> {
+    pub(super) async fn store_followed(
+        &self,
+        scope: Scope,
+        name: &str,
+        tip: TipId,
+    ) -> Result<(), Error> {
         self.conn.execute("INSERT INTO secure_followed_tip VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,bookmark=excluded.bookmark,tip=excluded.tip",bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Text(name.into()),SqlValue::Blob(encode(&tip)?)] )).await?;
         self.conn
             .execute(
@@ -617,6 +743,12 @@ impl<A: RowApplication> Inner<A> {
             }
             _ => None,
         };
+        if selected
+            .as_ref()
+            .is_some_and(|author| author.key.public_key() == self.config.node.public_key())
+        {
+            selected = Some(identity::NodeAuthor::new(&self.config)?);
+        }
         if let Some(author) = &selected
             && !self
                 .node_continues(scope, target, author.key.public_key())
@@ -704,6 +836,7 @@ impl<A: RowApplication> Inner<A> {
         name: &str,
         target: TipId,
     ) -> Result<(), Error> {
+        self.invalidate_context();
         let tip = self.workspace.tip;
         let author = self.node_author.clone();
         let nodes = self.line_nodes.clone();
@@ -711,9 +844,18 @@ impl<A: RowApplication> Inner<A> {
             inner.workspace.tip = tip;
             inner.node_author = author.clone();
             inner.line_nodes = nodes.clone();
-            inner.switch_tip(scope, name, target).await
+            match inner.schema_switch_intent().await? {
+                Some((staged, bookmark, _, _)) if staged == scope && bookmark == name => {
+                    inner.reconcile_staged_switch().await
+                }
+                Some(_) => Err(denied(
+                    "a staged schema switch must finish or be withdrawn first",
+                )),
+                None => inner.switch_tip(scope, name, target).await,
+            }
         });
         if let Err(error) = result {
+            self.invalidate_context();
             self.workspace.tip = tip;
             self.node_author = author;
             self.line_nodes = nodes;
@@ -723,14 +865,38 @@ impl<A: RowApplication> Inner<A> {
         self.publish_revision().await?;
         Ok(())
     }
-    async fn switch_tip(&mut self, scope: Scope, name: &str, target: TipId) -> Result<(), Error> {
+    pub(super) async fn switch_tip(
+        &mut self,
+        scope: Scope,
+        name: &str,
+        target: TipId,
+    ) -> Result<(), Error> {
+        self.invalidate_context();
+        // Whether the workspace's own bookmark moved, rather than the device
+        // following another bookmark: a pending switch keeps its intent.
+        let moved = match self.pending_intent().await? {
+            Some((pending, bookmark, moved)) => moved && pending == scope && bookmark == name,
+            None => self
+                .workspace
+                .followed
+                .as_ref()
+                .is_some_and(|(followed, bookmark)| *followed == scope && bookmark == name),
+        };
         let graph = self.graph_for(scope)?;
         let schema = graph.schema(target).map_err(credential)?;
-        if schema != self.manifest {
-            return Err(Error::Incompatible(
-                "followed tip schema is not installed".into(),
-            ));
+        if schema != self.manifest || !self.missing_live_schemas().await?.is_empty() {
+            self.conn.execute(
+                "INSERT INTO secure_pending_schema VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,bookmark=excluded.bookmark,tip=excluded.tip,manifest=excluded.manifest,moved=excluded.moved",
+                bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Text(name.into()), SqlValue::Blob(encode(&target)?), SqlValue::Blob(schema.to_vec()), SqlValue::Integer(i64::from(moved))]),
+            ).await?;
+            // The tip waits, but a caller may have changed the graph.
+            self.reseed_domain_ledgers(scope).await?;
+            return self.store_followed(scope, name, self.workspace.tip).await;
         }
+        self.conn
+            .execute("DELETE FROM secure_pending_schema WHERE id=1", ())
+            .await?;
+        self.invalidate_context();
         let forward = target == self.workspace.tip
             || graph
                 .continues(self.workspace.tip, target)
@@ -738,27 +904,11 @@ impl<A: RowApplication> Inner<A> {
         let old_tip = self.workspace.tip;
         let old_author = self.node_author.clone();
         let old_nodes = self.line_nodes.clone();
-        let leaving_line = !forward
-            && self
-                .workspace
-                .followed
-                .as_ref()
-                .is_some_and(|(followed, bookmark)| *followed == scope && bookmark == name);
-        if leaving_line {
-            let common = self.common_frontier(scope, self.workspace.tip, target)?;
-            let mut tips = Vec::new();
-            let mut cursor = self.workspace.tip;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                tips.push(cursor);
-                match Self::tip_parent(self.graph_for(scope)?, cursor)? {
-                    Some((parent, _)) => cursor = parent,
-                    None => break,
-                }
-            }
-            for tip in tips {
-                self.hold_line_writes(scope, tip, &common).await?;
-            }
+        // A moved bookmark leaves behind what its new target does not see;
+        // following another bookmark leaves the source line's writes on it.
+        if moved && !forward {
+            self.hold_line_writes(scope, self.workspace.tip, target)
+                .await?;
         }
         self.workspace.tip = target;
         let result = async {
@@ -766,10 +916,12 @@ impl<A: RowApplication> Inner<A> {
             if !forward {
                 self.rebuild_tip_workspace(scope).await?;
             }
-            self.store_followed(scope, name, target).await
+            self.store_followed(scope, name, target).await?;
+            self.reseed_domain_ledgers(scope).await
         }
         .await;
         if result.is_err() {
+            self.invalidate_context();
             self.workspace.tip = old_tip;
             self.node_author = old_author;
             self.line_nodes = old_nodes;
@@ -852,36 +1004,36 @@ impl<A: RowApplication> Inner<A> {
                         .pulled_seal(id)
                         .await?
                         .is_some_and(|seal| path.contains(&seal))
+                    && self.install_pulled(scope, id).await?
+                        == checkpoint::pulled::PulledInstall::Installed
                 {
-                    self.install_pulled(scope, id).await?;
                     installed = true;
                 }
             }
             if installed {
                 Box::pin(self.settle_seal_rebootstrap(domain)).await?;
             }
+            self.reseed_domain_ledgers(domain).await?;
             return Ok(());
         }
         // A kept seal the new path passes: scopes start from its rows.
         let rewind = self.rewind_seal(domain).await?;
         #[cfg(test)]
         let rewind = rewind.filter(|_| !self.rebuild_switches);
-        let scopes = rows(&self.conn, "SELECT scope FROM secure_scope_state").await?;
-        for record in scopes {
-            let [SqlValue::Blob(scope)] = record.as_slice() else {
-                return Err(Error::Corrupt("scope".into()));
-            };
-            let scope: ResourceScope = decode(scope)?;
-            if scope.domain != domain {
-                continue;
-            }
-            let id = self.scope_id(scope).await?;
+        for (scope, id) in self.domain_scopes(domain).await? {
             // Restoring a kept seal's rows replays only what followed it.
+            // Without the kept state's identity evidence it rebuilds instead.
             if let Some(rewind) = &rewind
+                && let Some(at) = rewind.at(id)
                 && self.rewinds(scope, id).await?
+                && let Some(ledger) = self.prefix_identity_ledger(scope, id, at.1).await?
             {
+                #[cfg(test)]
+                {
+                    self.rewound += 1;
+                }
                 let touched = self
-                    .rewind_rows(scope, id, rewind.at(id), i64::MAX, true)
+                    .rewind_rows(scope, id, at, i64::MAX, true, ledger)
                     .await?;
                 let frontier = self
                     .graph_for(domain)?
@@ -906,15 +1058,26 @@ impl<A: RowApplication> Inner<A> {
             let kept = kept
                 || match self.pulled_seal(id).await? {
                     Some(seal) if path.contains(&seal) && self.has_pruned_prefix(scope).await? => {
-                        self.install_pulled(scope, id).await?;
-                        true
+                        // A refused state leaves the scope waiting.
+                        self.install_pulled(scope, id).await?
+                            == checkpoint::pulled::PulledInstall::Installed
                     }
                     _ => false,
                 };
             if !kept && self.has_pruned_prefix(scope).await? {
-                return Err(denied(
-                    "switching tips needs retained history or a target checkpoint",
-                ));
+                if let Some(seal) =
+                    history::bookmark_seal(self.graph_for(domain)?, self.workspace.tip)?
+                {
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO secure_wanted_seals VALUES(?,?)",
+                            [encode(&domain)?, seal.to_vec()],
+                        )
+                        .await?;
+                }
+                // Metadata is admitted while the unavailable workspace waits
+                // for the target seal; reads and authoring remain gated.
+                continue;
             }
             self.rebuilding_tip = true;
             self.tip_base = kept;
@@ -940,6 +1103,10 @@ impl<A: RowApplication> Inner<A> {
             self.rebuild_tip_existence(scope).await?;
             self.rebuild_constraints(Some(scope), None).await?;
         }
+        // A scope that still misses coverage the path's pulled state gives,
+        // pruned prefix or not, installs it now.
+        self.install_needed_pulled(domain).await?;
+        self.reseed_domain_ledgers(domain).await?;
         Ok(())
     }
     async fn index_inherited_held(&self, domain: Scope) -> Result<(), Error> {
@@ -992,7 +1159,7 @@ impl<A: RowApplication> Inner<A> {
                 e.author_sequence,
                 self.workspace.tip,
             ),
-            None => Ok(self.explicit_frame(e.tip, operation.header.timestamp)),
+            None => Err(denied("domain has no installed tip graph")),
         }
     }
     pub(super) fn visible_held_in_workspace(
@@ -1019,18 +1186,56 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Verified union; no row scan is needed for seals or forward bookmark
     /// moves. On a trusted node a seal or move whose terminal log entry
     /// lost, or is not confirmed yet, waits outside the graph.
+    /// Received seals this node cannot confirm yet wait in the journal for
+    /// `settle_tip_statements`; receipt never catches up through peers.
     pub async fn receive_tip_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
-        let statements = self.coordinate_tip_statements(statements, false).await?;
-        self.admit_tip_statements(&statements).await
+        let mut fresh = false;
+        for statement in statements {
+            fresh |= !self.holds_statement(statement.id()?).await?;
+        }
+        if !fresh {
+            return self.admit_tip_statements(statements, None).await;
+        }
+        self.check_statements(statements).await?;
+        let batch = self.journal_tips(statements, false).await?;
+        let coordinated = self
+            .coordinate_tip_statements(statements, &coordinated::NoPeers, false, false)
+            .await?;
+        self.admit_pending_tips(&coordinated.kept, Some(batch), &coordinated.deferred)
+            .await
     }
+    /// Admits verified statements; `journal` names the batch the admission
+    /// settles, forgotten in the same transaction.
     pub(in crate::replica) async fn admit_tip_statements(
         &self,
         statements: &[TipStatement],
+        journal: Option<Commitment>,
+    ) -> Result<usize, Error> {
+        self.admit_pending_tips(statements, journal, &[]).await
+    }
+    pub(in crate::replica) async fn admit_pending_tips(
+        &self,
+        statements: &[TipStatement],
+        journal: Option<Commitment>,
+        remainder: &[TipStatement],
+    ) -> Result<usize, Error> {
+        self.admit_tips_with_stage(statements, journal, remainder, None)
+            .await
+    }
+    pub(in crate::replica) async fn admit_tips_with_stage(
+        &self,
+        statements: &[TipStatement],
+        journal: Option<Commitment>,
+        remainder: &[TipStatement],
+        stage: Option<&super::staging::SchemaStage>,
     ) -> Result<usize, Error> {
         let mut inner = self.inner.lock().await;
+        if let Some(stage) = stage {
+            inner.check_schema_stage(stage).await?;
+        }
         let mut graphs = inner.graphs.clone();
         let mut new = Vec::new();
         for statement in statements {
@@ -1060,6 +1265,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             new.push((id, statement));
         }
         if new.is_empty() {
+            transaction!(inner, |inner| {
+                if let Some(batch) = journal {
+                    inner.replace_pending_tips(batch, remainder).await?;
+                }
+                inner.prune_pending_tips().await
+            })?;
+            inner.flush()?;
             return Ok(0);
         }
         // A finality record or a raised genesis minimum resolves again.
@@ -1074,6 +1286,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 &graphs[&statement.scope()],
                 Some((&inner.config.revocations, now()?)),
             )?;
+            if let TipStatement::Carry(carry) = statement {
+                inner.check_carry(carry).await?;
+            }
         }
         for (_, statement) in &new {
             if let TipStatement::Bookmark(movement) = statement
@@ -1095,6 +1310,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let old_nodes = inner.line_nodes.clone();
         let old_followed = inner.workspace.followed.clone();
         let result = transaction!(inner, |inner| {
+            inner.invalidate_context();
             inner.graphs = graphs.clone();
             inner.workspace.tip = old_tip;
             inner.node_author = old_author.clone();
@@ -1113,29 +1329,64 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner
                     .conn
                     .execute(
-                        "INSERT INTO secure_tip_statements VALUES(?,?)",
-                        [id.to_vec(), encode(statement)?],
+                        "INSERT INTO secure_tip_statements(digest,statement,staged) VALUES(?,?,?)",
+                        bindings(vec![
+                            SqlValue::Blob(id.to_vec()),
+                            SqlValue::Blob(encode(statement)?),
+                            SqlValue::Integer(i64::from(stage.is_some())),
+                        ]),
                     )
                     .await?;
             }
-            if let Some((scope, name)) = old_followed.clone()
-                && let Some(target) = inner
-                    .graph_for(scope)?
-                    .bookmark(&name)
-                    .map_err(credential)?
-                && target != old_tip
-            {
-                inner.switch_tip(scope, &name, target).await?;
+            if let Some(stage) = stage {
+                inner.record_schema_stage(stage).await?;
+            }
+            if let Some((scope, name)) = old_followed.clone() {
+                inner.follow_resolved(scope, &name).await?;
+            }
+            // Frames a carry record places move with it.
+            for (_, statement) in &new {
+                if let TipStatement::Carry(carry) = statement {
+                    inner.index_carry(carry).await?;
+                }
             }
             // A finalized seal that lost a race is undone.
             if let Some((scope, _)) = old_followed.clone() {
+                // Writes the owner's recovery abandoned roll back, also once
+                // a carry record places a write in an abandoned range.
+                if new.iter().any(|(_, statement)| {
+                    matches!(statement, TipStatement::Seal(seal) if seal.statement.recovery.is_some())
+                        || matches!(statement, TipStatement::Carry(carry) if carry.statement.scope == scope)
+                }) {
+                    inner.roll_back_abandoned(scope).await?;
+                }
+                if !inner.seal_rebootstraps(scope).await?.is_empty()
+                    && let Some(seal) =
+                        history::bookmark_seal(inner.graph_for(scope)?, inner.workspace.tip)?
+                {
+                    inner
+                        .conn
+                        .execute(
+                            "INSERT OR IGNORE INTO secure_wanted_seals VALUES(?,?)",
+                            [encode(&scope)?, seal.to_vec()],
+                        )
+                        .await?;
+                }
                 inner.revalidate_finalized(scope, true).await?;
                 // Bookmarks may show other seals now.
                 inner.retain_kept(scope).await?;
             }
-            Ok(())
+            if let Some(batch) = journal {
+                inner.replace_pending_tips(batch, remainder).await?;
+            }
+            inner.prune_pending_tips().await?;
+            for domain in graphs.keys() {
+                inner.reseed_domain_ledgers(*domain).await?;
+            }
+            inner.publication_fault(3)
         });
         if let Err(error) = result {
+            inner.invalidate_context();
             inner.graphs = old_graphs;
             inner.workspace.tip = old_tip;
             inner.node_author = old_author;
@@ -1143,7 +1394,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.workspace.followed = old_followed;
             return Err(error);
         }
-        inner.bump_authority();
+        if inner.workspace.tip != old_tip
+            && old_followed.as_ref().is_some_and(|(scope, _)| {
+                !inner.graphs[scope]
+                    .continues_any(old_tip, inner.workspace.tip)
+                    .unwrap_or(false)
+            })
+        {
+            inner.bump_authority();
+        }
         inner.publish_revision().await?;
         inner.flush()?;
         Ok(new.len())
@@ -1157,8 +1416,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("tip graph page quota"));
         }
         let mut inner = self.inner.lock().await;
+        if inner.private_schema().await? {
+            return Err(denied("schema publication is private"));
+        }
         inner.flush()?;
-        let records=collect_rows(inner.conn.query("SELECT statement FROM secure_tip_statements WHERE digest>? ORDER BY digest LIMIT ?",bindings(vec![SqlValue::Blob(after.map(|v|v.to_vec()).unwrap_or_default()),SqlValue::Integer(limit as i64)])).await?).await?;
+        let records=collect_rows(inner.conn.query("SELECT statement FROM secure_tip_statements WHERE staged=0 AND digest>? ORDER BY digest LIMIT ?",bindings(vec![SqlValue::Blob(after.map(|v|v.to_vec()).unwrap_or_default()),SqlValue::Integer(limit as i64)])).await?).await?;
         records
             .into_iter()
             .map(|record| match record.as_slice() {
@@ -1169,6 +1431,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     pub async fn follow_bookmark(&self, scope: Scope, name: &str) -> Result<TipId, Error> {
         let mut inner = self.inner.lock().await;
+        let previous = inner.workspace.tip;
         let target = inner
             .graph_for(scope)?
             .bookmark(name)
@@ -1176,7 +1439,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .ok_or_else(|| denied("bookmark does not exist"))?;
         inner.require_held_start(scope, target).await?;
         inner.follow_target(scope, name, target).await?;
-        inner.bump_authority();
+        if previous != inner.workspace.tip
+            && !inner
+                .graph_for(scope)?
+                .continues_any(previous, inner.workspace.tip)
+                .map_err(credential)?
+        {
+            inner.bump_authority();
+        }
         inner.flush()?;
         Ok(target)
     }
@@ -1278,7 +1548,183 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
-        let statements = self.coordinate_tip_statements(statements, true).await?;
-        self.admit_tip_statements(&statements).await
+        self.publish_tip_statements_through(statements, &coordinated::NoPeers)
+            .await
+    }
+    /// As `publish_tip_statements`; a node outside the in-sync set of a tip
+    /// it seals catches up and joins through `peers` first. With a composed
+    /// log the batch is journaled, flushed, before its seals reach the
+    /// coordinator, and kept after a reply that may have been lost, so
+    /// `settle_tip_statements` sends the same bytes again.
+    pub async fn publish_tip_statements_through(
+        &self,
+        statements: &[TipStatement],
+        peers: &dyn EntryPeers,
+    ) -> Result<usize, Error> {
+        let journaled = match self.domain_log().is_some()
+            && statements
+                .iter()
+                .any(|s| matches!(s, TipStatement::Seal(_)))
+        {
+            true => {
+                self.check_statements(statements).await?;
+                Some(self.journal_tips(statements, true).await?)
+            }
+            false => None,
+        };
+        self.inner.lock().await.publication_fault(1)?;
+        let coordinated = match self
+            .coordinate_tip_statements(statements, peers, true, true)
+            .await
+        {
+            Ok(coordinated) => coordinated,
+            Err(error) => {
+                let unconfirmed = match &error {
+                    Error::Application(inner) => inner.downcast_ref::<coordinated::Unconfirmed>(),
+                    _ => None,
+                };
+                return Err(match unconfirmed {
+                    Some(unconfirmed) => {
+                        coordinated::abandoned::refusal(unconfirmed.code, &unconfirmed.message)
+                    }
+                    None => error,
+                });
+            }
+        };
+        self.inner.lock().await.publication_fault(2)?;
+        self.admit_tip_statements(&coordinated.kept, journaled)
+            .await
+    }
+}
+
+const MAX_FRONTIER_HEADERS: usize = 1 << 18;
+const MAX_STORED_HEADER_BYTES: usize = 32 * 1024 * 1024;
+
+/// Syntax only: no live status, custody, graph or authority decisions.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StoredHeader {
+    hash: Hash,
+    public_key: PublicKey,
+    seq_num: u64,
+    pub(super) tip: TipId,
+    pub(super) scope: ResourceScope,
+    pub(super) timestamp: u64,
+    pub(super) author: Option<u32>,
+    pub(super) author_sequence: u64,
+    pub(super) existence: u32,
+}
+
+#[derive(Default)]
+pub(super) struct StoredHeaders {
+    entries: HashMap<Hash, (Vec<u8>, StoredHeader)>,
+    bytes: usize,
+    #[cfg(test)]
+    limits: Option<(usize, usize)>,
+}
+impl StoredHeaders {
+    fn insert(&mut self, bytes: &[u8], header: StoredHeader) {
+        #[cfg(test)]
+        let (count_limit, byte_limit) = self
+            .limits
+            .unwrap_or((MAX_FRONTIER_HEADERS, MAX_STORED_HEADER_BYTES));
+        #[cfg(not(test))]
+        let (count_limit, byte_limit) = (MAX_FRONTIER_HEADERS, MAX_STORED_HEADER_BYTES);
+        if let Some((old, _)) = self.entries.remove(&header.hash) {
+            self.bytes -= old.len();
+        }
+        if self.entries.len() >= count_limit || self.bytes.saturating_add(bytes.len()) > byte_limit
+        {
+            self.entries.clear();
+            self.bytes = 0;
+        }
+        if count_limit != 0 && bytes.len() <= byte_limit {
+            self.bytes += bytes.len();
+            self.entries.insert(header.hash, (bytes.to_vec(), header));
+        }
+    }
+}
+impl<A: RowApplication> Inner<A> {
+    pub(super) fn stored_header(&self, bytes: &[u8]) -> Result<StoredHeader, Error> {
+        let hash = Hash::new(bytes);
+        {
+            let memo = self
+                .frontier_headers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((original, header)) = memo.entries.get(&hash)
+                && original == bytes
+            {
+                return Ok(*header);
+            }
+        }
+        #[cfg(test)]
+        self.frontier_decodes.fetch_add(1, Ordering::Relaxed);
+        let header: p2panda_core::Header<Extensions> = decode(bytes)?;
+        let e = &header.extensions;
+        let fields = StoredHeader {
+            hash,
+            public_key: header.public_key,
+            seq_num: header.seq_num,
+            tip: e.tip,
+            scope: e.scope,
+            timestamp: header.timestamp,
+            author: e.author,
+            author_sequence: e.author_sequence,
+            existence: e.existence,
+        };
+        self.frontier_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(bytes, fields);
+        Ok(fields)
+    }
+    #[cfg(test)]
+    pub(crate) fn stored_header_memo_limits(&self, count: usize, bytes: usize) {
+        *self
+            .frontier_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = StoredHeaders {
+            limits: Some((count, bytes)),
+            ..Default::default()
+        };
+    }
+    #[cfg(test)]
+    pub(crate) fn stored_header_memo_stats(&self) -> (usize, usize, u64) {
+        let memo = self
+            .frontier_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            memo.entries.len(),
+            memo.bytes,
+            self.frontier_decodes.load(Ordering::Relaxed),
+        )
+    }
+}
+
+pub(super) enum PathEnd {
+    Visible,
+    Hidden,
+    Cyclic,
+}
+/// See `Inner::frame_path`.
+pub(super) struct FramePath {
+    bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
+    end: PathEnd,
+}
+impl FramePath {
+    pub(super) fn admits(&self, author: u32, sequence: u64) -> Result<bool, Error> {
+        if !self.bounds.iter().all(|frontier| {
+            frontier
+                .iter()
+                .any(|mark| mark.author == author && sequence <= mark.sequence)
+        }) {
+            return Ok(false);
+        }
+        match self.end {
+            PathEnd::Visible => Ok(true),
+            PathEnd::Hidden => Ok(false),
+            PathEnd::Cyclic => Err(denied("cyclic tip graph")),
+        }
     }
 }

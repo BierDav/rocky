@@ -14,9 +14,9 @@ off an open tip first ends that tip's log
 lost to one this device already holds fails `sealed` (not retryable); one the
 coordinator did not confirm fails `coordinator_unavailable` (retryable) and
 publishes nothing. A seal changes no rows; each device
-[finalizes and compacts locally](lazy-compaction.md). Until
-[phase 17](../features_09/17-schema-changes-through-seals.md) schema changes are
-explicit [generations](generations.md), refused once a domain has a graph.
+[finalizes and compacts locally](lazy-compaction.md). A
+[schema change](generations.md) is a seal whose successor tip has another
+schema; every domain has a graph from install.
 
 ## Start with a bookmark
 
@@ -51,6 +51,12 @@ a `continue` seal leaves them out, so they walk to the continuation like
 writes this device never held, and a `close` refuses pruned history. Sealing
 refuses a tip this device does not follow.
 
+With a coordinated log, a device outside the tip's in-sync set catches up
+and joins before its seal ends the log. When no in-sync node can append any
+more, only the owner's `recover()` ends the tip: one `continue` seal that
+abandons the committed entries nobody holds; every bookmark on the tip
+follows it without a move. See [stuck recovery](stuck-recovery.md).
+
 ## Branches
 
 The owner or a trusted identity opens a tip on any seal and points a bookmark
@@ -71,6 +77,27 @@ also covers pulling a seal's state with `tips.pull`.
 
 `minimumInSync` names the minimum in-sync size of the tip's coordinated log;
 a device cannot know the coordinator's domain minimum, so it is required.
+
+Each opening commits its own schema (opening format 2). In a schema migration
+an issuer may open on an authenticated `close`, with a different schema and
+the parent line's signed minimum. This exception does not authorize ordinary
+branch creation. Issuer moves may follow these migration successors as well
+as continuations; migration successors remain separate author lines.
+
+Changing the followed bookmark preserves each line's writes there. Unsent
+`main` writes wait while the device follows `dev`, and dev test rows never
+become held re-authoring work merely on following `main` again. Across a schema
+change the target's state comes from its own path, including fields a different
+branch removed; see [the path filter](removal.md#the-path-filter).
+
+Retained statements verify structurally, including losing and revoked
+openings. Active tips require canonical parent seals and unrevoked openings
+throughout their ancestry. An issuer migration also inherits the currently
+resolved line minimum. Learning a larger owner-signed genesis minimum makes
+an older, lower-minimum migration ineligible without invalidating its history.
+Races between closing seals resolve before their openings' bookmark moves;
+openings on one winning close resolve by move authority, then digest. Losing
+migration openings never redirect to a rival opening.
 
 An author log continues along one line of `continue` seals. A device that
 writes on another line does so under another node of its identity, certified
@@ -112,11 +139,13 @@ current and unrevoked.
 
 ## Move or delete a bookmark
 
-Issuers move a bookmark forward along `continue` seals. The owner and trusted
+Issuers move a bookmark forward along `continue` seals and restricted
+migration-successor openings. The owner and trusted
 identities also create and delete bookmarks and move them backwards or
 sideways. Such a move off an open tip closes it in the same batch, so it is
-made on a device following that tip. The line's writes since the common seal
-return as held changes on every device holding them. A call whose statements
+made on a device following that tip. Frames visible at the old target and
+excluded by the new target return as held changes on every readable holder.
+Common-ancestor late frames that remain target-visible still apply. A call whose statements
 the graph would not resolve to, such as a move losing a race, is refused
 instead of published.
 
@@ -127,7 +156,7 @@ to the owner's statement, then a trusted identity's, then an issuer's; only
 among equals does the lower digest win. A [final seal](seal-finality.md),
 one its tip's coordinated log committed and enough trusted nodes
 acknowledged, beats every other seal of its tip, the owner's included. An issuer cannot outbid an owner's
-rollback by varying its statement. Revoking an identity leaves its seals and
+rollback by varying its statement. Revoking an identity leaves its seals, openings and
 moves in the graph but out of resolution; every device resolves again in the
 commit that learns the revocation, and writes on a tip that loses this way
 return as held changes. `inspect` reports each seal's and move's `authority`

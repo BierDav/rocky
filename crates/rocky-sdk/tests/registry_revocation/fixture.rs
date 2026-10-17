@@ -136,6 +136,7 @@ pub(super) struct Domain {
 impl Domain {
     pub(super) async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
         let a = Device::new(Database::create(open(&root.join("a"), hub, "a"), None)?)?;
+        a.follow_main().await;
         let b = join(root, hub, "b", &a, json!({"kind":"issuer"})).await?;
         for list in ["L", "M"] {
             a.ok(json!({"type":"partition_create","group":"list","values":values(list)}))

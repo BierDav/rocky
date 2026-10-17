@@ -27,7 +27,7 @@ one. A tip's opening names its own minimum: the authority or a trusted node
 relays it as `Action::Configure { minimum }` (`DomainLog::configure`) before
 the log's first join; a log nobody configured takes the domain's. Trusted
 nodes relay it for every tip of the opened line before they join. Only a
-configuration, a join, a cut or a seal opens a log; a domain holds at most
+configuration, a join or a terminal entry opens a log; a domain holds at most
 8 open logs and refuses more with `Backpressure`. A node is in sync on one
 open tip of its domain: joining another leaves the first and moves its epoch,
 and waits with `Backpressure` while the first has a pending entry. A tip no
@@ -76,18 +76,23 @@ head: the pending descriptor disappears, the commit index stays, and the assigne
 head returns to that index. In both cases missing nodes leave. Membership epoch
 changes fence old acknowledgments, including a later attempt at the same position.
 A node outside the set must catch up before rejoining. An entire missing set
-cannot invent a committed continuation; only an owner-signed cut can.
+cannot invent a committed continuation; only the owner's
+[recovery seal](stuck-recovery.md) ends such a log.
 
 ## Terminal entries
 
 A seal of the tip, or a bookmark move off it, ends its log:
 `Action::Seal { terminal }` (`DomainLog::seal`) carries a `LogTerminal`, the
 statement's opaque digest and the continuation tip a `continue` seal opens.
-The authority or a trusted node submits it; the coordinator never reads the
-statement. It commits at once at `commit+1` with the digest as its entry
-hash, aborting a pending entry, clears the in-sync set and moves the epoch.
+The coordinator never reads the statement. Before the log committed any
+entry anyone of the authority or the trusted nodes submits it; afterwards
+only a node of the in-sync set, which holds every committed entry, so a
+seal never leaves one behind. It commits at once at `commit+1` with the
+digest as its entry hash, aborting a pending entry, clears the in-sync set
+and moves the epoch.
 `LogHead::terminal` reports it. A retry of the same terminal returns the same
-commit; any other entry, join, configuration, cut or terminal is refused with
+commit, whoever sends it; any other entry, join, configuration or terminal is
+refused with
 `CoordinationError::Sealed`: the first admitted ends the log, and no entry
 commits after it. Which of concurrent seals wins is the devices' graph's
 decision: by authority, then the lower digest
@@ -95,27 +100,16 @@ decision: by authority, then the lower digest
 committed before it; what happens to an aborted pending write is in
 [coordinated writes](coordinated-writes.md#seals-and-moves).
 
-## Owner-signed cuts
+## The owner's recovery
 
-A cut belongs to one tip's log, which its statement names.
-`Action::Cut { record, authority }` carries a `rocky_credentials::SignedCut` of
-the exact current head ([decision 0074](../decisions/0074-owner-signed-recovery-cuts.md)).
-A trusted node or the control authority submits it; the record's signer must be
-the domain's control authority. Admission requires no pending entry, the
-replaced position, running hash and epoch equal to the head, the next cut
-sequence with the previous cut's digest, and a retained prefix end no earlier
-than the previous cut's entry. The verified point must be the genesis anchor or
-chain through the hash window to the head; where the window reaches, the
-retained running hash must match too. Positions before the window are endorsed
-by the record alone.
-
-The cut commits at `a+1` with the record digest as its entry hash, empties the
-in-sync set and increments the epoch, so positions are never reused. The head
-retains the latest record (at most 2 KiB) and its authority chain (at most
-8 KiB, never verified by the coordinator) and exposes both in `LogHead::cut`.
-Resubmitting the retained record returns the same `Result::Cut`; any other
-stale record returns `StaleHead`. `DomainLog::cut` reports it as `Committed`.
-`MemoryLog::set_owner` names the in-process signer.
+`Action::Recover { seal }` (`DomainLog::recover`) carries the owner's
+encoded recovery seal of a stuck tip: the one terminal entry committed
+without the in-sync set. The coordinator checks that the domain's
+authority signed it directly, that it names this tip and the exact commit
+and running hash, and that its retained prefix chains through the window;
+a prefix ending before the window is endorsed by the signature alone. It
+then commits like any terminal. A retry of the same seal answers the same
+commit; a moved head is `StaleHead`. See [stuck recovery](stuck-recovery.md).
 
 ## Retention and limits
 
@@ -135,9 +129,8 @@ bounded members, retry outcomes and the full window; this is admission accountin
 RSS or actual encoded size. Commits cannot need more accounted capacity after an
 append. The newest 1,024 hashes occupy a 32,768-byte string; their positions are
 `commit - hashes.len() + 1` through `commit`. The running hash persists after
-older entry hashes are dropped. A retained cut adds its record and authority
-bytes plus 256, and each kept terminal acknowledgment its record plus 64.
-Store and snapshot format 9 holds the tip logs, cuts, terminal entries and
+older entry hashes are dropped. Each kept terminal acknowledgment adds its
+record plus 64. Store and snapshot format 9 holds the tip logs, terminal entries and
 their [acknowledgments](seal-finality.md), and requests sign as `rocky.coordination-request.v6`; every
 other format is refused before writes. See [retention](coordinator-retention.md).
 

@@ -119,8 +119,26 @@ the scope. It is neither deletion nor pruning: the rows remain at the full
 nodes. An interrupted eviction continues on the next call. `subscribe` brings
 the scope back. It reads as incomplete until a catch-up from a peer, or a
 frontier exchange with nothing to pull, restores it, and authoring is refused
-until this node's own log there is restored. Eviction drops the scope's row
-identity marks with its rows, so the history applies again.
+until this node's original log prefix there is restored. The guard records the
+exact original config-node endpoint before eviction, replay reset or a base
+replacement drops its evidence. Completion checks the exact scope, key,
+sequence and hash through an authenticated contiguous prefix: an installed
+verified prefix can anchor retained settled full frames or genuine signed
+voids. Held and recovery-abandoned originals need not apply on the target line.
+Their signatures, bodies, stored bindings, backlinks and strictly increasing
+clocks still verify; an endpoint alone or a higher frontier cannot fill a gap.
+Staging, placements and custody claims supply no root.
+
+Guard verification and removal share the existing authoring/restoration
+transaction. Reads only observe guard presence. Clearing grants no authority,
+materializes no old payload and changes no held disposition, applied position,
+custody receipt or private publication. Target state, keys, current grants and
+all other readiness gates remain independent. Reopen preserves unresolved
+obligations and committed removal. Eviction keeps permanent marks and
+[admission evidence](admission-evidence.md#lifetime-and-non-powers), clearing only
+the replay ledger; returning admitted frames replay without admitting forged
+reuse. Current repair qualification is recorded in
+[round38 evidence](../features_09/17-original-prefix-restoration-evidence.md).
 
 ### Remote reads
 

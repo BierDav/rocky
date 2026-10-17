@@ -137,3 +137,17 @@ lifetime before release.
   load error. Binding object graphs are never stored or sent.
 - The runtime cannot prevent foreign handler I/O: handler determinism is
   trusted, and handler identity is declared and installed, not proven.
+
+## Contributor SHA-2 build prerequisite
+
+Little-endian AArch64 Apple, Linux and Android builds enable the pinned SHA2
+0.10.9 upstream `asm` feature. Its transitive sha2-asm 0.6.4 uses `cc` to
+assemble target code, so native contributors need the existing Xcode SDK,
+Android NDK or Linux cross-toolchain with its assembler. Other target families
+keep the existing backend. [Backend evidence](../features_09/17-sha2-backend-evidence.md)
+distinguishes link checks from runtime coverage.
+
+The assembler is a contributor prerequisite. Packaged SDK consumers continue
+to use prebuilt native resources with their declared runtime prerequisites;
+they do not need Rust, a C compiler or an assembler. Cross-built resources still
+need the ordinary final-source packaging qualification before release.

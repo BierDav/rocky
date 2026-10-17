@@ -22,8 +22,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if signed.statement.seal.is_none() {
             return Err(denied("custody requires a finalized checkpoint"));
         }
-        // Readers already retain verified materialized checkpoints.
-        if inner.scope_key(scope).is_ok() {
+        // Readers already retain verified materialized checkpoints; a
+        // no-frames statement has no pages and imports as a base instead.
+        if inner.scope_key(scope).is_ok() || signed.statement.no_frames() {
             return Ok((None, true));
         }
         if let Some(held) = inner.archived_checkpoint(scope, false).await?
@@ -60,7 +61,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signed = inner.check_archive(scope, page.checkpoint).await?;
         if page.rows.kind != PackageKind::Checkpoint
             || page.rows.scope != scope
-            || page.rows.generation != signed.statement.key_epoch
+            || Some(page.rows.generation) != signed.statement.key_epoch()
             || page
                 .next
                 .is_some_and(|next| page.after.is_some_and(|after| next <= after))

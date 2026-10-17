@@ -90,6 +90,13 @@ and the mergeable horizon is gone.
 - Inspection shows each seal's checkpoints with their signers.
 - No horizon code, format or SDK operation remains.
 
+The plateau gate is a row-state reclamation gate: deleted rows keep no
+tombstones, stubs or existence records. It does not bound all replica
+security metadata. Identity marks were already kept, and phase 17 specifies
+exact local [admission evidence](../runtime/admission-evidence.md), which
+grows with births, has no deleted-row, dependency or liveness function, and
+is reported separately from the plateau counts.
+
 ## Proposal: final seals
 
 Today members cannot tell a final seal from one that can still lose. The
@@ -104,7 +111,7 @@ log's in-sync set reads `LogHead::terminal` and signs a terminal
 acknowledgment: the tip's log `(scope, tip)`, the terminal's position and
 running hash, the seal digest and the continuation. A node signs at most one
 per log. It submits it to the coordinator, which keeps the acknowledgments
-with the terminal as it keeps an owner-signed cut. Any trusted node that
+with the terminal. Any trusted node that
 holds enough of them publishes a seal finality record, a new graph statement
 naming the seal and carrying the acknowledgments with their signers'
 certificate chains. A member verifies, with no coordinator call, that every

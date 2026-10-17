@@ -2,11 +2,10 @@
 
 Status: accepted as [features_09 phases 13–17, 19 and 20](../features_09/README.md#generations-as-sealed-forks), which supersede this draft.
 
-A [split schema](../runtime/adopting-generations.md#limits) is undefined
-today: issuers that sign different schemas on one generation fork the
-lineage, devices follow whichever branch they meet first, and nothing says
-what a device applies of the other branch. A fork that is a first-class,
-cheap operation would make such a split explicit instead.
+When this draft was written a split schema was undefined: issuers that
+signed different schemas on one generation forked the lineage. Phase 17
+made [schema changes seals](../runtime/generations.md#publishing): such a
+split is a seal race with one winner and the other tip a branch.
 
 ## Idea
 

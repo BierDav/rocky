@@ -45,8 +45,8 @@ leader changes and publishes only after commitment. An aborted entry is voided;
 synthetic success.
 
 An entry older than the hash window cannot be resolved by inventing receipt
-history. Lost in-sync sets recover by collection or an owner-signed cut
-([phase 10](../features_09/10-stuck-recovery.md)). Ordinary row history follows its own
+history. Lost in-sync sets recover by collection or the owner's
+[recovery seal](stuck-recovery.md). Ordinary row history follows its own
 [checkpoint](encrypted-checkpoints.md) and [seal-compaction](lazy-compaction.md) policies.
 
 ## Durability and formats

@@ -157,18 +157,16 @@ pub struct RebuildProgress {
     pub tables: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GenerationRecord {
-    pub generation: Generation,
+pub struct PendingGeneration {
+    pub tip: String,
     pub manifest: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationStatus {
     pub manifest: String,
     pub current: Generation,
-    pub previous: Vec<GenerationRecord>,
+    pub pending: Option<PendingGeneration>,
     pub rebuilding: Option<RebuildProgress>,
-    /// When the earliest transition into the current generation was signed.
-    pub baseline: Option<u64>,
     pub application: DeclaredSchema,
     /// A migration this device waits for or publishes.
     pub migration: Option<MigrationStatus>,
@@ -190,7 +188,7 @@ pub enum MigrationStatus {
 /// How the schema the application declares stands to the installed
 /// generation's. An application behind or ahead of its database still
 /// opens it; its statements on what differs fail. See
-/// `docs/runtime/generations.md#peer-discovery`.
+/// `docs/runtime/adopting-generations.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredSchema {

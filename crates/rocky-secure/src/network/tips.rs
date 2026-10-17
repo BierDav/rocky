@@ -6,7 +6,7 @@ const PAGE: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum TipMessage {
-    Digest(Commitment),
+    Digest(Commitment, usize),
     Statements {
         statements: Vec<TipStatement>,
         last: bool,
@@ -24,6 +24,11 @@ pub(super) enum TipMessage {
         last: bool,
     },
     Stored,
+    CandidateQuery,
+    CandidatePush {
+        statements: Vec<TipStatement>,
+    },
+    CandidateCount(usize),
 }
 
 impl NativeSession {
@@ -64,6 +69,7 @@ impl NativeSession {
                 break;
             }
         }
+        self.sync_candidates(replica).await?;
         self.send(TipMessage::Followed(replica.followed_tip().await))
             .await?;
         let TipMessage::Followed(tip) = self.reply::<TipMessage>().await? else {
@@ -78,6 +84,18 @@ impl NativeSession {
         message: TipMessage,
     ) -> Result<(), Error> {
         match message {
+            TipMessage::CandidateQuery => {
+                let batches = replica.pending_tip_candidates().await?;
+                self.send(TipMessage::CandidateCount(batches.len())).await?;
+                for statements in batches {
+                    self.send(TipMessage::CandidatePush { statements }).await?;
+                }
+                Ok(())
+            }
+            TipMessage::CandidatePush { statements } => {
+                replica.receive_tip_statements(&statements).await?;
+                self.send(TipMessage::Stored).await
+            }
             TipMessage::Query { after } => {
                 if !self.tip_incoming.is_empty() {
                     return Err(denied("tip graph push is incomplete"));
@@ -137,8 +155,9 @@ impl NativeSession {
             .map(TipStatement::id)
             .collect::<Result<Vec<_>, _>>()?;
         let digest = rocky_core::commitment("rocky.tip-graph.v1", &encode(&ids)?);
-        let TipMessage::Digest(theirs) = self
-            .swap_tips(initiator, TipMessage::Digest(digest))
+        let batches = replica.pending_tip_candidates().await?;
+        let TipMessage::Digest(theirs, count) = self
+            .swap_tips(initiator, TipMessage::Digest(digest, batches.len()))
             .await?
         else {
             return Err(denied("unexpected tip graph digest"));
@@ -189,6 +208,21 @@ impl NativeSession {
             // Dependencies may sort into later pages; verify the complete union.
             replica.receive_tip_statements(&learned).await?;
         }
+        let mut batches = batches.into_iter();
+        for index in 0..count.max(batches.len()) {
+            let statements = batches.next().unwrap_or_default();
+            let TipMessage::CandidatePush { statements } = self
+                .swap_tips(initiator, TipMessage::CandidatePush { statements })
+                .await?
+            else {
+                return Err(denied("unexpected pending candidate"));
+            };
+            if index < count {
+                replica.receive_tip_statements(&statements).await?;
+            } else if !statements.is_empty() {
+                return Err(denied("candidate beyond declared count"));
+            }
+        }
         let TipMessage::Followed(tip) = self
             .swap_tips(
                 initiator,
@@ -200,6 +234,29 @@ impl NativeSession {
         };
         // A received move may have changed either tip since the signed hello.
         replica.admit_peer(self.peer, &self.credentials, tip).await
+    }
+
+    async fn sync_candidates<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<(), Error> {
+        self.send(TipMessage::CandidateQuery).await?;
+        let TipMessage::CandidateCount(count) = self.reply::<TipMessage>().await? else {
+            return Err(denied("unexpected pending candidate count"));
+        };
+        for _ in 0..count {
+            let TipMessage::CandidatePush { statements } = self.reply::<TipMessage>().await? else {
+                return Err(denied("unexpected pending candidate"));
+            };
+            replica.receive_tip_statements(&statements).await?;
+        }
+        for statements in replica.pending_tip_candidates().await? {
+            self.send(TipMessage::CandidatePush { statements }).await?;
+            if !matches!(self.reply::<TipMessage>().await?, TipMessage::Stored) {
+                return Err(denied("unexpected pending candidate acknowledgment"));
+            }
+        }
+        Ok(())
     }
 
     async fn swap_tips(

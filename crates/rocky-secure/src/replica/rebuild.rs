@@ -6,6 +6,13 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_operation_status_hash ON secure_operations(status,hash)",
     // Serves the pending check of every read and the replay scan.
     "CREATE INDEX IF NOT EXISTS secure_operation_scope_status ON secure_operations(scope,status,hash)",
+    // Covers header scans such as the frontier: reading `status` from the
+    // table walks each frame's body overflow pages.
+    "CREATE INDEX IF NOT EXISTS secure_operation_headers ON secure_operations(scope,status,hash,header)",
+    // A complete header scan need not carry the encoded scope in each index entry.
+    "CREATE INDEX IF NOT EXISTS secure_operation_scan_headers ON secure_operations(status,hash,header)",
+    // An author's latest frame of one status, such as its newest held write.
+    "CREATE INDEX IF NOT EXISTS secure_operation_author_status ON secure_operations(author,scope,status,sequence)",
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -23,7 +30,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.has_pending(scope).await? {
             return Err(denied("projection rebuild has unresolved inputs"));
         }
-        inner.settle(scope).await?;
         transaction!(inner, |inner| {
             inner.rebuild_rows(scope).await?;
             #[cfg(test)]
@@ -67,24 +73,44 @@ impl<A: RowApplication> Inner<A> {
         } else {
             self.checkpoint_record(id, true).await?
         };
-        let (mut cursor, mut sets) = match base {
+        let (mut cursor, mut sets, mut ledger) = match base {
             Some(record) => {
-                self.verify_record(scope, &record)?;
-                (record.position, record.sets)
+                let signed = self.verify_record(scope, &record)?;
+                (
+                    record.position,
+                    record.sets,
+                    identity::IdentityLedger::based(&signed.statement.identities)?,
+                )
             }
-            None => (0, checkpoint::Sets::new()),
+            None => (
+                0,
+                checkpoint::Sets::new(),
+                identity::IdentityLedger::default(),
+            ),
         };
         self.conn
             .execute("DELETE FROM secure_checkpoint_scratch WHERE scope=?", [id])
+            .await?;
+        sets = self
+            .prime_path_base(
+                scope,
+                id,
+                checkpoint::Overlay::Scratch,
+                self.workspace.tip,
+                sets,
+            )
             .await?;
         while let Some(last) = self
             .replay_sealed(
                 scope,
                 id,
                 checkpoint::Overlay::Scratch,
+                self.workspace.tip,
                 (cursor, through),
                 checkpoint::STEP_OPERATIONS,
                 &mut sets,
+                &mut ledger,
+                checkpoint::ReplayMode::Mint,
             )
             .await?
         {
@@ -122,6 +148,9 @@ impl<A: RowApplication> Inner<A> {
         let applied = self.scope_state(id).await?.3;
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied)
             .await?;
+        if through == i64::MAX {
+            self.replace_ledger(scope, ledger).await?;
+        }
         Ok(())
     }
 }

@@ -16,7 +16,7 @@ impl<A: RowApplication> Inner<A> {
     /// unexpired node chain under the publisher granting only this
     /// application. A chain names no generation; peers of every
     /// generation present the same one.
-    fn admit_chain(
+    pub(super) fn admit_chain(
         &self,
         node: PublicKey,
         chain: &CredentialChain,
@@ -53,13 +53,16 @@ impl<A: RowApplication> Inner<A> {
             self.peer_tips.remove(&oldest);
         }
     }
-    /// The declared session tip. Without a graph, direct callers use genesis;
-    /// once tips exist a missing or evicted declaration fails closed.
+    /// The declared session tip. While no graph knows a tip beyond genesis,
+    /// direct callers use genesis; once tips exist a missing or evicted
+    /// declaration fails closed.
     pub(crate) fn peer_tip(&self, peer: PublicKey) -> Option<TipId> {
-        self.peer_tips
-            .get(&PeerId::of(peer))
-            .copied()
-            .or_else(|| self.graphs.is_empty().then_some(self.workspace.tip))
+        self.peer_tips.get(&PeerId::of(peer)).copied().or_else(|| {
+            self.graphs
+                .values()
+                .all(|graph| graph.seals.is_empty() && graph.openings.is_empty())
+                .then_some(self.workspace.tip)
+        })
     }
     /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {

@@ -272,6 +272,15 @@ async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
     let db = Database::create(open(&path, &hub), None).unwrap().database;
     let scope: Value = serde_json::from_str(&db.scope()).unwrap();
     let session = db.session();
+    // The owner follows `main`; the next version publishes on it.
+    for action in ["create", "follow"] {
+        call(
+            &session,
+            &scope,
+            json!({"type":"tips","action":action,"name":"main"}),
+        )
+        .await;
+    }
     for name in ["A", "B"] {
         call(
             &session,

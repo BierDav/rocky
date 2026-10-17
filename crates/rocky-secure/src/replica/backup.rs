@@ -38,28 +38,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         path: impl AsRef<Path>,
         app: A,
         config: SecureConfig,
-        upgrade: Option<Upgrade>,
         predecessor: PublicKey,
     ) -> Result<Self, Error> {
+        check_config(&config, &app.manifest())?;
         let node = config.node.public_key();
         if node == predecessor {
             return Err(denied(
                 "a restored file needs a fresh signing identity, not its predecessor's",
             ));
         }
-        let publisher = config.publisher;
-        let mut manifests = vec![
-            config
-                .manifest
-                .verify(publisher)
-                .map_err(credential)?
-                .hash(),
-        ];
-        for step in upgrade.iter().flat_map(|upgrade| &upgrade.steps) {
-            manifests.push(step.transition.verify(publisher).map_err(credential)?.from);
-        }
-        rebind(path.as_ref(), &manifests, predecessor, node).await?;
-        Self::open_upgrading(path, app, config, upgrade).await
+        rebind(path.as_ref(), predecessor, &config.node, config.publisher).await?;
+        Self::open(path, app, config).await
     }
     /// The signing identities this file was restored from, oldest first.
     pub async fn predecessors(&self) -> Result<Vec<PublicKey>, Error> {
@@ -91,10 +80,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
 /// left as it is.
 async fn rebind(
     path: &Path,
-    manifests: &[Commitment],
     predecessor: PublicKey,
-    node: PublicKey,
+    key: &PrivateKey,
+    publisher: PublicKey,
 ) -> Result<(), Error> {
+    let node = key.public_key();
     check_replica_format(path).await?;
     let (owner, raw) = DatabaseOwner::open(path).await?;
     let conn = ScopedConnection::new(raw, None, crate::store::SCHEMA);
@@ -102,21 +92,20 @@ async fn rebind(
     let Some([SqlValue::Blob(stored)]) = stored.first().map(Vec::as_slice) else {
         return Err(denied("the restored file holds no replica"));
     };
-    for manifest in manifests {
-        let matches = |key| -> Result<bool, Error> {
-            Ok(identity(rocky_credentials::genesis_tip(*manifest), key)? == *stored)
-        };
-        if matches(node)? {
-            return Ok(());
-        }
-        if !matches(predecessor)? {
-            continue;
-        }
+    let (_, tip, bound): (String, TipId, PublicKey) = decode(stored)?;
+    if bound == node {
+        return Ok(());
+    }
+    if bound != predecessor {
+        return Err(denied("backup belongs to another signing identity"));
+    }
+    {
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let result = async {
             for sql in SCHEMA {
                 conn.execute(*sql, ()).await?;
             }
+            super::identity::receipts::adopt_admission(&conn, publisher, predecessor, key).await?;
             conn.execute(
                 "INSERT OR IGNORE INTO secure_predecessors VALUES(?,(SELECT revision FROM secure_metadata WHERE id=1))",
                 [predecessor.as_bytes().to_vec()],
@@ -124,7 +113,7 @@ async fn rebind(
             .await?;
             conn.execute(
                 "UPDATE secure_metadata SET identity=?,revision=revision+1 WHERE id=1",
-                [identity(rocky_credentials::genesis_tip(*manifest), node)?],
+                [identity(tip, node)?],
             )
             .await?;
             Ok(())
@@ -132,7 +121,6 @@ async fn rebind(
         .await;
         crate::storage::finish(&conn, result).await?;
         drop(owner);
-        return Ok(());
+        Ok(())
     }
-    Err(denied("the restored file is not the predecessor's"))
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Reverse, collections::BTreeSet};
 
 pub const SEAL_FORMAT: u32 = 1;
-pub const TIP_OPENING_FORMAT: u32 = 1;
+pub const TIP_OPENING_FORMAT: u32 = 2;
 pub const BOOKMARK_MOVE_FORMAT: u32 = 1;
 pub const GENESIS_LINE_FORMAT: u32 = 1;
 pub const MAX_BOOKMARK_NAME: usize = 128;
@@ -29,6 +29,37 @@ pub enum SealAction {
     Continue { schema: Commitment },
     Close,
 }
+/// A position of a tip's coordinated log and the running hash after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogPoint {
+    pub position: u64,
+    pub running: Commitment,
+}
+/// What the owner's recovery seal of a stuck tip abandons: the committed
+/// entries of the tip's log after `retained` through `replaced`, the exact
+/// commit it ends. See `docs/runtime/stuck-recovery.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recovery {
+    /// The end of the prefix that stays: `retained ≤ replaced`.
+    pub retained: LogPoint,
+    pub replaced: LogPoint,
+}
+impl Recovery {
+    fn validate(&self) -> Result<(), Error> {
+        if self.retained.position > self.replaced.position
+            || self.replaced.position >= rocky_core::MAX_COUNTER
+            || (self.retained.position == self.replaced.position
+                && self.retained.running != self.replaced.running)
+        {
+            return Err(denied("invalid recovery"));
+        }
+        Ok(())
+    }
+    /// Whether the entry at `position` of the sealed tip's log is abandoned.
+    pub fn abandons(&self, position: u64) -> bool {
+        self.retained.position < position && position <= self.replaced.position
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealStatement {
     pub format: u32,
@@ -36,11 +67,19 @@ pub struct SealStatement {
     pub tip: TipId,
     pub frontier: Vec<AuthorMark>,
     pub action: SealAction,
+    /// Only the owner's `continue` seal of a stuck tip carries one.
+    pub recovery: Option<Recovery>,
 }
 impl SealStatement {
     pub fn validate(&self) -> Result<(), Error> {
         if self.format != SEAL_FORMAT {
             return Err(denied("unsupported seal format"));
+        }
+        if let Some(recovery) = &self.recovery {
+            recovery.validate()?;
+            if self.action == SealAction::Close {
+                return Err(denied("a recovery seal continues its tip"));
+            }
         }
         if self.frontier.len() > 256
             || self
@@ -63,6 +102,7 @@ pub struct TipOpeningStatement {
     pub format: u32,
     pub scope: Scope,
     pub seal: Commitment,
+    pub schema: Commitment,
     pub minimum_in_sync: u32,
 }
 impl TipOpeningStatement {
@@ -225,8 +265,8 @@ signed_statement!(
     SignedTipOpening,
     TipOpeningStatement,
     TIP_OPENING_FORMAT,
-    "rocky.tip-opening.v1",
-    "rocky.tip-opening.id.v1"
+    "rocky.tip-opening.v2",
+    "rocky.tip-opening.id.v2"
 );
 signed_statement!(
     SignedGenesisLine,
@@ -245,12 +285,32 @@ signed_statement!(
 
 impl SignedSeal {
     fn check_graph(&self, graph: &TipGraph, _trusted: bool) -> Result<(), Error> {
+        if self.statement.recovery.is_some() && !self.endorsement.chain.0.is_empty() {
+            return Err(denied("only the owner signs a recovery seal"));
+        }
         let schema = graph.schema_any(self.statement.tip)?;
-        if matches!(self.statement.action, SealAction::Continue { schema: next } if next != schema)
+        if self.statement.recovery.is_some()
+            && matches!(self.statement.action, SealAction::Continue { schema: next } if next != schema)
         {
-            return Err(denied("a continue seal must keep its parent's schema"));
+            return Err(denied("a recovery seal must keep its parent's schema"));
         }
         Ok(())
+    }
+    /// The recovery of a seal `owner` signed directly: what a coordinator
+    /// checks before ending a stuck log. Devices verify it in the graph.
+    pub fn verify_recovery(&self, owner: PublicKey) -> Result<&Recovery, Error> {
+        self.statement.validate()?;
+        let recovery = self
+            .statement
+            .recovery
+            .as_ref()
+            .ok_or_else(|| denied("not a recovery seal"))?;
+        if !self.endorsement.chain.0.is_empty() {
+            return Err(denied("only the owner signs a recovery seal"));
+        }
+        self.endorsement
+            .verify(owner, "rocky.seal.v1", &self.statement)?;
+        Ok(recovery)
     }
     pub fn successor(&self) -> Result<Option<TipId>, Error> {
         match self.statement.action {
@@ -261,10 +321,10 @@ impl SignedSeal {
 }
 impl SignedTipOpening {
     fn check_graph(&self, graph: &TipGraph, trusted: bool) -> Result<(), Error> {
-        if !trusted {
-            return Err(denied("only the owner or a trusted identity opens tips"));
-        }
         graph.seal_by_id(self.statement.seal)?;
+        if !trusted && !graph.migration_opening(self, false)? {
+            return Err(denied("an issuer only opens migration successors"));
+        }
         Ok(())
     }
     pub fn tip(&self) -> Result<TipId, Error> {
@@ -289,10 +349,10 @@ impl SignedBookmarkMove {
         }
         if !trusted {
             match (self.statement.from, self.statement.to) {
-                (Some(from), Some(to)) if graph.continues_any(from, to)? => {}
+                (Some(from), Some(to)) if graph.succeeds_any(from, to)? => {}
                 _ => {
                     return Err(denied(
-                        "an issuer only moves bookmarks forward along continue seals",
+                        "an issuer only moves bookmarks forward along schema successors",
                     ));
                 }
             }
@@ -342,12 +402,20 @@ pub struct TipGraph {
     pub genesis_lines: Vec<SignedGenesisLine>,
     pub finalities: Vec<SealFinality>,
     pub checkpoints: Vec<SignedCheckpointRecord>,
+    /// Where carried coordinated writes committed. Never revoked: a record
+    /// grants nothing, it places frames already admitted.
+    pub carries: Vec<crate::SignedCarry>,
     /// Seals, moves and checkpoint records a revocation ended the signer of, and finality
     /// records it left below their line's minimum: kept, inspectable, and
     /// left out of resolution. See [`Self::exclude_revoked`].
     #[serde(skip)]
     pub revoked: BTreeSet<Commitment>,
 }
+type BookmarkWalk<'a> = (
+    Option<TipId>,
+    Vec<&'a SignedBookmarkMove>,
+    Vec<(TipId, TipId)>,
+);
 impl TipGraph {
     pub fn new(scope: Scope, genesis_schema: Commitment) -> Self {
         Self {
@@ -359,10 +427,11 @@ impl TipGraph {
             genesis_lines: Vec::new(),
             finalities: Vec::new(),
             checkpoints: Vec::new(),
+            carries: Vec::new(),
             revoked: BTreeSet::new(),
         }
     }
-    /// Leaves out of resolution every seal, move and checkpoint record whose
+    /// Leaves out of resolution every seal, opening, move and checkpoint record whose
     /// signer's chain `revocations` ends; the owner's never are. Returns whether the set
     /// changed, so callers resolve again.
     pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
@@ -371,6 +440,11 @@ impl TipGraph {
             .seals
             .iter()
             .map(|seal| (seal.id(), &seal.endorsement().chain))
+            .chain(
+                self.openings
+                    .iter()
+                    .map(|opening| (opening.id(), &opening.endorsement().chain)),
+            )
             .chain(
                 self.moves
                     .iter()
@@ -472,6 +546,18 @@ impl TipGraph {
         if record.terminal() != Some((seal.statement.tip, seal.successor()?)) {
             return Err(denied("seal finality names another terminal"));
         }
+        if let Some(recovery) = seal.statement.recovery {
+            let position = recovery.replaced.position + 1;
+            let running =
+                rocky_core::coordinated_chain(recovery.replaced.running, position, record.seal);
+            if record
+                .acknowledgments
+                .iter()
+                .any(|ack| ack.statement.position != position || ack.statement.running != running)
+            {
+                return Err(denied("recovery finality names another replaced head"));
+            }
+        }
         if record.verified_nodes(publisher, current)? < self.finality_minimum(record)? {
             return Err(denied("seal finality below its line's minimum"));
         }
@@ -511,6 +597,15 @@ impl TipGraph {
         }
         Ok(winner.map(|(_, seal)| seal))
     }
+    /// Whether the winning seal of `tip` is the owner's recovery and
+    /// abandons the entry at `position` of the tip's coordinated log.
+    pub fn abandons(&self, tip: TipId, position: u64) -> Result<bool, Error> {
+        Ok(self.seal(tip)?.is_some_and(|seal| {
+            seal.statement
+                .recovery
+                .is_some_and(|recovery| recovery.abandons(position))
+        }))
+    }
     /// The authority a statement was signed with.
     pub fn authority(&self, endorsement: &Endorsement) -> TipAuthority {
         TipAuthority::of(endorsement, self.scope)
@@ -523,7 +618,7 @@ impl TipGraph {
         }
         Err(denied("unknown seal"))
     }
-    /// The schema is inherited from a tip's opening seal. Losing seals
+    /// Each tip commits its schema. Losing seals
     /// remain inspectable, but their continuations never become active.
     pub fn schema(&self, tip: TipId) -> Result<Commitment, Error> {
         self.schema_inner(tip, true)
@@ -534,13 +629,14 @@ impl TipGraph {
     }
     fn schema_inner(&self, tip: TipId, active: bool) -> Result<Commitment, Error> {
         let mut cursor = tip;
+        let mut requested = None;
         let mut visited = std::collections::BTreeSet::new();
         loop {
             if !visited.insert(cursor) {
                 return Err(denied("cyclic tip graph"));
             }
             if cursor == self.genesis() {
-                return Ok(self.genesis_schema);
+                return Ok(requested.unwrap_or(self.genesis_schema));
             }
             if let Some(seal) = self.seals.iter().find(|seal| {
                 seal.statement.scope == self.scope
@@ -552,6 +648,9 @@ impl TipGraph {
                 if active && !canonical {
                     return Err(denied("tip belongs to a losing seal"));
                 }
+                if let SealAction::Continue { schema } = seal.statement.action {
+                    requested.get_or_insert(schema);
+                }
                 cursor = seal.statement.tip;
                 continue;
             }
@@ -559,9 +658,22 @@ impl TipGraph {
             for opening in &self.openings {
                 if opening.statement.scope == self.scope && opening.tip()? == cursor {
                     let seal = self.seal_by_id(opening.statement.seal)?;
-                    if active && self.seal(seal.statement.tip)? != Some(seal) {
-                        return Err(denied("tip opens on a losing seal"));
+                    if active {
+                        if self.revoked.contains(&opening.id()?) {
+                            return Err(denied("tip opening is revoked"));
+                        }
+                        if self.seal(seal.statement.tip)? != Some(seal) {
+                            return Err(denied("tip opens on a losing seal"));
+                        }
+                        if self.authority(opening.endorsement()) == TipAuthority::Issuer
+                            && !self.migration_opening(opening, true)?
+                        {
+                            return Err(denied(
+                                "migration opening does not inherit the line minimum",
+                            ));
+                        }
                     }
+                    requested.get_or_insert(opening.statement.schema);
                     parent = Some(seal.statement.tip);
                     break;
                 }
@@ -601,6 +713,71 @@ impl TipGraph {
                 if seal.statement.scope == self.scope && seal.successor()? == Some(cursor) {
                     parent = Some(seal.statement.tip);
                     break;
+                }
+            }
+            let Some(tip) = parent else { return Ok(false) };
+            if tip == from {
+                return Ok(true);
+            }
+            cursor = tip;
+        }
+        Err(denied("cyclic tip graph"))
+    }
+    /// Whether an opening is a restricted schema migration, independent of
+    /// its signer's authority. Historical validation retains old minima.
+    pub(crate) fn migration_opening(
+        &self,
+        opening: &SignedTipOpening,
+        active: bool,
+    ) -> Result<bool, Error> {
+        self.check_scope(opening.statement.scope)?;
+        let seal = self.seal_by_id(opening.statement.seal)?;
+        if seal.statement.action != SealAction::Close
+            || opening.statement.schema == self.schema_any(seal.statement.tip)?
+        {
+            return Ok(false);
+        }
+        let minimum = opening.statement.minimum_in_sync as usize;
+        if active || self.line_root_any(seal.statement.tip)? != self.genesis() {
+            return Ok(self.line_minimum(seal.statement.tip)? == Some(minimum));
+        }
+        Ok(self.genesis_lines.iter().any(|line| {
+            line.statement.scope == self.scope && line.statement.minimum_in_sync as usize == minimum
+        }))
+    }
+    /// Forward schema successors along canonical ancestry. Migration edges
+    /// start new author lines; frame continuation still uses `continues`.
+    pub fn succeeds(&self, from: TipId, to: TipId) -> Result<bool, Error> {
+        self.schema(from)?;
+        self.schema(to)?;
+        self.succeeds_inner(from, to, true)
+    }
+    /// Structural forward authorization, including retained losing migrations.
+    pub fn succeeds_any(&self, from: TipId, to: TipId) -> Result<bool, Error> {
+        self.schema_any(from)?;
+        self.schema_any(to)?;
+        self.succeeds_inner(from, to, false)
+    }
+    fn succeeds_inner(&self, from: TipId, to: TipId, active: bool) -> Result<bool, Error> {
+        let mut cursor = to;
+        let mut visited = BTreeSet::new();
+        while visited.insert(cursor) {
+            let mut parent = None;
+            for seal in &self.seals {
+                if seal.statement.scope == self.scope && seal.successor()? == Some(cursor) {
+                    parent = Some(seal.statement.tip);
+                    break;
+                }
+            }
+            if parent.is_none() {
+                for opening in &self.openings {
+                    if opening.statement.scope == self.scope && opening.tip()? == cursor {
+                        if !self.migration_opening(opening, active)? {
+                            return Ok(false);
+                        }
+                        parent = Some(self.seal_by_id(opening.statement.seal)?.statement.tip);
+                        break;
+                    }
                 }
             }
             let Some(tip) = parent else { return Ok(false) };
@@ -681,7 +858,8 @@ impl TipGraph {
         Err(denied("cyclic tip graph"))
     }
     /// Resolve conflicts per `(name, from)` by authority, then the lower
-    /// move digest, and walk from creation. A revisit ends the walk at the
+    /// move digest, and walk from creation; a tip without a move that the
+    /// owner's recovery sealed continues on. A revisit ends the walk at the
     /// revisited tip. Revoked moves never win.
     pub fn bookmark(&self, name: &str) -> Result<Option<TipId>, Error> {
         Ok(self.bookmark_walk(name)?.0)
@@ -692,12 +870,16 @@ impl TipGraph {
     pub fn losing_moves(&self, name: &str) -> Result<Vec<&SignedBookmarkMove>, Error> {
         Ok(self.bookmark_walk(name)?.1)
     }
-    fn bookmark_walk(
-        &self,
-        name: &str,
-    ) -> Result<(Option<TipId>, Vec<&SignedBookmarkMove>), Error> {
+    /// The resolved edges a bookmark traverses, using the same authority,
+    /// revocation and ancestry rules as its final target.
+    pub fn bookmark_path(&self, name: &str) -> Result<Vec<(TipId, TipId)>, Error> {
+        Ok(self.bookmark_walk(name)?.2)
+    }
+    /// The target, losing moves and resolved edges of a bookmark.
+    fn bookmark_walk(&self, name: &str) -> Result<BookmarkWalk<'_>, Error> {
         let mut cursor = None;
         let mut losers = Vec::new();
+        let mut path = Vec::new();
         let mut visited = std::collections::BTreeSet::new();
         while visited.insert(cursor) {
             let mut candidates = Vec::new();
@@ -715,10 +897,12 @@ impl TipGraph {
             candidates.sort_by_key(|candidate| candidate.0);
             let mut winner = None;
             for (_, movement) in candidates {
-                let eligible = !movement
-                    .statement
-                    .to
-                    .is_some_and(|tip| self.canonical_tip(tip).is_err());
+                let eligible = match movement.statement.to {
+                    Some(tip) => self
+                        .canonical_tip(tip)
+                        .is_ok_and(|resolved| Some(resolved) != cursor),
+                    None => true,
+                };
                 if eligible && winner.is_none() {
                     winner = Some(movement);
                 } else {
@@ -727,15 +911,32 @@ impl TipGraph {
             }
             match winner {
                 Some(movement) => {
-                    cursor = movement
+                    let target = movement
                         .statement
                         .to
                         .map(|tip| self.canonical_tip(tip))
-                        .transpose()?
+                        .transpose()?;
+                    if let (Some(from), Some(to)) = (cursor, target) {
+                        path.push((from, to));
+                    }
+                    cursor = target;
                 }
-                None => return Ok((cursor, losers)),
+                None => {
+                    // The owner's recovery carries the tip's bookmarks to
+                    // its continuation; an explicit move from it comes first.
+                    if let Some(tip) = cursor
+                        && let Some(seal) = self.seal(tip)?
+                        && seal.statement.recovery.is_some()
+                        && let Some(next) = seal.successor()?
+                    {
+                        path.push((tip, next));
+                        cursor = Some(next);
+                        continue;
+                    }
+                    return Ok((cursor, losers, path));
+                }
             }
         }
-        Ok((cursor, losers))
+        Ok((cursor, losers, path))
     }
 }

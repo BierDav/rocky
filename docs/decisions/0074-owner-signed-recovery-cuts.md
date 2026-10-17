@@ -1,6 +1,9 @@
 # 0074: Owner-signed recovery cuts
 
-Status: accepted design; not implemented. Date: 2026-10-15.
+Status: superseded by [0075](0075-generations-as-sealed-forks.md#tips-seals-and-bookmarks)
+in [phase 19](../features_09/19-recovery-as-a-bookmark-move.md): one owner
+`continue` seal replaces the cut, its chain, fencing and checkpoint taint.
+Date: 2026-10-15.
 Completes the cut half of [0073](0073-stuck-recovery-and-strong-commands.md)
 for [phase 10](../features_09/10-stuck-recovery.md).
 

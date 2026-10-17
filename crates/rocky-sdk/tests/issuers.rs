@@ -64,6 +64,19 @@ async fn synced(device: &Device) -> Result<Value, Failure> {
         .await
         .map_err(|error| error.to_string().into())
 }
+/// Whether `report` completed a reconcile with `node`.
+fn reconciled_with(report: &Value, node: &str) -> bool {
+    report["peers"].as_array().is_some_and(|peers| {
+        peers.iter().any(|peer| {
+            peer["node"] == node
+                && peer["attempts"].as_array().is_some_and(|attempts| {
+                    attempts.iter().any(|attempt| {
+                        attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                    })
+                })
+        })
+    })
+}
 async fn session(device: &Device) -> Value {
     device.ok(json!({"type": "session"})).await
 }
@@ -74,6 +87,7 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
+    a.follow_main().await;
     // Enrolled before a second issuer exists: it knows only the creator.
     let early = join(root, &hub, "early", &a.invite().await)?;
     a.add(1, "Milk").await;
@@ -159,10 +173,13 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
             .is_none()
     );
 
-    // The second issuer invites a third device, which syncs with it.
+    // The second issuer invites a third device, which syncs with it: the
+    // rows before the rotation reach it through a base at a seal.
+    b.seal_and_compact().await;
     let c = join(root, &hub, "c", &b.invite().await)?;
     assert_eq!(session(&c).await["revocations"]["statements"], 1);
-    synced(&c).await?;
+    let report = synced(&c).await?;
+    assert!(reconciled_with(&report, &b_node), "{report}");
     assert_eq!(c.titles().await, ["Milk"]);
 
     // A device the creator enrolled renews through the second issuer and
@@ -181,8 +198,13 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
             .is_none()
     );
     early.add(2, "Eggs").await;
-    synced(&early).await?;
-    synced(&c).await?;
+    assert_eq!(early.titles().await, ["Eggs", "Milk"]);
+    // Each sync completes with the second issuer, not only returns.
+    let report = synced(&early).await?;
+    assert!(reconciled_with(&report, &b_node), "{report}");
+    assert_eq!(b.titles().await, ["Eggs", "Milk"]);
+    let report = synced(&c).await?;
+    assert!(reconciled_with(&report, &b_node), "{report}");
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
 
     // A refused sync renews from the second issuer, learning the
@@ -192,9 +214,22 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     assert_issuers(root, "late", &[&b_node])?;
     late.add(3, "Bread").await;
     synced(&late).await?;
-    synced(&c).await?;
+    let report = synced(&c).await?;
+    assert!(reconciled_with(&report, &b_node), "{report}");
     assert_eq!(c.titles().await, ["Bread", "Eggs", "Milk"]);
+    assert_eq!(session(&c).await["revocations"]["statements"], 1);
+    assert_issuers(root, "early", &[&b_node])?;
     for device in [&b, &c, &early, &late] {
+        device.close().await;
+    }
+    drop((c, early));
+    // The rows survive reopening.
+    for (name, titles) in [
+        ("c", &["Bread", "Eggs", "Milk"][..]),
+        ("early", &["Eggs", "Milk"][..]),
+    ] {
+        let device = Device::new(Database::open(open(&root.join(name), &hub, name))?)?;
+        assert_eq!(device.titles().await, titles);
         device.close().await;
     }
     Ok(())

@@ -256,6 +256,7 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     }
     let both: BTreeSet<_> = [a_chain.digest(), b_chain.digest()].into();
     assert_eq!(b.chain_census().await, (both.clone(), 0));
+    compacted_base(&b, &f.publisher, f.public).await;
     b.set_retention_policy(
         f.public,
         RetentionPolicy {
@@ -267,7 +268,6 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     )
     .await
     .unwrap();
-    b.checkpoint(f.public).await.unwrap();
     // Interrupted after the first batch: Alice's remaining operations keep
     // her chain, and no operation is left without its chain.
     b.inject_stage_fault(Stage::Prune, 1).await;
@@ -324,7 +324,9 @@ async fn checkpointed() -> Checkpointed {
         )
         .await
         .unwrap();
-    source.checkpoint(f.private).await.unwrap();
+    compacted_base(&source, &f.publisher, f.private).await;
+    // Enrollment hands the target the graph and the bookmark to follow.
+    exchange_graphs(&source, &target, f.private.domain).await;
     Checkpointed {
         f,
         _dir: dir,
@@ -364,6 +366,18 @@ async fn an_installed_checkpoint_is_not_imported_again() {
     served.unwrap();
     assert!(revisions[0].0 && !revisions[1].0);
     assert_eq!(revisions[0].1, revisions[1].1);
+    // The never-written public scope is a signed empty base at the seal.
+    let empty = import_needed_bases(
+        &c.source,
+        &c.target,
+        &c.target_key,
+        c.target_chain.credentials(),
+        c.f.public.domain,
+    )
+    .await;
+    assert_eq!(empty.len(), 1);
+    assert_eq!(empty[0].statement.scope, c.f.public);
+    assert_signed_empty(&empty[0]);
     assert_eq!(
         c.target.snapshot(c.f.private).await.unwrap().rows,
         c.source.snapshot(c.f.private).await.unwrap().rows

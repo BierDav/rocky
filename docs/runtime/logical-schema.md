@@ -66,9 +66,15 @@ signs and zero are refused.
   table's author to its admitted `NodeId` with `TypedApp::with_row_author`,
   the same binding on every replica.
 - Receivers check the `id`'s author against the frame signer (secure) and
-  admit only sequences above the permanent partition mark, while local allocation uses the table-wide mark. The mark
+  admit only sequences above the author's own-birth mark in that partition;
+  carries never raise it. Local
+  allocation uses the table-wide mark. An exact prior grant and legitimate
+  carries follow their own [admission rules](admission-evidence.md). The mark
   commits with the frame, projection and outbox; refused operations never move
   it, duplicates settle first, and pruning, rebuild and checkpoints keep it.
+  Phase 17 specifies exact local [admission evidence](admission-evidence.md)
+  beside the mark, so a pruned frame this replica admitted can return without
+  lowering it (implementation in progress).
 - An insert creates an incarnation; updates and deletes name its `id`. Grants
   stay bound to the canonical natural key, never to `id`.
 - The typed table shows, per natural key, the live incarnation with the

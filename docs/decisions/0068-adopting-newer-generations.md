@@ -70,4 +70,4 @@ Removal makes stamps hybrid time, so they compare with a baseline; the
 encrypted file becomes `rocky.encrypted-replica.v16`, and other identities
 are refused. An application schema that matches an earlier generation is
 behind unless it declares a later version. See [removal](../runtime/removal.md) and
-[generations](../runtime/generations.md#adopting-newer-generations).
+[generations](../runtime/adopting-generations.md).

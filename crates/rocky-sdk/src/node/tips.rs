@@ -3,8 +3,8 @@
 use super::*;
 use crate::tips::{
     Bookmark, BookmarkMove, KeptSeals, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction,
-    TipDevice, TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier,
-    TipSeal, TipStatus,
+    TipDevice, TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipRecovery,
+    TipScopeFrontier, TipSeal, TipStatus,
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
@@ -41,9 +41,9 @@ fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
 
 /// Who signs tip statements: the identity and the links its authority
 /// comes through.
-struct Signer {
-    identity: Arc<dyn IdentityProvider>,
-    links: CredentialChain,
+pub(super) struct Signer {
+    pub(super) identity: Arc<dyn IdentityProvider>,
+    pub(super) links: CredentialChain,
     /// The owner or a trusted identity, which open tips.
     opens: bool,
 }
@@ -88,7 +88,7 @@ impl Node {
                 let report = self.replica.compact(scope, keep).await?;
                 self.sign_existence_bases(scope).await?;
                 self.list_checkpoints(scope).await?;
-                self.forget_generations().await?;
+                self.replica.drop_unrequired_schemas().await?;
                 self.observations.touch();
                 let blocked = report
                     .blocked
@@ -112,6 +112,7 @@ impl Node {
                 };
                 self.seal_followed(scope, close).await?;
             }
+            "recover" => self.recover_followed(scope).await?,
             "pull" => {
                 self.replica
                     .want_seal(scope, digest(request, "seal")?)
@@ -336,6 +337,10 @@ impl Node {
                         }
                         .into()
                     }),
+                    recovery: statement.recovery.map(|recovery| TipRecovery {
+                        retained: recovery.retained.position,
+                        replaced: recovery.replaced.position,
+                    }),
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -346,6 +351,7 @@ impl Node {
                 Ok(TipOpening {
                     id: hex(&opening.id()?),
                     seal: hex(&opening.statement.seal),
+                    schema: hex(&opening.statement.schema),
                     minimum_in_sync: opening.statement.minimum_in_sync,
                 })
             })
@@ -472,12 +478,14 @@ impl Node {
                 )))
             })
             .collect::<Result<Vec<_>, Failure>>()?;
-        self.replica.publish_tip_statements(&records).await?;
+        self.replica
+            .publish_tip_statements_through(&records, &super::coordinated::LinkPeers(self))
+            .await?;
         self.wake_sync();
         Ok(())
     }
 
-    async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
+    pub(super) async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
         let settings = self.settings.lock().await.clone();
         let identity = settings.identity(&self.vault)?;
         let links = settings.identity_links();
@@ -519,7 +527,13 @@ impl Node {
         expected(&graph)?;
         // The replica's codes stay: `sealed`, `coordinator_unavailable`.
         let before = self.replica.followed_tip().await;
-        self.replica.publish_tip_statements(&statements).await?;
+        self.prepare_terminal_credentials().await?;
+        let published = self
+            .replica
+            .publish_tip_statements_through(&statements, &super::coordinated::LinkPeers(self))
+            .await;
+        self.wake_sync();
+        published?;
         self.finalize_seals().await;
         self.followed_tip_changed(before).await;
         // A move of the followed bookmark may have switched lines.
@@ -528,7 +542,7 @@ impl Node {
         Ok(())
     }
 
-    fn bookmark_move(
+    pub(super) fn bookmark_move(
         signer: &Signer,
         scope: Scope,
         name: &str,
@@ -585,6 +599,7 @@ impl Node {
                 tip,
                 frontier,
                 action,
+                recovery: None,
             },
             &*signer.identity,
             &signer.links,
@@ -628,6 +643,68 @@ impl Node {
         .await
     }
 
+    /// The owner recovers the followed tip when no in-sync node of its log
+    /// can append: after collecting what reachable devices hold, it seals
+    /// the tip with `continue`, abandoning the committed entries nobody
+    /// holds. Bookmarks on the tip follow the seal.
+    async fn recover_followed(&self, scope: Scope) -> Result<(), Failure> {
+        let settings = self.settings.lock().await.clone();
+        if !settings.owner() {
+            return Err(refused("only the owner recovers a stuck tip"));
+        }
+        let coordinator = self
+            .replica
+            .domain_log()
+            .ok_or_else(|| refused("recovering needs this device's coordinated log composed"))?;
+        let tip = self.replica.followed_tip().await;
+        let graph = self.replica.tip_graph(scope).await?;
+        if graph.seal(tip)?.is_some() {
+            return Err(refused("this tip is already sealed"));
+        }
+        let log = rocky_core::TipLog { scope, tip };
+        if graph.line_minimum(tip)?.is_none() {
+            return Err(refused(
+                "set the genesis line's owner-signed minimum before recovery",
+            ));
+        }
+        let recovery = self
+            .replica
+            .recovery_proposal(
+                log,
+                coordinator.as_ref(),
+                &super::coordinated::LinkPeers(self),
+            )
+            .await
+            .map_err(super::coordinated::coordinated)?;
+        let frontier = self
+            .replica
+            .seal_frontier(scope, false)
+            .await
+            .map_err(refused)?;
+        let identity = settings.identity(&self.vault)?;
+        let seal = SignedSeal::sign(
+            SealStatement {
+                format: SEAL_FORMAT,
+                scope,
+                tip,
+                frontier,
+                action: SealAction::Continue {
+                    schema: graph.schema(tip)?,
+                },
+                recovery: Some(recovery),
+            },
+            &*identity,
+        )?;
+        let id = seal.id()?;
+        self.publish_tips(scope, vec![TipStatement::Seal(seal)], |graph| {
+            match graph.seal(tip)? {
+                Some(winner) if winner.id()? == id => Ok(()),
+                _ => Err(refused("another seal of this tip takes precedence")),
+            }
+        })
+        .await
+    }
+
     /// The owner signs the minimum of trusted acknowledgments that makes a
     /// seal on the genesis line final.
     async fn sign_genesis_minimum(&self, scope: Scope, minimum: u32) -> Result<(), Failure> {
@@ -648,12 +725,56 @@ impl Node {
             .await
     }
 
-    /// On a trusted node with a composed log, acknowledges the terminal
-    /// entries of its line and publishes the finality records they reach.
-    /// A failure leaves the seals to the next call.
+    async fn prepare_terminal_credentials(&self) -> Result<(), Failure> {
+        if self.replica.domain_log().is_none() {
+            return Ok(());
+        }
+        let settings = self.settings.lock().await.clone();
+        let Some(links) = settings.trusted_links() else {
+            return Ok(());
+        };
+        let author = self.replica.terminal_author().await?;
+        let identity = settings.identity(&self.vault)?;
+        let chain = settings.certify_node(&*identity, links, &self.domain(), author)?;
+        self.replica.install_terminal_credentials(chain).await?;
+        Ok(())
+    }
+
+    /// On a trusted node with a composed log, ends the logs of journaled
+    /// seals through its live links, acknowledges the terminal entries of
+    /// its line and publishes the finality records they reach. A failure
+    /// leaves the seals to the next call.
     pub(super) async fn finalize_seals(&self) {
         if self.replica.domain_log().is_none() {
             return;
+        }
+        if let Err(error) = self.prepare_terminal_credentials().await {
+            self.activity.record(
+                "terminal_credentials_failed",
+                json!({"error":error.to_string()}),
+            );
+        }
+        let before = self.replica.followed_tip().await;
+        match self
+            .replica
+            .settle_tip_statements(&super::coordinated::LinkPeers(self))
+            .await
+        {
+            Ok(0) => {}
+            Ok(_) => {
+                self.followed_tip_changed(before).await;
+                if let Err(error) = self.ensure_tip_node().await {
+                    self.activity
+                        .record("line_node_failed", json!({"error": error.to_string()}));
+                }
+                self.observations.touch();
+            }
+            Err(error) => {
+                self.activity.record(
+                    "seal_settlement_failed",
+                    json!({"error": error.to_string()}),
+                );
+            }
         }
         match self.replica.finalize_seals(self.domain().scope).await {
             Ok(0) => {}
@@ -672,11 +793,9 @@ impl Node {
         seal: rocky_core::Commitment,
         minimum_in_sync: u32,
     ) -> Result<TipId, Failure> {
-        self.replica
-            .tip_graph(scope)
-            .await?
-            .seal_by_id(seal)
-            .map_err(refused)?;
+        let graph = self.replica.tip_graph(scope).await?;
+        let parent = graph.seal_by_id(seal).map_err(refused)?;
+        let schema = graph.schema(parent.statement.tip).map_err(refused)?;
         let signer = self.tip_signer(scope).await?;
         if !signer.opens {
             return Err(refused("only the owner or a trusted identity opens tips"));
@@ -691,6 +810,7 @@ impl Node {
         let opening = SignedTipOpening::endorse(
             TipOpeningStatement {
                 format: TIP_OPENING_FORMAT,
+                schema,
                 scope,
                 seal,
                 minimum_in_sync,

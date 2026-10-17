@@ -566,6 +566,11 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
         store,
         hub,
     );
+    for action in ["create", "follow"] {
+        issuer
+            .ok(json!({"type":"tips","action":action,"name":"main"}))
+            .await;
+    }
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
         .await;

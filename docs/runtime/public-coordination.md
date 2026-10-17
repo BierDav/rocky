@@ -70,5 +70,5 @@ There are no command heads, preparations, receipts or result-forwarding lanes.
 
 [Operations](coordinator-operations.md) covers provisioning and restore fencing.
 [Phase 11 evidence](../features_09/11-removing-strong-commands-evidence.md) records
-current verification. Owner-signed recovery cuts remain Phase 10 work; this
-change does not add them or depend on their unmerged implementation.
+current verification. A stuck tip's log ends only by the owner's
+[recovery seal](stuck-recovery.md).

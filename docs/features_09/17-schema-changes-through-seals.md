@@ -1,6 +1,8 @@
 # 17. Schema changes through seals
 
-Status: proposed; not started.
+Status: repairs implemented after round 7; current-format requalification and
+fresh independent HIGH acceptance pending. See
+[implementation evidence](17-schema-changes-through-seals-evidence.md).
 Owner: `rocky-core` generations; `rocky-secure` generation switch and
 admission; `rocky-sdk` generations and migrations. Depends on
 [phase 16](16-kept-seals-and-views.md). Follow the
@@ -85,3 +87,16 @@ schema. Generations no longer form a chain of transitions, and both
   does not follow.
 - A name removed and added again in a later generation never receives a
   value written before its removal.
+
+## Bulk migration history
+
+The exact migration opening identity endorses a bounded descriptor of its node's
+initial frame prefix. Per-frame Merkle-sum proofs authenticate exact ciphertext,
+index and stored length without publishing bundle-member lists. A separate
+durable history account applies on publishers, followers and keyless custodians;
+ordinary retained history remains limited to 64 MiB, and checkpoints remain at
+seals. The SQL commit journals the unsigned intent and disk-backed tree; external
+endorsement follows commit, before release, independently of exact-close finality.
+See [0071](../decisions/0071-staged-migration-publication.md) for acquisition,
+equivocation, audit, pruning and restart rules. Qualification remains outstanding
+until the unchanged 100,000-row and complete feature-matrix gates pass.

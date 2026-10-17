@@ -96,7 +96,7 @@ unreserved record is 0076; 0064 remains reserved for
 | Transport-independent identity, contact records, peer sync | [sdk-transports](../runtime/sdk-transports.md#design-rationale) |
 
 | Stuck coordinated recovery, removal of strong commands | [0073](0073-stuck-recovery-and-strong-commands.md) |
-| Owner-signed recovery cuts, history fencing, checkpoint binding | [0074](0074-owner-signed-recovery-cuts.md) |
+| Owner-signed recovery cuts, superseded by the recovery seal | [0074](0074-owner-signed-recovery-cuts.md), [0075](0075-generations-as-sealed-forks.md) |
 | Generations as sealed forks; identities, node certificates, bookmarks | [0075](0075-generations-as-sealed-forks.md) |
 
 ## Writing a record

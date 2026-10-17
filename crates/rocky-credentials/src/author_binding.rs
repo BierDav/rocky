@@ -65,6 +65,26 @@ impl AuthorBinding {
             ),
         )
     }
+    /// Certifies a node's author assignment by one exact identity, without
+    /// revealing partition selectors. Row admission still checks live grants.
+    pub fn verify_node_issuer(
+        &self,
+        issuer: PublicKey,
+        node: PublicKey,
+        author: u32,
+    ) -> Result<(), Error> {
+        if self.version != BINDING_VERSION
+            || self.issuer != issuer
+            || self.subject != node
+            || self.kind != PrincipalKind::Node
+            || self.issues
+            || self.authors.and_then(|range| range.single()) != Some(author)
+            || !issuer.verify(&self.bytes()?, &self.signature)
+        {
+            return Err(denied("migration writer assignment"));
+        }
+        Ok(())
+    }
     /// Verifies historical assignment provenance, independently of live grants.
     pub fn verify_chain(
         chain: &[Self],

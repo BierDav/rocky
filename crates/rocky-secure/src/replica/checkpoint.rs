@@ -1,16 +1,27 @@
 //! Signed checkpoints, pruning and rebootstrap of one encryption scope.
 //! Format and rules: `docs/runtime/encrypted-checkpoints.md`.
 mod archive;
+#[cfg(test)]
+mod backend_vectors;
 pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
 mod create;
+mod no_frames;
 mod prune;
-mod pulled;
+pub(super) mod pulled;
 pub(crate) use pulled::SCHEMA as PULLED_SCHEMA;
 mod served;
 pub(crate) use served::SCHEMA as SERVED_SCHEMA;
+#[cfg(test)]
+mod replay_test_support;
 mod transfer;
 use super::*;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReplayMode {
+    Mint,
+    Check,
+}
 pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
@@ -21,7 +32,6 @@ pub(crate) use transfer::{forge_page, forge_page_bindings};
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_compaction_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_build_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_identity_marks(scope BLOB NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_scope_state(id INTEGER PRIMARY KEY,scope BLOB NOT NULL UNIQUE,rows INTEGER NOT NULL,tombstones INTEGER NOT NULL,digest BLOB NOT NULL,applied INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_retained(id INTEGER PRIMARY KEY CHECK(id=1),records INTEGER NOT NULL,bytes INTEGER NOT NULL,handles INTEGER NOT NULL,handle_digest BLOB NOT NULL)",
@@ -29,7 +39,7 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_applied_scope ON secure_applied(scope,position)",
     "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,pruned_prefix INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,state TEXT NOT NULL,position INTEGER NOT NULL,cursor INTEGER NOT NULL,sets BLOB NOT NULL,capture BLOB,signed BLOB,PRIMARY KEY(scope,sequence))",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,position INTEGER NOT NULL,sets BLOB NOT NULL,signed BLOB NOT NULL,PRIMARY KEY(scope,sequence))",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
@@ -64,6 +74,32 @@ pub struct IdentityMark {
     pub sequence: u32,
 }
 
+/// Covered maxima over all births and over the author's own births only.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CoveredMark {
+    pub author: u32,
+    pub signer: PublicKey,
+    pub sequence: u32,
+    pub own: u32,
+}
+impl CoveredMark {
+    pub(crate) fn mark(&self) -> IdentityMark {
+        IdentityMark {
+            author: self.author,
+            signer: self.signer,
+            sequence: self.sequence,
+        }
+    }
+    pub(crate) fn own_mark(&self) -> Option<IdentityMark> {
+        (self.own > 0).then_some(IdentityMark {
+            author: self.author,
+            signer: self.signer,
+            sequence: self.own,
+        })
+    }
+}
+
 /// The applied tip of one author's log in a scope.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogPosition {
@@ -86,18 +122,8 @@ pub struct CustodySummary {
     /// Retained covered operations nobody acknowledged: sole copies.
     pub sole: SetSummary,
 }
-/// The coordinated history a checkpoint covers: the applied cuts of its
-/// domain's log and the highest entry position among covered frames.
-/// See decision 0074.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CoordinatedBinding {
-    pub cuts: u64,
-    /// The digest of the last applied cut; none without one.
-    pub cut: Option<Commitment>,
-    pub highest: u64,
-}
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 15;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 16;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -105,7 +131,7 @@ pub struct CheckpointStatement {
     /// its frontier bounds the covered frames. None for another cut.
     pub seal: Option<Commitment>,
     pub partition: Option<rocky_core::PartitionTuple>,
-    pub identities: Vec<IdentityMark>,
+    pub identities: Vec<CoveredMark>,
     /// Opaque move links, also committed by the corresponding materialized rows.
     pub moves: SetSummary,
     pub tip: rocky_core::TipId,
@@ -113,7 +139,7 @@ pub struct CheckpointStatement {
     /// The digest of the revocations the signer held.
     pub revocations: Commitment,
     pub scope: ResourceScope,
-    pub key_epoch: rocky_core::KeyEpoch,
+    pub state: CheckpointState,
     /// Length of the checkpoint chain of this scope, starting at 1.
     pub sequence: u64,
     pub previous: Option<Commitment>,
@@ -129,7 +155,45 @@ pub struct CheckpointStatement {
     /// Mutation handles the signer retains.
     pub handles: SetSummary,
     pub custody: CustodySummary,
-    pub coordinated: CoordinatedBinding,
+}
+/// How a checkpoint's state is held. See `docs/runtime/encrypted-checkpoints.md`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CheckpointState {
+    /// Rows sealed under this key epoch, transferred in pages.
+    Keyed { key_epoch: rocky_core::KeyEpoch },
+    /// The scope's state at the seal holds no frame history at all,
+    /// inherited history included: no rows, pages or key epoch.
+    NoFrames,
+}
+impl CheckpointStatement {
+    pub fn key_epoch(&self) -> Option<rocky_core::KeyEpoch> {
+        match &self.state {
+            CheckpointState::Keyed { key_epoch } => Some(*key_epoch),
+            CheckpointState::NoFrames => None,
+        }
+    }
+    pub fn no_frames(&self) -> bool {
+        self.state == CheckpointState::NoFrames
+    }
+    /// A no-frames statement's only shape: at a seal, with empty history,
+    /// identities, rows, moves and custody.
+    fn canonical_no_frames(&self) -> Result<bool, Error> {
+        let empty = Sets::new();
+        Ok(self.seal.is_some()
+            && self.operations == 0
+            && self.frontier.is_empty()
+            && self.clock == 0
+            && self.identities.is_empty()
+            && self.rows == empty.rows_summary()
+            && self.tombstones == 0
+            && self.creations == empty.creations_summary()
+            && self.moves
+                == (SetSummary {
+                    count: 0,
+                    digest: [0; 32],
+                })
+            && self.custody == create::no_custody()?)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedCheckpoint {
@@ -236,12 +300,11 @@ impl SignedCheckpoint {
                 .identities
                 .windows(2)
                 .any(|pair| pair[0].author >= pair[1].author)
-            || statement
-                .identities
-                .iter()
-                .any(|mark| rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err())
+            || statement.identities.iter().any(|mark| {
+                mark.own > mark.sequence
+                    || rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err()
+            })
             || statement.sequence == 0
-            || (statement.coordinated.cuts == 0) != statement.coordinated.cut.is_none()
             || statement.frontier.len() > MAX_CHECKPOINT_LOGS
             || statement
                 .frontier
@@ -250,6 +313,9 @@ impl SignedCheckpoint {
             || !self.node.verify(&self.signing_bytes()?, &self.signature)
         {
             return Err(denied("invalid checkpoint signature or frontier"));
+        }
+        if statement.no_frames() && !statement.canonical_no_frames()? {
+            return Err(denied("a no-frames checkpoint must be empty at a seal"));
         }
         Ok(())
     }
@@ -306,10 +372,6 @@ pub struct RetentionPolicy {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionLimits {
-    /// Applied operations after a scope's checkpoint that start the next one.
-    pub checkpoint_operations: usize,
-    /// Retained header and body bytes that start checkpointing and pruning.
-    pub soft_bytes: usize,
     /// Retained bytes at which authoring and receiving report backpressure.
     pub hard_bytes: usize,
     /// Most recent mutation handles kept for retries after their operations
@@ -319,8 +381,6 @@ pub struct RetentionLimits {
 impl Default for RetentionLimits {
     fn default() -> Self {
         Self {
-            checkpoint_operations: 1024,
-            soft_bytes: MAX_SECURE_BYTES,
             hard_bytes: 2 * MAX_SECURE_BYTES,
             handles: 65_536,
         }
@@ -330,8 +390,6 @@ impl Default for RetentionLimits {
 pub struct CheckpointStatus {
     /// The latest verified checkpoint.
     pub checkpoint: Option<SignedCheckpoint>,
-    /// A newer checkpoint is being built or installed.
-    pub in_progress: bool,
     /// Applied operations after the verified checkpoint.
     pub uncovered: u64,
     /// Retained operations at or before it.
@@ -349,14 +407,17 @@ pub struct CheckpointStatus {
 /// Fault points of the bounded maintenance steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
-    Begin,
-    Replay,
-    Seal,
-    Install,
+    #[cfg(test)]
+    AuditReplay,
+    #[cfg(test)]
+    AuditStaged,
+    Compact,
     Prune,
     Import,
     Switch,
     Evict,
+    /// After a seal rebootstrap installed or refused pulled states.
+    Settle,
 }
 
 const LANES: usize = 1024;
@@ -523,25 +584,11 @@ pub(super) fn handle_item(handle: &[u8], input: &[u8], hash: &[u8]) -> Vec<u8> {
     [handle, input, hash].concat()
 }
 
-/// What a checkpoint must reproduce, captured in one transaction.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct Capture {
-    pub identities: Vec<IdentityMark>,
-    pub frontier: Vec<LogPosition>,
-    pub clock: u64,
-    pub operations: u64,
-    pub rows: SetSummary,
-    pub tombstones: u64,
-    pub handles: SetSummary,
-    pub previous: Option<Commitment>,
-}
+/// A scope's replay base: through which applied position, its set state
+/// and statement.
 pub(super) struct Record {
-    pub sequence: i64,
-    pub state: String,
     pub position: i64,
-    pub cursor: i64,
     pub sets: Sets,
-    pub capture: Option<Capture>,
     pub signed: Option<SignedCheckpoint>,
 }
 /// One author's log in a scope: its applied tip and pruned prefix.
@@ -575,6 +622,80 @@ impl Overlay {
                 "SELECT fields FROM secure_rows WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?) AND row=?"
             }
         }
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Filters the replay's view of a verified base, leaving its signed
+    /// bytes and summaries untouched. Unchanged schemas require no row scan.
+    pub(super) async fn prime_path_base(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        overlay: Overlay,
+        target: TipId,
+        mut sets: Sets,
+    ) -> Result<Sets, Error> {
+        if self.ignores_base() {
+            return Ok(sets);
+        }
+        let Some(signed) = self
+            .checkpoint_record(id, true)
+            .await?
+            .and_then(|record| record.signed)
+        else {
+            return Ok(sets);
+        };
+        let graph = self.graph_for(scope.domain)?;
+        let source = graph.schema_any(signed.statement.tip).map_err(credential)?;
+        let definition = self
+            .catalog
+            .get(&source)
+            .ok_or_else(|| denied("checkpoint source schema missing"))?;
+        let fields = self.path_fields_to(scope.domain, signed.statement.tip, target)?;
+        if !fields.strips(definition) {
+            return Ok(sets);
+        }
+        let mut after = Vec::new();
+        loop {
+            let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256", bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone())])).await?).await?;
+            for row in &records {
+                let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = row.as_slice() else {
+                    return Err(Error::Corrupt("checkpoint base row".into()));
+                };
+                after = key.clone();
+                let mut row: Materialized = decode(bytes)?;
+                let next = if !fields.tables.contains(&scope.table) {
+                    Some(Vec::new())
+                } else if fields.strip(scope.table, &mut row) {
+                    Some(encode(&row)?)
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    let key = row_of(key)?;
+                    if next.is_empty() {
+                        sets.remove(&key, bytes)?;
+                    } else {
+                        sets.replace(&key, Some(bytes), &next)?;
+                    }
+                    self.conn
+                        .execute(
+                            format!("INSERT OR REPLACE INTO {} VALUES(?,?,?)", overlay.table()),
+                            bindings(vec![
+                                SqlValue::Integer(id),
+                                SqlValue::Blob(key.to_vec()),
+                                SqlValue::Blob(next),
+                            ]),
+                        )
+                        .await?;
+                }
+            }
+            if records.len() < 256 {
+                break;
+            }
+        }
+        Ok(sets)
     }
 }
 
@@ -971,31 +1092,20 @@ impl<A: RowApplication> Inner<A> {
         scope: i64,
         verified: bool,
     ) -> Result<Option<Record>, Error> {
-        let sql = if verified {
-            "SELECT sequence,state,position,cursor,sets,capture,signed FROM secure_checkpoints WHERE scope=? AND state='verified' ORDER BY sequence DESC LIMIT 1"
-        } else {
-            "SELECT sequence,state,position,cursor,sets,capture,signed FROM secure_checkpoints WHERE scope=? ORDER BY sequence DESC LIMIT 1"
-        };
-        let mut result = self.conn.query(sql, [scope]).await?;
+        let mut result = self
+            .conn
+            .query(
+                "SELECT position,sets,signed FROM secure_checkpoints WHERE scope=? ORDER BY sequence DESC LIMIT 1",
+                [scope],
+            )
+            .await?;
         let Some(row) = result.next().await? else {
             return Ok(None);
         };
-        let blob = |index| -> Result<Option<Vec<u8>>, Error> {
-            Ok(match row.get_value(index)? {
-                crate::sqlite::Value::Blob(bytes) => Some(bytes),
-                _ => None,
-            })
-        };
         Ok(Some(Record {
-            sequence: row.get::<i64>(0)?,
-            state: row.get::<String>(1)?,
-            position: row.get::<i64>(2)?,
-            cursor: row.get::<i64>(3)?,
-            sets: Sets::from_bytes(&row.get::<Vec<u8>>(4)?)?,
-            capture: blob(5)?.map(|bytes| decode(&bytes)).transpose()?,
-            signed: blob(6)?
-                .map(|bytes| self.decoded_checkpoint((scope, verified), bytes))
-                .transpose()?,
+            position: row.get::<i64>(0)?,
+            sets: Sets::from_bytes(&row.get::<Vec<u8>>(1)?)?,
+            signed: Some(self.decoded_checkpoint((scope, verified), row.get::<Vec<u8>>(2)?)?),
         }))
     }
     /// Decodes a stored statement once; maintenance reads it in every step.
@@ -1100,14 +1210,19 @@ impl<A: RowApplication> Inner<A> {
     /// application order into `overlay`, at most `limit`, and folds every row
     /// change into `sets`. Each operation opens with the key epoch that
     /// sealed it. Returns the last position replayed.
+    // The scope, its base, the view and target replayed, and the bounds.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn replay(
         &self,
         scope: ResourceScope,
         id: i64,
         overlay: Overlay,
+        target: TipId,
         (after, through): (i64, i64),
         limit: usize,
         sets: &mut Sets,
+        ledger: &mut identity::IdentityLedger,
+        mode: ReplayMode,
     ) -> Result<Option<i64>, Error> {
         let records = collect_rows(
             self.conn
@@ -1137,26 +1252,9 @@ impl<A: RowApplication> Inner<A> {
                     "an applied operation after the checkpoint is not retained".into(),
                 ));
             };
-            // Consumed without effect by an owner-signed cut.
-            if status == "abandoned" {
-                last = Some(*position);
-                continue;
-            }
             let frame = EncryptedFrame::bare(header.clone(), body.clone());
-            let operation = frame.operation()?;
-            if status == "held" && !self.visible_held_in_workspace(&operation)? {
-                last = Some(*position);
-                continue;
-            }
-            if self.rebuilding_tip && !self.visible_in_workspace(&operation)? {
-                last = Some(*position);
-                continue;
-            }
-            // Stamped before its table was added again: nothing applies.
-            if self
-                .names
-                .ignores_frame(scope.table, operation.header.timestamp)
-            {
+            let operation = frame.operation_ref()?;
+            if !self.replay_eligible(status, operation, self.rebuilding_tip)? {
                 last = Some(*position);
                 continue;
             }
@@ -1169,32 +1267,182 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("applied encrypted dependency missing"));
             }
             let payload = self.row_payload(&frame)?;
+            if operation.header.extensions.scope != scope {
+                return Err(denied("replay scope mismatch"));
+            }
+            let writes = restore::replay_changes(scope, &payload)?;
             let mut created = false;
-            let key = self
-                .opening_key(scope, operation.header.extensions.generation)
-                .ok_or_else(|| {
-                    denied("an applied operation's key epoch is not installed; it is needed until a checkpoint covers it")
-                })?;
-            for write in restore::replay_changes(&(scope, key.key), &frame)? {
-                let Some(write) = self.names.current(&write, operation.header.timestamp) else {
+            // Births compare with the marks the frame entered with, as live
+            // application loads them once per frame.
+            let entry = ledger.clone();
+            let mut identities = BTreeSet::new();
+            let path_fields =
+                self.path_fields_to(scope.domain, operation.header.extensions.tip, target)?;
+            // The live schema reads a write through its own path's fields.
+            let live_fields = if target == self.workspace.tip {
+                None
+            } else {
+                Some(self.path_fields(scope.domain, operation.header.extensions.tip)?)
+            };
+            let prior = self.receipt_of(operation.hash).await?;
+            if let Some((_, receipt)) = &prior {
+                self.check_frame_receipt(receipt, &frame, writes, &payload)
+                    .await?;
+            }
+            let allocation = match mode {
+                ReplayMode::Mint => self.optional_allocation_of(scope).await?,
+                ReplayMode::Check => self.allocation_binding(scope).await?,
+            };
+            let allocation_marks = match allocation {
+                Some((_, allocation)) => self.identity_marks(allocation).await?,
+                None => Vec::new(),
+            };
+            let mut snapshot = identity::receipts::BirthSnapshot {
+                permanent: self.identity_marks(scope).await?,
+                own: self.own_marks(scope).await?,
+                allocation: allocation_marks,
+                ledger: entry,
+                summary: self.summary_marks(scope).await?,
+                receipt: prior,
+                claims: Default::default(),
+            };
+            let mut changed = BTreeSet::new();
+            for (ordinal, write) in writes.iter().enumerate() {
+                let Some(write) = path_fields.current(write) else {
                     continue;
                 };
-                if self
-                    .app
-                    .row_partition(&write.change)
-                    .map_err(|error| denied(&error))?
-                    != operation.header.extensions.partition
+                let live = match &live_fields {
+                    Some(fields) => fields.project(&write),
+                    None => Some(write.clone()),
+                };
+                let row = match &live {
+                    Some(live) => self.storage_row(&live.change)?,
+                    None => write.change.row,
+                };
+                let old = self.replay_row(overlay, id, row).await?;
+                let current: Option<Materialized> = old.as_deref().map(decode).transpose()?;
+                let carried = payload.carried(&write.change.row);
+                let identity = if write.change.before.is_none() {
+                    live.as_ref()
+                        .map(|live| self.app.row_identity(&live.change))
+                        .transpose()
+                        .map_err(|message| denied(&message))?
+                        .flatten()
+                } else {
+                    None
+                };
+                let mut restoration = None;
+                let mut observation = None;
+                if let Some(identity) = identity {
+                    if !identities.insert(identity) {
+                        return Err(denied("forged row author or reused identity sequence"));
+                    }
+                    let (signer, provenance) = match carried {
+                        Some(carried) => (
+                            carried.proof.stamp().author.key()?,
+                            carried.proof.provenance()?,
+                        ),
+                        None => (
+                            operation.header.public_key,
+                            payload
+                                .proof(&write.change.row)
+                                .ok_or_else(|| denied("numeric birth requires a creation proof"))?
+                                .provenance()?,
+                        ),
+                    };
+                    match self
+                        .classify_birth(
+                            allocation.ok_or_else(|| {
+                                Error::Corrupt("applied identity allocation missing".into())
+                            })?,
+                            &mut snapshot,
+                            identity::receipts::BirthInput {
+                                frame: operation.hash,
+                                ordinal: ordinal as u8,
+                                identity,
+                                provenance,
+                                signer,
+                                author: operation.header.extensions.author,
+                                carried: carried.is_some(),
+                                existing: current.is_some(),
+                                finalized,
+                                target,
+                                first: false,
+                            },
+                        )
+                        .await?
+                    {
+                        identity::receipts::BirthClass::Suppressed(_) => continue,
+                        identity::receipts::BirthClass::Restore(grant) => restoration = Some(grant),
+                        identity::receipts::BirthClass::Exact => {}
+                        identity::receipts::BirthClass::Observe(record) => {
+                            observation = Some(record)
+                        }
+                        identity::receipts::BirthClass::Created
+                        | identity::receipts::BirthClass::Carried => {
+                            return Err(Error::Corrupt("replay cannot first-admit a birth".into()));
+                        }
+                    }
+                }
+                let ceiling = Stamp {
+                    clock: operation.header.timestamp,
+                    author: operation.header.public_key.into(),
+                    sequence: operation.header.seq_num,
+                };
+                if restoration.is_some() {
+                    let checked = async {
+                        self.check_write(
+                            &write,
+                            scope,
+                            &mut changed,
+                            operation.header.extensions.partition.clone(),
+                        )
+                        .await?;
+                        self.app
+                            .validate_changes(std::slice::from_ref(&write.change))
+                            .map_err(|message| denied(&message))?;
+                        let proof = payload
+                            .proof(&write.change.row)
+                            .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
+                        proof.verify(
+                            self.config.publisher,
+                            self.manifest_of_tip(operation.header.extensions.tip)?,
+                            scope.table,
+                            identity
+                                .ok_or_else(|| Error::Corrupt("restoration identity".into()))?,
+                            &ceiling,
+                        )?;
+                        if proof.stamp() != &ceiling {
+                            return Err(denied("birth proof must name its creating frame stamp"));
+                        }
+                        Ok::<_, Error>(())
+                    }
+                    .await;
+                    match checked {
+                        Ok(()) => {}
+                        Err(error) if identity::receipts::semantic_refusal(&error) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                if let Some(carried) = carried {
+                    if payload.membership().is_none() {
+                        return Err(denied("a move or follow requires a transaction bundle"));
+                    }
+                    self.check_carried(&write, carried, &ceiling)?;
+                }
+                if let Some(live) = &live
+                    && self
+                        .app
+                        .row_partition(&live.change)
+                        .map_err(|error| denied(&error))?
+                        != operation.header.extensions.partition
                 {
                     return Err(denied("replayed row differs from its partition"));
                 }
 
-                let row = self.storage_row(&write.change)?;
-                let old = self.replay_row(overlay, id, row).await?;
-                let current: Option<Materialized> = old.as_deref().map(decode).transpose()?;
                 if current.is_none()
                     && write.change.before.is_some()
-                    && (self.names.tables.contains_key(&scope.table)
-                        || self.abandoned_dependency(&operation.header).await?)
+                    && self.abandoned_dependency(&operation.header).await?
                 {
                     continue;
                 }
@@ -1208,7 +1456,7 @@ impl<A: RowApplication> Inner<A> {
                 let (_, mut record) = apply::merge_row(
                     &write,
                     current,
-                    &operation,
+                    operation,
                     payload.carried(&write.change.row),
                 )?;
                 if write.change.before.is_none() && payload.carried(&write.change.row).is_none() {
@@ -1218,11 +1466,56 @@ impl<A: RowApplication> Inner<A> {
                         .transpose()?;
                 }
                 record.key = Some(write.change.row);
-                record.identity = self
-                    .app
-                    .row_identity(&write.change)
+                record.identity = live
+                    .as_ref()
+                    .map(|live| self.app.row_identity(&live.change))
+                    .transpose()
                     .map_err(|message| denied(&message))?
+                    .flatten()
                     .map(|identity| identity.integer());
+                if let Some(grant) = restoration {
+                    let actual = RowChange {
+                        scope,
+                        row: write.change.row,
+                        before: None,
+                        after: Some(record.fields.clone()),
+                    };
+                    if self
+                        .app
+                        .validate_changes(std::slice::from_ref(&actual))
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if mode == ReplayMode::Check {
+                        return Err(Error::Corrupt(
+                            "an eligible restoration has no grant".into(),
+                        ));
+                    }
+                    self.put_identity_mark(
+                        scope,
+                        &IdentityMark {
+                            author: grant.identity.author(),
+                            signer: operation.header.public_key,
+                            sequence: grant.identity.sequence(),
+                        },
+                        identity::Raise::Own,
+                    )
+                    .await?;
+                    self.append_admission(identity::receipts::EntryKind::Restoration(grant))
+                        .await?;
+                }
+                if let Some(observation) = observation {
+                    if mode == ReplayMode::Check {
+                        return Err(Error::Corrupt(
+                            "an eligible carry has no observation".into(),
+                        ));
+                    }
+                    self.append_admission(identity::receipts::EntryKind::CarryObservation(
+                        observation,
+                    ))
+                    .await?;
+                }
                 let new = encode(&record)?;
                 sets.replace(&row, old.as_deref(), &new)?;
                 self.conn
@@ -1241,6 +1534,13 @@ impl<A: RowApplication> Inner<A> {
                 if matches!(overlay, Overlay::Build) {
                     self.put_stub(operation.hash, id, operation.header.timestamp, true)
                         .await?;
+                }
+            }
+            // Own births retire sequences in replay order even without a row;
+            // another author's carry cannot retire that author's log.
+            for birth in self.payload_birth_marks(&frame, &payload)? {
+                if !birth.carried {
+                    ledger.merge(birth.mark)?;
                 }
             }
             last = Some(*position);
@@ -1299,10 +1599,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Replaces the retained-history bounds of this open replica.
     pub async fn set_retention_limits(&self, limits: RetentionLimits) -> Result<(), Error> {
-        if limits.checkpoint_operations == 0
-            || limits.soft_bytes == 0
-            || limits.hard_bytes < limits.soft_bytes
-        {
+        if limits.hard_bytes == 0 {
             return Err(denied("invalid retention limits"));
         }
         self.inner.lock().await.limits = limits;
@@ -1312,7 +1609,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         let mut status = CheckpointStatus {
             checkpoint: None,
-            in_progress: false,
             uncovered: 0,
             covered: 0,
             pending: 0,
@@ -1338,10 +1634,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let verified = inner.checkpoint_record(id, true).await?;
         let position = verified.as_ref().map_or(0, |record| record.position);
-        status.in_progress = inner
-            .checkpoint_record(id, false)
-            .await?
-            .is_some_and(|record| ["building", "installing"].contains(&record.state.as_str()));
         status.checkpoint = verified.and_then(|record| record.signed);
         let counts = collect_rows(
             inner
@@ -1411,52 +1703,4 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-impl<A: RowApplication> Inner<A> {
-    pub(in crate::replica) async fn capture_checkpoint_creations(
-        &self,
-        scope: ResourceScope,
-        id: i64,
-        table: &str,
-    ) -> Result<(), Error> {
-        self.conn
-            .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
-            .await?;
-        self.conn.execute(format!("INSERT INTO {table} SELECT scope,hash,clock FROM secure_stubs WHERE scope=? AND creation=1"), [id]).await?;
-        let mut after = Vec::new();
-        loop {
-            let rows = collect_rows(self.conn.query("SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?", bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Blob(after.clone()),SqlValue::Integer(STEP_ROWS as i64)])).await?).await?;
-            if rows.is_empty() {
-                break;
-            }
-            for row in rows {
-                let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = row.as_slice() else {
-                    return Err(Error::Corrupt("creation witness row".into()));
-                };
-                after = key.clone();
-                let record: Materialized = decode(bytes)?;
-                let clock = match self.stub(record.creation).await? {
-                    Some((_, clock)) => clock,
-                    None => {
-                        self.frame(record.creation)
-                            .await?
-                            .ok_or_else(|| denied("checkpoint creation witness missing"))?
-                            .operation()?
-                            .header
-                            .timestamp
-                    }
-                };
-                self.conn
-                    .execute(
-                        format!("INSERT OR IGNORE INTO {table} VALUES(?,?,?)"),
-                        bindings(vec![
-                            SqlValue::Integer(id),
-                            SqlValue::Blob(record.creation.as_bytes().to_vec()),
-                            integer(clock),
-                        ]),
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-}
+impl<A: RowApplication> Inner<A> {}

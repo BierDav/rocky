@@ -57,15 +57,17 @@ pub(super) async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> Signe
             action: SealAction::Continue {
                 schema: lineage.definition(3).hash(),
             },
+            recovery: None,
         },
         lineage.publisher(),
     )
     .unwrap()
 }
-fn opening(lineage: &Lineage, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
+pub(super) fn opening(lineage: &Lineage, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
     SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: seal.id().unwrap(),
             minimum_in_sync: minimum,
@@ -75,7 +77,7 @@ fn opening(lineage: &Lineage, seal: &SignedSeal, minimum: u32) -> SignedTipOpeni
     .unwrap()
 }
 /// Composes `node` with the mesh's log, which it relays seals to.
-fn compose(fixture: &Fixture, node: &Node) {
+pub(super) fn compose(fixture: &Fixture, node: &Node) {
     node.1
         .set_domain_log(Some(Arc::new(fixture.mesh.client(&node.0))));
 }
@@ -89,11 +91,24 @@ pub(super) async fn follow_main(fixture: &Fixture) {
         None,
         Some(tip_log(&fixture.lineage).tip),
     );
-    alice
-        .1
-        .publish_tip_statements(std::slice::from_ref(&main))
-        .await
-        .unwrap();
+    let minimum = fixture
+        .mesh
+        .log
+        .head(tip_log(&fixture.lineage))
+        .unwrap()
+        .minimum as u32;
+    let line = TipStatement::GenesisLine(
+        rocky_credentials::SignedGenesisLine::sign(
+            rocky_credentials::GenesisLineStatement {
+                format: rocky_credentials::GENESIS_LINE_FORMAT,
+                scope: fixture.lineage.domain,
+                minimum_in_sync: minimum,
+            },
+            fixture.lineage.publisher(),
+        )
+        .unwrap(),
+    );
+    alice.1.publish_tip_statements(&[main, line]).await.unwrap();
     for node in [alice, bob] {
         compose(fixture, node);
         share(&alice.1, &node.1).await;
@@ -120,10 +135,10 @@ pub(super) async fn share(from: &Replica, to: &Replica) -> usize {
         .await
         .unwrap()
 }
-async fn followed(fixture: &Fixture, node: &Node) -> TipLog {
+pub(super) async fn followed(fixture: &Fixture, node: &Node) -> TipLog {
     node.1.followed_log(fixture.lineage.domain).await
 }
-async fn slot_on(fixture: &Fixture, node: &Node) -> Result<Slot, CoordinatedError> {
+pub(super) async fn slot_on(fixture: &Fixture, node: &Node) -> Result<Slot, CoordinatedError> {
     let log = followed(fixture, node).await;
     node.1
         .coordinated_slot(
@@ -134,7 +149,7 @@ async fn slot_on(fixture: &Fixture, node: &Node) -> Result<Slot, CoordinatedErro
         .await
 }
 /// Issues one invoice on the followed tip's log, retrying lost races.
-async fn invoice_on(fixture: &Fixture, node: &Node, title: &str) {
+pub(super) async fn invoice_on(fixture: &Fixture, node: &Node, title: &str) {
     for _ in 0..200 {
         let attempt = async {
             let slot = slot_on(fixture, node).await?;
@@ -303,7 +318,7 @@ async fn a_dev_write_commits_through_devs_log_while_mains_in_sync_set_sees_no_en
                 &fixture.dir.path().join("carol.db"),
                 (&identity, &key),
                 3,
-                Some(lineage_upgrade(&fixture.lineage)),
+                None,
             )
             .await
             .unwrap(),

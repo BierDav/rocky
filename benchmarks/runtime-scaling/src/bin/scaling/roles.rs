@@ -134,7 +134,6 @@ impl World {
         // A full node keeps everything it was not told it may drop.
         replica
             .set_retention_limits(RetentionLimits {
-                soft_bytes: 1 << 30,
                 hard_bytes: 4 << 30,
                 ..RetentionLimits::default()
             })

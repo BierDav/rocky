@@ -1,7 +1,6 @@
 //! Original signed frames held after a line closes.
 use super::*;
 use crate::replica::incoming::Outcome;
-use rocky_credentials::AuthorMark;
 
 impl<A: RowApplication> Inner<A> {
     /// Stores already authenticated held members in the caller's transaction.
@@ -20,11 +19,11 @@ impl<A: RowApplication> Inner<A> {
         let names = self.item_names().await?;
         let local = self.local_grants(time)?;
         let mut stored = Stored {
-            time: first.operation()?.header.timestamp,
+            time: first.operation_ref()?.header.timestamp,
             rows: Vec::new(),
         };
         for (frame, payload) in frames {
-            let operation = frame.operation()?;
+            let operation = frame.operation_ref()?;
             let scope = operation.header.extensions.scope;
             let grants = self.verify_frame_authority(frame, time)?;
             if !self.can_read_key(scope, &local) || !self.holds(scope).await? {
@@ -34,30 +33,103 @@ impl<A: RowApplication> Inner<A> {
             if writes.is_empty() || writes.len() > ROWS_PER_FRAME {
                 return Err(denied("held row change quota"));
             }
+            let source = self
+                .graph_for(scope.domain)?
+                .schema_any(operation.header.extensions.tip)
+                .map_err(credential)?;
+            let definition = self.definition_at(&source).ok_or_else(|| {
+                Error::Incompatible("held source tip schema is not installed".into())
+            })?;
+            let source_fields: BTreeSet<_> =
+                definition.fields.iter().map(|field| field.id).collect();
+            if definition.publisher != *self.config.publisher.as_bytes()
+                || definition.app != scope.domain.app
+                || !definition
+                    .domains
+                    .iter()
+                    .any(|domain| domain.domain == scope.domain.domain)
+                || !definition
+                    .entities
+                    .iter()
+                    .any(|table| table.id == scope.table)
+                || writes.iter().any(|write| {
+                    write
+                        .change
+                        .before
+                        .iter()
+                        .chain(&write.change.after)
+                        .any(|image| image.keys().any(|field| !source_fields.contains(field)))
+                })
+            {
+                return Err(denied(
+                    "held frame fields are outside its source tip schema",
+                ));
+            }
+            let owned;
+            let application: &dyn RowApplication = if source == self.manifest {
+                self.app.as_ref()
+            } else {
+                owned = self
+                    .app
+                    .source_application(definition)
+                    .map_err(Error::Incompatible)?;
+                if owned.manifest().hash() != source {
+                    return Err(Error::Incompatible(
+                        "held source validator has a different manifest".into(),
+                    ));
+                }
+                owned.as_ref()
+            };
+            let source_permissions = if source == self.manifest {
+                BTreeSet::new()
+            } else {
+                application.permission_fields()
+            };
             for write in &writes {
                 if !write.valid()
                     || write.change.scope != scope
                     || !write.permitted_by(&grants)
-                    || write
-                        .published_fields()
-                        .iter()
-                        .any(|field| self.permission_fields.contains(field))
-                    || self
-                        .app
+                    || write.published_fields().iter().any(|field| {
+                        self.permission_fields.contains(field) || source_permissions.contains(field)
+                    })
+                    || application
                         .row_partition(&write.change)
                         .map_err(|error| denied(&error))?
                         != operation.header.extensions.partition
                 {
                     return Err(denied("held row/field transition denied"));
                 }
-                self.app
+                application
                     .validate_write(write)
                     .map_err(|error| denied(&error))?;
-                stored
-                    .rows
-                    .push(stored_row(write, self.storage_row(&write.change)?, &names));
+                let row = match application
+                    .row_identity(&write.change)
+                    .map_err(|error| denied(&error))?
+                {
+                    Some(id) => rocky_core::commitment(
+                        "rocky.row-incarnation.v2",
+                        &id.integer().to_le_bytes(),
+                    ),
+                    None => write.change.row,
+                };
+                stored.rows.push(stored_row(write, row, &names));
             }
             stored.time = stored.time.min(operation.header.timestamp);
+        }
+        let mut migration = false;
+        let mut ledger_scopes = BTreeSet::new();
+        for (frame, _) in frames {
+            ledger_scopes.insert(frame.operation_ref()?.header.extensions.scope);
+            migration |= !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_migration_frames WHERE hash=?",
+                        [frame.id()?.as_bytes().to_vec()],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty();
         }
         let resolved = collect_rows(
             self.conn
@@ -79,7 +151,7 @@ impl<A: RowApplication> Inner<A> {
             None => false,
             _ => return Err(Error::Corrupt("held resolution authority".into())),
         };
-        if !resolved {
+        if !resolved && !migration {
             self.conn
                 .execute(
                     "INSERT OR REPLACE INTO secure_held VALUES(?,?)",
@@ -88,18 +160,20 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         for (frame, _) in frames {
-            let operation = frame.operation()?;
-            self.conn
-                .execute(
-                    "INSERT OR IGNORE INTO secure_held_frames VALUES(?,?,?,?)",
-                    [
-                        operation.hash.as_bytes().to_vec(),
-                        id.to_vec(),
-                        encode(&operation.header.extensions.scope)?,
-                        encode(frame)?,
-                    ],
-                )
-                .await?;
+            let operation = frame.operation_ref()?;
+            if !migration {
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO secure_held_frames VALUES(?,?,?,?)",
+                        [
+                            operation.hash.as_bytes().to_vec(),
+                            id.to_vec(),
+                            encode(&operation.header.extensions.scope)?,
+                            encode(frame)?,
+                        ],
+                    )
+                    .await?;
+            }
             self.conn
                 .execute(
                     "UPDATE secure_operations SET status='held' WHERE hash=?",
@@ -112,6 +186,11 @@ impl<A: RowApplication> Inner<A> {
                     [operation.hash.as_bytes().to_vec()],
                 )
                 .await?;
+        }
+        for scope in ledger_scopes {
+            if let Some(id) = self.find_scope_id(scope).await? {
+                self.reseed_ledger(scope, id).await?;
+            }
         }
         self.conn
             .execute(
@@ -137,64 +216,115 @@ impl<A: RowApplication> Inner<A> {
 
     /// Closed-source classification is lazy; learning a seal remains metadata only.
     pub(in crate::replica) async fn refresh_closed_held(&self, time: u64) -> Result<(), Error> {
-        let records = rows(&self.conn, "SELECT header,body FROM secure_operations WHERE status IN ('applied','pending') ORDER BY scope,author,sequence").await?;
+        // Without a recovery seal a frame's reach follows from its header
+        // alone: only frames it holds load their body.
+        let recovery = self.graphs.values().any(|graph| {
+            graph
+                .seals
+                .iter()
+                .any(|seal| seal.statement.recovery.is_some())
+        });
+        let mut context = tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
+        let records = rows(&self.conn, "SELECT hash,header FROM secure_operations WHERE status IN ('applied','pending') ORDER BY scope,author,sequence").await?;
         for record in records {
-            let [SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else {
+            let [SqlValue::Blob(hash), SqlValue::Blob(header)] = record.as_slice() else {
                 return Err(Error::Corrupt("closed source frame".into()));
             };
-            let frame = self.stored_frame(header.clone(), body.clone()).await?;
-            let operation = frame.operation()?;
+            if !recovery {
+                let e = self.stored_header(header)?;
+                let reach = self.frame_reach_at_using(
+                    e.scope.domain,
+                    e.tip,
+                    e.author
+                        .ok_or_else(|| denied("node author number missing"))?,
+                    e.author_sequence,
+                    e.timestamp,
+                    Some(&mut context),
+                )?;
+                if reach != tips::FrameReach::Held {
+                    continue;
+                }
+            }
+            let body = match collect_rows(
+                self.conn
+                    .query(
+                        "SELECT body FROM secure_operations WHERE hash=?",
+                        [hash.clone()],
+                    )
+                    .await?,
+            )
+            .await?
+            .pop()
+            .as_deref()
+            {
+                Some([SqlValue::Blob(body)]) => body.clone(),
+                _ => return Err(Error::Corrupt("closed source frame".into())),
+            };
+            let frame = self.stored_frame(header.clone(), body).await?;
+            let operation = frame.operation_ref()?;
             let extension = &operation.header.extensions;
             if self.stored_status(operation.hash).await?.as_deref() == Some("held") {
                 continue;
             }
-            if self.frame_reach(
-                extension.scope.domain,
-                extension.tip,
-                extension
-                    .author
-                    .ok_or_else(|| denied("node author number missing"))?,
-                extension.author_sequence,
-                operation.header.timestamp,
-            )? == tips::FrameReach::Held
+            if self.frame_reach(&frame)? == tips::FrameReach::Held
                 && self.can_read_key(extension.scope, &self.local_grants(time)?)
                 && self
                     .opening_key(extension.scope, extension.generation)
                     .is_some()
             {
-                self.hold_closed_frame(&frame, time).await?;
+                if self.abandoned_write(&frame)? {
+                    self.hold_abandoned(&frame, time).await?;
+                } else {
+                    self.hold_closed_frame(&frame, time).await?;
+                }
             }
         }
         Ok(())
     }
-    /// Holds retained writes beyond the common seal before the workspace rebuild.
+    /// Holds the writes the workspace at `source` applied that `target`
+    /// does not see, before a moved bookmark's workspace rebuild.
     pub(in crate::replica) async fn hold_line_writes(
         &self,
         scope: rocky_core::Scope,
-        tip: TipId,
-        frontier: &[AuthorMark],
+        source: TipId,
+        target: TipId,
     ) -> Result<usize, Error> {
+        let graph = self.graph_for(scope)?;
+        let mut line = BTreeSet::new();
+        let mut cursor = source;
+        while line.insert(cursor) {
+            match Self::tip_parent(graph, cursor)? {
+                Some((parent, _)) => cursor = parent,
+                None => break,
+            }
+        }
         let records = rows(&self.conn,
             "SELECT header,body FROM secure_operations WHERE status IN ('applied','pending') ORDER BY scope,author,sequence",
         ).await?;
+        let mut paths = BTreeMap::new();
         let mut held = 0;
         for record in records {
             let [SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else {
                 return Err(Error::Corrupt("held line frame".into()));
             };
             let frame = self.stored_frame(header.clone(), body.clone()).await?;
-            let operation = frame.operation()?;
+            let operation = frame.operation_ref()?;
             let extension = &operation.header.extensions;
-            if extension.scope.domain != scope || extension.tip != tip {
+            if extension.scope.domain != scope || !line.contains(&extension.tip) {
                 continue;
             }
             let author = extension
                 .author
                 .ok_or_else(|| denied("node author number missing"))?;
-            let covered = frontier
-                .iter()
-                .any(|mark| mark.author == author && extension.author_sequence <= mark.sequence);
-            if !covered && self.stored_status(operation.hash).await?.as_deref() != Some("held") {
+            let path = match paths.entry(extension.tip) {
+                std::collections::btree_map::Entry::Occupied(path) => path.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(Self::frame_path(graph, extension.tip, target)?)
+                }
+            };
+            if !path.admits(author, extension.author_sequence)?
+                && self.stored_status(operation.hash).await?.as_deref() != Some("held")
+            {
                 match self.hold_closed_frame(&frame, now()?).await? {
                     Outcome::Applied => held += 1,
                     Outcome::Waiting => {
@@ -312,19 +442,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             let inner = self.inner.lock().await;
             for frame in &frames {
-                let operation = frame.operation()?;
-                let extension = &operation.header.extensions;
                 inner.verify_frame_authority(frame, now()?)?;
-                if inner.frame_reach(
-                    extension.scope.domain,
-                    extension.tip,
-                    extension
-                        .author
-                        .ok_or_else(|| denied("node author number missing"))?,
-                    extension.author_sequence,
-                    operation.header.timestamp,
-                )? != tips::FrameReach::Held
-                {
+                if inner.frame_reach(frame)? != tips::FrameReach::Held {
                     return Err(denied("held transfer names a live or unrelated frame"));
                 }
             }
@@ -332,6 +451,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for status in self.receive_all(frames).await {
             match status? {
                 ReceiveStatus::Held
+                | ReceiveStatus::Abandoned
                 | ReceiveStatus::Duplicate
                 | ReceiveStatus::PendingDependencies => {}
                 _ => return Err(denied("held transfer was not held")),

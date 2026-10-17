@@ -97,7 +97,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut scopes = Vec::new();
         for (scope, id) in inner.domain_scopes(domain).await? {
             if inner.base_seal(id).await? != Some(seal)
-                && inner.pulled_seal(id).await? != Some(seal)
+                && inner.available_pulled_seal(id).await? != Some(seal)
             {
                 scopes.push(scope);
             }
@@ -110,7 +110,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn begin_seal_pull(&self, signed: SignedCheckpoint) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         signed.verify_authority(&inner, now()?)?;
-        inner.check_binding(&signed.statement)?;
         let statement = &signed.statement;
         let scope = statement.scope;
         let seal = statement
@@ -123,12 +122,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let generation = inner.generation_of(inner.manifest_of_tip(statement.tip)?, true)?;
         if statement.schema != generation.schema
             || signed.signer() == inner.config.node.public_key()
-            || inner.scope_key(scope)?.0 != statement.key_epoch
+            || (!statement.no_frames() && Some(inner.scope_key(scope)?.0) != statement.key_epoch())
         {
             return Err(denied(
                 "checkpoint definition/generation/key epoch mismatch",
             ));
         }
+        if statement.no_frames() {
+            inner.check_no_frames(&signed).await?;
+        }
+        // A no-frames checkpoint has no pages: it stages complete at once.
+        let complete = i64::from(statement.no_frames());
         let bytes = signed.to_bytes()?;
         transaction!(inner, |inner| {
             let id = inner.scope_id(scope).await?;
@@ -143,10 +147,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .execute(
-                    "INSERT INTO secure_rebootstrap VALUES(?,?,NULL,0,?,0)",
+                    "INSERT INTO secure_rebootstrap VALUES(?,?,NULL,?,?,0)",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(bytes.clone()),
+                        SqlValue::Integer(complete),
                         SqlValue::Blob(Sets::new().to_bytes()),
                     ]),
                 )
@@ -175,11 +180,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !staging.complete {
             return Err(denied("checkpoint rows are incomplete"));
         }
-        let verified = inner.rebootstrap_moves(id).await? == statement.moves
+        let matches = inner.rebootstrap_moves(id).await? == statement.moves
             && staging.sets.rows_summary() == statement.rows
             && staging.sets.tombstones == statement.tombstones
-            && staging.sets.creations_summary() == statement.creations
-            && inner.scope_key(scope)?.0 == statement.key_epoch;
+            && staging.sets.creations_summary() == statement.creations;
+        // Authority, schema, key and seal are checked again now: a refusal
+        // keeps nothing and is not corruption.
+        let refused = match matches {
+            true => match inner.verify_pulled_statement(&staging.signed).await {
+                Ok(()) => None,
+                Err(error) if refusal(&error) => Some(error),
+                Err(error) => return Err(error),
+            },
+            false => None,
+        };
+        let verified = matches && refused.is_none();
         let signed = staging.signed.to_bytes()?;
         let sets = staging.sets.to_bytes();
         transaction!(inner, |inner| {
@@ -210,6 +225,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.clear_staging(id).await
         })?;
         inner.flush()?;
+        if let Some(error) = refused {
+            return Err(error);
+        }
         if !verified {
             return Err(Error::Corrupt(
                 "checkpoint rows differ from the signed checkpoint".into(),
@@ -239,7 +257,7 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("pulled seal".into())),
         }
     }
-    async fn drop_pulled(&self, id: i64) -> Result<(), Error> {
+    pub(in crate::replica) async fn drop_pulled(&self, id: i64) -> Result<(), Error> {
         for table in std::iter::once("secure_pulled").chain(KEPT.iter().map(|(_, kept)| *kept)) {
             self.conn
                 .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
@@ -247,28 +265,135 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// The state pulled for scope `id`, checked for integrity only: decoded,
+    /// bound to its row's scope and seal, signed and canonical, and for a
+    /// no-frames state stored as empty. Any failure is corruption.
+    pub(in crate::replica) async fn pulled_record(
+        &self,
+        id: i64,
+    ) -> Result<Option<PulledRecord>, Error> {
+        let records = collect_rows(
+            self.conn
+                .query(
+                    "SELECT s.scope,p.seal,p.signed,p.sets FROM secure_pulled p LEFT JOIN secure_scope_state s ON s.id=p.scope WHERE p.scope=?",
+                    [id],
+                )
+                .await?,
+        )
+        .await?;
+        let Some(record) = records.first() else {
+            return Ok(None);
+        };
+        let corrupt = |reason: &str| Error::Corrupt(format!("pulled checkpoint {reason}"));
+        let [
+            SqlValue::Blob(scope),
+            SqlValue::Blob(seal),
+            SqlValue::Blob(signed),
+            SqlValue::Blob(sets),
+        ] = record.as_slice()
+        else {
+            return Err(corrupt("record"));
+        };
+        let scope: ResourceScope = decode(scope).map_err(|_| corrupt("scope"))?;
+        let signed = SignedCheckpoint::from_bytes(signed).map_err(|_| corrupt("statement"))?;
+        let sets = Sets::from_bytes(sets).map_err(|_| corrupt("sets"))?;
+        let seal = row_of(seal).map_err(|_| corrupt("seal"))?;
+        if signed.statement.scope != scope {
+            return Err(corrupt("names another scope"));
+        }
+        if signed.statement.seal != Some(seal) {
+            return Err(corrupt("names another seal"));
+        }
+        signed
+            .verify_signature()
+            .map_err(|_| corrupt("is not canonical or signed"))?;
+        if signed.statement.no_frames()
+            && (sets.to_bytes() != Sets::new().to_bytes()
+                || self
+                    .stores_anything(&KEPT.map(|(_, kept)| kept), id)
+                    .await?)
+        {
+            return Err(corrupt("is not stored as complete empty state"));
+        }
+        Ok(Some(PulledRecord { signed, sets }))
+    }
+    /// The checks a pulled statement passes now: those of any import, and
+    /// its seal names its tip.
+    async fn verify_pulled_statement(&self, signed: &SignedCheckpoint) -> Result<(), Error> {
+        self.verify_import_statement(signed).await?;
+        let statement = &signed.statement;
+        let sealed = statement
+            .seal
+            .ok_or_else(|| denied("a pulled checkpoint sits at a seal"))?;
+        let graph = self.graph_for(statement.scope.domain)?;
+        // A seal a revocation excluded stays nameable but is not usable.
+        if graph.revoked.contains(&sealed) {
+            return Err(denied("a pulled checkpoint's seal was revoked"));
+        }
+        let seal = graph.seal_by_id(sealed).map_err(credential)?;
+        if seal.statement.scope != statement.scope.domain || seal.statement.tip != statement.tip {
+            return Err(denied("a pulled checkpoint names its seal's tip"));
+        }
+        Ok(())
+    }
+    /// The seal of scope `id`'s pulled state when it passes the import
+    /// checks now: what a pull or a held start may count on. It writes
+    /// nothing; corruption is an error. It never stands in for live
+    /// coverage, which only an installed base gives.
+    pub(in crate::replica) async fn available_pulled_seal(
+        &self,
+        id: i64,
+    ) -> Result<Option<Commitment>, Error> {
+        let Some(pulled) = self.pulled_record(id).await? else {
+            return Ok(None);
+        };
+        match self.verify_pulled_statement(&pulled.signed).await {
+            Ok(()) => Ok(pulled.signed.statement.seal),
+            Err(error) if refusal(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    /// Inside the caller's transaction, drops every pulled state that no
+    /// longer passes the import checks, such as after a revocation.
+    /// Corruption is reported, never dropped.
+    pub(in crate::replica) async fn revalidate_pulled(&self) -> Result<(), Error> {
+        for record in rows(&self.conn, "SELECT scope FROM secure_pulled").await? {
+            let [SqlValue::Integer(id)] = record.as_slice() else {
+                return Err(Error::Corrupt("pulled checkpoint".into()));
+            };
+            let Some(pulled) = self.pulled_record(*id).await? else {
+                continue;
+            };
+            match self.verify_pulled_statement(&pulled.signed).await {
+                Ok(()) => {}
+                Err(error) if refusal(&error) => self.drop_pulled(*id).await?,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
     /// Inside the caller's transaction, makes the state pulled for `scope`
     /// its replay base, as a finished import does; its operations apply
-    /// again on top.
+    /// again on top. A state that no longer passes the import checks is
+    /// dropped instead and `Refused`; the caller's commit keeps the drop
+    /// and the scope keeps waiting. Corruption is an error.
     pub(in crate::replica) async fn install_pulled(
         &mut self,
         scope: ResourceScope,
         id: i64,
-    ) -> Result<(), Error> {
-        let records = collect_rows(
-            self.conn
-                .query("SELECT signed,sets FROM secure_pulled WHERE scope=?", [id])
-                .await?,
-        )
-        .await?;
-        let Some([SqlValue::Blob(signed), SqlValue::Blob(sets)]) =
-            records.first().map(Vec::as_slice)
-        else {
-            return Err(denied("no state was pulled for this scope"));
-        };
-        let signed = SignedCheckpoint::from_bytes(signed)?;
-        let sets = Sets::from_bytes(sets)?;
-        signed.verify_authority(self, now()?)?;
+    ) -> Result<PulledInstall, Error> {
+        let PulledRecord { signed, sets } = self
+            .pulled_record(id)
+            .await?
+            .ok_or_else(|| denied("no state was pulled for this scope"))?;
+        match self.verify_pulled_statement(&signed).await {
+            Ok(()) => {}
+            Err(error) if refusal(&error) => {
+                self.drop_pulled(id).await?;
+                return Ok(PulledInstall::Refused);
+            }
+            Err(error) => return Err(error),
+        }
         self.clear_staging(id).await?;
         for (staged, kept) in KEPT {
             self.conn
@@ -292,6 +417,27 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         self.drop_pulled(id).await?;
         self.verified_at.remove(&id);
-        Ok(())
+        Ok(PulledInstall::Installed)
     }
+}
+
+/// A pulled state that passed its integrity checks.
+pub(in crate::replica) struct PulledRecord {
+    signed: SignedCheckpoint,
+    sets: Sets,
+}
+/// What installing a pulled state did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::replica) enum PulledInstall {
+    Installed,
+    /// It no longer passes the import checks and was dropped.
+    Refused,
+}
+/// Whether `error` refuses a statement, rather than reporting corruption
+/// or a failure to read it.
+fn refusal(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Rejected(_) | Error::Protocol(_) | Error::Incompatible(_)
+    )
 }

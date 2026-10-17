@@ -94,6 +94,11 @@ class ShoppingNode private constructor(
         suspend fun create(platform: ShoppingPlatform): ShoppingNode = open(platform) { coordinator ->
             RockyDatabase.create(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), coordinator = coordinator)
         }.configure {
+            // Rocky defines no bookmark: the household follows `main`, and a schema migration's opening inherits
+            // the signed minimum of trusted devices in sync.
+            rocky.tips.createBookmark("main")
+            rocky.tips.follow("main")
+            rocky.tips.setGenesisMinimum(1u)
             rememberKind(NodeKind.Trusted)
             household.record(self, platform.deviceName, NodeKind.Trusted)
             Approvals.start(household.trusted)

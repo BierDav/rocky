@@ -1,251 +1,212 @@
-# Recoverable application generations
+# Schema changes
 
-Implemented for the encrypted runtime and SDK's single-file placement group.
-[Decision 0028](../decisions/0028-generation-lineage-and-signed-backups.md) fixes the
-formats. The trusted runtime's earlier same-definition APIs remain separate.
-Once a domain has a [tip graph](tips-and-bookmarks.md), explicit generation
-upgrades are refused until
-[schema changes through seals](../features_09/17-schema-changes-through-seals.md).
+A schema change is a [seal](tips-and-bookmarks.md): the tip after it has
+another schema. [Decision 0075](../decisions/0075-generations-as-sealed-forks.md)
+records the model; [following schema changes](adopting-generations.md)
+covers members, [removal](removal.md) removed and re-added names. Schemas
+have no chain of transitions.
 
 ## Choose the change
 
-- Local version, SQL spelling, local tables and indexes do not authorize a new
+- Local version, SQL spelling, local tables and indexes do not change the
   replicated definition. A local plan keeps the manifest and row identities.
-- Adding a mergeable table or nullable field requires a
-  `GenerationTransition` the owner or an issuer endorsed
-  ([identities](credentials.md#identities)). Rows from an older definition supply null for newly
-  added nullable fields. Names are the identities of tables and fields
+- Adding a mergeable table or a nullable or defaulted field is additive.
+  Names are the identities of tables and fields
   ([decision 0067](../decisions/0067-names-are-identities.md)).
 - Requiring a field of an existing table, newly added or once nullable, is
-  additive too: the field needs a default, rows that lack it or hold NULL
-  read the default, and the schema's migrations compute its values once
-  ([required fields](#required-fields)).
-- Key rotation/revocation uses the existing explicit credential policy mechanism.
-  Generation plans refuse reader-scope remapping and key/type changes.
-  Removing mergeable tables or fields needs [application confirmation](#confirmed-removals);
-  renaming is removal and addition.
+  additive too: the field needs a default, and rows that lack it or hold
+  NULL read the default ([required fields](#required-fields)).
+- Removing mergeable tables or fields needs
+  [application confirmation](#confirmed-removals); renaming is removal and
+  addition. Key or type changes, reader-scope remapping and partition column
+  or group changes are refused.
 
-Partition group membership and names are immutable for existing tables, as are
-partition columns. A new mergeable table may join an existing group with matching
-slots. See [partition groups](partitioned-scopes.md#partition-groups).
+`rocky_core::classify` rejects unsupported changes before anything is
+signed. The schema commitment of a tip is the hash of its
+`ApplicationManifest`, which includes each table's `granted_like`.
 
-`rocky_core::classify` rejects unsupported changes before
-activation. A signed transition (`rocky.transition.v5`) binds application,
-old/new manifest, schema generations, the field ids rows of the old
-generation may lack, the table and field ids the step named and removed, and
-when it was signed, in microseconds. A generation-number edit alone
-cannot open a different definition.
+## Publishing
 
-## Plan, backfill and switch
+An application follows a bookmark it names, by convention `main`; Rocky
+creates none. The owner's application calls `create("main")` and
+`follow("main")` once after creating the domain, and a domain that migrates
+signs its genesis line's minimum once (`genesis_minimum`). Enrollment
+carries the inviter's graph, its followed bookmark and that tip's schema
+record, so a joiner follows the same bookmark.
 
-`EncryptedReplica::install_tables` records a durable descriptor and progress,
-creates shadow tables, fills 256 stored rows per transaction, verifies projections
-against canonical stored rows and switches all affected tables in one transaction.
-Concurrent committed updates also maintain the shadow. Readers see the old view
-until switch, then the complete new view. Tables with unique indexes or foreign
-keys, and every schema with a partitioned table, have no shadow: every candidate decides which rows show, so the switch
-recreates them and resolves the stored rows in one transaction, proportional to
-the domain's rows. Notifications follow commit; old secure
-sessions and cursors become stale at the authority switch.
+`Database::open` compares the declared schema D (version Vd) with the
+followed tip's installed manifest M (generation Vi):
 
-Reopen resumes the recorded plan. An incompatible pending plan is refused.
-`open_upgrading` verifies the signed lineage before changing the installed manifest;
-projection switch and generation activation retain a recoverable durable boundary.
-Network/coordinator calls never occur inside these storage transactions.
-`generations()` reports the current generation, the earlier ones whose
-manifests the replica holds, the baseline and bounded progress.
+| Condition | `application` | Opening does |
+| --- | --- | --- |
+| D at Vi hashes to M | `current` | A local rebuild if needed |
+| Vd > Vi | `ahead` | An issuer, owner or trusted identity publishes; a member waits (`waiting_for_issuer`) |
+| Otherwise, the same version included | `behind` | Opens the installed schema; never publishes |
+| Following no bookmark | `ahead`, `reason: follow_required` | Never changes schema |
 
-The SDK issuer signs an additive upgrade when `Database::open` receives the new
-schema. A member fetches that exact schema/lineage from a device that runs it,
-issuers first, over its attached transport; while it reaches none, it opens at
-its generation and reports its application ahead. Issuer state is saved before replica activation,
-so reopening with the same schema continues after interruption. New collections
-do not silently expand member grants. SDK lineage is capped at 32 steps; secure
-runtime lineage at 64.
+Publishing happens before the network starts, when the followed bookmark
+points to an open tip:
+
+- **Additive or removal, no migration above Vi:** a `continue` seal naming
+  the new schema and a forward bookmark move. A removal is
+  [confirmed](#confirmed-removals) first.
+- **With migrations:** the issuer needs [full access](#migrations); it
+  closes the tip, opens a migration successor on the close and moves the
+  bookmark ([migrations](#migrations)).
+
+A coordinated `continue` is the source log's terminal entry, as for any
+seal. Issuers that publish one tip apart resolve by authority, then digest;
+the other tip stays a branch, listed as `main/1`, and its writes return as
+[held changes](held-changes.md) on the device that made them.
+
+## The switch
+
+`EncryptedReplica::switch_schema` installs the followed tip's authenticated
+schema. An additive change applies in place: `ALTER TABLE … ADD COLUMN` and
+`CREATE TABLE` in the follow transaction, with no backfill, no change to
+stored rows and no observer event; sessions and cursors stay valid. A
+change to a constrained table (unique policy, foreign key) or one whose path
+filters stored rows recreates the tables through a projection plan, which
+fills shadow tables 256 rows per transaction and switches in one verified
+transaction. Removals and migrations keep "tables rebuilt" notifications and
+stale sessions. The plan's final transaction moves the workspace to the tip;
+reopening resumes it.
 
 ## Confirmed removals
 
 An issuer opening a schema that removes tables or fields receives
-`RolloutConfirmationRequired` before settings, secrets or the replica change,
-and before its network starts. Its `report` lists removed tables and
-`table.field` names with the live stored row count of each table on this copy,
-including rows suppressed by constraints and every held partition. A removed
-field counts every live row of its table, including NULL or missing values.
-Counts are neither a device inventory nor a domain-wide estimate.
-
-The application shows the report with its own wording and asks for confirmation.
-Only after confirmation does it call `Database::open_confirmed(open, digest)`;
-Kotlin calls `RockyDatabase.open(..., confirmation = report.digest)` or `resume`.
-The digest binds the domain, installed manifest, complete target SDK schema
-(including migrations) and counts. Open recomputes it under the directory lock.
-A mismatch returns the current report with `mismatch = true` and changes nothing;
-the application must show that report again. Counts changing invalidates approval;
-a value change that leaves counts unchanged does not change this impact report.
-Cancelling leaves the old schema usable. Pure additions need no confirmation.
-
-Members never sign or authorize removal. Until an issuer supplies a signed
-new generation, they open the installed one with `application = ahead` and
-`waiting_for_issuer = true`. Adopting a generation already signed by an issuer
-needs no further local confirmation. Confirmation governs SDK signing, not
-verification of publisher signatures from peers.
-
-## Peer discovery
-
-Meeting a peer running another generation does not change the installed
-workspace. Incompatible frames and checkpoints return an
-admission error; sync never fetches or adopts another generation to retry them.
-Explicit schema opens retain the existing signed generation verification and
-recoverable switch. Replica-level [tips and bookmarks](tips-and-bookmarks.md) select the live
-workspace; the SDK surface follows in phase 14 integration.
-
-## Removing tables and fields
-
-A signed generation can remove mergeable tables and fields, including their
-constraints. Every adopter drops them and applies older frames field by
-field under their original authority. Re-adding a name uses the earliest
-signing baseline and replays retained frames after it. See
-[removal](removal.md) for grants, checkpoint and recovery rules.
-
-Never-offered local bundles that touch removed items are held whole and
-voided; their effects on kept tables roll back during the switch. The app
-lists, re-authors or drops them through the [held-change API](held-changes.md).
+`RolloutConfirmationRequired` before settings, secrets or the replica
+change, and before its network starts. Its `report` lists removed tables
+and `table.field` names with the live stored row count of each table on
+this copy, including rows suppressed by constraints and every held
+partition. The application shows the report and calls
+`Database::open_confirmed(open, digest)`; Kotlin passes
+`confirmation = report.digest`. The digest binds the domain, installed
+manifest, complete target schema and counts; a mismatch returns the current
+report with `mismatch = true` and changes nothing. Pure additions need no
+confirmation. Members never confirm: following a removal another device
+published needs none.
 
 ## Tables granted like another
 
-Grant profiles name tables, so a table added later is in no existing grant.
-The SDK schema's `granted_like` maps a new table to an existing one, as in
-`{"item_categories": "items"}`; Kotlin declares `grantedLike = "items"` on
-the table. Wherever the SDK turns a profile into grants or asks whether it
-reads a table (enrollment, renewal, revocation rotation, group delivery), a grant naming `items` in whole rows also names `item_categories`
-with the same read and write rights. Partition selectors on
-`items` select the same partitions of `item_categories`. A grant without
-columns covers every field in every generation, so nothing widens fields.
-A partial replica holds the new table wherever it holds its group partition.
-A member that adopts the generation receives the new grants and keys with
-its next renewal, which it asks an issuer for once per such generation; until
-then it writes every table its chain names. The followed table must follow none, and the entry
-is declared with the table: changing it for an existing table is refused, since
-it would change what earlier grants mean.
+The SDK schema's `granted_like` maps a new table to an existing one;
+Kotlin declares `grantedLike = "items"` on the table. Wherever the SDK turns
+a profile into grants or asks whether it reads a table, a whole-row grant
+naming `items` also names `item_categories` with the same rights, and
+partition selectors on `items` select its partitions. A follower receives
+the new grants and keys with its next renewal, which it asks an issuer for
+once per such schema. The entry is part of the manifest and is declared
+with the table: changing it for an existing table is refused.
 
 ## Required fields
 
 A field rows of the installed schema lack, or hold NULL in, may become
-required in an ordinary additive transition; it declares a default. Every
-device reads the default wherever a row lacks the field or holds NULL in
-it, including rows a device of an older generation writes later, and the
-projection switch rewrites stored NULLs the same way. A device whose
-application predates the field keeps syncing; its new rows read the
-default.
-
-The schema's `migrations` compute its values once, on one issuer
-([migrations](#migrations)).
+required; it declares a default. Every device reads the default wherever a
+row lacks the field or holds NULL, and the switch rewrites stored NULLs the
+same way. A device whose application predates the field keeps syncing; its
+new rows read the default. The schema's `migrations` compute its values
+once ([migrations](#migrations)).
 
 ## Migrations
 
 [Decision 0071](../decisions/0071-staged-migration-publication.md) records
-the design. An issuer whose application declares a schema with migrations
-above its installed version moves the domain to it:
+the staged publication; phase 17 runs it on the migration tip:
 
-1. It asks its known issuers for the generation; one already signed is
-   adopted like a member's, and nothing runs.
-2. It may migrate only if it holds the key of, and reads and writes, every
-   partition the domain knows. Otherwise it opens at the domain's
-   generation, and status reports `full_access_required`.
-3. It records the version it migrates from in `migration.json` and signs
-   the schema; the earliest signing time is the generation's baseline.
-4. At open, before the network starts, it runs
-   every migration above that version, in order, in one SQL transaction of
-   any size, in the new generation. A step is SQL, or
-   `{"insert": table, "select": sql}`, which inserts a row per selected row
-   with an `id` Rocky issues in its partition. Migration SQL cannot call
-   `rocky_next_id`.
-5. The transaction commits as a staged publication: the net change as
-   consecutive ordinary bundles within the [bundle bounds](secure-sessions.md#bundles),
-   parents first, all stamped at that commit, and the record that marks the
-   migration done. A crash before the commit repeats the migration; after
-   it, nothing runs again.
+1. The issuer may migrate only if it holds the key of, and reads and writes,
+   every partition the domain knows; otherwise status reports
+   `full_access_required`.
+2. Outside any transaction it signs the `close` seal of the source tip, the
+   opening of the migration tip (its schema, the line's signed minimum) and
+   the bookmark move.
+3. One stage transaction records them as private statements, freezes the
+   tables migration steps name as `parent.<table>`, and switches the
+   workspace to the new tip. Writes on the source tip past the close's
+   frontier become held changes there.
+4. At open, before the network starts, it runs every migration above the
+   installed version in one SQL transaction of any size on the new tip. A
+   step is SQL, or `{"insert": table, "select": sql}`, which inserts a row
+   per selected row with an `id` Rocky issues; `parent.<table>` reads the
+   frozen source state read-only, and migration SQL cannot call
+   `rocky_next_id`. The commit records the publication
+   (`rocky.sdk.migration.v3`, the target tip) and its bundles.
+5. The commit journals an exact descriptor and disk-backed inclusion proofs.
+   The opening identity endorses that intent outside the transaction. An
+   uncoordinated stage releases after endorsement. A coordinated one
+   stays private until a trusted node that follows the source tip ends its
+   log with exactly the close (`rocky.sdk.staged-close.v1`) and enough
+   trusted nodes acknowledge it; the issuer verifies that finality and
+   releases the statements in one transaction.
 
-The bundles leave by ordinary sync, a restart included, until peers hold
-them. Status `migration` reports `{"state": "publishing", "bundles": n,
-"published": k}`: `k` leading bundles some peer holds. Until its last bundle
-arrives, a receiver reads the default in rows not reached yet; an edit a
-member makes meanwhile is stamped later and wins. A publication's frames do
-not count toward the [retained-history bound](encrypted-checkpoints.md#what-runs-on-its-own) until they
-are pruned. Rows the migrating issuer did not hold, and rows devices on an
-older application write later, keep their default; nobody's work is
-dropped. [Discovering such rows](../ideas/discovering_unmigrated_rows.md) is
-an idea.
+Stored frame reconstruction may reuse one successfully parsed descriptor per
+replica, bound to the complete freshly selected bytes, with a 32 KiB retained
+raw-byte cap. SQL, proofs and current authority remain fresh; this is only
+canonical syntax reuse. See the [bounded experiment](../features_09/17-migration-descriptor-parsing-evidence.md)
+for its memory and qualification limits.
 
-Issuers that open the new schema without reaching each other each migrate;
-the steps are one generation. Updates meet by latest wins, and rows an
-`insert` step adds merge when the table is keyed by name. In a table keyed
-by `id` each issuer's rows stay apart: an `insert` step's ids come from the
-issuer's own creation log, an
-[accepted limitation](../features_09/README.md#accepted-limitations).
+A crash before the migration commits runs it again; after it, nothing runs
+again. A migration that fails while it runs withdraws its private stage
+atomically and switches back to the source tip; nothing of it left the
+device, and a later application stages its own. An uncertain coordinated
+submission keeps the exact stage and retries; it is never withdrawn.
 
-## Manifests are a cache
-
-Every device keeps the signed transitions of its lineage; they prove which
-manifests belong to it and carry, for each step, the field ids rows of the
-earlier generation may lack and the table and field ids it named and removed.
-Removal and re-adding are read from them alone ([removal](removal.md)), and a
-device checks a step against its manifests where it holds both. A manifest of an
-earlier generation is kept only while a retained frame, a checkpoint or an
-existence base names it; credential chains name none. After compaction,
-`EncryptedReplica::drop_unreferenced_generations` drops the others, and the
-SDK removes them from the saved lineage. Retained history stays verifiable
-by its transitions. Frames whose schemas the replica no longer holds are
-refused; peer discovery does not fetch schemas or change the workspace.
-
-## Old devices and pending work
-
-Retained generations remain subject to the followed tip's admission rules.
-New admission verifies the original authority plus current revocations, never
-invented current authority.
-
-Without a tip graph an explicit switch replaces the generation in place. A
-frame of an earlier generation the replica records belongs to its workspace
-when it was stamped before the signed transition out of that generation; a
-later one comes from a device that stayed and is refused. Such a frame is
-offered to peers only once its author's log, as the sender holds it, ends on
-the current generation: an issuer's migration bundles signed before its next
-switch still reach every member, while a write a device left behind when it
-switched stays local.
-
-Pending operations preserve exact original bytes and author logs. Retained
-checkpoints keep typed keys/incarnations, tombstones, bundles and signed history;
-rebootstrap accepts only supported generations and authorized dependency closure.
-Existing [retention holds](retention-holds.md) protect unresolved outcomes.
+The bundles leave by ordinary sync until peers hold them. Their exact initial
+frames carry issuer-endorsed migration membership proofs and use a separate
+durable history account; ordinary edits retain the 64 MiB hard limit. A generic
+publication receives no exemption. An unavailable external signer leaves the
+committed candidate private; reopening signs the same intent without rerunning
+SQL. Keyless custody verifies membership without decrypting or reporting applied
+rows. See [the acquisition and accounting contract](../decisions/0071-staged-migration-publication.md). Status `migration`
+reports `{"state": "publishing", "bundles": n, "published": k}`. A migration
+admits no late frames: writes on the source tip past the close return as
+[held changes](held-changes.md) with their original source images, and older
+applications re-author them as their developers
+choose. Issuers that migrate apart race: one tip wins and the other's
+migration is never merged, so rows an `insert` step adds appear once.
 
 ## Evidence
 
-SDK `tests/migrations.rs` runs a migration again after it failed before its
-commit and never after it (`a_failed_migration_runs_again_and_a_committed_one_never`),
-migrates on two issuers apart (`issuers_that_cannot_reach_each_other_both_migrate_and_converge`),
-keeps an issuer without a partition's key at the domain's generation
-(`an_issuer_without_a_partitions_key_keeps_the_households_generation`) and,
-in the e2e tier, fills a required field of 100,000 rows
-(`a_migration_of_100000_rows_converges_on_every_member`; its 8-row variant
-`a_two_step_migration_converges_on_every_member` runs in integration). `rocky-secure`
-`tests::sql::publication` commits one transaction as consecutive bundles.
-SDK `tests/generations.rs` also requires a field with a migration while an
-older member keeps its unsynced work across an explicit target schema open
-(`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),
-reads the default for a NULL an older generation writes
-(`a_null_an_older_generation_writes_to_a_required_field_reads_its_default`)
-and grants a new table like an existing one. The shopping example's
-`SchemaUpgradeTest` awaits phase 17's restoration of adoption on discovery.
-`rocky-secure`'s `tests::generations` interrupts shadow creation, backfill, switch
-and definition activation; verifies atomic visibility, stale sessions, pending
-work, old peers and typed checkpoint recovery, and drops and learns again an
-unreferenced manifest (`an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame`).
-Core/credentials tests
-verify transition encoding, classification and signing; SDK `tests/generations.rs` exercises issuer/member
-upgrade, an offline member opening at its generation, nullable fields, scope denial
-and ordinary pending writes. Peer discovery tests keep both an idle member
-and an older application on their installed schema.
-See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
+- SDK `tests/generations.rs`: following a published schema while behind;
+  late writes across a `continue`; an old application across a migration
+  re-authoring its held write; required and nullable fields; a crash on
+  either side of the switch; fetching a required schema from a member; two
+  issuers publishing apart (`main/1`); a dev branch whose schema a device on
+  `main` never fetches; an offline migration published on reconnect.
+- SDK `tests/migrations.rs`: a migration refused before signing, one that
+  fails and withdraws, a committed one never repeated, issuers migrating
+  apart without duplicated rows, and the 100,000-row gate (e2e).
+- SDK `tests/coordinated.rs`
+  `an_offline_coordinated_migration_is_released_by_the_exact_close_s_finality`.
+- `rocky-secure` `tests::generations::switches` and `tests::tip_schemas`
+  (in-place additive switch: rows, observers, cursors, sessions).
 
-This does not implement cross-file atomic switching,
-Room file import or cross-coordinator migration. Migrations run only on the
-migrating issuer; replicas never transform rows on their own.
+## Interrupted schema switches
+
+A durable switch intent records its source, target and bookmark before the
+projection plan finishes. Reopen with the source application's schema while
+that intent is staged. Opening with the target schema is refused before writes;
+the identical switch request resumes, while a different intent must first be
+withdrawn.
+
+While a switch is staged the source stays installed, also after a failed plan
+in the same process, and the intent is the only authority: admission never
+follows the bookmark normally. If the bookmark still continues from the staged
+target along the winning seal chain, the intent stays; resuming finishes at the
+target and advances to the bookmark's tip in the same transaction, or leaves a
+pending switch when that tip has another schema. If the bookmark moved
+sideways or back, was deleted, or the target no longer resolves (for example
+revoked), the switch is withdrawn in one transaction: the intent, plan and
+shadow tables go, the domain's rows are rebuilt from their unstripped bases
+and history under the source schema, and the bookmark is followed where it now
+resolves. Seal anchors of removed tables are cleared only when a switch
+finishes. Never-offered writes the staging held and voided stay held: their
+void records are signed facts. This device's own uncommitted publication is
+withdrawn only through `withdraw_staged_schema`, together with its intent. An
+SDK that crashed between the replica commit and its settings file adopts the
+target schema when the committed tip is the pending one or continues from it
+with the same schema.
+
+Open and full audit still replay the source's signed history. They then apply
+the staging row transform derived from the stored intent, graph and target
+schema, including removed tables, and compare the transformed rows and digest
+with stored state. Audit and staging share that transform. A tampered row is
+still refused; finalization waits until the switch finishes.

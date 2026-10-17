@@ -13,8 +13,9 @@ use rocky_core::{
 };
 use std::sync::{Arc, Mutex as StdMutex};
 
-mod cuts;
 mod finality;
+mod recovery;
+mod relay;
 mod seals;
 mod tips;
 
@@ -145,8 +146,8 @@ impl DomainLog for Client {
             result
         })
     }
-    fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
-        self.inner.cut(log, cut)
+    fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult> {
+        self.inner.recover(log, seal)
     }
     fn acknowledge_terminal(
         &self,
@@ -186,24 +187,39 @@ impl EntryPeers for Peers {
                 Some(me) => Some(me.replica.followed_tip().await),
                 None => None,
             };
+            let mut collected = std::collections::BTreeMap::<u64, CommittedEntry>::new();
             for peer in nodes
                 .iter()
                 .filter(|peer| peer.reachable && peer.key.public_key() != self.me)
             {
-                if let Some(tip) = tip {
-                    peer.replica
+                if let Some(tip) = tip
+                    && peer
+                        .replica
                         .admit_peer(self.me, &self.credentials, tip)
-                        .await?;
+                        .await
+                        .is_err()
+                {
+                    continue;
                 }
-                let entries = peer
+                let Ok(entries) = peer
                     .replica
                     .committed_entries(self.me, &self.credentials, log, after)
-                    .await?;
-                if !entries.is_empty() {
-                    return Ok(entries);
+                    .await
+                else {
+                    continue;
+                };
+                for entry in entries {
+                    if let Some(held) = collected.get(&entry.position)
+                        && held.hash != entry.hash
+                    {
+                        return Err(Error::Rejected(
+                            "invalid committed evidence: conflicting peer entries".into(),
+                        ));
+                    }
+                    collected.entry(entry.position).or_insert(entry);
                 }
             }
-            Ok(Vec::new())
+            Ok(collected.into_values().collect())
         })
     }
 }
@@ -218,11 +234,18 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(minimum: usize) -> Self {
-        let lineage = Lineage::new();
+        Self::with_lineage(minimum, Lineage::new()).await
+    }
+    async fn with_lineage(minimum: usize, lineage: Lineage) -> Self {
+        Self::with_keys(minimum, lineage, [PrivateKey::new(), PrivateKey::new()]).await
+    }
+    async fn with_keys(
+        minimum: usize,
+        lineage: Lineage,
+        [alice_key, bob_key]: [PrivateKey; 2],
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let mesh = Mesh::new(minimum, lineage.domain);
-        let alice_key = PrivateKey::new();
-        let bob_key = PrivateKey::new();
         let alice = open(&lineage, &dir, "alice", &alice_key).await;
         let bob = open(&lineage, &dir, "bob", &bob_key).await;
         mesh.add(&alice_key, &alice);
@@ -360,17 +383,14 @@ impl Fixture {
 }
 async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) -> Replica {
     lineage
-        .open(
+        .open_trusted(
             &dir.path().join(format!("{name}.db")),
-            key,
+            (&PrivateKey::new(), key),
             3,
-            Some(lineage_upgrade(lineage)),
+            None,
         )
         .await
         .unwrap()
-}
-fn lineage_upgrade(lineage: &Lineage) -> crate::Upgrade {
-    lineage.upgrade(1, 3)
 }
 async fn invoices(replica: &Replica) -> Vec<String> {
     select(replica, "SELECT key FROM items ORDER BY key")
@@ -455,7 +475,7 @@ async fn a_fresh_trusted_node_rebuilds_from_a_member_after_the_in_sync_set_is_lo
 }
 
 #[tokio::test]
-async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
+async fn a_missing_copy_waits_and_a_complete_chain_outside_the_hash_window_rejoins() {
     let fixture = Fixture::new(1).await;
     fixture.invoice(&fixture.alice, "retained").await;
     let key = PrivateKey::new();
@@ -510,8 +530,8 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
         ) -> CoordinationFuture<'_, LogResult> {
             self.0.acknowledge(log, pending)
         }
-        fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
-            self.0.cut(log, cut)
+        fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult> {
+            self.0.recover(log, seal)
         }
         fn acknowledge_terminal(
             &self,
@@ -523,40 +543,40 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
     }
     fixture.mesh.add(&member_key, &member);
     let client = OutsideWindow(fixture.mesh.log.client(node.0.public_key()));
-    assert_eq!(
-        node.1
-            .coordinated_slot(
-                tip_log(&fixture.lineage),
-                &client,
-                &fixture.mesh.peers(&fixture.lineage, &node.0)
-            )
-            .await,
-        Err(CoordinatedError::Behind),
-    );
-    assert!(invoices(&node.1).await.is_empty());
+    node.1
+        .coordinated_slot(
+            tip_log(&fixture.lineage),
+            &client,
+            &fixture.mesh.peers(&fixture.lineage, &node.0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invoices(&node.1).await, ["0001"]);
     assert_eq!(
         node.1
             .coordinated_status(tip_log(&fixture.lineage))
             .await
             .unwrap()
             .position,
-        0
+        1
     );
     assert!(
-        !fixture
+        fixture
             .mesh
             .log
             .head(tip_log(&fixture.lineage))
             .unwrap()
-            .members
-            .iter()
-            .any(|member| member.key == node.0.public_key())
+            .member(node.0.public_key())
     );
 }
 /// Syncs `target` from `source` by range pages, voids first, as a member does.
 async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
     let scope = lineage.scope("items");
     let credentials = lineage.credentials(3, key);
+    source
+        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
     let mut after = None;
     loop {
         let frontier = target.frontier(scope).await.unwrap();
@@ -570,7 +590,6 @@ async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &Priva
             )
             .await
             .unwrap();
-        target.receive_cuts(&page.cuts).await.unwrap();
         for status in target.receive_voids(&page.voids).await {
             status.unwrap();
         }
@@ -681,8 +700,9 @@ async fn concurrent_invoices_are_sequential_on_every_device_and_members_see_no_a
 
 #[tokio::test]
 async fn importing_a_checkpoint_never_reuses_a_voided_author_position() {
-    let fixture = Fixture::new(2).await;
+    let fixture = Fixture::new(1).await;
     let (alice, bob) = (&fixture.alice, &fixture.bob);
+    seals::follow_main(&fixture).await;
     let scope = fixture.lineage.scope("items");
     let first = fixture.slot(alice).await.unwrap();
     let second = fixture.slot(bob).await.unwrap();
@@ -695,44 +715,99 @@ async fn importing_a_checkpoint_never_reuses_a_voided_author_position() {
     ));
     fixture.resolve(bob).await;
 
-    // Alice's checkpoint has never seen Bob's consumed position.
-    alice.1.checkpoint(scope).await.unwrap();
-    let credentials = fixture.lineage.credentials(3, &bob.0);
-    let offered = alice
+    // Alice's base at the seal has never seen Bob's consumed position.
+    let main = tip_log(&fixture.lineage);
+    let sealed = seals::seal(&fixture.lineage, &alice.1, main.tip).await;
+    let next = TipLog {
+        scope: main.scope,
+        tip: sealed.successor().unwrap().unwrap(),
+    };
+    alice
         .1
-        .checkpoint_offer(bob.0.public_key(), &credentials, scope)
+        .publish_tip_statements(&[
+            TipStatement::Seal(sealed),
+            seals::bookmark(&fixture.lineage, "main", Some(main.tip), Some(next.tip)),
+        ])
         .await
-        .unwrap()
-        .expect("checkpoint");
-    let checkpoint = offered.id().unwrap();
-    bob.1.begin_rebootstrap(offered).await.unwrap();
-    let mut after = None;
-    loop {
-        let page = alice
+        .unwrap();
+    // Joining the continuation's log gives alice every held scope, so she
+    // compacts each, the unwritten one too.
+    alice
+        .1
+        .resolve_coordinated(
+            next,
+            &fixture.mesh.client(&alice.0),
+            &fixture.mesh.peers(&fixture.lineage, &alice.0),
+        )
+        .await
+        .unwrap();
+    alice.1.compact(scope.domain, 0).await.unwrap();
+    link_up(&alice.1, &bob.1, scope.domain).await;
+    let credentials = fixture.lineage.credentials(3, &bob.0);
+    // Bob takes every scope's base at the seal, as a rebootstrap at seals does.
+    let scopes: Vec<_> = alice
+        .1
+        .inner
+        .lock()
+        .await
+        .config
+        .keys
+        .iter()
+        .map(|key| key.scope)
+        .collect();
+    for scope in scopes {
+        let Some(offered) = alice
             .1
-            .checkpoint_page(
-                bob.0.public_key(),
-                &credentials,
-                scope,
-                checkpoint,
-                after,
-                64 * 1024,
-            )
+            .checkpoint_offer(bob.0.public_key(), &credentials, scope)
             .await
-            .unwrap();
-        after = page.next;
-        bob.1.stage_checkpoint_page(page).await.unwrap();
-        if after.is_none() {
-            break;
+            .unwrap()
+        else {
+            continue;
+        };
+        let checkpoint = offered.id().unwrap();
+        bob.1.begin_rebootstrap(offered).await.unwrap();
+        let mut after = None;
+        loop {
+            let page = alice
+                .1
+                .checkpoint_page(
+                    bob.0.public_key(),
+                    &credentials,
+                    scope,
+                    checkpoint,
+                    after,
+                    64 * 1024,
+                )
+                .await
+                .unwrap();
+            after = page.next;
+            bob.1.stage_checkpoint_page(page).await.unwrap();
+            if after.is_none() {
+                break;
+            }
         }
+        bob.1.finish_rebootstrap(scope).await.unwrap();
     }
-    bob.1.finish_rebootstrap(scope).await.unwrap();
-    let next = fixture.invoice(bob, "bob").await;
+    seals::invoice_on(&fixture, bob, "bob").await;
+    let frames = stored_frames(&bob.1, "SELECT header,body FROM secure_operations").await;
+    let continued = frames
+        .iter()
+        .map(|frame| frame.operation().unwrap())
+        .filter(|operation| operation.header.public_key == bob.0.public_key())
+        .max_by_key(|operation| operation.header.seq_num)
+        .unwrap();
     let previous = lost.last().unwrap().operation().unwrap();
-    let continued = next[0].operation().unwrap();
     assert_eq!(continued.header.seq_num, previous.header.seq_num + 1);
     assert_eq!(continued.header.backlink, Some(previous.hash));
-    fixture.resolve(alice).await;
+    alice
+        .1
+        .resolve_coordinated(
+            next,
+            &fixture.mesh.client(&alice.0),
+            &fixture.mesh.peers(&fixture.lineage, &alice.0),
+        )
+        .await
+        .unwrap();
     for node in [alice, bob] {
         assert_eq!(invoices(&node.1).await, numbered(2));
         node.1.audit(scope).await.unwrap();
@@ -1052,7 +1127,7 @@ async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
             &crate::wire::decrypt(
                 &key,
                 &encode(&operation.header.extensions).unwrap(),
-                &frame.body,
+                frame.body_bytes(),
             )
             .unwrap(),
         )
@@ -1074,4 +1149,45 @@ async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
         (1, commit.hash, 3)
     );
     assert!(entries[0].frames.is_empty());
+}
+
+#[tokio::test]
+async fn a_trusted_node_that_cannot_hold_an_entrys_scope_stores_and_acknowledges_nothing() {
+    let fixture = Fixture::new(1).await;
+    let key = PrivateKey::new();
+    let dana = fixture
+        .lineage
+        .open_scoped(&fixture.dir.path().join("dana.db"), &key, true, &["tags"])
+        .await
+        .unwrap();
+    let alice = &fixture.alice;
+    let slot = fixture.slot(alice).await.unwrap();
+    fixture.stage(alice, slot, "invoice").await.unwrap();
+    let commit = fixture.propose(alice).await.unwrap();
+    let log = tip_log(&fixture.lineage);
+    let entry = CoordinatedEntry {
+        log,
+        pending: rocky_core::LogPending {
+            proposer: *alice.0.public_key().as_bytes(),
+            hash: commit.hash,
+            position: commit.position,
+            epoch: 0,
+            deadline: 0,
+        },
+        frames: commit.frames,
+        voids: Vec::new(),
+        carry: None,
+    };
+    let refused = dana
+        .store_entry(entry, &fixture.mesh.client(&key))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("cannot hold"), "{refused}");
+    let inner = dana.inner.lock().await;
+    assert!(
+        crate::storage::rows(&inner.conn, "SELECT 1 FROM secure_entries")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

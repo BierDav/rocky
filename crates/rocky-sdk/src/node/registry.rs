@@ -45,11 +45,14 @@ impl Node {
             return Err(refused("only an issuer enrolls devices"));
         }
         let registry = self.registry().await?;
+        let bootstrap = self.enrollment_bootstrap().await?;
         let (reply, changes) = {
             let mut settings = self.settings.lock().await;
             let mut draft = settings.clone();
+            draft.bootstrap = Some(bootstrap);
             let answer = draft.pair(&self.vault, request, &registry);
             // Attempts count even when the request is refused.
+            draft.bootstrap = None;
             draft.save(&self.path)?;
             *settings = draft;
             answer?

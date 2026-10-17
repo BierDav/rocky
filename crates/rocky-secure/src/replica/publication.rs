@@ -215,7 +215,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok((self.publication_frames(&publication, bundles).await?, true));
         }
         let chunks = chunks(self.publication_order(writes)?)?;
-        self.publishing = true;
+        let migration = self.migration_stage(publication).await?;
+        self.publishing = migration.is_some();
         let authored = self.author_publication(&publication, &chunks).await;
         self.publishing = false;
         let frames = authored?;
@@ -236,6 +237,10 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        if let Some(stage) = migration {
+            self.build_migration_intent(&stage, &frames).await?;
+        }
+        self.commit_schema_stage(publication).await?;
         Ok((frames, false))
     }
     async fn author_publication(
@@ -262,29 +267,12 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frames)
     }
-    /// Retained bytes of publication frames, which the retained-history
-    /// bound does not count: a migration of any size would otherwise hold
-    /// back the writes that deliver it, such as renewing members into its
-    /// generation.
-    pub(super) async fn staged_bytes(&self) -> Result<u64, Error> {
-        match rows(
-            &self.conn,
-            "SELECT coalesce(sum(bytes),0) FROM secure_publication_frames",
-        )
-        .await?
-        .first()
-        .map(Vec::as_slice)
-        {
-            Some([SqlValue::Integer(bytes)]) => Ok(*bytes as u64),
-            _ => Err(Error::Corrupt("publication frames".into())),
-        }
-    }
     /// Whether some peer reported holding every member of the bundle.
     async fn bundle_published(&self, handle: &Commitment) -> Result<bool, Error> {
         for frame in self.bundle_frames(handle).await? {
             // Pruning waits for the copies retention requires.
             let Some(frame) = frame else { continue };
-            let header = frame.operation()?.header;
+            let header = frame.operation_ref()?.header.clone();
             let (held, _) = self
                 .covering_peers(&encode(&frame.scope()?)?, header.public_key, header.seq_num)
                 .await?;
@@ -321,6 +309,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .try_into()
                 .map_err(|_| Error::Corrupt("publication record".into()))?;
             let (bundles, mut published) = (*bundles as u64, *published as u64);
+            // A publication on a tip that lost its race stays retained on
+            // its branch; it is not this workspace's to publish.
+            if let Some(Some(frame)) = inner
+                .bundle_frames(&bundle_handle(&id, 0))
+                .await?
+                .into_iter()
+                .next()
+                && matches!(
+                    inner.frame_reach(&frame)?,
+                    super::tips::FrameReach::Held | super::tips::FrameReach::Unfollowed
+                )
+            {
+                continue;
+            }
             let reached = published;
             while published < bundles
                 && inner

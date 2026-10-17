@@ -6,7 +6,7 @@ use rocky_core::{
     Commitment, Configuration, CoordinationError, LogTerminal, MAX_COUNTER, Scope, TipId, TipLog,
     commitment,
 };
-use rocky_credentials::{CutPoint, MAX_CUT_AUTHORITY_BYTES, SignedCut};
+use rocky_credentials::{LogPoint, SignedSeal};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -48,18 +48,17 @@ pub enum Action {
         pending: Pending,
         acknowledgments: Vec<Request>,
     },
-    /// An owner-signed `rocky_credentials::SignedCut` of the exact head,
-    /// with the owner's credential chain for devices.
-    Cut {
-        #[serde(with = "bytes")]
-        record: Vec<u8>,
-        #[serde(with = "bytes")]
-        authority: Vec<u8>,
-    },
-    /// The terminal entry: a seal of the tip or a bookmark move off it. A
-    /// trusted node or the authority submits it.
+    /// The terminal entry: a seal of the tip or a bookmark move off it. Once
+    /// the log committed an entry, a node of its in-sync set submits it.
     Seal {
         terminal: LogTerminal,
+    },
+    /// The owner's recovery seal of a stuck tip, an encoded
+    /// `rocky_credentials::SignedSeal`: the one terminal entry committed
+    /// without the in-sync set.
+    Recover {
+        #[serde(with = "bytes")]
+        seal: Vec<u8>,
     },
     /// A trusted node's signed `rocky_credentials::TerminalAck` of the
     /// terminal entry, kept with it for devices to verify.
@@ -95,8 +94,6 @@ pub struct Head {
     pub pending: Option<Pending>,
     #[serde(with = "hashes")]
     pub hashes: VecDeque<Commitment>,
-    /// The latest admitted cut; its digest is the entry hash at `position`.
-    pub cut: Option<Box<Cut>>,
     /// The entry at `commit` that ended the log.
     pub terminal: Option<LogTerminal>,
     /// Encoded terminal acknowledgments, one per node, in arrival order.
@@ -109,17 +106,6 @@ pub struct Acknowledgment {
     pub key: PublicKey,
     #[serde(with = "bytes")]
     pub record: Vec<u8>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Cut {
-    #[serde(with = "bytes")]
-    pub record: Vec<u8>,
-    #[serde(with = "bytes")]
-    pub authority: Vec<u8>,
-    pub digest: Commitment,
-    pub sequence: u64,
-    pub position: u64,
-    pub running_hash: Commitment,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Result {
@@ -137,10 +123,6 @@ pub enum Result {
         epoch: u64,
     },
     Configured,
-    Cut {
-        position: u64,
-        running_hash: Commitment,
-    },
     TerminalAcknowledged,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,7 +153,6 @@ impl Log {
                 members: Vec::new(),
                 pending: None,
                 hashes: VecDeque::new(),
-                cut: None,
                 terminal: None,
                 acknowledgments: Vec::new(),
                 closed: false,
@@ -194,116 +175,91 @@ impl Log {
     }
     pub fn bytes(&self) -> usize {
         // Conservative admission accounting including encoded retry outcomes.
-        let cut = self
-            .head
-            .cut
-            .as_ref()
-            .map_or(0, |cut| 256 + cut.record.len() + cut.authority.len());
         let acknowledgments: usize = self
             .head
             .acknowledgments
             .iter()
             .map(|ack| 64 + ack.record.len())
             .sum();
-        if self.retries.is_empty() && cut == 0 && acknowledgments == 0 {
+        if self.retries.is_empty() && acknowledgments == 0 {
             0
         } else {
-            1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + cut + acknowledgments
+            1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + acknowledgments
         }
     }
-    /// Admits an owner-signed cut of the exact head; the caller has checked
-    /// the signer's authority. The cut commits at `a+1`, clears the in-sync
-    /// set and moves the epoch. A retry of the retained record answers the
-    /// same commit.
-    pub fn cut(
+    /// Commits `terminal` from `key` at `commit+1`, aborting the pending
+    /// entry. The in-sync set holds every committed entry, so only one of
+    /// its nodes ends a log that has any: a seal never leaves a committed
+    /// entry behind, and a stuck log ends only by the owner's recovery.
+    /// A retry of the same terminal answers the same commit, whoever sends
+    /// it; another one is `Sealed`.
+    pub fn seal(
+        &mut self,
+        key: PublicKey,
+        terminal: LogTerminal,
+    ) -> std::result::Result<Result, CoordinationError> {
+        if let Some(result) = self.ended(terminal)? {
+            return Ok(result);
+        }
+        if self.head.commit > 0 && !self.head.member(key) {
+            return Err(CoordinationError::Denied);
+        }
+        self.end(terminal)
+    }
+    /// Commits the owner's recovery seal of the exact head without the
+    /// in-sync set. `owner` is the domain's authority; the seal's retained
+    /// prefix must chain to the head where the window reaches.
+    pub fn recover(
         &mut self,
         log: TipLog,
-        record: &[u8],
-        authority: &[u8],
+        seal: &[u8],
+        owner: PublicKey,
     ) -> std::result::Result<Result, CoordinationError> {
-        if self.head.terminal.is_some() {
-            return Err(CoordinationError::Sealed);
-        }
-        let signed = SignedCut::from_bytes(record).map_err(|_| CoordinationError::Denied)?;
-        if authority.len() > MAX_CUT_AUTHORITY_BYTES {
-            return Err(CoordinationError::Denied);
-        }
-        let digest = signed.digest().map_err(|_| CoordinationError::Denied)?;
-        if let Some(cut) = self.head.cut.as_ref().filter(|cut| cut.digest == digest) {
-            return Ok(Result::Cut {
-                position: cut.position,
-                running_hash: cut.running_hash,
-            });
-        }
-        let statement = &signed.statement;
-        if statement.log != log {
-            return Err(CoordinationError::Denied);
-        }
-        let (sequence, previous, floor) = match &self.head.cut {
-            Some(cut) => (cut.sequence + 1, Some(cut.digest), cut.position),
-            None => (1, None, 0),
+        let signed = SignedSeal::from_bytes(seal).map_err(|_| CoordinationError::Denied)?;
+        let terminal = LogTerminal {
+            digest: signed.id().map_err(|_| CoordinationError::Denied)?,
+            continuation: signed.successor().map_err(|_| CoordinationError::Denied)?,
         };
-        if self.head.pending.is_some()
-            || statement.replaced.position != self.head.commit
-            || statement.replaced.running != self.head.running_hash
-            || statement.epoch != self.head.epoch
-            || statement.sequence != sequence
-            || statement.previous != previous
+        if let Some(result) = self.ended(terminal)? {
+            return Ok(result);
+        }
+        let recovery = signed
+            .verify_recovery(owner)
+            .map_err(|_| CoordinationError::Denied)?;
+        if signed.statement.scope != log.scope || signed.statement.tip != log.tip {
+            return Err(CoordinationError::Denied);
+        }
+        if recovery.replaced
+            != (LogPoint {
+                position: self.head.commit,
+                running: self.head.running_hash,
+            })
         {
             return Err(CoordinationError::StaleHead);
         }
-        // A cut never abandons a cut, and its prefix chains from a point
-        // the window or the genesis anchor authenticates.
-        if statement.retained.position < floor
-            || !self.endorses(statement.verified, statement.retained)
-        {
+        if !self.endorses(recovery.retained) {
             return Err(CoordinationError::Denied);
         }
-        let epoch = self
-            .head
-            .epoch
-            .checked_add(1)
-            .ok_or(CoordinationError::StaleEpoch)?;
-        let position = statement.entry();
-        let running_hash = rocky_core::coordinated_chain(self.head.running_hash, position, digest);
-        self.head.epoch = epoch;
-        self.head.head = position;
-        self.head.commit = position;
-        self.head.running_hash = running_hash;
-        self.head.members.clear();
-        self.head.hashes.push_back(digest);
-        if self.head.hashes.len() > HASH_WINDOW {
-            self.head.hashes.pop_front();
-        }
-        self.head.cut = Some(Box::new(Cut {
-            record: record.to_vec(),
-            authority: authority.to_vec(),
-            digest,
-            sequence,
-            position,
-            running_hash,
-        }));
-        Ok(Result::Cut {
-            position,
-            running_hash,
-        })
+        self.end(terminal)
     }
-    /// Commits `terminal` at `commit+1`, aborting the pending entry, and
-    /// ends the log: it keeps no in-sync set and takes no other entry. A
-    /// retry of the same terminal answers the same commit.
-    pub fn seal(
-        &mut self,
+    /// The same commit for a retry of the terminal that ended the log;
+    /// `Sealed` for another one.
+    fn ended(
+        &self,
         terminal: LogTerminal,
-    ) -> std::result::Result<Result, CoordinationError> {
-        if let Some(ended) = &self.head.terminal {
-            return match *ended == terminal {
-                true => Ok(Result::Committed {
-                    position: self.head.commit,
-                    running_hash: self.head.running_hash,
-                }),
-                false => Err(CoordinationError::Sealed),
-            };
+    ) -> std::result::Result<Option<Result>, CoordinationError> {
+        match &self.head.terminal {
+            None => Ok(None),
+            Some(ended) if *ended == terminal => Ok(Some(Result::Committed {
+                position: self.head.commit,
+                running_hash: self.head.running_hash,
+            })),
+            Some(_) => Err(CoordinationError::Sealed),
         }
+    }
+    /// Ends the log with `terminal` at `commit+1`: it keeps no in-sync set
+    /// and takes no other entry.
+    fn end(&mut self, terminal: LogTerminal) -> std::result::Result<Result, CoordinationError> {
         let epoch = self
             .head
             .epoch
@@ -372,29 +328,22 @@ impl Log {
         });
         Ok(Result::TerminalAcknowledged)
     }
-    /// Whether `verified` is the genesis anchor or chains through the window
-    /// to the commit, and `retained` follows from it where the window
-    /// reaches. Entries before the window are endorsed by the record alone.
-    fn endorses(&self, verified: CutPoint, retained: CutPoint) -> bool {
+    /// Whether `retained` chains through the window to the commit: at the
+    /// genesis anchor, or at a position the window reaches. A prefix ending
+    /// before the window is endorsed by the owner's signature alone.
+    fn endorses(&self, retained: LogPoint) -> bool {
         let head = &self.head;
         let first = head.commit + 1 - head.hashes.len() as u64;
-        let hash = |position: u64| head.hashes[(position - first) as usize];
-        if verified.position == 0 {
-            if verified.running != head.genesis {
-                return false;
-            }
-        } else if verified.position + 1 < first {
+        if retained.position == 0 && retained.running != head.genesis {
             return false;
         }
-        if verified.position + 1 < first {
+        if retained.position + 1 < first {
             return true;
         }
-        let mut running = verified.running;
-        for position in verified.position + 1..=head.commit {
-            running = rocky_core::coordinated_chain(running, position, hash(position));
-            if position == retained.position && running != retained.running {
-                return false;
-            }
+        let mut running = retained.running;
+        for position in retained.position + 1..=head.commit {
+            let hash = head.hashes[(position - first) as usize];
+            running = rocky_core::coordinated_chain(running, position, hash);
         }
         running == head.running_hash
     }
@@ -650,7 +599,7 @@ impl Logs {
         Ok(Result::Configured)
     }
     /// A copy of `tip`'s log to apply `action` from `key` to; `store` keeps
-    /// it. Only a configuration, a join, a cut or a seal opens a log, within
+    /// it. Only a configuration, a join or a terminal entry opens a log, within
     /// `TIP_LOGS` open ones. A node is in sync on one tip of its domain: a
     /// join waits while the tip it leaves has a pending entry.
     pub fn working(
@@ -678,8 +627,8 @@ impl Logs {
         }
         match action {
             // An unopened tip's seal ends it at once.
-            Action::Seal { .. } => return Ok(self.fresh(tip)),
-            Action::Configure { .. } | Action::Join { .. } | Action::Cut { .. } => {}
+            Action::Seal { .. } | Action::Recover { .. } => return Ok(self.fresh(tip)),
+            Action::Configure { .. } | Action::Join { .. } => {}
             Action::Append { .. } => return Err(CoordinationError::Denied),
             _ => return Err(CoordinationError::StaleHead),
         }
@@ -881,10 +830,6 @@ impl Head {
                 .collect(),
             pending: self.pending.as_ref().map(Pending::port),
             hashes: self.hashes.iter().copied().collect(),
-            cut: self.cut.as_ref().map(|cut| rocky_core::LogCut {
-                record: cut.record.clone(),
-                authority: cut.authority.clone(),
-            }),
             terminal: self.terminal,
             acknowledgments: self
                 .acknowledgments
@@ -908,7 +853,7 @@ type Acknowledged = std::collections::BTreeMap<TipId, Vec<PublicKey>>;
 #[derive(Default)]
 struct MemoryLogs {
     domains: std::collections::BTreeMap<Scope, (Logs, Acknowledged)>,
-    /// Each domain's control authority, which signs its cuts.
+    /// Each domain's control authority, which signs its recovery seals.
     owners: std::collections::BTreeMap<Scope, PublicKey>,
     /// Seconds added to the system clock.
     skew: u64,
@@ -933,7 +878,8 @@ impl MemoryLog {
     ) -> std::result::Result<(), CoordinationError> {
         self.domain(scope, |logs, _, _, _| logs.configure(minimum).map(|_| ()))
     }
-    /// Names `scope`'s control authority, the only signer of its cuts.
+    /// Names `scope`'s control authority, the only signer of its recovery
+    /// seals.
     pub fn set_owner(&self, scope: Scope, owner: PublicKey) {
         self.lock().owners.insert(scope, owner);
     }
@@ -1122,43 +1068,6 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 })
         })
     }
-    fn cut(
-        &self,
-        log: TipLog,
-        cut: rocky_core::LogCut,
-    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
-        Box::pin(async move {
-            let signer = SignedCut::from_bytes(&cut.record)
-                .map_err(|_| CoordinationError::Denied)?
-                .signer;
-            let action = Action::Cut {
-                record: cut.record,
-                authority: cut.authority,
-            };
-            let Action::Cut { record, authority } = &action else {
-                return Err(CoordinationError::Corrupt);
-            };
-            self.logs
-                .with(log, self.key, &action, |working, acknowledged, _, owner| {
-                    if owner != Some(signer) {
-                        return Err(CoordinationError::Denied);
-                    }
-                    match working.cut(log, record, authority)? {
-                        Result::Cut {
-                            position,
-                            running_hash,
-                        } => {
-                            acknowledged.clear();
-                            Ok(rocky_core::LogResult::Committed {
-                                position,
-                                running_hash,
-                            })
-                        }
-                        _ => Err(CoordinationError::Corrupt),
-                    }
-                })
-        })
-    }
     fn seal(
         &self,
         log: TipLog,
@@ -1166,24 +1075,29 @@ impl rocky_core::DomainLog for MemoryLogClient {
     ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
         Box::pin(async move {
             let action = Action::Seal { terminal };
-            self.logs.with(
-                log,
-                self.key,
-                &action,
-                |working, acknowledged, _, _| match working.seal(terminal)? {
-                    Result::Committed {
-                        position,
-                        running_hash,
-                    } => {
-                        acknowledged.clear();
-                        Ok(rocky_core::LogResult::Committed {
-                            position,
-                            running_hash,
-                        })
-                    }
-                    _ => Err(CoordinationError::Corrupt),
-                },
-            )
+            self.logs
+                .with(log, self.key, &action, |working, acknowledged, _, _| {
+                    let result = working.seal(self.key, terminal)?;
+                    committed(result, acknowledged)
+                })
+        })
+    }
+    fn recover(
+        &self,
+        log: TipLog,
+        seal: Vec<u8>,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
+        Box::pin(async move {
+            let action = Action::Recover { seal };
+            let Action::Recover { seal } = &action else {
+                return Err(CoordinationError::Corrupt);
+            };
+            self.logs
+                .with(log, self.key, &action, |working, acknowledged, _, owner| {
+                    let owner = owner.ok_or(CoordinationError::Denied)?;
+                    let result = working.recover(log, seal, owner)?;
+                    committed(result, acknowledged)
+                })
         })
     }
     fn acknowledge_terminal(
@@ -1202,5 +1116,24 @@ impl rocky_core::DomainLog for MemoryLogClient {
                     .map(|_| ())
             })
         })
+    }
+}
+/// A terminal entry's commit, which drops the leader's acknowledgments.
+fn committed(
+    result: Result,
+    acknowledged: &mut Vec<PublicKey>,
+) -> std::result::Result<rocky_core::LogResult, CoordinationError> {
+    match result {
+        Result::Committed {
+            position,
+            running_hash,
+        } => {
+            acknowledged.clear();
+            Ok(rocky_core::LogResult::Committed {
+                position,
+                running_hash,
+            })
+        }
+        _ => Err(CoordinationError::Corrupt),
     }
 }

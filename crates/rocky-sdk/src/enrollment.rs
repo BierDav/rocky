@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 18;
+pub const VERSION: u32 = 19;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -119,7 +119,10 @@ pub struct Settings {
     pub stored_identity: bool,
     #[serde(skip)]
     pub(crate) provider: Option<Arc<dyn IdentityProvider>>,
-    pub manifest: String,
+    pub genesis: String,
+    pub generation: u32,
+    pub pending: Option<crate::tip_schemas::Pending>,
+    pub(crate) bootstrap: Option<crate::tip_schemas::Bootstrap>,
     /// Every revocation statement this device verified.
     pub revocations: RevocationSet,
     pub credentials: CredentialChain,
@@ -151,9 +154,6 @@ pub struct Settings {
     #[serde(skip)]
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
-    /// The generations the domain left, oldest first. Empty until its
-    /// first upgrade; see `docs/runtime/generations.md`.
-    pub lineage: Vec<crate::generation::Step>,
     /// The author numbers this principal grants to other principals, if any.
     pub minting: Option<Minting>,
     /// Stable outgoing principal ranges, including non-issuer delegations.
@@ -380,12 +380,14 @@ pub(crate) struct Invite {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enrollment {
+    format: u32,
     mesh: MeshId,
     domain: DomainId,
     /// The domain's current schema, which the device installs whatever
     /// schema its application declares.
-    schema: Schema,
-    manifest: String,
+    record: crate::tip_schemas::Record,
+    genesis: String,
+    bootstrap: crate::tip_schemas::Bootstrap,
     revocations: RevocationSet,
     capability: SignedCapability,
     profile: Profile,
@@ -397,10 +399,6 @@ struct Enrollment {
     /// The issuer links `capability` follows; empty when the owner signed.
     chain: CredentialChain,
     ttl: u64,
-    /// The generations the domain left, so a new device admits history
-    /// and peers of earlier ones.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    lineage: Vec<crate::generation::Step>,
     /// The principal range granted by this enrollment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authors: Option<AuthorRange>,
@@ -575,13 +573,6 @@ pub struct Renewed {
 
 pub fn now() -> Result<u64, Failure> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
-}
-/// Microseconds since the epoch: a transition's signing time, which stamps
-/// compare with.
-pub(crate) fn now_micros() -> Result<u64, Failure> {
-    Ok(u64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
-    )?)
 }
 pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
@@ -825,21 +816,19 @@ impl Settings {
     }
     pub fn domain(&self) -> Result<Domain, Failure> {
         let publisher = *self.publisher.as_bytes();
-        let (generation, added, removed) =
-            crate::generation::lineage(&self.lineage, self.publisher)?;
-        Ok(Domain::at(
+        Domain::at(
             &self.schema,
             publisher,
             self.mesh,
             self.domain,
-            generation,
-            &added,
-        )?
-        .removing(removed))
+            self.generation,
+            &BTreeSet::new(),
+        )
     }
+
     pub fn manifest(&self) -> Result<SignedManifest, Failure> {
         Ok(SignedManifest::from_bytes(
-            &HEXLOWER.decode(self.manifest.as_bytes())?,
+            &HEXLOWER.decode(self.genesis.as_bytes())?,
         )?)
     }
     /// The grants of this device's node: its chain's leaf.
@@ -1235,7 +1224,10 @@ impl Settings {
             identity: publisher,
             stored_identity,
             provider,
-            manifest: HEXLOWER.encode(&manifest.to_bytes()?),
+            genesis: HEXLOWER.encode(&manifest.to_bytes()?),
+            generation: schema.version,
+            pending: None,
+            bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl,
@@ -1251,7 +1243,6 @@ impl Settings {
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
-            lineage: Vec::new(),
             minting: None,
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
@@ -1277,14 +1268,17 @@ impl Settings {
         Self {
             version: VERSION,
             installation,
-            schema,
+            schema: schema.clone(),
             mesh,
             domain,
             publisher,
             identity,
             stored_identity,
             provider: Some(provider),
-            manifest,
+            generation: schema.version,
+            genesis: manifest,
+            pending: None,
+            bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl,
@@ -1300,7 +1294,6 @@ impl Settings {
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
-            lineage: Vec::new(),
             minting: None,
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
@@ -1671,6 +1664,7 @@ impl Settings {
         profile: Profile,
         registry: &Registry,
     ) -> Result<(String, u64), Failure> {
+        profile.grants(&self.domain()?.resources())?;
         grants_of(&profile, &self.domain()?)?;
         self.issuing("invites devices")?;
         if registry.devices() >= registry::MAX_DEVICES {
@@ -1825,12 +1819,14 @@ impl Settings {
             registry.get(&request.node),
         )?;
         let enrollment = Enrollment {
+            format: 2,
             groups: self.groups_for(vault, request.node, &issued.capability, false)?,
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
             mesh: self.mesh,
             domain: self.domain,
-            schema: self.schema.clone(),
-            manifest: self.manifest.clone(),
+            record: crate::tip_schemas::Record::new(&self.schema, self.generation),
+            genesis: self.genesis.clone(),
+            bootstrap: self.schema_bootstrap()?,
             revocations: self.revocations.clone(),
             capability: issued,
             keys: self.keys_for(vault, &domain, &grants)?,
@@ -1839,7 +1835,6 @@ impl Settings {
             chain: links.clone(),
             ttl: self.ttl,
             profile,
-            lineage: self.lineage.clone(),
             authors,
             issuers: self.issuer_contacts(&[request.node])?,
         };
@@ -1866,6 +1861,7 @@ impl Settings {
             return Err("issuer authority travels only in an issuer invitation".into());
         }
         let domain = self.domain()?;
+        profile.grants(&domain.resources())?;
         let grants = grants_of(&profile, &domain)?;
         self.issuing("grants credentials")?;
         let known = registry.get(&device.node);
@@ -2380,7 +2376,10 @@ impl Settings {
             identity,
             stored_identity: intent.stored_identity,
             provider,
-            manifest: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
+            genesis: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
+            generation: schema.version,
+            pending: None,
+            bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: credentials.chain.clone(),
             ttl: DEFAULT_TTL,
@@ -2396,7 +2395,6 @@ impl Settings {
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
-            lineage: Vec::new(),
             minting: None,
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
@@ -2538,17 +2536,24 @@ impl Joining {
         let sealed = exchange(transport, &addresses, Protocol::Pair, &request.to_bytes()?).await?;
         let enrollment: Enrollment =
             serde_json::from_slice(&open_enrollment(&token, &request, &sealed)?)?;
+        if enrollment.format != 2 {
+            return Err("unsupported enrollment format".into());
+        }
+        enrollment.record.bytes()?;
         let mut settings = Settings {
             version: VERSION,
             installation: intent.installation.clone(),
-            schema: enrollment.schema.clone(),
+            schema: enrollment.record.schema.clone(),
+            generation: enrollment.record.generation,
+            pending: None,
+            bootstrap: Some(enrollment.bootstrap),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
             publisher: invite.publisher,
             identity,
             stored_identity: intent.stored_identity,
             provider,
-            manifest: enrollment.manifest,
+            genesis: enrollment.genesis,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl: enrollment.ttl,
@@ -2575,7 +2580,6 @@ impl Joining {
                 BTreeMap::new()
             },
             logged_out: false,
-            lineage: enrollment.lineage,
             minting: None,
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
@@ -2585,7 +2589,7 @@ impl Joining {
             epoch_statements: BTreeMap::new(),
         };
         // The schema and lineage are the publisher's.
-        settings.verify_lineage()?;
+        settings.verify_schema()?;
         let domain = settings.domain()?;
         settings.epoch_statements = enrollment.epoch_statements.clone();
         settings.learn_revocations(&enrollment.revocations)?;
@@ -3954,7 +3958,10 @@ impl Settings {
             identity,
             stored_identity,
             provider: _,
-            manifest,
+            genesis,
+            generation,
+            pending,
+            bootstrap,
             revocations,
             credentials,
             ttl,
@@ -3969,7 +3976,6 @@ impl Settings {
             contact_meta: _,
             enrollment_routes: _,
             logged_out,
-            lineage,
             minting,
             granted_authors,
             author_high_water,
@@ -3984,7 +3990,10 @@ impl Settings {
             && *publisher == other.publisher
             && *identity == other.identity
             && *stored_identity == other.stored_identity
-            && *manifest == other.manifest
+            && *genesis == other.genesis
+            && *generation == other.generation
+            && *pending == other.pending
+            && *bootstrap == other.bootstrap
             && *revocations == other.revocations
             && *credentials == other.credentials
             && *ttl == other.ttl
@@ -3994,7 +4003,6 @@ impl Settings {
             && *epoch_statements == other.epoch_statements
             && *authority == other.authority
             && *logged_out == other.logged_out
-            && *lineage == other.lineage
             && *granted_authors == other.granted_authors
             && *minting == other.minting
             && *author_high_water == other.author_high_water
@@ -4094,16 +4102,6 @@ impl Settings {
             return Ok(None);
         };
         self.resolve_saved_route(transport, *id).await
-    }
-    pub(crate) async fn resolve_saved_routes(&mut self, transport: &dyn Transport) {
-        let mut contacts = self.unresolved_contacts();
-        contacts
-            .sort_by_key(|(id, _)| !self.contact_refs.get(id).is_some_and(|entry| entry.issuer));
-        for (id, _) in contacts.into_iter().take(MAX_DIALED) {
-            if let Ok(Some(node)) = self.resolve_saved_route(transport, id).await {
-                self.bind_saved_contact(node);
-            }
-        }
     }
     pub(crate) fn unresolved_contacts(&self) -> Vec<(rocky_credentials::PeerId, Contact)> {
         self.contact_refs

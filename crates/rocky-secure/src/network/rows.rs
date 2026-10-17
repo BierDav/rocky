@@ -8,12 +8,16 @@ pub(super) const MAX_SECURE_PAGE: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum RowMessage {
+    MigrationQuery {
+        publication: Commitment,
+    },
+    MigrationRecord {
+        descriptor: Option<Box<rocky_credentials::SignedMigrationPublication>>,
+    },
     Pull {
         scopes: Vec<ResourceScope>,
         after: Option<Hash>,
         quota: usize,
-        /// Cut records the puller holds of each log of the scopes.
-        cuts: Vec<(rocky_core::TipLog, u64)>,
     },
     Page {
         frames: Vec<EncryptedFrame>,
@@ -22,8 +26,6 @@ pub(super) enum RowMessage {
         pruned: Vec<ResourceScope>,
         /// Void records consuming the positions before the frames.
         voids: Vec<SignedVoid>,
-        /// Cut records the puller lacks; received before the frames.
-        cuts: Vec<CutEvidence>,
     },
     Ack {
         id: Hash,
@@ -51,7 +53,6 @@ pub(super) enum RowMessage {
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
         voids: Vec<SignedVoid>,
-        cuts: Vec<CutEvidence>,
     },
     ScopesQuery {
         after: Option<ResourceScope>,
@@ -114,6 +115,41 @@ pub struct ScopeSync {
 }
 
 impl NativeSession {
+    /// Exact lookup authorized by local followed-path or retained history requirements.
+    pub async fn acquire_migration_publication<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        tip: rocky_core::TipId,
+    ) -> Result<bool, Error> {
+        if !replica.migration_tip_required(tip).await? {
+            return Err(denied("migration publication is not required"));
+        }
+        let publication = rocky_core::commitment("rocky.sdk.migration.v3", &tip.0);
+        self.send(RowMessage::MigrationQuery { publication })
+            .await?;
+        let RowMessage::MigrationRecord { descriptor } = self.reply::<RowMessage>().await? else {
+            return Err(denied("unexpected migration descriptor response"));
+        };
+        let Some(descriptor) = descriptor else {
+            return Ok(false);
+        };
+        if descriptor.statement.publication != publication || descriptor.statement.tip != tip {
+            return Err(denied("unsolicited migration descriptor"));
+        }
+        replica.admit_migration_publication(*descriptor).await?;
+        Ok(true)
+    }
+    async fn acquire_required_migrations<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<(), Error> {
+        for tip in replica.missing_migration_publications().await? {
+            if !self.acquire_migration_publication(replica, tip).await? {
+                return Err(denied("required migration descriptor unavailable"));
+            }
+        }
+        Ok(())
+    }
     /// Each pull supplies current subscriptions. Leaving a scope removes it from later pulls.
     /// A scope whose history the peer pruned past what this replica holds
     /// fails the pull; `pull_page` reports such scopes instead.
@@ -142,12 +178,11 @@ impl NativeSession {
         quota: usize,
     ) -> Result<Pulled, Error> {
         self.ensure_holding(replica, &scopes).await?;
-        let held = replica.held_cut_counts(&scopes).await;
+        self.acquire_required_migrations(replica).await?;
         self.send(RowMessage::Pull {
             scopes: scopes.clone(),
             after,
             quota,
-            cuts: held,
         })
         .await?;
         let RowMessage::Page {
@@ -155,12 +190,10 @@ impl NativeSession {
             next,
             pruned,
             voids,
-            cuts,
         } = self.reply::<RowMessage>().await?
         else {
             return Err(denied("unexpected native response"));
         };
-        receive_cuts(replica, &cuts, &scopes).await?;
         let mut rebootstrap = Vec::new();
         for scope in pruned {
             if !scopes.contains(&scope) {
@@ -213,7 +246,10 @@ impl NativeSession {
             ids.push(frame.id()?);
         }
         // The page is received in shared transactions; acknowledgments follow the commit.
-        for (id, status) in ids.into_iter().zip(replica.receive_all(frames).await) {
+        for (id, status) in ids
+            .into_iter()
+            .zip(replica.receive_migration_all(frames).await)
+        {
             let status = status?;
             let applied = matches!(status, ReceiveStatus::Applied | ReceiveStatus::Abandoned)
                 || (status == ReceiveStatus::Duplicate
@@ -240,14 +276,21 @@ impl NativeSession {
         quota: usize,
     ) -> Result<CatchUp, Error> {
         self.ensure_holding(replica, &[scope]).await?;
+        self.acquire_required_migrations(replica).await?;
         let mut report = CatchUp::default();
         let mut after = None;
+        // The frontier last reported as held; only peer bookkeeping follows
+        // it, and a stale one only costs frames sent again.
+        let mut held = None;
         loop {
             if self.low(quota) {
                 report.exhausted = true;
                 return Ok(report);
             }
-            let frontier = replica.frontier(scope).await?;
+            let frontier = match held.take() {
+                Some(frontier) => frontier,
+                None => replica.frontier(scope).await?,
+            };
             self.send(RowMessage::Range {
                 frontier,
                 after,
@@ -281,17 +324,20 @@ impl NativeSession {
                 return Ok(report);
             }
             report.frames += page.frames.len();
-            receive_cuts(replica, &page.cuts, &[scope]).await?;
             receive_voids(replica, &page.voids, &[scope]).await?;
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
             // The page is received in shared transactions and one flush.
-            for status in replica.receive_all(frames).await {
+            for status in replica.receive_migration_all(frames).await {
                 status?;
             }
-            let held = replica.frontier(scope).await?;
-            report.lag = held.lag_behind(&page.frontier);
-            self.send(RowMessage::Held { frontier: held }).await?;
+            let frontier = replica.frontier(scope).await?;
+            report.lag = frontier.lag_behind(&page.frontier);
+            self.send(RowMessage::Held {
+                frontier: frontier.clone(),
+            })
+            .await?;
+            held = Some(frontier);
             self.acknowledged("unexpected acknowledgment response")
                 .await?;
             // The sender's own frontier is its acknowledgment of what it holds.
@@ -328,7 +374,7 @@ impl NativeSession {
                 pushed.behind = true;
                 return Ok(pushed);
             }
-            if page.frames.is_empty() && page.voids.is_empty() && page.cuts.is_empty() {
+            if page.frames.is_empty() && page.voids.is_empty() {
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
@@ -337,7 +383,6 @@ impl NativeSession {
                 scope,
                 frames: page.frames,
                 voids: page.voids,
-                cuts: page.cuts,
             })
             .await?;
             let RowMessage::Frontier { frontier: theirs } = self.reply::<RowMessage>().await?
@@ -428,13 +473,31 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: RowMessage,
     ) -> Result<(), Error> {
-        replica.inner.lock().await.same_tip_peer(self.peer)?;
+        if !matches!(&message, RowMessage::MigrationQuery { .. }) {
+            replica.inner.lock().await.same_tip_peer(self.peer)?;
+        }
         match message {
+            RowMessage::MigrationQuery { publication } => {
+                let inner = replica.inner.lock().await;
+                self.credentials
+                    .verify_selectors(
+                        inner.config.publisher,
+                        self.peer,
+                        &inner.config.revocations,
+                        now()?,
+                    )
+                    .map_err(credential)?;
+                drop(inner);
+                let descriptor = replica
+                    .migration_publication(publication)
+                    .await?
+                    .map(Box::new);
+                self.send(RowMessage::MigrationRecord { descriptor }).await
+            }
             RowMessage::Pull {
                 scopes,
                 after,
                 quota,
-                cuts: held,
             } => {
                 // Leave room for canonical envelope and session signature overhead.
                 if quota > MAX_SECURE_FRAME / 2 {
@@ -447,13 +510,11 @@ impl NativeSession {
                     self.served_frames.insert(frame.id()?, frame.scope()?);
                 }
                 self.carry_chains(&mut page.frames).await?;
-                let cuts = replica.cuts_for(&scopes, &held).await?;
                 self.send(RowMessage::Page {
                     frames: page.frames,
                     next: page.next,
                     pruned: page.pruned,
                     voids: page.voids,
-                    cuts,
                 })
                 .await
             }
@@ -497,7 +558,6 @@ impl NativeSession {
                 scope,
                 frames,
                 voids,
-                cuts,
             } => {
                 replica
                     .authorize_scope_peer(self.peer, &self.credentials, scope)
@@ -510,12 +570,11 @@ impl NativeSession {
                         return Err(denied("pushed frame outside its scope"));
                     }
                 }
-                receive_cuts(replica, &cuts, &[scope]).await?;
                 receive_voids(replica, &voids, &[scope]).await?;
                 // An incomplete frame is not received; the frontier that
                 // answers the push shows the sender what is still missing.
                 let (frames, _) = self.complete_frames(frames)?;
-                for status in replica.receive_all(frames).await {
+                for status in replica.receive_migration_all(frames).await {
                     status?;
                 }
                 let frontier = replica.frontier(scope).await?;
@@ -564,19 +623,44 @@ pub(super) async fn receive_voids<A: RowApplication>(
     Ok(())
 }
 
-/// Admits the cut records a message carries before its frames: each must
-/// be of the log of a requested scope.
-pub(super) async fn receive_cuts<A: RowApplication>(
-    replica: &EncryptedReplica<A>,
-    cuts: &[CutEvidence],
-    scopes: &[ResourceScope],
-) -> Result<(), Error> {
-    if cuts.iter().any(|cut| {
-        !scopes
-            .iter()
-            .any(|scope| scope.domain == cut.record.statement.log.scope)
-    }) {
-        return Err(denied("cut record outside the requested scopes"));
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    #[test]
+    fn parent_transfer_pages_with_removed_metadata_are_refused() {
+        #[derive(Serialize)]
+        enum Parent {
+            Pull {
+                scopes: Vec<ResourceScope>,
+                after: Option<Hash>,
+                quota: usize,
+                cuts: Vec<()>,
+            },
+            Page {
+                frames: Vec<EncryptedFrame>,
+                next: Option<Hash>,
+                pruned: Vec<ResourceScope>,
+                voids: Vec<SignedVoid>,
+                cuts: Vec<()>,
+            },
+        }
+        for message in [
+            Parent::Pull {
+                scopes: vec![],
+                after: None,
+                quota: 1024,
+                cuts: vec![],
+            },
+            Parent::Page {
+                frames: vec![],
+                next: None,
+                pruned: vec![],
+                voids: vec![],
+                cuts: vec![],
+            },
+        ] {
+            let bytes = encode(&message).unwrap();
+            assert!(decode_bounded::<RowMessage>(&bytes, MAX_SECURE_FRAME).is_err());
+        }
     }
-    replica.receive_cuts(cuts).await
 }

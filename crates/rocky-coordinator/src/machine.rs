@@ -795,11 +795,9 @@ impl Metadata {
                 .closure_authorized(request, scope)
                 .or_else(|_| self.authorized(scope, request, time).map(|_| ())),
             // A trusted node or the authority submits; the authority signs.
-            Action::Cut { record, .. } => {
-                let signer = rocky_credentials::SignedCut::from_bytes(record)
-                    .map_err(|_| CoordinationError::Denied)?
-                    .signer;
-                if !self.authority(scope, signer) || self.issuer(scope) != Some(signer) {
+            Action::Recover { .. } => {
+                let owner = self.issuer(scope).ok_or(CoordinationError::UnknownDomain)?;
+                if !self.authority(scope, owner) {
                     return Err(CoordinationError::Denied);
                 }
                 self.closure_authorized(request, scope)
@@ -914,8 +912,11 @@ impl Metadata {
                     appends < u64::from(crate::coordinated::APPENDS_PER_MINUTE),
                 )
             }
-            Action::Cut { record, authority } => next.cut(log, record, authority),
-            Action::Seal { terminal } => next.seal(*terminal),
+            Action::Seal { terminal } => next.seal(request.key, *terminal),
+            Action::Recover { seal } => {
+                let owner = self.issuer(scope).ok_or(CoordinationError::UnknownDomain)?;
+                next.recover(log, seal, owner)
+            }
             Action::AcknowledgeTerminal { acknowledgment } => {
                 next.acknowledge_terminal(log, request.key, acknowledgment)
             }
@@ -1045,8 +1046,8 @@ mod retention_tests;
 #[path = "machine/coordinated_tests.rs"]
 mod coordinated_tests;
 #[cfg(test)]
-#[path = "machine/cut_tests.rs"]
-mod cut_tests;
+#[path = "machine/recovery_tests.rs"]
+mod recovery_tests;
 #[cfg(test)]
 #[path = "machine/tip_tests.rs"]
 mod tip_tests;

@@ -51,8 +51,27 @@ pub(crate) async fn confirm(
     let removed = rocky_core::classify(
         settings.domain()?.logical(),
         &crate::domain::logical(schema, *settings.publisher.as_bytes())?,
-    )?
+    )
+    .map_err(|refusal| {
+        format!("the application schema cannot replace the installed one: {refusal}")
+    })?
     .removed();
+    // Grants issued before would silently change meaning. An entry goes
+    // with its table, or with the table it followed.
+    let kept = |name: &str| schema.tables.iter().any(|table| table.name == name);
+    let (installed, declared) = (settings.schema.granted_like(), schema.granted_like());
+    if let Some(table) = settings.schema.tables.iter().find(|table| {
+        let (before, after) = (installed.get(&table.name), declared.get(&table.name));
+        kept(&table.name)
+            && before != after
+            && !(after.is_none() && before.is_some_and(|like| !kept(like)))
+    }) {
+        return Err(format!(
+            "the application schema cannot replace the installed one: {} changed whom it is granted like; declare that only when adding a table",
+            table.name
+        )
+        .into());
+    }
     if removed.is_empty() {
         return Ok(());
     }

@@ -7,10 +7,7 @@ pub use coordinated::*;
 mod definition;
 pub use definition::*;
 mod generation;
-pub use generation::{
-    Generation, GenerationTransition, ItemChanges, MAX_TRANSITION_IDS, Removed, SchemaChange,
-    Unsupported, classify,
-};
+pub use generation::{Generation, Removed, SchemaChange, Unsupported, classify};
 mod manifest;
 pub use manifest::*;
 mod history;
@@ -18,6 +15,8 @@ mod key;
 mod key_epoch;
 pub use key_epoch::KeyEpoch;
 mod logical;
+mod migration;
+pub use migration::*;
 pub mod net;
 mod storage;
 mod types;

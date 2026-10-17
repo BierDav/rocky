@@ -41,6 +41,11 @@ measurements.
   grown as much as its time in the run has, stays within three quarters of
   its budget (`target/test-tiers/confirmed-<tier>.json`). CI re-runs them all.
 - A suite's wall time, divided by the load factor, must fit its budget.
+- The owner-approved 100,000-row migration exemption runs that exact SDK test
+  separately in each feature build, outside the e2e suite clock. It still runs
+  all assertions and keeps nextest's 600 s timeout; failures still fail the
+  command. Reports show both budgeted and additional exempt wall time. Other
+  tests retain the 15 min combined suite budget and normal scheduling.
 - nextest still kills an integration test at 30 s, an e2e test at 10 min and
   a soak test at 30 min; the e2e suite budget binds first.
 

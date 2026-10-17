@@ -65,9 +65,12 @@ Inspection reports `final` for each seal and the genesis line's minimum.
 | Finality record | Format 1, at most 32 acknowledgments ordered by signer |
 | Genesis line statement | Format 1, owner-signed `rocky.genesis-line.v1` |
 | Coordinator store | Format 9: ended heads keep their acknowledgments |
-| Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
+| Live link / replica file | `rocky.link.v14` / `rocky.encrypted-replica.v32` |
 
-Seals, frames and existence records do not change.
+Recovery seals also name the retained and replaced log points; their finality
+checks the exact terminal position and running hash against the replaced point.
+A recovery waits outside the graph until its proof verifies; see
+[stuck recovery](stuck-recovery.md). Frames and existence records do not change.
 
 ## Design rationale
 

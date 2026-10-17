@@ -11,14 +11,22 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     let replica = EncryptedReplica::open(&source, f.app(), f.config(&node, f.full(), &[f.public]))
         .await
         .unwrap();
-    replica.checkpoint(f.public).await.unwrap();
+    replica
+        .author(
+            [1; 32],
+            vec![change(f.public, 1, None, Some(f.app().name("base")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    compacted_base(&replica, &f.publisher, f.public).await;
     replica
         .backup_into(&template.path().join("base.sqlite"))
         .await
         .unwrap();
     drop(replica);
     let source = template.path().join("base.sqlite");
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -63,7 +71,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     }
     for version in [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 27,
+        25, 26, 27, 28, 29, 30, 31, 33,
     ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -312,4 +320,62 @@ async fn seal_author_positions_span_resource_logs_and_survive_reopen() {
         third.operation().unwrap().header.extensions.author_sequence,
         2
     );
+}
+
+#[tokio::test]
+async fn a_parent_checkpoint_binding_is_refused_even_with_the_same_version_label() {
+    #[derive(Serialize)]
+    struct Binding {
+        cuts: u64,
+        cut: Option<Commitment>,
+        highest: u64,
+    }
+    #[derive(Serialize)]
+    struct ParentStatement<'a> {
+        #[serde(flatten)]
+        current: &'a crate::CheckpointStatement,
+        coordinated: Binding,
+    }
+    #[derive(Serialize)]
+    struct ParentCheckpoint<'a> {
+        statement: ParentStatement<'a>,
+        node: PublicKey,
+        credentials: CredentialChain,
+        signature: p2panda_core::Signature,
+    }
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        dir.path().join("parent.db"),
+        f.app(),
+        f.config(&node, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    replica
+        .author(
+            [1; 32],
+            vec![change(f.public, 1, None, Some(f.app().name("base")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let signed = compacted_base(&replica, &f.publisher, f.public).await;
+    let credentials = f.credentials(&node, f.full());
+    let parent = ParentCheckpoint {
+        statement: ParentStatement {
+            current: &signed.statement,
+            coordinated: Binding {
+                cuts: 0,
+                cut: None,
+                highest: 0,
+            },
+        },
+        node: node.public_key(),
+        credentials,
+        signature: node.sign(b"parent fixture"),
+    };
+    let bytes = encode(&parent).unwrap();
+    assert!(SignedCheckpoint::from_bytes(&bytes).is_err());
 }

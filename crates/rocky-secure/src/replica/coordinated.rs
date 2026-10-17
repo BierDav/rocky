@@ -5,19 +5,22 @@
 use super::checkpoint::hash_of;
 use super::*;
 use rocky_core::{
-    Append, DomainLog, LogHead, LogPending, LogResult, Scope, TipLog, coordinated_chain,
+    Append, CoordinationError, DomainLog, LogHead, LogPending, LogResult, Scope, TipLog,
+    coordinated_chain,
 };
+use rocky_credentials::SignedCarry;
 use std::future::Future;
 use std::pin::Pin;
 
-pub(super) mod cut;
+pub(super) mod abandoned;
 mod finality;
-pub(super) mod proposal;
 mod recovery;
-mod statements;
+pub(super) mod relay;
+pub use relay::StagedCloseStatus;
+pub(super) mod statements;
 mod terminal;
-pub use cut::{CutEvidence, CutRefusal, MAX_PAGE_CUTS};
-pub use proposal::{BaseReport, CutProposal};
+pub use abandoned::Refusal;
+pub(in crate::replica) use statements::{NoPeers, Unconfirmed};
 use terminal::settled;
 
 pub(super) const SCHEMA: &[&str] = &[
@@ -26,8 +29,9 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_coordinated(log BLOB PRIMARY KEY,position INTEGER NOT NULL,running BLOB,genesis BLOB,sequence INTEGER NOT NULL) WITHOUT ROWID",
     // Entries by state: this device's `staged` and `assigned` ones, other
     // proposers' `stored` ones with their frames, and `committed` ones
-    // with the running hash after them.
-    "CREATE TABLE IF NOT EXISTS secure_entries(log BLOB NOT NULL,hash BLOB NOT NULL,position INTEGER NOT NULL,state TEXT NOT NULL,bundle BLOB,frames BLOB NOT NULL,running BLOB,pending BLOB,append BLOB,PRIMARY KEY(log,hash)) WITHOUT ROWID",
+    // with the running hash after them. `carry` is the author's carry
+    // record of a write a seal carried into this log.
+    "CREATE TABLE IF NOT EXISTS secure_entries(log BLOB NOT NULL,hash BLOB NOT NULL,position INTEGER NOT NULL,state TEXT NOT NULL,bundle BLOB,frames BLOB NOT NULL,running BLOB,pending BLOB,append BLOB,carry BLOB,PRIMARY KEY(log,hash)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_entries_position ON secure_entries(log,state,position)",
     // This device's frames of an uncommitted entry: no peer is sent them.
     "CREATE TABLE IF NOT EXISTS secure_staged(hash BLOB PRIMARY KEY,scope BLOB NOT NULL) WITHOUT ROWID",
@@ -94,6 +98,8 @@ pub struct CoordinatedEntry {
     pub frames: Vec<EncryptedFrame>,
     /// Void records consuming the positions before the frames.
     pub voids: Vec<SignedVoid>,
+    /// The author's record placing frames a seal carried into this log.
+    pub carry: Option<SignedCarry>,
 }
 /// A committed entry served to a node catching up. `frames` holds those
 /// still retained; `before` is the running hash before the entry when the
@@ -106,6 +112,8 @@ pub struct CommittedEntry {
     pub before: Option<Commitment>,
     pub frames: Vec<EncryptedFrame>,
     pub voids: Vec<SignedVoid>,
+    /// The record placing a carried write's frames at this entry.
+    pub carry: Option<SignedCarry>,
 }
 /// A committed coordinated write.
 #[derive(Clone, Debug)]
@@ -132,6 +140,9 @@ pub enum CoordinatedError {
     Undecided,
     /// Committed entries are missing locally and no peer supplied them.
     Behind,
+    /// A seal's position lies in a partition this node cannot prove, so no
+    /// peer may show where it is: only that partition's custody settles it.
+    CustodyRequired,
     /// This node does not follow the log's tip: only trusted nodes that
     /// follow a tip write through its log.
     Unfollowed,
@@ -204,6 +215,7 @@ struct Entry {
     frames: Vec<u8>,
     pending: Option<LogPending>,
     append: Option<Append>,
+    carry: Option<SignedCarry>,
 }
 /// What the coordinator's head says of an entry.
 #[derive(Debug, PartialEq, Eq)]
@@ -319,7 +331,7 @@ impl<A: RowApplication> Inner<A> {
         for record in collect_rows(
             self.conn
                 .query(
-                    format!("SELECT hash,position,state,bundle,frames,pending,append FROM secure_entries WHERE log=? AND state IN ({placeholders}) ORDER BY position,hash"),
+                    format!("SELECT hash,position,state,bundle,frames,pending,append,carry FROM secure_entries WHERE log=? AND state IN ({placeholders}) ORDER BY position,hash"),
                     bindings(values),
                 )
                 .await?,
@@ -334,6 +346,7 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(frames),
                 pending,
                 append,
+                carry,
             ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("coordinated entry".into()));
@@ -353,6 +366,12 @@ impl<A: RowApplication> Inner<A> {
                 },
                 append: match append {
                     SqlValue::Blob(bytes) => Some(decode(bytes)?),
+                    _ => None,
+                },
+                carry: match carry {
+                    SqlValue::Blob(bytes) => {
+                        Some(SignedCarry::from_bytes(bytes).map_err(credential)?)
+                    }
                     _ => None,
                 },
             });
@@ -418,7 +437,7 @@ impl<A: RowApplication> Inner<A> {
         };
         self.conn
             .execute(
-                "INSERT INTO secure_entries VALUES(?,?,?,'staged',?,?,NULL,NULL,?)",
+                "INSERT INTO secure_entries VALUES(?,?,?,'staged',?,?,NULL,NULL,?,NULL)",
                 bindings(vec![
                     SqlValue::Blob(encode(&slot.log)?),
                     SqlValue::Blob(hash.to_vec()),
@@ -474,6 +493,17 @@ impl<A: RowApplication> Inner<A> {
         if local + 1 != position {
             return Err(denied("coordinated entries commit in order"));
         }
+        // Frames a seal carried here are released only once their author's
+        // carry record places them at this entry.
+        for id in ids {
+            if self.graphs.contains_key(&log.scope)
+                && let Some(frame) = self.frame(*id).await?
+                && frame.operation_ref()?.header.extensions.tip != log.tip
+                && self.coordinate(&frame)? != Some((log, position))
+            {
+                return Err(denied("a carried frame commits only with its carry record"));
+            }
+        }
         let running = running
             .or(before)
             .ok_or_else(|| denied("the coordinated log's genesis is unknown"))?;
@@ -481,7 +511,7 @@ impl<A: RowApplication> Inner<A> {
         let blob = encode(&log)?;
         self.conn
             .execute(
-                "INSERT INTO secure_entries VALUES(?1,?2,?3,'committed',NULL,?4,?5,NULL,NULL) ON CONFLICT(log,hash) DO UPDATE SET state='committed',frames=?4,running=?5,pending=NULL,append=NULL",
+                "INSERT INTO secure_entries VALUES(?1,?2,?3,'committed',NULL,?4,?5,NULL,NULL,NULL) ON CONFLICT(log,hash) DO UPDATE SET state='committed',frames=?4,running=?5,pending=NULL,append=NULL",
                 bindings(vec![
                     SqlValue::Blob(blob.clone()),
                     SqlValue::Blob(hash.to_vec()),
@@ -536,6 +566,122 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    /// An entry's frames sign its log and position, or a seal carried them
+    /// here and their author's record places them: signed by that author,
+    /// naming exactly these frames, this entry and their signed coordinate.
+    fn check_entry_coordinates(&self, entry: &CoordinatedEntry, ids: &[Hash]) -> Result<(), Error> {
+        let (log, position) = (entry.log, entry.pending.position);
+        let mut signed = None;
+        for frame in &entry.frames {
+            let operation = frame.operation_ref()?;
+            let header = &operation.header;
+            let coordinate = (
+                header.public_key,
+                header.extensions.tip,
+                self.entry_of(frame),
+            );
+            match signed {
+                None => signed = Some(coordinate),
+                Some((author, tip, entry)) => {
+                    if author != coordinate.0
+                        || tip != coordinate.1
+                        || (entry.is_some() && coordinate.2.is_some() && entry != coordinate.2)
+                    {
+                        return Err(denied("an entry's frames sign one coordinate"));
+                    }
+                }
+            }
+        }
+        let Some((author, tip, signed_entry)) = signed else {
+            return Err(denied("an entry has frames"));
+        };
+        let Some(carry) = &entry.carry else {
+            // Explicit generations have no graph and no recovery to place
+            // a carried write for.
+            if !self.graphs.contains_key(&log.scope) {
+                return Ok(());
+            }
+            if tip != log.tip || signed_entry.is_some_and(|signed| signed != position) {
+                return Err(denied("a carried entry needs its author's carry record"));
+            }
+            return Ok(());
+        };
+        let names: Vec<[u8; 32]> = ids.iter().map(|id| *id.as_bytes()).collect();
+        if carry.signer != author
+            || carry.statement.scope != log.scope
+            || carry.statement.tip != log.tip
+            || carry.statement.position != position
+            || carry.statement.from.0 != tip
+            || signed_entry.is_some_and(|signed| signed != carry.statement.from.1)
+            || !carry.names(&names)
+        {
+            return Err(denied("the carry record does not place this entry"));
+        }
+        carry
+            .verify_signature(
+                self.config.publisher,
+                Some((&self.config.revocations, now()?)),
+            )
+            .map_err(credential)?;
+        if let Some(graph) = self.graphs.get(&log.scope)
+            && !graph
+                .continues_any(carry.statement.from.0, log.tip)
+                .map_err(credential)?
+        {
+            return Err(denied("a carry record names a tip its write cannot reach"));
+        }
+        Ok(())
+    }
+    /// Signs, as the author of the carried frames `ids`, where they are
+    /// retried: the first entry of `log`. Only a node of a trusted identity
+    /// carries a write.
+    async fn sign_carry(&self, log: TipLog, ids: &[Hash]) -> Result<Option<SignedCarry>, Error> {
+        let frames = self.own_frames(ids).await?;
+        let Some(first) = frames.first() else {
+            return Err(Error::Corrupt("carried entry without frames".into()));
+        };
+        let operation = first.operation_ref()?;
+        let author = operation.header.public_key;
+        let tip = operation.header.extensions.tip;
+        let entry = self
+            .entry_of(first)
+            .ok_or_else(|| Error::Corrupt("carried frame without its entry".into()))?;
+        let (key, chain) = if self.config.node.public_key() == author {
+            (self.config.node.clone(), self.config.credentials.clone())
+        } else if let Some(node) = self
+            .node_author
+            .iter()
+            .chain(self.line_nodes.values())
+            .find(|node| node.key.public_key() == author)
+        {
+            (node.key.clone(), node.credentials.clone())
+        } else {
+            return Ok(None);
+        };
+        let chain = self.terminal_credentials(author, &chain).await?;
+        let mut names: Vec<[u8; 32]> = ids.iter().map(|id| *id.as_bytes()).collect();
+        names.sort_unstable();
+        let carry = SignedCarry::sign(
+            rocky_credentials::CarryStatement {
+                format: rocky_credentials::CARRY_FORMAT,
+                scope: log.scope,
+                from: (tip, entry),
+                tip: log.tip,
+                position: 1,
+                ids: names,
+            },
+            &key,
+            chain,
+        )
+        .map_err(credential)?;
+        match carry.verify_signature(
+            self.config.publisher,
+            Some((&self.config.revocations, now()?)),
+        ) {
+            Ok(()) => Ok(Some(carry)),
+            Err(_) => Ok(None),
+        }
+    }
     /// This device's frames of an entry, with their chains.
     async fn own_frames(&self, ids: &[Hash]) -> Result<Vec<EncryptedFrame>, Error> {
         let mut frames = Vec::with_capacity(ids.len());
@@ -555,19 +701,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn followed_log(&self, domain: Scope) -> TipLog {
         self.inner.lock().await.tip_log(domain)
     }
-    /// Decides this replica's undecided entries of `log`, applies those
-    /// committed, catches up from `peers` and joins the in-sync set. The
-    /// slot is the position the next coordinated write is staged at.
-    pub async fn coordinated_slot(
+    /// Catches this node up on `log`, which it follows, and joins its
+    /// in-sync set at the exact committed position and hash, unless it is a
+    /// member already. Returns the head it joined; the caller holds the
+    /// deciding lock. A pending entry, an undecided own entry or anything
+    /// this node cannot verify and apply refuses it.
+    async fn join_log(
         &self,
         log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
-    ) -> Result<Slot, CoordinatedError> {
-        if log != self.followed_log(log.scope).await {
-            return Err(CoordinatedError::Unfollowed);
-        }
-        let _deciding = self.domain_log.deciding.lock().await;
+    ) -> Result<LogHead, CoordinatedError> {
         if self.inner.lock().await.log_state(log).await?.0 == 0 {
             self.hold_sealed_entries(log, coordinator, peers).await?;
         }
@@ -615,6 +759,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(CoordinatedError::Conflict);
             }
         }
+        Ok(head)
+    }
+    /// Decides this replica's undecided entries of `log`, applies those
+    /// committed, catches up from `peers` and joins the in-sync set. The
+    /// slot is the position the next coordinated write is staged at.
+    pub async fn coordinated_slot(
+        &self,
+        log: TipLog,
+        coordinator: &dyn DomainLog,
+        peers: &dyn EntryPeers,
+    ) -> Result<Slot, CoordinatedError> {
+        if log != self.followed_log(log.scope).await {
+            return Err(CoordinatedError::Unfollowed);
+        }
+        let _deciding = self.domain_log.deciding.lock().await;
+        let head = self.join_log(log, coordinator, peers).await?;
         if head.members.len() < head.minimum {
             return Err(CoordinatedError::BelowMinimum);
         }
@@ -627,12 +787,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Refuses a slot while a committed entry's frames wait for dependencies.
     pub(super) async fn require_applied(&self, log: TipLog) -> Result<(), CoordinatedError> {
         let inner = self.inner.lock().await;
+        // A pruned frame was applied; a stored one must be. The stored
+        // status suffices: no frame is decoded or verified again.
         for entry in inner.entries(log, &["committed"]).await? {
             let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
             for id in ids {
-                if inner.frame(id).await?.is_some()
-                    && inner.status(id).await? != ReceiveStatus::Applied
-                {
+                let stored = collect_rows(
+                    inner
+                        .conn
+                        .query(
+                            "SELECT 1 FROM secure_operations WHERE hash=? AND status<>'applied'",
+                            [id.as_bytes().to_vec()],
+                        )
+                        .await
+                        .map_err(Error::from)?,
+                )
+                .await?;
+                if !stored.is_empty() {
                     return Err(CoordinatedError::Behind);
                 }
             }
@@ -716,6 +887,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         match decided {
             Decision::Committed => {
+                self.admit_carry(entry.carry.as_ref()).await?;
+                self.inner.lock().await.publication_fault(4)?;
                 self.commit_own(log, &entry, &ids).await?;
                 Ok(CoordinatedCommit {
                     position: pending.position,
@@ -743,17 +916,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<(Vec<EncryptedFrame>, Option<Decision>), CoordinatedError> {
-        let (frames, voids) = {
+        let (frames, voids, carry) = {
             let inner = self.inner.lock().await;
             let frames = inner.own_frames(ids).await?;
             let voids = inner.voids_before(&frames).await?;
-            (frames, voids)
+            let carry = inner
+                .entries(log, &["staged", "assigned"])
+                .await?
+                .into_iter()
+                .find(|entry| entry.hash == pending.hash)
+                .and_then(|entry| entry.carry);
+            (frames, voids, carry)
         };
         let sent = CoordinatedEntry {
             log,
             pending: pending.clone(),
             frames,
             voids,
+            carry,
         };
         let me = coordinator.node();
         let Ok(head) = coordinator.log_head(log).await else {
@@ -863,7 +1043,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.pull_again().await?;
+        inner.rebuild_voided().await?;
         inner.flush()?;
         inner.publish_revision().await
     }
@@ -894,18 +1074,35 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         {
+            let inner = self.inner.lock().await;
+            inner.check_entry_coordinates(&entry, &ids)?;
+            // Its acknowledgment promises to apply it once committed: a node
+            // that cannot hold every frame's scope stores nothing.
+            let local = inner.local_grants(now()?)?;
+            for frame in &entry.frames {
+                let scope = frame.scope()?;
+                if !roles::holds_whole(&local, scope) {
+                    return Err(denied("this node cannot hold a coordinated entry's scope").into());
+                }
+            }
+        }
+        {
             let mut inner = self.inner.lock().await;
             transaction!(inner, |inner| {
                 inner
                     .conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_entries VALUES(?,?,?,'stored',NULL,?,NULL,?,NULL)",
+                        "INSERT OR IGNORE INTO secure_entries VALUES(?,?,?,'stored',NULL,?,NULL,?,NULL,?)",
                         bindings(vec![
                             SqlValue::Blob(encode(&entry.log)?),
                             SqlValue::Blob(pending.hash.to_vec()),
                             SqlValue::Integer(pending.position as i64),
                             SqlValue::Blob(encode(&(&entry.frames, &entry.voids))?),
                             SqlValue::Blob(encode(pending)?),
+                            match &entry.carry {
+                                Some(carry) => SqlValue::Blob(carry.to_bytes().map_err(credential)?),
+                                None => SqlValue::Null,
+                            },
                         ]),
                     )
                     .await?;
@@ -960,13 +1157,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<CoordinatedStatus, CoordinatedError> {
         let head = coordinator.log_head(log).await.map_err(coordination)?;
         self.inner.lock().await.learn_genesis(log, &head).await?;
-        // A submission a lost reply left undecided is sent again first.
-        self.retry_cut(log, coordinator).await?;
-        let head = coordinator.log_head(log).await.map_err(coordination)?;
-        // Trusted nodes take cuts from the coordinator head only.
-        if let Some(cut) = &head.cut {
-            self.receive_cuts(&[CutEvidence::from_log(cut)?]).await?;
-        }
         let me = coordinator.node();
         // A staged entry whose append a restart lost: its first outcome
         // decides. One this process proposes next is left to `propose`.
@@ -976,6 +1166,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             false => self.inner.lock().await.entries(log, &["staged"]).await?,
         };
         for entry in staged {
+            // A lost append reply may leave the exact committed bundle staged.
+            // Collection proves older outcomes against the current anchor.
+            if entry.position
+                <= head
+                    .commit
+                    .saturating_sub(u64::from(head.terminal.is_some()))
+            {
+                match decision(&head, entry.position, entry.hash) {
+                    Decision::Committed | Decision::Unknown => continue,
+                    _ => {}
+                }
+            }
             let append = entry
                 .append
                 .ok_or_else(|| Error::Corrupt("staged entry without its append".into()))?;
@@ -1041,6 +1243,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         Ok(())
                     })?;
                 }
+                // Its frames are held once the recovery is admitted.
+                Decision::Committed
+                    if self
+                        .inner
+                        .lock()
+                        .await
+                        .recovery(log)?
+                        .is_some_and(|recovery| recovery.abandons(entry.position)) => {}
                 Decision::Committed => {
                     let (position, _, _, _) = self.inner.lock().await.log_state(log).await?;
                     if position + 1 < entry.position && !caught_up {
@@ -1053,8 +1263,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         // A terminal entry is metadata no device holds; the sealed state
-        // ends before it.
-        let through = head.commit - u64::from(head.terminal.is_some());
+        // ends before it, or at the prefix the owner's recovery retained.
+        let mut through = head.commit - u64::from(head.terminal.is_some());
+        if head.terminal.is_some()
+            && let Some(recovery) = self.inner.lock().await.recovery(log)?
+        {
+            through = through.min(recovery.retained.position);
+        }
         let (position, _, _, _) = self.inner.lock().await.log_state(log).await?;
         if position < through {
             self.catch_up(log, &head, peers, through).await?;
@@ -1081,6 +1296,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 };
             }
         }
+        self.admit_carry(entry.carry.as_ref()).await?;
         let ids = if entry.state == "stored" {
             let (frames, voids): (Vec<EncryptedFrame>, Vec<SignedVoid>) =
                 decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
@@ -1098,6 +1314,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .map(|_| ())
         })?;
         inner.flush()?;
+        Ok(())
+    }
+    /// Admits the carry record of an entry known committed into the graph,
+    /// before its frames are released: no node releases a carried frame
+    /// that its graph cannot place.
+    async fn admit_carry(&self, carry: Option<&SignedCarry>) -> Result<(), CoordinatedError> {
+        if let Some(carry) = carry {
+            self.admit_tip_statements(&[crate::TipStatement::Carry(Box::new(carry.clone()))], None)
+                .await?;
+        }
         Ok(())
     }
     /// Admits a committed entry's voids and frames as any received ones.
@@ -1125,37 +1351,35 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
         through: u64,
     ) -> Result<(), CoordinatedError> {
-        // Hashes before the window that a cut's retained chain endorsed.
+        // Hashes before the window that a recovery's retained prefix endorsed.
         let mut endorsed: BTreeMap<u64, Commitment> = BTreeMap::new();
+        let retained = self
+            .inner
+            .lock()
+            .await
+            .recovery(log)?
+            .map(|recovery| recovery.retained);
         loop {
             let (position, running, _, _) = self.inner.lock().await.log_state(log).await?;
             if position >= through {
                 return Ok(());
             }
-            let next = {
-                let mut inner = self.inner.lock().await;
-                // A held cut whose retained prefix ends here moves past it.
-                if let Some(cut) = inner
-                    .cut_after(log, position)
-                    .filter(|cut| cut.statement.entry() <= head.commit)
-                {
-                    let jumped = transaction!(inner, |inner| inner.jump_cut(&cut).await)?;
-                    inner.flush()?;
-                    if !jumped {
-                        return Err(CoordinatedError::Behind);
-                    }
-                    continue;
-                }
-                inner.next_cut(log, position)
-            };
-            let limit = next
-                .as_ref()
-                .map_or(through, |cut| cut.statement.retained.position.min(through));
+            let limit = retained.map_or(through, |retained| retained.position.min(through));
             if head.committed(position + 1).is_none() && !endorsed.contains_key(&(position + 1)) {
-                let (Some(cut), Some(running)) = (&next, running) else {
+                let Some(running) = running.or((position == 0).then_some(head.genesis)) else {
                     return Err(CoordinatedError::Behind);
                 };
-                let hashes = cut::endorsed_hashes(log, cut, (position, running), peers).await?;
+                let retained = retained.unwrap_or(rocky_credentials::LogPoint {
+                    position: head.commit,
+                    running: head.running_hash,
+                });
+                let collected = Collected {
+                    replica: self,
+                    peers,
+                };
+                let hashes =
+                    abandoned::endorsed_hashes(log, retained, (position, running), &collected)
+                        .await?;
                 endorsed.extend(
                     hashes
                         .into_iter()
@@ -1163,13 +1387,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .map(|(offset, hash)| (position + 1 + offset as u64, hash)),
                 );
             }
-            let entries: Vec<CommittedEntry> = peers
-                .committed(log, position)
-                .await
-                .map_err(|_| CoordinatedError::Behind)?
-                .into_iter()
-                .take_while(|entry| entry.position <= limit)
-                .collect();
+            let entries: Vec<CommittedEntry> = Collected {
+                replica: self,
+                peers,
+            }
+            .committed(log, position)
+            .await
+            .map_err(evidence_error)?
+            .into_iter()
+            .take_while(|entry| entry.position <= limit)
+            .collect();
             let Some(first) = entries.first() else {
                 return Err(CoordinatedError::Behind);
             };
@@ -1187,15 +1414,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .frames
                         .iter()
                         .any(|frame| frame.id().map_or(true, |id| !entry.ids.contains(&id)))
+                    || entry.carry.as_ref().is_some_and(|carry| {
+                        carry.statement.scope != log.scope
+                            || carry.statement.tip != log.tip
+                            || carry.statement.position != entry.position
+                            || !carry.names(
+                                &entry
+                                    .ids
+                                    .iter()
+                                    .map(|id| *id.as_bytes())
+                                    .collect::<Vec<_>>(),
+                            )
+                    })
                 {
-                    return Err(CoordinatedError::Behind);
+                    return Err(CoordinatedError::Refused(CoordinationError::Denied));
                 }
                 chained = coordinated_chain(chained, entry.position, entry.hash);
                 if entry.position == head.commit && chained != head.running_hash {
-                    return Err(CoordinatedError::Behind);
+                    return Err(CoordinatedError::Refused(CoordinationError::Denied));
                 }
             }
             for entry in entries {
+                self.admit_carry(entry.carry.as_ref()).await?;
                 self.receive_entry(entry.frames, &entry.voids).await?;
                 let mut inner = self.inner.lock().await;
                 for id in &entry.ids {
@@ -1260,15 +1500,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             let ids: Vec<Hash> = decode_bounded(ids, MAX_SECURE_BYTES)?;
             let mut frames = Vec::new();
+            let mut inherited = true;
             for id in &ids {
                 if let Some(frame) = inner.frame(*id).await? {
-                    inner.authorize_peer(peer, credentials, frame.scope()?)?;
+                    inner.authorize_log_peer(peer, credentials, frame.scope()?, log)?;
+                    if inner.authorize_log_frame(peer, log, &frame).is_err() { inherited = false; break; }
                     frames.push(frame);
                 }
             }
+            if !inherited { break; }
             entries.push(CommittedEntry {
                 position,
                 hash: commitment_of(hash)?,
+                carry: inner.entry_carry(log, position, &ids),
                 ids,
                 before: if position == 1 { genesis } else { before },
                 voids: inner.voids_before(&frames).await?,
@@ -1277,10 +1521,31 @@ impl<A: RowApplication> EncryptedReplica<A> {
             before = Some(commitment_of(running)?);
         }
         // Members rebuild evidence from retained bundles of the log's tip.
-        if entries.is_empty() {
-            entries = inner
-                .recovered_entries(peer, credentials, log, after)
-                .await?;
+        if entries
+            .first()
+            .is_none_or(|entry| entry.position != after + 1)
+            || entries
+                .windows(2)
+                .any(|pair| pair[1].position != pair[0].position + 1)
+        {
+            let mut combined: BTreeMap<u64, CommittedEntry> = entries
+                .into_iter()
+                .map(|entry| (entry.position, entry))
+                .collect();
+            for entry in inner
+                .collectible_entries(Some((peer, credentials)), log, after)
+                .await?
+            {
+                if let Some(known) = combined.get(&entry.position)
+                    && known.hash != entry.hash
+                {
+                    return Err(denied(
+                        "invalid committed evidence: conflicting retained bundle",
+                    ));
+                }
+                combined.entry(entry.position).or_insert(entry);
+            }
+            entries = combined.into_values().take(MAX_CATCH_UP_ENTRIES).collect();
         }
         let hashes = entries
             .iter()
@@ -1309,5 +1574,62 @@ impl PartialEq for CoordinatedError {
             (Self::Refused(a), Self::Refused(b)) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         }
+    }
+}
+
+/// Committed entries this node rebuilds from bundles it holds itself, as a
+/// member would serve them, then those its peers serve.
+struct Collected<'a, A> {
+    replica: &'a EncryptedReplica<A>,
+    peers: &'a dyn EntryPeers,
+}
+impl<A: RowApplication> EntryPeers for Collected<'_, A> {
+    fn store<'b>(&'b self, node: PublicKey, entry: &'b CoordinatedEntry) -> PeerFuture<'b, ()> {
+        self.peers.store(node, entry)
+    }
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+        Box::pin(async move {
+            let held = self
+                .replica
+                .inner
+                .lock()
+                .await
+                .collectible_entries(None, log, after)
+                .await?;
+            let mut available: BTreeMap<u64, CommittedEntry> =
+                held.into_iter().map(|e| (e.position, e)).collect();
+            let mut contiguous = Vec::new();
+            let mut at = after;
+            while contiguous.len() < MAX_CATCH_UP_ENTRIES {
+                if !available.contains_key(&(at + 1)) {
+                    for entry in self.peers.committed(log, at).await? {
+                        if entry.position <= at {
+                            return Err(denied("invalid committed evidence: nonadvancing page"));
+                        }
+                        if let Some(held) = available.get(&entry.position)
+                            && held.hash != entry.hash
+                        {
+                            return Err(denied("invalid committed evidence: conflicting entries"));
+                        }
+                        available.entry(entry.position).or_insert(entry);
+                    }
+                }
+                let Some(entry) = available.remove(&(at + 1)) else {
+                    break;
+                };
+                at = entry.position;
+                contiguous.push(entry);
+            }
+            Ok(contiguous)
+        })
+    }
+}
+
+fn evidence_error(error: Error) -> CoordinatedError {
+    match error {
+        Error::Rejected(reason) if reason.starts_with("invalid committed evidence:") => {
+            CoordinatedError::Refused(CoordinationError::Denied)
+        }
+        _ => CoordinatedError::Behind,
     }
 }

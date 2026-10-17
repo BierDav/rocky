@@ -21,6 +21,11 @@ Trust is the guard. Nothing prevents a trusted node from writing coordinated
 tables directly with an ordinary commit; applications that need every write
 of a table coordinated keep that discipline themselves.
 
+Trust grants no row access. A scoped trusted node coordinates entries in scopes
+it may hold with whole-row Read or Custody grants. Before storing or acknowledging
+an entry it refuses any frame outside those grants; a retained key or full replica
+role cannot authorize it. Such a refusal surfaces to the proposer as `rejected`.
+
 ## One write
 
 1. **Slot.** `EncryptedReplica::coordinated_slot(followed_log(domain))`
@@ -66,6 +71,7 @@ has rolled the local effects back; ordinary writes are unaffected.
 | `Aborted` | `aborted` | The deadline passed without enough acknowledgments; voided everywhere |
 | `Undecided` | `undecided` | The coordinator was lost after assignment; the effects stay unsent until resolution decides |
 | `Behind` | `behind` | Committed entries are missing and no trusted peer supplied them yet |
+| `CustodyRequired` | `custody_required` | Inherited frontier positions require a partition this node has not proved; acquire authorized custody rather than retrying unchanged |
 | `Unfollowed` | `unfollowed_tip` | This node does not follow the log's tip; a tip no trusted node follows takes no coordinated write |
 | `Sealed` | `sealed` | A seal or bookmark move ended the followed tip's log, or a `close` ended a pending write, now held |
 | `Refused` | `rejected` | The coordinator refused the call |
@@ -81,7 +87,13 @@ On a trusted node with a composed log, a seal of a tip enters the graph only
 after its digest ended that tip's log as its terminal entry, so no entry
 commits on a tip the graph sealed. `publish_tip_statements` and
 `receive_tip_statements` verify each new seal as admission does, then end its
-tip's log with `LogTerminal { digest, continuation }` unless it ended already:
+tip's log with `LogTerminal { digest, continuation }` unless it ended already.
+Once the log committed an entry, the coordinator takes an ordinary seal only
+from a node of its in-sync set: a node outside it that follows the tip
+catches up through its peers and joins first
+(`publish_tip_statements_through`), and one that cannot fails `behind`
+(retryable). It never switches tips to do so. The owner's recovery seal is
+the exception; see [stuck recovery](stuck-recovery.md).
 
 - A log ended by this seal, or by a terminal entry whose statement this node
   does not hold, admits the seal; concurrent seals resolve in the graph by
@@ -90,11 +102,17 @@ tip's log with `LogTerminal { digest, continuation }` unless it ended already:
 - When a seal this node already holds ended the log, its own publication
   fails `sealed` and publishes nothing. A received seal is admitted anyway.
 - When the coordinator does not confirm, publication fails
-  `coordinator_unavailable`; a received seal and the statements depending on
-  it wait outside the graph until a later exchange.
+  `coordinator_unavailable`. A received seal this node cannot confirm, also
+  because it is outside the in-sync set, waits outside the graph with the
+  statements depending on it.
 
-The SDK's `tips` calls report both with these JSON codes: `sealed` is not
-retryable, `coordinator_unavailable` is.
+Publication journals the signed batch, flushed, before the coordinator sees
+it, and keeps it after a reply that may have been lost; received seals that
+wait are journaled too (`secure_pending_tips`, at most 32 batches).
+`settle_tip_statements(peers)` ends their logs and admits them, catching up
+and joining first; the SDK runs it at the start of every sync pass. The SDK's
+`tips` calls report `sealed` (not retryable), `coordinator_unavailable` and
+`behind` (retryable).
 
 Moves need no entry of their own: a move off an open tip carries the close
 seal that ends its log, and a forward move leaves an already sealed tip.
@@ -109,20 +127,34 @@ terminal entry are the sealed state; their frames beyond the seal's frontier
 walk on as late frames. A continuation's log starts at zero, so before a
 node takes anything of it, at its first slot or resolution there, it decides
 its entries of the sealed tip's log and catches up and applies every one
-committed before the terminal entry; otherwise it is `Behind`. A pending
+committed before the terminal entry, or through the prefix an owner's
+recovery retained; otherwise it is `Behind`. A branch opened on a seal that
+ended its tip's log needs the same of that log. Followers of a tip that
+descends from a sealed one may fetch its committed entries. A pending
 entry the terminal entry aborted is decided by its proposer:
 
+- After the owner's recovery that abandoned entries, the write was computed
+  on abandoned state: it is held and returns `Sealed`, never carried.
 - With a continuation, the write moves unsent into the log of the
   continuation of the tip's winning seal in the proposer's graph, else the
   terminal entry's. Once the node follows that tip, it is appended there as
   the first entry, which is the state it was computed on, and commits once.
-  Until then `propose` returns `Undecided`; a continuation whose seal lost
+  Its frames are unchanged: they keep the tip and entry they sign, the
+  mutation handle, row identities and timestamps. In a tip graph the author
+  signs a carry record naming the continuation's tip, its first entry and the
+  frames (see [carry records](#carry-records)). Until then `propose` returns `Undecided`; a continuation whose seal lost
   hands it on to the winner's. Another node that stored it discards it.
 - After a `close`, or when the continuation already took a write, it is
   voided, rolled back and returned as a [held change](held-changes.md):
   `Sealed`.
 
 Slots on an ended log fail `Sealed`.
+
+The first slot after a seal also checks its inherited frontier. Author-signed
+[header placements](lazy-compaction.md#finalizing) settle positions in scopes
+the node cannot hold, including an issuer's registry-only tail. They grant no
+payload access and never satisfy `require_applied` for a held scope. An
+unproved partition fails explicitly with `custody_required`.
 
 ## Recovery
 
@@ -139,12 +171,13 @@ memory.
 
 Join and append sequences are allocated in a flushed transaction before the
 coordinator sees them. A position committed beyond the coordinator's
-1,024-hash window cannot be decided by a node that slept through it; stuck
-recovery is [phase 10](../features_09/10-stuck-recovery.md).
+1,024-hash window cannot be decided by a node that slept through it; see
+[stuck recovery](stuck-recovery.md).
 
 ## Catch-up
 
-A node outside the set reads entry evidence from any reachable device: each
+A node outside the set reads entry evidence from what it holds itself and
+from any reachable device: each
 position, entry hash and frame ids, verified against the head's hash window
 and running hash before any is recorded. The coordinator supplies the genesis
 anchor even after the first commit, so a fresh identity can start at zero. The frames themselves are ordinary
@@ -160,15 +193,44 @@ the coordinator's window. The scan and reply use bounded pages.
 
 A missing copy, incomplete bundle or entry outside the hash window leaves the
 node `Behind`; even a matching final running hash cannot bypass a missing hash
-in that window. Only an owner-signed cut continues past entries no device
-holds, and only a held cut's retained chain verifies positions before the
+in that window. Only the owner's recovery seal continues past entries no
+device holds, and only its retained hash verifies positions before the
 window; see [stuck recovery](stuck-recovery.md).
+
+## Carry records
+
+`SignedCarry` (`rocky.entry-carry.v1`) states that the bundle `ids`, signed at
+entry `from` of one tip's log, committed at position 1 of a continuation
+`tip`. The frames' author signs it with its trusted node chain, verified like a
+[terminal acknowledgment](seal-finality.md). The graph refuses a record whose
+target is not reached from `from` through seals, so a branch opening is never a
+target, and a second record of other frames for an occupied entry. A trusted
+node holding that committed entry also refuses a record whose entry hash
+differs. Records grant nothing, so revocation does not remove them.
+
+- **Staging.** The record is signed in the staging transaction of the retry
+  and travels with the stored entry. An in-sync node stores frames that sign
+  another coordinate only with a record from their author naming exactly
+  them, this entry and their signed coordinate. A further carry discards it.
+- **Release.** After the coordinator reports the entry committed, and before
+  its frames commit locally, the record enters the graph through ordinary
+  admission. Frames of another tip commit only with an effective record,
+  so no node offers a carried frame its graph cannot place. Catch-up pages
+  carry the record; served evidence attaches it from the graph.
+- **Placement.** A frame resolves to its author's deepest record along the
+  continue path, else to the coordinate it signs. Entry indexes, member
+  evidence, recovery rollback and receipt-time holding all use that
+  coordinate. A record admitted after its frames re-indexes them and rolls
+  back what a recovery abandoned, in the admission transaction.
+
+Without a tip graph, explicit generations carry no record: no recovery can
+abandon the continuation's entries.
 
 ## APIs
 
 | Surface | Calls |
 | --- | --- |
-| Rust | `EncryptedReplica::{followed_tip, followed_log, coordinated_slot, propose, store_entry, resolve_coordinated, seal_log, committed_entries, coordinated_status, set_domain_log}`, `SecureSql::commit_coordinated`, the `EntryPeers` transport port and the `rocky_core::DomainLog` metadata port |
+| Rust | `EncryptedReplica::{followed_tip, followed_log, coordinated_slot, propose, store_entry, resolve_coordinated, seal_log, committed_entries, coordinated_status, set_domain_log, publish_tip_statements_through, settle_tip_statements, recovery_proposal}`, `SecureSql::commit_coordinated`, the `EntryPeers` transport port and the `rocky_core::DomainLog` metadata port |
 | Coordinator | `NetworkCoordinator` implements `DomainLog`; `rocky_coordinator::coordinated::MemoryLog` runs the same log machine in one process |
 | Live links | `NativeSession::{store_entry, committed_entries}`; a store is paged and its chains carried as for pushes |
 | SDK | `Open::coordination` accepts `Coordination::Composed(Arc<dyn DomainLog>)` or `Coordination::Service(bundle)`; `Database::coordinate(log)` changes the composed log after open. A service database composes its log itself. SQL `BEGIN` and `COMMIT` with `"coordinated": true`, through the followed tip's log; `coordinated` reports `trusted`, `tip` (hex), `position` and `undecided` |
@@ -187,9 +249,9 @@ The SDK sends entries only over open live links: a trusted node without one
 to a member of the set leaves the set at the deadline. Kotlin uses a coordination service, or attaches `DevelopmentLog` for
 in-process development. A development log loses its ledger at process exit.
 
-The encrypted file identity is `rocky.encrypted-replica.v25` and the live
-link handshake `rocky.link.v9`; entries, catch-up requests and cut counts name
-their tip's log. Other versions are refused.
+The encrypted file identity is `rocky.encrypted-replica.v32` and the live
+link handshake `rocky.link.v14`; entries and catch-up requests name their
+tip's log. Other versions are refused.
 
 ## Limits
 
@@ -198,21 +260,20 @@ their tip's log. Other versions are refused.
 - An offered frame of another log that depends on an aborted entry's row
   waits for its void and then applies on the rolled-back state.
 - One undecided own entry per log; checkpoints of its scopes wait for it.
-- A write carried into a continuation keeps its frames' tip and log
-  position, the sealed tip's; members cannot rebuild its entry evidence from
-  bundles, so catch-up needs a trusted node's committed index for it.
-- Members fence and rebuild entry evidence by the tip each frame names.
+- Until a carried write's record reaches a member, its rows stay as for a
+  late recovery seal; the record rolls them back when it arrives.
+- Members rebuild entry evidence by the coordinate each frame resolves to.
 - The coordinator keeps 8 ended logs per domain; an older one reads as
   unopened. A node holding committed entries of it refuses its slots
   `Sealed`; one that held none could join it again until its seal arrives.
-- Only a continuation's own sealed parent log is caught up, while that log
-  is retained, and a branch tip's log checks nothing of the log its opening
-  seal ended: a trusted node must hold that sealed state before it writes.
+- Only the log a tip starts from is caught up, while the coordinator
+  retains it: a continuation's parent, or the log a branch's opening seal
+  ended.
 - Only the followed tip's log, and the sealed log it continues, are
   resolved: an own write a crash left undecided on a tip the node left for
   another line stays unsent, with its effects.
 - Commit is decided against the coordinator's window; older positions need
-  an owner-signed [recovery cut](stuck-recovery.md).
+  the owner's [recovery seal](stuck-recovery.md).
 
 ## Evidence
 

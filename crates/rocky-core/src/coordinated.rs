@@ -53,8 +53,6 @@ pub struct LogHead {
     pub pending: Option<LogPending>,
     /// The newest committed entry hashes, the last at `commit`.
     pub hashes: Vec<Commitment>,
-    /// The latest owner-signed cut, retained so no device must explain it.
-    pub cut: Option<LogCut>,
     /// The committed entry at `commit` that ended the log; none while open.
     pub terminal: Option<LogTerminal>,
     /// Encoded `rocky_credentials::TerminalAck`s of the terminal entry, one
@@ -62,14 +60,6 @@ pub struct LogHead {
     pub acknowledgments: Vec<Vec<u8>>,
     /// The owner closed the domain: the log takes no further write.
     pub closed: bool,
-}
-/// An owner-signed cut as the coordinator retains it: the encoded signed
-/// record, whose digest is its entry hash, and the owner's credential chain
-/// devices verify. The coordinator checks the record, never the chain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LogCut {
-    pub record: Vec<u8>,
-    pub authority: Vec<u8>,
 }
 impl LogHead {
     /// The committed hash at `position`, while the window still holds it.
@@ -116,13 +106,14 @@ pub trait DomainLog: Send + Sync {
     fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending>;
     /// Promises that this node durably stored the exact pending entry.
     fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult>;
-    /// Submits an owner-signed cut of the exact current head. A retry of the
-    /// retained record returns the same commit.
-    fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult>;
     /// Commits the terminal entry that ends the log, aborting a pending
     /// entry. A retry of the committed terminal returns the same commit;
     /// another one is refused with `Sealed`.
     fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult>;
+    /// Ends a stuck log with the owner's recovery seal, an encoded
+    /// `rocky_credentials::SignedSeal` naming the exact commit, without the
+    /// in-sync set. A retry of the committed one returns the same commit.
+    fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult>;
     /// Keeps this node's signed acknowledgment of the terminal entry that
     /// ended `log`. A retry of the same one succeeds; another is refused.
     fn acknowledge_terminal(

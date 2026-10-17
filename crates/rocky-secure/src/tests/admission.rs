@@ -202,6 +202,12 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
 
 #[tokio::test]
 async fn another_session_version_is_refused_with_the_authentication_error() {
+    // The first version and the parent format, `rocky.link.v10`.
+    for version in [1, 10] {
+        refused_session_version(version).await;
+    }
+}
+async fn refused_session_version(version: u32) {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
@@ -221,7 +227,7 @@ async fn another_session_version_is_refused_with_the_authentication_error() {
             &b,
             (bob.clone(), f.credentials(&bob, f.full())),
             Some(alice.public_key()),
-            1,
+            version,
         )
     );
     match accepted {

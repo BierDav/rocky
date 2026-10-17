@@ -98,7 +98,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(Error::Corrupt("held frame".into()));
             };
             let frame: EncryptedFrame = decode(bytes)?;
-            evidence.push(frame.operation()?.header);
+            evidence.push(frame.operation_ref()?.header.clone());
         }
         for record in rows(&inner.conn, "SELECT header FROM secure_voids").await? {
             let [SqlValue::Blob(bytes)] = record.as_slice() else {
@@ -125,7 +125,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "SELECT 1 FROM secure_staged WHERE hash=?",
                 "SELECT 1 FROM secure_stubs WHERE hash=?",
                 "SELECT 1 FROM secure_checkpoint_stubs WHERE hash=?",
-                "SELECT 1 FROM secure_checkpoint_build_stubs WHERE hash=?",
             ] {
                 if !collect_rows(inner.conn.query(sql, [hash.clone()]).await?)
                     .await?

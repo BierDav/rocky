@@ -14,6 +14,19 @@ struct Fixture {
     public: ResourceScope,
     private: ResourceScope,
 }
+
+/// Warms the committed cache, checks a hit, then compares independent replay.
+pub(crate) async fn check_frontier_cache<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+    scope: ResourceScope,
+) {
+    let first = replica.frontier(scope).await.unwrap();
+    let inner = replica.inner.lock().await;
+    let before = inner.frontier_cache_stats();
+    assert_eq!(inner.frontier(scope).await.unwrap(), first);
+    assert_eq!(inner.frontier_cache_stats(), before);
+    assert_eq!(inner.compute_tip_frontier(scope).await.unwrap(), first);
+}
 /// From a day ago for 300 days: a fixture chain's validity, within the
 /// longest a chain may live. Read once per process, so a link issued after a
 /// second boundary never outlives its parent.
@@ -41,6 +54,233 @@ pub(crate) async fn stored_frames<A: rocky_core::RowApplication>(
         );
     }
     frames
+}
+/// Creates and follows `main` on the genesis tip on first use, has `owner`
+/// seal the followed tip at everything `replica` holds and move `main` on.
+/// Returns the statements peers receive, through [`exchange_graphs`], before
+/// frames of the next tip.
+pub(crate) async fn seal_main<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+    owner: &PrivateKey,
+    domain: rocky_core::Scope,
+) -> Vec<TipStatement> {
+    use rocky_credentials::{
+        BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction, SealStatement,
+        SignedBookmarkMove, SignedSeal,
+    };
+    let bookmark = |from, to| {
+        TipStatement::Bookmark(
+            SignedBookmarkMove::sign(
+                BookmarkMoveStatement {
+                    format: BOOKMARK_MOVE_FORMAT,
+                    scope: domain,
+                    name: "main".into(),
+                    from,
+                    to: Some(to),
+                },
+                owner,
+            )
+            .unwrap(),
+        )
+    };
+    let mut statements = Vec::new();
+    if replica.followed_bookmark().await.is_none() {
+        let created = bookmark(None, replica.followed_tip().await);
+        replica
+            .publish_tip_statements(std::slice::from_ref(&created))
+            .await
+            .unwrap();
+        replica.follow_bookmark(domain, "main").await.unwrap();
+        statements.push(created);
+    }
+    let tip = replica.followed_tip().await;
+    let schema = replica
+        .tip_graph(domain)
+        .await
+        .unwrap()
+        .schema(tip)
+        .unwrap();
+    let seal = SignedSeal::sign(
+        SealStatement {
+            format: SEAL_FORMAT,
+            scope: domain,
+            tip,
+            frontier: replica.seal_frontier(domain, false).await.unwrap(),
+            action: SealAction::Continue { schema },
+            recovery: None,
+        },
+        owner,
+    )
+    .unwrap();
+    let next = seal.successor().unwrap().unwrap();
+    let advanced = [TipStatement::Seal(seal), bookmark(Some(tip), next)];
+    replica.publish_tip_statements(&advanced).await.unwrap();
+    statements.extend(advanced);
+    statements
+}
+/// Bases form only at seals: [`seal_main`], then compacts there.
+pub(crate) async fn seal_and_compact<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+    owner: &PrivateKey,
+    domain: rocky_core::Scope,
+) -> Vec<TipStatement> {
+    let statements = seal_main(replica, owner, domain).await;
+    let report = replica.compact(domain, 0).await.unwrap();
+    if report.compacted.is_none() {
+        let status = replica.compaction_status(domain).await;
+        panic!("{report:?} {status:?}");
+    }
+    statements
+}
+/// [`seal_and_compact`], then `scope`'s base at the seal.
+pub(crate) async fn compacted_base<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+    owner: &PrivateKey,
+    scope: ResourceScope,
+) -> crate::SignedCheckpoint {
+    seal_and_compact(replica, owner, scope.domain).await;
+    replica.checkpoint(scope).await.unwrap()
+}
+/// Imports from `source` the verified base of every scope `target`, whose
+/// node key is `key`, still needs at a seal of its path, and returns the
+/// signed records for the caller to check. Nothing remains needed after.
+pub(crate) async fn import_needed_bases<A: rocky_core::RowApplication>(
+    source: &EncryptedReplica<A>,
+    target: &EncryptedReplica<A>,
+    key: &PrivateKey,
+    credentials: &CredentialChain,
+    domain: rocky_core::Scope,
+) -> Vec<crate::SignedCheckpoint> {
+    source
+        .admit_peer(key.public_key(), credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let mut imported = Vec::new();
+    for need in target.seal_rebootstraps(domain).await.unwrap() {
+        let offered = source
+            .checkpoint_offer(key.public_key(), credentials, need.scope)
+            .await
+            .unwrap()
+            .expect("a verified base at a seal");
+        offered.verify_signature().unwrap();
+        let checkpoint = offered.id().unwrap();
+        target.begin_rebootstrap(offered.clone()).await.unwrap();
+        // A no-frames checkpoint stages complete: it has no pages.
+        let (_, mut after, complete) = target
+            .rebootstrap_progress(need.scope)
+            .await
+            .unwrap()
+            .unwrap();
+        if !complete {
+            loop {
+                let page = source
+                    .checkpoint_page(
+                        key.public_key(),
+                        credentials,
+                        need.scope,
+                        checkpoint,
+                        after,
+                        MAX_SECURE_FRAME,
+                    )
+                    .await
+                    .unwrap();
+                after = page.next;
+                target.stage_checkpoint_page(page).await.unwrap();
+                if after.is_none() {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            target
+                .finish_rebootstrap(need.scope)
+                .await
+                .unwrap()
+                .checkpoint,
+            checkpoint
+        );
+        imported.push(offered);
+    }
+    assert!(target.seal_rebootstraps(domain).await.unwrap().is_empty());
+    imported
+}
+/// A signed record of empty state at a seal: no operations, rows,
+/// tombstones or creations.
+pub(crate) fn assert_signed_empty(signed: &crate::SignedCheckpoint) {
+    signed.verify_signature().unwrap();
+    let statement = &signed.statement;
+    assert!(statement.seal.is_some());
+    assert_eq!(
+        (
+            statement.operations,
+            statement.rows.count,
+            statement.tombstones,
+            statement.creations.count
+        ),
+        (0, 0, 0, 0)
+    );
+}
+/// Exchanges tip graphs between `a` and `b` as a link does; each follows
+/// `main` once it exists.
+pub(crate) async fn exchange_graphs<A: rocky_core::RowApplication>(
+    a: &EncryptedReplica<A>,
+    b: &EncryptedReplica<A>,
+    domain: rocky_core::Scope,
+) {
+    let (forward, back) = (all_tip_statements(a).await, all_tip_statements(b).await);
+    for (replica, statements) in [(b, &forward), (a, &back)] {
+        replica.receive_tip_statements(statements).await.unwrap();
+    }
+    for replica in [a, b] {
+        if replica.followed_bookmark().await.is_none()
+            && replica
+                .tip_graph(domain)
+                .await
+                .unwrap()
+                .bookmark("main")
+                .unwrap()
+                .is_some()
+        {
+            replica.follow_bookmark(domain, "main").await.unwrap();
+        }
+    }
+}
+/// [`exchange_graphs`], then tells each side which tip the other follows,
+/// as a link's tip exchange does.
+pub(crate) async fn link_up<A: rocky_core::RowApplication>(
+    a: &EncryptedReplica<A>,
+    b: &EncryptedReplica<A>,
+    domain: rocky_core::Scope,
+) {
+    exchange_graphs(a, b, domain).await;
+    for (server, client) in [(a, b), (b, a)] {
+        let (node, credentials) = {
+            let inner = client.inner.lock().await;
+            (
+                inner.config.node.public_key(),
+                inner.config.credentials.clone(),
+            )
+        };
+        server
+            .admit_peer(node, &credentials, client.followed_tip().await)
+            .await
+            .unwrap();
+    }
+}
+/// Every released statement of `replica`'s tip graphs, page by page.
+pub(crate) async fn all_tip_statements<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+) -> Vec<TipStatement> {
+    let mut statements = Vec::new();
+    let mut after = None;
+    loop {
+        let page = replica.tip_statements(after, 32).await.unwrap();
+        let Some(last) = page.last() else {
+            return statements;
+        };
+        after = Some(last.id().unwrap());
+        statements.extend(page);
+    }
 }
 pub(crate) fn lifetime() -> (u64, u64) {
     static LIFETIME: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
@@ -593,7 +833,7 @@ async fn rollback_retry_restart_and_missing_encrypted_dependencies() {
         .await
         .unwrap();
     assert_eq!(third.operation().unwrap().header.seq_num, 2);
-    assert_ne!(&first.body[..24], &third.body[..24]);
+    assert_ne!(&first.body_bytes()[..24], &third.body_bytes()[..24]);
     target.receive(third).await.unwrap();
     assert_eq!(
         target.companion(fixture.public, [1; 32]).await.unwrap(),
@@ -1274,8 +1514,9 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
         )
         .await
         .unwrap();
-    let mut broken = frame.clone();
-    broken.body[30] ^= 1;
+    let mut body = frame.body_bytes().to_vec();
+    body[30] ^= 1;
+    let broken = frame.with_body(body);
     assert!(target.receive(broken).await.is_err());
     let mut operation = frame.operation().unwrap();
     operation.header.extensions.generation.generation = 2;
@@ -1340,6 +1581,7 @@ mod scaling;
 mod checkpoint;
 
 mod admission;
+mod author_payload;
 mod bundles;
 mod chains;
 mod compaction;
@@ -1353,6 +1595,7 @@ mod generations;
 mod group;
 mod kept;
 mod partitions;
+mod placements;
 mod revocations;
 #[cfg(unix)]
 mod roles;
@@ -1360,6 +1603,7 @@ mod rotation;
 mod sql;
 mod tip_drop;
 mod tip_network;
+mod tip_schemas;
 mod tips;
 
 mod partition_foreign_keys;
@@ -1370,3 +1614,5 @@ pub(crate) mod group_sync_measurement;
 fn node_number(node: PublicKey) -> u32 {
     (u32::from_le_bytes(node.as_bytes()[..4].try_into().unwrap()) & 0x7fff_ffff).max(1)
 }
+
+mod bulk;

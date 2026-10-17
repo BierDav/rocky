@@ -3,6 +3,7 @@
 use super::checkpoint::{MAX_CHECKPOINT_LOGS, key_of};
 use super::*;
 use rocky_credentials::PeerId;
+mod restoration;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_roles(id INTEGER PRIMARY KEY CHECK(id=1),config BLOB NOT NULL)",
@@ -80,8 +81,6 @@ pub struct ScopeFrontier {
     pub scope: ResourceScope,
     /// Ordered by author, at most `MAX_CHECKPOINT_LOGS`.
     pub logs: Vec<FrontierLog>,
-    /// Cut records of the scope's coordinated log the holder has.
-    pub cuts: u64,
 }
 impl ScopeFrontier {
     pub fn log(&self, author: PublicKey) -> Option<&FrontierLog> {
@@ -180,8 +179,6 @@ pub struct RangePage {
     pub frontier: ScopeFrontier,
     /// Void records consuming positions of the logs the page continues.
     pub voids: Vec<SignedVoid>,
-    /// Cut records of the scope's log the requester lacks; received first.
-    pub cuts: Vec<crate::replica::CutEvidence>,
 }
 /// Lag between this replica and one peer in one scope, by applied operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,6 +234,15 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
+    /// Scopes whose payload custody current grants authorize, even without keys.
+    pub(super) fn custody_scopes(&self, time: u64) -> Result<BTreeSet<ResourceScope>, Error> {
+        let grants = self.local_grants(time)?;
+        Ok(grants
+            .iter()
+            .filter(|grant| holds_whole(std::slice::from_ref(*grant), grant.scope))
+            .map(|grant| grant.scope)
+            .collect())
+    }
     /// Whether rows of the scope follow the peers here: subscribed, or any
     /// scope of a full replica that is not being evicted.
     pub(crate) async fn holds(&self, scope: ResourceScope) -> Result<bool, Error> {
@@ -258,23 +264,38 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// The own log tip an eviction dropped. Authoring waits until the log is back.
-    async fn eviction_guard(&self, scope: ResourceScope) -> Result<Option<i64>, Error> {
+    /// The own log endpoint `(G, H)` whose frames must return before this
+    /// node authors in the scope again: after an eviction, a reset replay or
+    /// a base replacement that left its pruned own positions uncovered.
+    /// `G` is -1, with no hash, when no own log was known.
+    async fn eviction_guard(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<(i64, Option<Hash>)>, Error> {
         let mut result = self
             .conn
             .query(
-                "SELECT sequence FROM secure_evicted_logs WHERE scope=?",
+                "SELECT sequence,hash FROM secure_evicted_logs WHERE scope=?",
                 [encode(&scope)?],
             )
             .await?;
-        Ok(match result.next().await? {
-            Some(row) => Some(row.get::<i64>(0)?),
-            None => None,
-        })
+        let Some(row) = result.next().await? else {
+            return Ok(None);
+        };
+        let sequence = row.get::<i64>(0)?;
+        let hash = row.get::<Vec<u8>>(1)?;
+        match (sequence, hash.is_empty()) {
+            (-1, true) => Ok(Some((-1, None))),
+            (sequence, false) if sequence >= 0 => {
+                Ok(Some((sequence, Some(checkpoint::hash_of(&hash)?))))
+            }
+            _ => Err(Error::Corrupt("restoration guard".into())),
+        }
     }
     /// Refuses frames of a scope this replica does not hold. A frame of the
-    /// local signing identity is accepted only as a copy of what an eviction
-    /// dropped.
+    /// local signing identity is accepted only as a copy of what a recorded
+    /// restoration obligation dropped: at or below its endpoint, and the
+    /// endpoint frame itself only with its recorded hash.
     pub(crate) async fn admit_scope(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -283,27 +304,87 @@ impl<A: RowApplication> Inner<A> {
         if !self.holds(scope).await? {
             return Err(denied("scope is not held by this replica"));
         }
-        if header.public_key == self.config.node.public_key()
-            && self
-                .eviction_guard(scope)
-                .await?
-                .is_none_or(|sequence| header.seq_num as i64 > sequence)
-        {
-            return Err(denied("unknown operation from local signing identity"));
+        if header.public_key == self.config.node.public_key() {
+            let restorable = match self.eviction_guard(scope).await? {
+                Some((sequence, hash)) => {
+                    let at = header.seq_num as i64;
+                    at < sequence || (at == sequence && hash == Some(header.hash()))
+                }
+                None => false,
+            };
+            if !restorable {
+                return Err(denied("unknown operation from local signing identity"));
+            }
         }
         Ok(())
+    }
+    /// The exact original-node prefix must be applied or authentically disposed.
+    /// Neither a held endpoint nor a higher imported log alone completes it.
+    async fn restoration_complete(
+        &self,
+        scope: ResourceScope,
+        (sequence, hash): (i64, Option<Hash>),
+    ) -> Result<bool, Error> {
+        let Some(hash) = hash else { return Ok(true) };
+        let Some(id) = self.find_scope_id(scope).await? else {
+            return Ok(false);
+        };
+        let node = self.config.node.public_key();
+        let log = self.log(id, node).await?;
+        if let Some(log) = &log {
+            if log.sequence == sequence && log.hash == hash {
+                return Ok(true);
+            }
+            if log.sequence > sequence
+                && self
+                    .applied_restoration_endpoint(scope, id, sequence, hash)
+                    .await?
+            {
+                return Ok(true);
+            }
+        }
+        self.restoration_dispositions(scope, id, sequence, hash, log)
+            .await
+    }
+    /// While a restoration obligation stands, a frame of this node's own key
+    /// in the scope applies only on top of its own log: its backlink is the
+    /// log tip, or a member of the same `bundle`; the first frame of an
+    /// absent log has none. Anything else waits for its predecessors.
+    pub(super) async fn own_chain_ready(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        bundle: &BTreeSet<Hash>,
+    ) -> Result<bool, Error> {
+        let scope = header.extensions.scope;
+        if header.public_key != self.config.node.public_key()
+            || self.eviction_guard(scope).await?.is_none()
+        {
+            return Ok(true);
+        }
+        let log = match self.find_scope_id(scope).await? {
+            Some(id) => self.log(id, header.public_key).await?,
+            None => None,
+        };
+        Ok(match (log, header.backlink) {
+            (_, Some(backlink)) if bundle.contains(&backlink) => true,
+            (Some(log), Some(backlink)) => {
+                log.sequence + 1 == header.seq_num as i64 && log.hash == backlink
+            }
+            (None, None) => header.seq_num == 0,
+            _ => false,
+        })
     }
     /// Authoring needs a held scope whose own log is complete again.
     pub(crate) async fn admit_author(
         &self,
         scope: ResourceScope,
-        tip: Option<i64>,
+        _tip: Option<i64>,
     ) -> Result<(), Error> {
         if !self.holds(scope).await? {
             return Err(denied("author needs a held scope"));
         }
         if let Some(guard) = self.eviction_guard(scope).await? {
-            if tip.is_none_or(|tip| tip < guard) {
+            if !self.restoration_complete(scope, guard).await? {
                 return Err(denied(
                     "catch up the resubscribed scope before authoring in it",
                 ));
@@ -317,6 +398,37 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// Records a restoration obligation for the scope, keeping the higher
+    /// endpoint: a lower one never replaces it, and two hashes at one
+    /// sequence are corruption.
+    pub(super) async fn merge_restoration_guard(
+        &self,
+        scope: ResourceScope,
+        endpoint: (i64, Option<Hash>),
+    ) -> Result<(), Error> {
+        if let Some((held, hash)) = self.eviction_guard(scope).await? {
+            if held > endpoint.0 {
+                return Ok(());
+            }
+            if held == endpoint.0 {
+                if hash != endpoint.1 {
+                    return Err(Error::Corrupt("conflicting restoration endpoints".into()));
+                }
+                return Ok(());
+            }
+        }
+        self.conn
+            .execute(
+                "INSERT INTO secure_evicted_logs VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=excluded.sequence,hash=excluded.hash",
+                bindings(vec![
+                    SqlValue::Blob(encode(&scope)?),
+                    SqlValue::Integer(endpoint.0),
+                    SqlValue::Blob(endpoint.1.map_or_else(Vec::new, |hash| hash.as_bytes().to_vec())),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
     /// Records the own log tip an eviction drops, -1 without one. The scope
     /// reads as unavailable until a catch-up restores it.
     pub(super) async fn save_eviction_guard(&self, scope: ResourceScope) -> Result<(), Error> {
@@ -324,17 +436,11 @@ impl<A: RowApplication> Inner<A> {
             Some(id) => self.log(id, self.config.node.public_key()).await?,
             None => None,
         };
-        self.conn
-            .execute(
-                "INSERT INTO secure_evicted_logs VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=MAX(sequence,excluded.sequence),hash=excluded.hash",
-                bindings(vec![
-                    SqlValue::Blob(encode(&scope)?),
-                    SqlValue::Integer(log.as_ref().map_or(-1, |log| log.sequence)),
-                    SqlValue::Blob(log.map_or_else(Vec::new, |log| log.hash.as_bytes().to_vec())),
-                ]),
-            )
-            .await?;
-        Ok(())
+        self.merge_restoration_guard(
+            scope,
+            log.map_or((-1, None), |log| (log.sequence, Some(log.hash))),
+        )
+        .await
     }
     /// Whether a resubscribed scope still waits for the catch-up that
     /// restores what its eviction dropped.
@@ -358,80 +464,9 @@ impl<A: RowApplication> Inner<A> {
     }
     /// The contiguous held and applied prefix of every log of a scope.
     pub(crate) async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
-        if self.graphs.contains_key(&scope.domain) {
-            return self.tip_frontier(scope).await;
-        }
-        let mut logs = BTreeMap::<PublicKey, (u64, u64)>::new();
-        if let Some(id) = self.find_scope_id(scope).await? {
-            for (log, _) in self.logs(id, None, false, MAX_CHECKPOINT_LOGS + 1).await? {
-                logs.insert(log.author, (log.sequence + 1, log.sequence + 1));
-            }
-        }
-        let blob = encode(&scope)?;
-        for record in collect_rows(
-            self.conn
-                .query(
-                    "SELECT author FROM secure_operations WHERE scope=?1 UNION SELECT author FROM secure_voids WHERE scope=?1",
-                    [blob.clone()],
-                )
-                .await?,
-        )
-        .await?
-        {
-            let [SqlValue::Blob(author)] = record.as_slice() else {
-                return Err(Error::Corrupt("operation author".into()));
-            };
-            let author = key_of(author)?;
-            let entry = logs.entry(author).or_insert((0, 0));
-            // Received operations extend the prefix while they are contiguous.
-            loop {
-                let next = collect_rows(
-                    self.conn
-                        .query(
-                            // A voided position is consumed: it continues the prefix.
-                            "SELECT sequence FROM secure_operations WHERE scope=?1 AND author=?2 AND sequence>=?3 UNION SELECT sequence FROM secure_voids WHERE scope=?1 AND author=?2 AND sequence>=?3 ORDER BY sequence LIMIT 256",
-                            bindings(vec![
-                                SqlValue::Blob(blob.clone()),
-                                SqlValue::Blob(author.as_bytes().to_vec()),
-                                SqlValue::Integer(entry.0 as i64),
-                            ]),
-                        )
-                        .await?,
-                )
-                .await?;
-                let before = entry.0;
-                for record in &next {
-                    match record.as_slice() {
-                        [SqlValue::Integer(sequence)] if *sequence as u64 == entry.0 => {
-                            entry.0 += 1
-                        }
-                        _ => break,
-                    }
-                }
-                if next.len() < 256 || entry.0 - before < next.len() as u64 {
-                    break;
-                }
-            }
-        }
-        if logs.len() > MAX_CHECKPOINT_LOGS {
-            return Err(Error::Quota {
-                resource: "logs per scope",
-                limit: MAX_CHECKPOINT_LOGS,
-            });
-        }
-        Ok(ScopeFrontier {
-            scope,
-            cuts: self.held_cuts(self.tip_log(scope.domain)).len() as u64,
-            logs: logs
-                .into_iter()
-                .map(|(author, (held, applied))| FrontierLog {
-                    author,
-                    held,
-                    applied,
-                })
-                .collect(),
-        })
+        self.tip_frontier(scope).await
     }
+
     /// The grants a peer's credentials give it now.
     fn peer_grants(
         &self,
@@ -496,7 +531,7 @@ impl<A: RowApplication> Inner<A> {
         self.touch_peer(peer);
         let first = reports.iter().any(|(_, logs, _)| !logs.is_empty())
             && self.unrecorded_peer(peer).await?;
-        transaction!(self, |inner| {
+        transaction!(@cache_neutral self, |inner| {
             for (scope, logs, reads) in &reports {
                 for log in logs {
                     inner.conn.execute(
@@ -615,7 +650,6 @@ impl<A: RowApplication> Inner<A> {
         let scope = request.scope;
         self.authorize_peer(peer, credentials, scope)?;
         self.same_tip_peer(peer)?;
-        self.ensure_cut_clean(scope).await?;
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }
@@ -630,9 +664,6 @@ impl<A: RowApplication> Inner<A> {
             behind: false,
             frontier: own.clone(),
             voids: vec![],
-            cuts: self
-                .cuts_after(self.tip_log(scope.domain), request.cuts)
-                .await?,
         };
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, pruned_prefix) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
@@ -727,8 +758,8 @@ impl<A: RowApplication> Inner<A> {
 
                 // Every frame of a revoked author is refused, so none is
                 // sent.
-                let operation = frame.operation()?;
-                if !self.visible_in_workspace(&operation)?
+                let operation = frame.operation_ref()?;
+                if !self.visible_in_workspace(operation)?
                     || !self.offered(&operation.header).await?
                     || self
                         .config
@@ -833,6 +864,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await),
         }
     }
+    /// Test access: merges a restoration endpoint and returns the stored one.
+    #[cfg(test)]
+    pub(crate) async fn merge_restoration_for_test(
+        &self,
+        scope: ResourceScope,
+        endpoint: (i64, Option<Hash>),
+    ) -> Result<Option<(i64, Option<Hash>)>, Error> {
+        let inner = self.inner.lock().await;
+        inner.merge_restoration_guard(scope, endpoint).await?;
+        inner.eviction_guard(scope).await
+    }
     /// Ends the restoration of a resubscribed or replayed scope after a
     /// complete catch-up from a peer, once the own log it dropped is back.
     pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
@@ -840,20 +882,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !inner.holds(scope).await? {
             return Ok(());
         }
-        let Some(guard) = inner.eviction_guard(scope).await? else {
-            return Ok(());
-        };
-        let tip = match inner.find_scope_id(scope).await? {
-            Some(id) => inner
-                .log(id, inner.config.node.public_key())
-                .await?
-                .map(|log| log.sequence),
-            None => None,
-        };
-        if tip.unwrap_or(-1) < guard {
-            return Ok(());
-        }
-        transaction!(inner, |inner| {
+        // The completion check and the guard's removal commit together.
+        let cleared = transaction!(inner, |inner| {
+            let Some(guard) = inner.eviction_guard(scope).await? else {
+                return Ok(false);
+            };
+            if !inner.restoration_complete(scope, guard).await? {
+                return Ok(false);
+            }
             inner
                 .conn
                 .execute(
@@ -861,6 +897,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [encode(&scope)?],
                 )
                 .await?;
+            inner.settle_seal_rebootstrap(scope.domain).await?;
             inner
                 .conn
                 .execute(
@@ -868,8 +905,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     (),
                 )
                 .await?;
-            Ok(())
+            Ok(true)
         })?;
+        if !cleared {
+            return Ok(());
+        }
         inner.publish_revision().await
     }
     /// Scopes with a recorded subscription state, in scope order.
@@ -1083,7 +1123,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let mut theirs = ScopeFrontier {
                     scope,
                     logs: vec![],
-                    cuts: 0,
                 };
                 for log in collect_rows(
                     inner

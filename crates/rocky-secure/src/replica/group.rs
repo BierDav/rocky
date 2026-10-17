@@ -80,6 +80,23 @@ pub(crate) enum GroupFault {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    #[cfg(test)]
+    pub(crate) async fn stage_bundle_before_apply_for_test(
+        &self,
+        frames: &[EncryptedFrame],
+    ) -> Result<(), Error> {
+        let time = now()?;
+        let mut inner = self.inner.lock().await;
+        transaction!(inner, |inner| {
+            for frame in frames {
+                assert!(matches!(
+                    inner.receive_step(frame, time).await?,
+                    Staged::Stored(_)
+                ));
+            }
+            Ok(())
+        })
+    }
     /// Enqueues `work` as contiguous requests and returns their results in order.
     pub(super) async fn submit(&self, work: Vec<(Work, usize)>, exposed: bool) -> Vec<Reply> {
         let mut pending = Vec::with_capacity(work.len());
@@ -415,13 +432,7 @@ impl<A: RowApplication> Inner<A> {
                     },
                     Err(error) => Err(error),
                 },
-                Work::Receive(frame) => match frame.scope() {
-                    Ok(scope) => match self.ensure_cut_clean(scope).await {
-                        Ok(()) => self.receive_step(frame, time).await,
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(error),
-                },
+                Work::Receive(frame) => self.receive_step(frame, time).await,
             };
             match result {
                 Err(error) if retryable(&error) => return Err(error),
@@ -472,8 +483,10 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Admits one incoming frame into custody; application follows in the pass.
     async fn receive_step(&mut self, frame: &EncryptedFrame, time: u64) -> Result<Staged, Error> {
-        let bytes = frame.weight();
-        let operation = frame.operation()?;
+        let bytes =
+            usize::try_from(frame.stored_bytes()?).map_err(|_| denied("stored frame size"))?;
+        let migration = self.check_migration_frame(frame, time).await?;
+        let operation = frame.operation_ref()?;
         let mut store = TransactionStore(self.conn.clone());
         let held = store.has_operation(operation.hash).await?;
         // A held frame of a generation this replica does not admit, such as
@@ -488,19 +501,19 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Staged::Duplicate);
         }
         self.verify_frame(frame, time)?;
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
+        // Under the lock that installs no-frames bases, so neither order
+        // commits both a base and history it says the seal excludes.
+        self.refuse_no_frames_contradiction(&operation.header)
+            .await?;
         let extension = &operation.header.extensions;
         if let Some(key) = self.opening_key(extension.scope, extension.generation)
-            && let Ok(plaintext) = decrypt(&key.key, &encode(extension)?, &frame.body)
+            && let Ok(plaintext) = decrypt(&key.key, &encode(extension)?, frame.body_bytes())
         {
             RowPayload::check_formats(&plaintext)?;
         }
         let local = self.local_grants(time)?;
-        if !local.iter().any(|grant| {
-            grant.scope == operation.header.extensions.scope
-                && grant.rows == RowSelection::All
-                && (grant.rights.contains(&Right::Custody) || grant.rights.contains(&Right::Read))
-        }) {
+        if !roles::holds_whole(&local, operation.header.extensions.scope) {
             return Err(denied("incoming custody denied"));
         }
         if held {
@@ -509,15 +522,7 @@ impl<A: RowApplication> Inner<A> {
         // A late frame from before the pruned_prefix is part of the checkpoint: it
         // is not stored and cannot be applied a second time.
         let scope = operation.header.extensions.scope;
-        if self.frame_reach(
-            scope.domain,
-            extension.tip,
-            extension
-                .author
-                .ok_or_else(|| denied("node author missing"))?,
-            extension.author_sequence,
-            operation.header.timestamp,
-        )? != tips::FrameReach::Held
+        if self.frame_reach(frame)? != tips::FrameReach::Held
             && let Some(id) = self.find_scope_id(scope).await?
             && let Some(log) = self.log(id, operation.header.public_key).await?
             && operation.header.seq_num as i64 <= log.pruned_prefix
@@ -537,17 +542,29 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Staged::Covered);
         }
         self.admit_scope(&operation.header).await?;
-        self.check_budget(bytes).await?;
+        if migration.is_none() {
+            self.check_budget(bytes).await?;
+        }
         self.keep_chain(frame.chain()?).await?;
+        self.no_frames_intake(&operation.header).await?;
         store
             .insert_operation(
                 operation.hash,
                 &operation.header,
                 operation.body.as_ref(),
-                &frame.header,
+                frame.header_bytes(),
                 &operation.header.extensions.scope,
             )
             .await?;
+        self.settle_placement(&operation.header).await?;
+        if let Some(statement) = migration {
+            let proof = &frame
+                .migration
+                .as_ref()
+                .ok_or_else(|| denied("migration proof missing"))?
+                .proof;
+            self.classify_migration(&statement, frame, proof).await?;
+        }
         self.conn
             .execute(
                 "INSERT INTO secure_outbox VALUES(?)",

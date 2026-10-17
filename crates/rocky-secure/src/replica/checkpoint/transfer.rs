@@ -179,8 +179,8 @@ pub struct RebootstrapReport {
     /// Operations beyond the checkpoint that wait for a dependency or key.
     pub pending: Vec<Hash>,
 }
-pub(super) struct Staging {
-    pub(super) signed: SignedCheckpoint,
+pub(in crate::replica) struct Staging {
+    pub(in crate::replica) signed: SignedCheckpoint,
     pub(super) cursor: Option<Commitment>,
     pub(super) complete: bool,
     pub(super) sets: Sets,
@@ -204,7 +204,94 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(super) async fn staging(&self, id: i64) -> Result<Option<Staging>, Error> {
+    /// As `authorize_peer` for a coordinated log's entries: a peer also
+    /// takes those of a sealed tip its followed tip descends from, the
+    /// state it starts from.
+    pub(crate) fn authorize_log_peer(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scope: ResourceScope,
+        log: rocky_core::TipLog,
+    ) -> Result<(), Error> {
+        let inherited = match (self.peer_tip(peer), self.graphs.get(&log.scope)) {
+            (Some(tip), Some(graph)) => Self::descends(graph, tip, log.tip)?,
+            _ => false,
+        };
+        if !inherited {
+            return self.authorize_peer(peer, credentials, scope);
+        }
+        let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
+        if !crate::replica::roles::holds_whole(&grants, scope) {
+            return Err(denied("ciphertext custody denied"));
+        }
+        Ok(())
+    }
+    pub(crate) fn authorize_log_frame(
+        &self,
+        peer: PublicKey,
+        log: rocky_core::TipLog,
+        frame: &EncryptedFrame,
+    ) -> Result<(), Error> {
+        let Some(mut tip) = self.peer_tip(peer) else {
+            return Ok(());
+        };
+        let Some(graph) = self.graphs.get(&log.scope) else {
+            return Ok(());
+        };
+        let header = frame.operation()?.header;
+        let mut visited = BTreeSet::new();
+        while tip != log.tip && visited.insert(tip) {
+            for opening in &graph.openings {
+                if opening.tip().map_err(credential)? == tip {
+                    let seal = graph
+                        .seal_by_id(opening.statement.seal)
+                        .map_err(credential)?;
+                    let covered = seal.statement.frontier.iter().any(|mark| {
+                        Some(mark.author) == header.extensions.author
+                            && header.extensions.author_sequence <= mark.sequence
+                    });
+                    if !covered {
+                        return Err(denied(
+                            "ancestor frame exceeds the branch's inherited frontier",
+                        ));
+                    }
+                }
+            }
+            match Self::tip_parent(graph, tip)? {
+                Some((parent, _)) => tip = parent,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+    /// Whether `tip` continues or opens on a seal of `ancestor`, directly
+    /// or through further seals.
+    fn descends(
+        graph: &rocky_credentials::TipGraph,
+        tip: TipId,
+        ancestor: TipId,
+    ) -> Result<bool, Error> {
+        let mut cursor = tip;
+        let mut visited = BTreeSet::new();
+        while let Some((parent, _)) = Self::tip_parent(graph, cursor)? {
+            if parent == ancestor {
+                return Ok(true);
+            }
+            if !visited.insert(parent) {
+                break;
+            }
+            cursor = parent;
+        }
+        Ok(false)
+    }
+    pub(in crate::replica) async fn unsealed_import(&self, id: i64) -> Result<bool, Error> {
+        Ok(self
+            .staging(id)
+            .await?
+            .is_some_and(|staging| staging.signed.statement.seal.is_none()))
+    }
+    pub(in crate::replica) async fn staging(&self, id: i64) -> Result<Option<Staging>, Error> {
         let mut result = self
             .conn
             .query(
@@ -225,6 +312,65 @@ impl<A: RowApplication> Inner<A> {
             sets: Sets::from_bytes(&row.get::<Vec<u8>>(3)?)?,
             direct: row.get::<i64>(4)? == 1,
         }))
+    }
+    /// The checks an imported statement passes now: signature and current
+    /// signer authority, a seal in a graph domain, the tip's schema
+    /// generation, and the installed key epoch or a no-frames shape that
+    /// local history does not contradict.
+    pub(in crate::replica) async fn verify_import_statement(
+        &self,
+        signed: &SignedCheckpoint,
+    ) -> Result<(), Error> {
+        signed.verify_authority(self, now()?)?;
+        let statement = &signed.statement;
+        let scope = statement.scope;
+        if self.graphs.contains_key(&scope.domain) && statement.seal.is_none() {
+            return Err(denied(
+                "with a tip graph an imported checkpoint sits at a seal",
+            ));
+        }
+        let generation = self.generation_of(self.manifest_of_tip(statement.tip)?, true)?;
+        if statement.schema != generation.schema
+            || (!statement.no_frames() && Some(self.scope_key(scope)?.0) != statement.key_epoch())
+        {
+            return Err(denied(
+                "checkpoint definition/generation/key epoch mismatch",
+            ));
+        }
+        if statement.no_frames() {
+            self.check_no_frames(signed).await?;
+        }
+        Ok(())
+    }
+    /// Whether `scope` shows the verified pages of a direct import: its
+    /// staged statement still passes the import checks now, at a seal of
+    /// the followed path. Its rows are incomplete until it finishes.
+    pub(in crate::replica) async fn authenticated_direct_import(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        let Some(id) = self.find_scope_id(scope).await? else {
+            return Ok(false);
+        };
+        let Some(staging) = self.staging(id).await?.filter(|staging| staging.direct) else {
+            return Ok(false);
+        };
+        let statement = &staging.signed.statement;
+        if statement.scope != scope || self.verify_import_statement(&staging.signed).await.is_err()
+        {
+            return Ok(false);
+        }
+        if !self.graphs.contains_key(&scope.domain) {
+            return Ok(true);
+        }
+        let Some(sealed) = statement.seal else {
+            return Ok(false);
+        };
+        let graph = self.graph_for(scope.domain)?;
+        Ok(graph
+            .seal_by_id(sealed)
+            .is_ok_and(|seal| seal.statement.tip == statement.tip)
+            && self.path_index(scope.domain, sealed)?.is_some())
     }
     /// Whether the scope is being imported from a checkpoint: a staged
     /// import, or the owner's intent while the scope holds no rows yet. A
@@ -268,7 +414,7 @@ impl<A: RowApplication> Inner<A> {
             || staging.cursor != page.after
             || page.rows.scope != scope
             || page.rows.kind != PackageKind::Checkpoint
-            || page.rows.generation != staging.signed.statement.key_epoch
+            || Some(page.rows.generation) != staging.signed.statement.key_epoch()
         {
             return Err(denied("unexpected checkpoint page"));
         }
@@ -285,6 +431,13 @@ impl<A: RowApplication> Inner<A> {
         after: Option<Commitment>,
     ) -> Result<(), Error> {
         let statement = &staging.signed.statement;
+        self.check_statement_marks(scope, &statement.identities)
+            .await?;
+        if let Some((allocation, _)) = self.allocation_binding(scope).await? {
+            for (_, _, record) in &page.rows {
+                self.check_record_provenance(allocation, record).await?;
+            }
+        }
         for set in &page.bindings {
             self.put_bindings(set).await?;
         }
@@ -318,7 +471,9 @@ impl<A: RowApplication> Inner<A> {
                 let identity = rocky_core::RowIdentity::from_integer(identity)
                     .map_err(|error| denied(&error.to_string()))?;
                 if !statement.identities.iter().any(|mark| {
-                    mark.author == identity.author() && mark.sequence >= identity.sequence()
+                    mark.author == identity.author()
+                        && mark.sequence >= identity.sequence()
+                        && (record.moved_from.is_some() || mark.own >= identity.sequence())
                 }) {
                     return Err(denied("checkpoint identity exceeds its permanent mark"));
                 }
@@ -483,6 +638,7 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         id: i64,
     ) -> Result<(), Error> {
+        self.clear_seal_anchor(id).await?;
         let blob = encode(&scope)?;
         self.conn
             .execute(
@@ -506,6 +662,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.store_scope_state(id, 0, 0, &Lt::new(), 0).await?;
         self.reproject(scope).await?;
+        self.reseed_ledger(scope, id).await?;
         self.clear_staging(id).await
     }
     /// Reads which scopes a direct import is filling, after a commit that
@@ -589,7 +746,6 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: ResourceScope,
     ) -> Result<Option<(i64, SignedCheckpoint)>, Error> {
-        self.settle(scope).await?;
         let Some(id) = self.find_scope_id(scope).await? else {
             return Ok(None);
         };
@@ -616,9 +772,14 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         signed.verify_authority(self, now()?)?;
+        // A no-frames base has no pages and needs no key.
+        if signed.statement.no_frames() {
+            self.check_no_frames(&signed).await?;
+            return Ok(Some((id, signed)));
+        }
         // Pages are sealed under the current key; a checkpoint of an earlier
         // key epoch is served again once maintenance seals the next one.
-        if self.scope_key(scope)?.0 != signed.statement.key_epoch {
+        if Some(self.scope_key(scope)?.0) != signed.statement.key_epoch() {
             return Ok(None);
         }
         Ok(Some((id, signed)))
@@ -691,76 +852,67 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// The signed checkpoint a peer behind the pruned_prefix starts from.
+    /// The signed checkpoint a peer behind the pruned_prefix starts from:
+    /// a base at a seal, never one the peer signed itself.
     pub async fn checkpoint_offer(
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<SignedCheckpoint>, Error> {
-        let may_sign = {
-            let mut inner = self.inner.lock().await;
-            inner.authorize_peer(peer, credentials, scope)?;
-            // A partitioned table's own scope holds no rows; each partition
-            // scope has its checkpoint.
-            if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
-                return Ok(None);
-            }
-            // A scope still being imported has nothing whole to offer, nor
-            // has one its owner means to replace.
-            if inner.importing.contains(&scope) || inner.importing(scope).await? {
-                return Ok(None);
-            }
-            let time = now()?;
-            // A keyless holder serves only complete, verified sealed archives.
-            if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
-                return Ok(inner
-                    .archived_checkpoint(scope, true)
-                    .await?
-                    .filter(|signed| {
-                        signed.signer() != peer && signed.verify_authority(&inner, time).is_ok()
-                    }));
-            }
-            let (key_epoch, _) = inner.scope_key(scope)?;
-            inner.settle(scope).await?;
-            // A bootstrap requester refuses its own checkpoint signature.
-            if let Some(id) = inner.find_scope_id(scope).await?
-                && let Some(signed) = inner
-                    .checkpoint_record(id, true)
-                    .await?
-                    .and_then(|record| record.signed)
-                && signed.signer() != peer
-                && inner
-                    .manifest_of_tip(signed.statement.tip)
-                    .and_then(|manifest| inner.admits(manifest))
-                    .is_ok()
-                && signed.statement.key_epoch == key_epoch
-                && signed.verify_authority(&inner, now()?).is_ok()
-            {
-                // Keep a transferable cut stable across page/session retries.
-                inner.flush()?;
-                return Ok(inner
-                    .served_checkpoint(scope)
-                    .await?
-                    .filter(|(_, signed)| signed.signer() != peer)
-                    .map(|(_, signed)| signed));
-            }
-            // With a tip graph a checkpoint exists only at a seal, after a
-            // compaction.
-            !inner.graphs.contains_key(&scope.domain)
-                && inner.local_grants(now()?)?.iter().any(|grant| {
-                    grant.scope == scope
-                        && grant.rows == RowSelection::All
-                        && [Right::Insert, Right::Update, Right::Delete]
-                            .iter()
-                            .any(|right| grant.rights.contains(right))
-                })
-        };
-        if may_sign {
-            self.checkpoint(scope).await?;
-        }
         let mut inner = self.inner.lock().await;
         inner.authorize_peer(peer, credentials, scope)?;
+        // A partitioned table's own scope holds no rows; each partition
+        // scope has its checkpoint.
+        if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
+            return Ok(None);
+        }
+        // A scope still being imported has nothing whole to offer, nor
+        // has one its owner means to replace.
+        if inner.importing.contains(&scope) || inner.importing(scope).await? {
+            return Ok(None);
+        }
+        let time = now()?;
+        // A no-frames base is served as signed, by key holders and relays alike.
+        if inner.no_frames_base(scope).await?.is_some() {
+            inner.flush()?;
+            return Ok(inner
+                .served_checkpoint(scope)
+                .await?
+                .map(|(_, signed)| signed)
+                .filter(|signed| signed.signer() != peer));
+        }
+        // A keyless holder serves only complete, verified sealed archives.
+        if !inner.can_read_key(scope, &inner.local_grants(time)?) {
+            return Ok(inner
+                .archived_checkpoint(scope, true)
+                .await?
+                .filter(|signed| {
+                    signed.signer() != peer && signed.verify_authority(&inner, time).is_ok()
+                }));
+        }
+        let (key_epoch, _) = inner.scope_key(scope)?;
+        let Some(id) = inner.find_scope_id(scope).await? else {
+            return Ok(None);
+        };
+        let Some(signed) = inner
+            .checkpoint_record(id, true)
+            .await?
+            .and_then(|record| record.signed)
+        else {
+            return Ok(None);
+        };
+        if signed.signer() == peer
+            || inner
+                .manifest_of_tip(signed.statement.tip)
+                .and_then(|manifest| inner.admits(manifest))
+                .is_err()
+            || signed.statement.key_epoch() != Some(key_epoch)
+            || signed.verify_authority(&inner, time).is_err()
+        {
+            return Ok(None);
+        }
+        // Keep a transferable cut stable across page/session retries.
         inner.flush()?;
         Ok(inner
             .served_checkpoint(scope)
@@ -978,20 +1130,43 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// reads in whole. Nothing changes until `finish_rebootstrap`.
     pub async fn begin_rebootstrap(&self, signed: SignedCheckpoint) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        signed.verify_authority(&inner, now()?)?;
-        inner.check_binding(&signed.statement)?;
+        inner.verify_import_statement(&signed).await?;
         let statement = &signed.statement;
         let scope = statement.scope;
-        let generation = inner.generation_of(inner.manifest_of_tip(statement.tip)?, true)?;
-        if statement.schema != generation.schema
-            || signed.signer() == inner.config.node.public_key()
-            || inner.scope_key(scope)?.0 != statement.key_epoch
-        {
+        if signed.signer() == inner.config.node.public_key() {
             return Err(denied(
                 "checkpoint definition/generation/key epoch mismatch",
             ));
         }
         let bytes = signed.to_bytes()?;
+        // A no-frames checkpoint has no pages: it stages complete at once.
+        if statement.no_frames() {
+            transaction!(inner, |inner| {
+                let id = inner.scope_id(scope).await?;
+                inner.check_frontier(id, &signed).await?;
+                if inner
+                    .staging(id)
+                    .await?
+                    .is_some_and(|staging| staging.direct)
+                {
+                    inner.abort_direct(scope, id).await?;
+                }
+                inner.clear_staging(id).await?;
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_rebootstrap VALUES(?,?,NULL,1,?,0)",
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(bytes.clone()),
+                            SqlValue::Blob(Sets::new().to_bytes()),
+                        ]),
+                    )
+                    .await?;
+                Ok(())
+            })?;
+            return inner.load_direct().await;
+        }
         transaction!(inner, |inner| {
             let id = inner.scope_id(scope).await?;
             inner.bind_node_author(&signed.credentials).await?;
@@ -1126,7 +1301,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<RebootstrapReport, Error> {
         let mut inner = self.inner.lock().await;
         let time = now()?;
-        let (generation, _) = inner.scope_key(scope)?;
+        let generation = inner
+            .scope_key(scope)
+            .ok()
+            .map(|(generation, _)| generation);
         let id = inner
             .find_scope_id(scope)
             .await?
@@ -1141,8 +1319,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signed = staging.signed;
         let direct = staging.direct;
         signed.verify_authority(&inner, time)?;
-        inner.check_binding(&signed.statement)?;
         let statement = signed.statement.clone();
+        // History stored since begin may contradict a staged no-frames
+        // claim: it is refused and nothing stays staged.
+        if statement.no_frames()
+            && let Err(error) = inner.check_no_frames(&signed).await
+        {
+            if matches!(error, Error::Rejected(_) | Error::Protocol(_)) {
+                transaction!(inner, |inner| inner.clear_staging(id).await)?;
+                inner.load_direct().await?;
+                inner.flush()?;
+            }
+            return Err(error);
+        }
+        if inner.graphs.contains_key(&scope.domain) && statement.seal.is_none() {
+            transaction!(inner, |inner| match direct {
+                true => inner.abort_direct(scope, id).await,
+                false => inner.clear_staging(id).await,
+            })?;
+            inner.load_direct().await?;
+            inner.flush()?;
+            return Err(denied(
+                "with a tip graph an imported checkpoint sits at a seal",
+            ));
+        }
         let moves = match direct {
             true => inner.imported_moves(id).await?,
             false => inner.rebootstrap_moves(id).await?,
@@ -1151,7 +1351,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             || staging.sets.rows_summary() != statement.rows
             || staging.sets.tombstones != statement.tombstones
             || staging.sets.creations_summary() != statement.creations
-            || generation != statement.key_epoch
+            || (!statement.no_frames()
+                && (generation.is_none() || generation != statement.key_epoch()))
         {
             // Unverifiable rows are discarded; a direct import's are undone.
             transaction!(inner, |inner| match direct {
@@ -1196,10 +1397,42 @@ impl<A: RowApplication> Inner<A> {
         direct: bool,
         time: u64,
     ) -> Result<RebootstrapReport, Error> {
+        // Whether the base it replaces left the followed path, before
+        // anything about it changes.
+        let off_path = self.base_off_path(scope, id).await?;
+        self.clear_seal_anchor(id).await?;
         let statement = signed.statement.clone();
-        let (generation, key) = self.scope_key(scope)?;
-        self.bind_node_author(&signed.credentials).await?;
+        if self.graphs.contains_key(&scope.domain) && statement.seal.is_none() {
+            return Err(denied(
+                "with a tip graph an imported checkpoint sits at a seal",
+            ));
+        }
+        // A no-frames base installs no key and binds no author.
+        let key = match statement.no_frames() {
+            true => None,
+            false => Some(self.scope_key(scope)?),
+        };
+        if key.is_some() {
+            self.bind_node_author(&signed.credentials).await?;
+        }
         self.check_frontier(id, signed).await?;
+        // A replacement of an off-path base that leaves this node's pruned
+        // own positions uncovered keeps the old own endpoint as an
+        // obligation: those frames may return, and authoring waits for them.
+        if off_path {
+            let node = self.config.node.public_key();
+            if let Some(log) = self.log(id, node).await?
+                && log.pruned_prefix
+                    > statement
+                        .frontier
+                        .iter()
+                        .find(|position| position.author == node)
+                        .map_or(-1, |position| position.sequence as i64)
+            {
+                self.merge_restoration_guard(scope, (log.sequence, Some(log.hash)))
+                    .await?;
+            }
+        }
         let mut report = RebootstrapReport {
             checkpoint: signed.id()?,
             superseded: 0,
@@ -1211,6 +1444,28 @@ impl<A: RowApplication> Inner<A> {
         // local write applied over them: then they are restored and
         // the write applies again.
         let rewrite = !direct || self.applied_any(id).await?;
+        // Before anything changes: the statement's marks keep every author's
+        // signer, and no incoming row contradicts a known original.
+        self.check_statement_marks(scope, &statement.identities)
+            .await?;
+        self.check_covered_identities(
+            match direct {
+                true => "secure_checkpoint_rows",
+                false => "secure_rebootstrap_rows",
+            },
+            id,
+            &statement.identities,
+        )
+        .await?;
+        self.check_row_provenance(
+            scope,
+            match direct {
+                true => "secure_checkpoint_rows",
+                false => "secure_rebootstrap_rows",
+            },
+            id,
+        )
+        .await?;
         let reapply = self.supersede(scope, &statement, &mut report).await?;
         let blob = encode(&scope)?;
         if rewrite {
@@ -1232,15 +1487,26 @@ impl<A: RowApplication> Inner<A> {
             })
             .await?;
         }
-        let permanent = self.identity_marks(scope).await?;
+        // Permanent marks and the summary only rise; the replay ledger
+        // starts over from exactly the new base.
+        for mark in &statement.identities {
+            self.put_identity_mark(
+                scope,
+                &mark.mark(),
+                identity::Raise::Statement { own: mark.own },
+            )
+            .await?;
+        }
         self.conn
             .execute(
-                "DELETE FROM secure_identity_marks WHERE scope=?",
+                "DELETE FROM secure_identity_ledger WHERE scope=?",
                 [encode(&scope)?],
             )
             .await?;
         for mark in &statement.identities {
-            self.put_identity_mark(scope, mark).await?;
+            if let Some(own) = mark.own_mark() {
+                self.fold_ledger(scope, &own).await?;
+            }
         }
         if rewrite {
             self.reproject(scope).await?;
@@ -1299,7 +1565,7 @@ impl<A: RowApplication> Inner<A> {
         self
             .conn
             .execute(
-                "INSERT INTO secure_checkpoints SELECT ?,?,'verified',COALESCE(MAX(seq),0),COALESCE(MAX(seq),0),?,NULL,? FROM sqlite_sequence WHERE name='secure_applied'",
+                "INSERT INTO secure_checkpoints SELECT ?,?,COALESCE(MAX(seq),0),?,? FROM sqlite_sequence WHERE name='secure_applied'",
                 bindings(vec![
                     SqlValue::Integer(id),
                     SqlValue::Integer(statement.sequence as i64),
@@ -1308,31 +1574,33 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
-        self.conn
-            .execute(
-                "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
-                bindings(vec![
-                    SqlValue::Blob(encode(&scope)?),
-                    SqlValue::Blob(encode(&generation)?),
-                    SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key).to_vec()),
-                ]),
-            )
-            .await?;
+        if let Some((generation, key)) = key {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
+                    bindings(vec![
+                        SqlValue::Blob(encode(&scope)?),
+                        SqlValue::Blob(encode(&generation)?),
+                        SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key).to_vec()),
+                    ]),
+                )
+                .await?;
+        }
         // A checkpoint sealed under an earlier generation names what
         // this one removed: its rows and base keep only the rest.
         self.keep_current(id, scope, true).await?;
-        // A clean base replaces the one a cut tainted.
-        self.conn
-            .execute(
-                "DELETE FROM secure_cut_guard WHERE scope=?",
-                [encode(&scope)?],
-            )
-            .await?;
         for hash in reapply {
             let frame = self
                 .frame(hash)
                 .await?
                 .ok_or_else(|| Error::Corrupt("retained operation".into()))?;
+            // An applied birth without its admission evidence is a missing
+            // journal, never backfilled.
+            if self.receipt_of(hash).await?.is_none() && !self.birth_marks(&frame)?.is_empty() {
+                return Err(Error::Corrupt(
+                    "an applied birth has no admission evidence".into(),
+                ));
+            }
             match self.apply_frame(&frame, time).await? {
                 incoming::Outcome::Applied => match self.consumed(hash).await? {
                     Some(reason) => report.rejected.push((hash, reason)),
@@ -1342,9 +1610,7 @@ impl<A: RowApplication> Inner<A> {
                 incoming::Outcome::Waiting => report.pending.push(hash),
             }
         }
-        for mark in &permanent {
-            self.put_identity_mark(scope, mark).await?;
-        }
+        self.reseed_ledger(scope, id).await?;
         self.clear_staging(id).await?;
         self.conn
             .execute(
@@ -1358,6 +1624,92 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// Refuses statement marks naming another signer for an author that the
+    /// concrete or the allocation scope already binds.
+    async fn check_statement_marks(
+        &self,
+        scope: ResourceScope,
+        marks: &[CoveredMark],
+    ) -> Result<(), Error> {
+        let (_, allocation) = self.allocation_of(scope).await?;
+        for held in [
+            self.identity_marks(scope).await?,
+            self.identity_marks(allocation).await?,
+        ] {
+            if marks.iter().any(|mark| {
+                held.iter()
+                    .any(|held| held.author == mark.author && held.signer != mark.signer)
+            }) {
+                return Err(denied(
+                    "checkpoint author number belongs to another signing key",
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// Refuses checkpoint rows of scope `id` in `rows` whose original
+    /// creation contradicts a claim this file holds on that identity. The
+    /// same original, carried, is accepted.
+    pub(super) async fn check_row_provenance(
+        &self,
+        scope: ResourceScope,
+        rows: &str,
+        id: i64,
+    ) -> Result<(), Error> {
+        let Some((allocation, _)) = self.allocation_binding(scope).await? else {
+            return Ok(());
+        };
+        let mut after = Vec::new();
+        loop {
+            let records = collect_rows(
+                self.conn
+                    .query(
+                        format!("SELECT row,fields FROM {rows} WHERE scope=? AND row>? ORDER BY row LIMIT 256"),
+                        bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone())]),
+                    )
+                    .await?,
+            )
+            .await?;
+            for record in &records {
+                let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
+                    return Err(Error::Corrupt("checkpoint row".into()));
+                };
+                after = row.clone();
+                if fields.is_empty() {
+                    continue;
+                }
+                self.check_record_provenance(allocation, &decode(fields)?)
+                    .await?;
+            }
+            if records.len() < 256 {
+                return Ok(());
+            }
+        }
+    }
+    /// Refuses one row record whose proof contradicts a known claim.
+    pub(super) async fn check_record_provenance(
+        &self,
+        allocation: i64,
+        record: &Materialized,
+    ) -> Result<(), Error> {
+        let (Some(identity), Some(proof)) = (record.identity, &record.proof) else {
+            return Ok(());
+        };
+        let identity = rocky_core::RowIdentity::from_integer(identity)
+            .map_err(|error| Error::Corrupt(error.to_string()))?;
+        let provenance = proof.provenance()?;
+        if self
+            .claims_on(allocation, identity)
+            .await?
+            .iter()
+            .any(|claim| claim.provenance != provenance)
+        {
+            return Err(denied(
+                "a checkpoint row contradicts a known original creation",
+            ));
+        }
+        Ok(())
+    }
     /// A checkpoint that ends before this replica's own pruned_prefix would lose
     /// the operations between them.
     async fn check_frontier(&self, id: i64, signed: &SignedCheckpoint) -> Result<(), Error> {

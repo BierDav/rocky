@@ -61,11 +61,11 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
     let (alice_path, carol_path) = (dir.path().join("alice.db"), dir.path().join("carol.db"));
     let alice = lineage
-        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(1, 3)))
+        .open(&alice_path, &alice_key, 3, Some(lineage.projection(3)))
         .await
         .unwrap();
     let carol = lineage
-        .open(&carol_path, &carol_key, 3, Some(lineage.upgrade(1, 3)))
+        .open(&carol_path, &carol_key, 3, Some(lineage.projection(3)))
         .await
         .unwrap();
     let items = lineage.scope("items");
@@ -102,21 +102,25 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
         .unwrap();
     drop(bundle);
     assert_eq!(title(&carol).await, vec![vec![text("mine")]]);
+    crate::tests::check_frontier_cache(&carol, items).await;
 
+    // The owner seals `main` at what alice holds; both follow it.
+    let statements = lineage.publish(&alice, 4).await.unwrap();
     for (replica, key) in [(&carol, &carol_key), (&alice, &alice_key)] {
         // Schema removal does not revoke the credential needed to inspect
         // and resolve the bundle's removed scope.
         let mut config = lineage.config(4, key);
         config.credentials = lineage.credentials(3, key);
         assert!(
-            replica
-                .adopt_generation(lineage.app(4), config, lineage.upgrade(1, 4))
+            lineage
+                .follow(replica, config, 4, &statements)
                 .await
                 .unwrap()
         );
     }
     // Held whole: its kept effect is rolled back at once.
     assert_eq!(title(&carol).await, vec![vec![text("one")]]);
+    crate::tests::check_frontier_cache(&carol, items).await;
     let held = carol.held_changes().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
     let change = &held[0];
@@ -155,6 +159,8 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
         carol.frontier(items).await.unwrap(),
     );
     assert_eq!(theirs.lag_behind(&ours), 0);
+    crate::tests::check_frontier_cache(&carol, items).await;
+    crate::tests::check_frontier_cache(&alice, items).await;
     alice.audit(items).await.unwrap();
     carol.audit(items).await.unwrap();
 
@@ -173,7 +179,10 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
         .run("UPDATE items SET title='invalid' WHERE key='0001'", vec![])
         .await
         .unwrap();
-    assert!(failed.commit_reauthoring([91; 32], [92; 32]).await.is_err());
+    assert!(matches!(
+        failed.commit_reauthoring([91; 32], [92; 32]).await,
+        Err(Error::Rejected(reason)) if reason == "no such held change"
+    ));
     drop(failed);
     assert_eq!(title(&carol).await, vec![vec![text("alice")]]);
     assert_eq!(carol.held_changes().await.unwrap().len(), 1);
@@ -184,11 +193,43 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
         .run("UPDATE items SET title='mine' WHERE key='0001'", vec![])
         .await
         .unwrap();
-    reauthor
+    let reauthored = reauthor
         .commit_reauthoring(rocky_core::commitment("held.reauthor", b"carol"), change.id)
         .await
-        .unwrap();
+        .unwrap()
+        .committed
+        .unwrap()
+        .frames;
     drop(reauthor);
+    assert_eq!(reauthored.len(), 1);
+    let frame = &reauthored[0];
+    assert_ne!(frame.id().unwrap(), offered.id().unwrap());
+    let operation = frame.operation_ref().unwrap();
+    assert_eq!(operation.header.extensions.tip, carol.followed_tip().await);
+    let config = lineage.config(4, &carol_key);
+    let key = config.keys.iter().find(|key| key.scope == items).unwrap();
+    assert_eq!(operation.header.extensions.generation, key.generation);
+    let opened = crate::wire::RowPayload::decode(
+        &crate::wire::decrypt(
+            &key.key,
+            &encode(&operation.header.extensions).unwrap(),
+            frame.body_bytes(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opened.reauthors(), Some(change.id));
+    assert!(opened.membership().is_some());
+    assert!(!opened.creations().is_empty());
+    assert_eq!(
+        rows(
+            &carol.inner.lock().await.conn,
+            "SELECT id FROM secure_held_resolved"
+        )
+        .await
+        .unwrap(),
+        vec![vec![SqlValue::Blob(change.id.to_vec())]]
+    );
     assert!(carol.held_changes().await.unwrap().is_empty());
     // The handle also binds which change was resolved.
     write(&carol, "UPDATE items SET title='alice' WHERE key='0001'").await;
@@ -214,7 +255,7 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     assert!(carol.drop_held(change.id).await.is_err());
 
     // A void of a frame a peer holds is refused there.
-    let void = SignedVoid::sign(&signer, vec![offered.header.clone()]).unwrap();
+    let void = SignedVoid::sign(&signer, vec![offered.header_bytes().to_vec()]).unwrap();
     let statuses = alice.receive_voids(&[void]).await;
     assert!(
         matches!(statuses[..], [Ok(ReceiveStatus::Rejected)]),
@@ -224,10 +265,7 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
 
     // The held state survives a restart.
     drop(carol);
-    let carol = lineage
-        .open(&carol_path, &carol_key, 4, Some(lineage.upgrade(1, 4)))
-        .await
-        .unwrap();
+    let carol = lineage.reopen(&carol_path, &carol_key, 3, 4).await.unwrap();
     carol.audit(items).await.unwrap();
     assert_eq!(title(&carol).await, vec![vec![text("mine")]]);
 }
@@ -242,7 +280,7 @@ async fn a_dropped_held_change_leaves_the_list_and_writes_nothing() {
             &dir.path().join("carol.db"),
             &key,
             3,
-            Some(lineage.upgrade(1, 3)),
+            Some(lineage.projection(3)),
         )
         .await
         .unwrap();
@@ -261,28 +299,19 @@ async fn a_dropped_held_change_leaves_the_list_and_writes_nothing() {
     )
     .await
     .unwrap();
-    EncryptedReplica::<TypedRows>::fail_next_activation();
-    let failed = carol
-        .adopt_generation(
-            lineage.app(4),
-            lineage.config(4, &key),
-            lineage.upgrade(1, 4),
-        )
-        .await;
+    carol.inject_plan_fault(PlanStage::Create, 0).await;
+    let failed = lineage.advance(&carol, lineage.config(4, &key), 4).await;
     assert!(matches!(failed, Err(Error::InjectedFailure)));
-    assert!(carol.held_changes().await.unwrap().is_empty());
-    assert_eq!(
-        select(&carol, "SELECT key FROM items ORDER BY key").await,
-        vec![vec![text("0001")], vec![text("0002")]]
+    // The switch's first transaction committed the hold with its intent;
+    // the source stays installed and the identical request resumes the plan.
+    assert_eq!(carol.held_changes().await.unwrap().len(), 1);
+    assert!(carol.run_plan().await.is_err());
+    assert!(
+        lineage
+            .follow(&carol, lineage.config(4, &key), 4, &[])
+            .await
+            .unwrap()
     );
-    carol
-        .adopt_generation(
-            lineage.app(4),
-            lineage.config(4, &key),
-            lineage.upgrade(1, 4),
-        )
-        .await
-        .unwrap();
     assert_eq!(
         select(&carol, "SELECT key FROM items ORDER BY key").await,
         vec![vec![text("0002")]]
@@ -294,12 +323,7 @@ async fn a_dropped_held_change_leaves_the_list_and_writes_nothing() {
     // before the table author is registered to sign its voids.
     drop(carol);
     let carol = lineage
-        .open(
-            &dir.path().join("carol.db"),
-            &key,
-            4,
-            Some(lineage.upgrade(1, 4)),
-        )
+        .reopen(&dir.path().join("carol.db"), &key, 3, 4)
         .await
         .unwrap();
     assert_eq!(carol.held_changes().await.unwrap(), held);
@@ -319,7 +343,7 @@ async fn offering_one_bundle_member_without_delivery_prevents_holding_after_rest
     let peer = PrivateKey::new();
     let path = dir.path().join("author.db");
     let replica = lineage
-        .open(&path, &key, 3, Some(lineage.upgrade(1, 3)))
+        .open(&path, &key, 3, Some(lineage.projection(3)))
         .await
         .unwrap();
     let transaction = session(&replica).await;
@@ -344,7 +368,6 @@ async fn offering_one_bundle_member_without_delivery_prevents_holding_after_rest
             &crate::replica::ScopeFrontier {
                 scope,
                 logs: vec![],
-                cuts: 0,
             },
             None,
             MAX_SECURE_FRAME,
@@ -355,10 +378,13 @@ async fn offering_one_bundle_member_without_delivery_prevents_holding_after_rest
     // The page is never delivered: exposure, rather than acknowledgement,
     // decides whether the whole bundle may be voided.
     drop(replica);
-    let replica = lineage
-        .open(&path, &key, 4, Some(lineage.upgrade(1, 4)))
-        .await
-        .unwrap();
+    let replica = lineage.reopen(&path, &key, 3, 3).await.unwrap();
+    assert!(
+        lineage
+            .advance(&replica, lineage.config(4, &key), 4)
+            .await
+            .unwrap()
+    );
     assert!(replica.held_changes().await.unwrap().is_empty());
     assert_eq!(title(&replica).await, vec![vec![text("mine")]]);
 }

@@ -44,6 +44,13 @@ pub struct TipAuthorMark {
     pub author: u32,
     pub sequence: u64,
 }
+/// What the owner's recovery seal abandons: the committed entries of its
+/// tip's coordinated log after `retained` through `replaced`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TipRecovery {
+    pub retained: u64,
+    pub replaced: u64,
+}
 /// A seal; a `continue` seal's id is also its successor tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipSeal {
@@ -70,6 +77,8 @@ pub struct TipSeal {
     /// How this device holds the seal's state: `kept`, `checkpoint` or
     /// `live`; null when it is shallow here.
     pub held: Option<String>,
+    /// The owner's recovery of a stuck tip; null for any other seal.
+    pub recovery: Option<TipRecovery>,
 }
 /// The seals a device keeps, among those of the tips it follows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +113,7 @@ pub struct TipCheckpoint {
 pub struct TipOpening {
     pub id: String,
     pub seal: String,
+    pub schema: String,
     pub minimum_in_sync: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

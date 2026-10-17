@@ -80,7 +80,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }) {
                 return Err(denied("ciphertext custody denied"));
             }
-            inner.ensure_cut_clean(*scope).await?;
         }
         // Never a silent gap: every page names the scopes with pruned history.
         let mut pruned = Vec::new();
@@ -168,7 +167,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }) {
             return Err(denied("acknowledgment right denied"));
         }
-        transaction!(inner, |inner| {
+        transaction!(@cache_neutral inner, |inner| {
             inner.conn.execute("INSERT INTO secure_ack VALUES(?,?,?) ON CONFLICT(peer,hash) DO UPDATE SET applied=MAX(applied,excluded.applied)", bindings(vec![SqlValue::Blob(rocky_credentials::PeerId::of(peer).as_bytes().to_vec()), SqlValue::Blob(id.as_bytes().to_vec()), SqlValue::Integer(i64::from(applied))])).await?;
             Ok(())
         })?;
@@ -183,6 +182,7 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         row: Commitment,
     ) -> Result<Companion, Error> {
+        self.require_scope_readable(scope).await?;
         let has_key = self.readable(scope)?;
         // An evicted scope is unavailable, never deleted.
         let record = if has_key && self.holding(scope).await? != Some(roles::Holding::Evicting) {
@@ -190,9 +190,12 @@ impl<A: RowApplication> Inner<A> {
         } else {
             None
         };
+        // An unfinished import never proves a deletion.
         match record {
             Some(record) if !record.deleted => Ok(Companion::Present(record.fields)),
-            Some(_) if !self.has_pending(scope).await? => Ok(Companion::Deleted),
+            Some(_) if !self.has_pending(scope).await? && !self.importing(scope).await? => {
+                Ok(Companion::Deleted)
+            }
             _ => Ok(Companion::Unavailable),
         }
     }
@@ -220,13 +223,18 @@ impl<A: RowApplication> Inner<A> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<SecurePage, Error> {
+        self.require_scope_readable(scope).await?;
         let has_key = self.readable(scope)?;
-        // Rows of a scope that no longer follows the peers are not complete.
+        // Rows of a scope that no longer follows the peers, or whose
+        // import is unfinished, are not complete.
         let holding = self.holding(scope).await?;
         let mut page = SecurePage {
             revision: self.revision,
             rows: BTreeMap::new(),
-            complete: has_key && self.holds(scope).await? && !self.has_pending(scope).await?,
+            complete: has_key
+                && self.holds(scope).await?
+                && !self.has_pending(scope).await?
+                && !self.importing(scope).await?,
             next: None,
         };
         if !has_key || holding == Some(roles::Holding::Evicting) {

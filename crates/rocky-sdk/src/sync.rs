@@ -150,9 +150,8 @@ pub(crate) struct Planned {
 /// Checkpoint-first enrollment, resumed from the runtime's staged pages.
 /// The peer's offers come first: populated scopes import smallest first,
 /// followed by empty scopes. The intent records each scope's rows for progress.
-/// `None` when the peer offers no checkpoint for some scope, as a keyless
-/// custody peer: the remaining intent waits for a peer that does. In a
-/// domain with a tip graph such a scope joins by frames instead.
+/// A scope the peer offers no checkpoint of joins by frames. `None` when an
+/// offered import cannot start with this peer: the intent waits for another.
 pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -171,10 +170,9 @@ pub(crate) async fn bootstrap(
         Some(session) => session,
         None => session(replica, upstream).await?,
     };
-    // With a tip graph a checkpoint exists only after a compaction; a scope
-    // the peer offers none of joins by frames.
+    // A checkpoint exists only after a compaction; a scope the peer offers
+    // none of joins by frames.
     planning.sync_tip_graph(replica).await?;
-    let graph = !replica.tip_statements(None, 1).await?.is_empty();
     let mut offered = planning.offered_rows(replica, scopes).await?;
     first = Some(planning);
     for (scope, offer) in scopes.iter().zip(offered.iter_mut()) {
@@ -214,17 +212,7 @@ pub(crate) async fn bootstrap(
     planned.sort_by_key(|planned| (planned.rows == 0, planned.rows));
     totals.extend(planned.iter().cloned());
     let importable = planned.len();
-    let pending: Vec<ResourceScope> = planned
-        .iter()
-        .map(|planned| planned.scope)
-        .chain(
-            scopes
-                .iter()
-                .zip(&offered)
-                .filter(|(_, rows)| rows.is_none() && !graph)
-                .map(|(scope, _)| *scope),
-        )
-        .collect();
+    let pending: Vec<ResourceScope> = planned.iter().map(|planned| planned.scope).collect();
     let mut next = 0;
     let record = |next: usize, expected: &mut Vec<u8>| -> Result<(), Failure> {
         if std::fs::read(marker)? != *expected {
@@ -435,6 +423,8 @@ async fn rows(
             for scope in replica.existence_scopes().await? {
                 session.sync_existence(replica, scope).await?;
             }
+            // Where a seal's positions in scopes this node cannot hold lie.
+            session.pull_placements(replica).await?;
         }
         session.close().await?;
         if !exhausted {

@@ -51,6 +51,7 @@ pub struct Table {
     identity: Option<(usize, usize)>,
     pub columns: Vec<Column>,
     names: Vec<String>,
+    capture_order: Vec<usize>,
     /// Column positions of the primary key, in key order.
     pub key: Vec<usize>,
     key_columns: Vec<KeyColumn>,
@@ -165,6 +166,7 @@ impl Table {
                 })
                 .collect(),
             names: table.columns.iter().map(|c| c.sql_name.clone()).collect(),
+            capture_order: (0..table.columns.len()).collect(),
             key_columns: key
                 .iter()
                 .map(|index| KeyColumn {
@@ -257,6 +259,44 @@ fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 impl Plan {
+    /// Additive DDL may append columns in a different order from the logical
+    /// declaration. Capture maps physical hook images back to that declaration.
+    pub fn bind_physical_columns(
+        &mut self,
+        connection: &crate::sqlite::Connection,
+    ) -> Result<(), Error> {
+        for table in &mut self.tables {
+            let rows = connection.rows(
+                "SELECT name FROM pragma_table_info(?) ORDER BY cid",
+                vec![Value::Text(table.physical.clone())],
+            )?;
+            let names: Vec<_> = rows
+                .iter()
+                .filter_map(|row| match row.as_slice() {
+                    [Value::Text(name)] => Some(name),
+                    _ => None,
+                })
+                .collect();
+            table.capture_order = table
+                .names
+                .iter()
+                .map(|name| {
+                    names
+                        .iter()
+                        .position(|physical| physical.eq_ignore_ascii_case(name))
+                        .ok_or_else(|| {
+                            Error::Incompatible(format!("{}.{} is not installed", table.name, name))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+        }
+        Ok(())
+    }
+    /// Runtime-owned frozen tables may only be read in this plan.
+    pub fn allow_read_only(&mut self, tables: impl IntoIterator<Item = String>) {
+        self.views
+            .extend(tables.into_iter().map(|name| name.to_ascii_lowercase()));
+    }
     pub fn new(schema: &LogicalSchema, names: &Names) -> Result<Self, Error> {
         Self::bound(&[Part {
             schema,
@@ -569,6 +609,16 @@ impl Sink {
         let Some(index) = plan.table(table) else {
             return;
         };
+        let logical = |image: Option<Vec<Value>>| -> Option<Vec<Value>> {
+            image.map(|image| {
+                plan.tables[index]
+                    .capture_order
+                    .iter()
+                    .filter_map(|position| image.get(*position).cloned())
+                    .collect()
+            })
+        };
+        let (old, new) = (logical(old), logical(new));
         if self.mode == Mode::User
             && let Some((id, kind)) = plan.tables[index].identity
         {
@@ -710,6 +760,7 @@ mod tests {
     fn table(name: &str, sql: &str, columns: Vec<LogicalColumn>, key: &[&str]) -> LogicalTable {
         LogicalTable {
             sql_name: name.into(),
+            granted_like: None,
             class: TableClass::Mergeable,
             create_sql: sql.into(),
             auto_generate: false,

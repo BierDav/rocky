@@ -5,7 +5,6 @@
 //! drops them. See `docs/runtime/held-changes.md` and decision 0069.
 mod late;
 use super::checkpoint::hash_of;
-use super::generation::Names;
 use super::*;
 use p2panda_core::{Header, Signature, validate_header};
 
@@ -236,7 +235,7 @@ impl<A: RowApplication> Inner<A> {
         if unoffered.is_empty() {
             return Ok(());
         }
-        transaction!(self, |inner| {
+        transaction!(@cache_neutral self, |inner| {
             for hash in &unoffered {
                 inner
                     .conn
@@ -278,39 +277,91 @@ impl<A: RowApplication> Inner<A> {
         }
         self.offer(&hashes).await
     }
-    /// Holds every bundle of this device never offered to a peer that
-    /// touches a table, or writes a field to other than its default, which
-    /// the current names removed since `before`, and every unoffered bundle
-    /// that depends on one. Inside the activation transaction: their frames
-    /// are voided and deleted, and their scopes rebuilt after the switch.
-    /// Returns how many bundles it held.
-    pub(super) async fn hold_removed(&self, before: &Names) -> Result<usize, Error> {
-        let tables: HashSet<Commitment> = self
-            .names
-            .retired_tables
-            .difference(&before.retired_tables)
-            .copied()
-            .collect();
-        let fields: HashSet<Commitment> = self
-            .names
-            .retired_fields
-            .difference(&before.retired_fields)
-            .copied()
-            .collect();
-        if tables.is_empty() && fields.is_empty() {
-            return Ok(0);
-        }
+    /// Holds every bundle of this device never offered to a peer with a
+    /// frame `target` sees that touches a table, or writes a field to other
+    /// than its default, missing from some tip between the frame's and
+    /// `target`, and every unoffered bundle that depends on one. A frame
+    /// `target` does not see stays unsent on its own line. Inside the
+    /// activation transaction: their frames are voided and deleted, and
+    /// their scopes rebuilt after the switch. Returns how many bundles it held.
+    pub(super) async fn hold_removed(
+        &self,
+        scope: rocky_core::Scope,
+        target: TipId,
+    ) -> Result<usize, Error> {
         let frames = self.unoffered().await?;
         if frames.is_empty() {
             return Ok(0);
         }
-        let defaults = self.defaults(&fields).await?;
+        let graph = self.graph_for(scope)?;
+        // What each frame's tip had that the path to `target` lost.
+        let mut removed_at = BTreeMap::<TipId, (HashSet<_>, HashSet<_>)>::new();
+        let mut removed = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            let extension = &frame.header.extensions;
+            let author = extension
+                .author
+                .ok_or_else(|| denied("node author number missing"))?;
+            if extension.scope.domain != scope
+                || !self.visible_frame(
+                    graph,
+                    extension.tip,
+                    author,
+                    extension.author_sequence,
+                    target,
+                )?
+            {
+                removed.push(None);
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                removed_at.entry(extension.tip)
+            {
+                let path = self.path_fields_to(scope, extension.tip, target)?;
+                let manifest = graph.schema_any(extension.tip).map_err(credential)?;
+                let before = self
+                    .definition_at(&manifest)
+                    .ok_or_else(|| denied("source schema missing"))?;
+                let tables: HashSet<_> = before
+                    .entities
+                    .iter()
+                    .map(|table| table.id)
+                    .filter(|table| !path.tables.contains(table))
+                    .collect();
+                let fields: HashSet<_> = before
+                    .fields
+                    .iter()
+                    .map(|field| field.id)
+                    .filter(|field| !path.fields.contains(field))
+                    .collect();
+                entry.insert((tables, fields));
+            }
+            removed.push(Some(extension.tip));
+        }
+        if removed_at
+            .values()
+            .all(|(tables, fields)| tables.is_empty() && fields.is_empty())
+        {
+            return Ok(0);
+        }
+        let defaults = self
+            .defaults(
+                &removed_at
+                    .values()
+                    .flat_map(|(_, fields)| fields.iter().copied())
+                    .collect(),
+            )
+            .await?;
         let null = {
             let mut bytes = Vec::new();
             SqlValue::Null.encode(&mut bytes);
             bytes
         };
-        let touches = |frame: &Unoffered| {
+        let touches = |index: usize| {
+            let frame = &frames[index];
+            let Some((tables, fields)) = removed[index].and_then(|tip| removed_at.get(&tip)) else {
+                return false;
+            };
             tables.contains(&frame.header.extensions.scope.table)
                 || frame.writes.iter().any(|(write, _)| {
                     tables.contains(&write.change.scope.table)
@@ -335,7 +386,7 @@ impl<A: RowApplication> Inner<A> {
         });
         let held: BTreeSet<Vec<u8>> = bundles
             .iter()
-            .filter(|(_, members)| members.iter().any(|index| touches(&frames[*index])))
+            .filter(|(_, members)| members.iter().any(|index| touches(*index)))
             .map(|(bundle, _)| bundle.clone())
             .collect();
         self.void_closure(&frames, &bundles, held, true).await
@@ -442,6 +493,7 @@ impl<A: RowApplication> Inner<A> {
             .flat_map(|bundle| &bundles[bundle])
             .map(|i| &frames[*i])
         {
+            self.no_frames_intake(&frame.header).await?;
             self.conn
                 .execute(
                     "INSERT INTO secure_voids VALUES(?,?,?,?,?,NULL)",
@@ -459,10 +511,10 @@ impl<A: RowApplication> Inner<A> {
         // A node registered after open signs its logs' voids then.
         self.sign_voids().await?;
         for scope in scopes {
-            if !self.names.retired_tables.contains(&scope.table) {
+            if self.tables.contains(&scope.table) {
                 self.conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_repull VALUES(?)",
+                        "INSERT OR IGNORE INTO secure_rebuild_scopes VALUES(?)",
                         [encode(&scope)?],
                     )
                     .await?;
@@ -474,7 +526,7 @@ impl<A: RowApplication> Inner<A> {
         let mut frames = Vec::new();
         for record in rows(
             &self.conn,
-            "SELECT u.hash,u.bundle,u.members,u.writes,o.header FROM secure_unoffered u JOIN secure_operations o ON o.hash=u.hash ORDER BY o.scope,o.author,o.sequence",
+            "SELECT u.hash,u.bundle,u.members,u.writes,o.header FROM secure_unoffered u JOIN secure_operations o ON o.hash=u.hash WHERE NOT EXISTS(SELECT 1 FROM secure_migration_frames m WHERE m.hash=u.hash) ORDER BY o.scope,o.author,o.sequence",
         )
         .await?
         {
@@ -516,21 +568,9 @@ impl<A: RowApplication> Inner<A> {
     /// manifest this replica holds.
     async fn item_names(&self) -> Result<BTreeMap<Commitment, String>, Error> {
         let mut names = BTreeMap::new();
-        let mut manifests = vec![self.definition.clone()];
-        for record in rows(
-            &self.conn,
-            "SELECT signed FROM secure_generations WHERE signed IS NOT NULL",
-        )
-        .await?
-        {
-            if let [SqlValue::Blob(bytes)] = record.as_slice() {
-                manifests.push(
-                    SignedManifest::from_bytes(bytes)
-                        .and_then(|signed| signed.verify(self.config.publisher))
-                        .map_err(credential)?,
-                );
-            }
-        }
+        let manifests: Vec<_> = std::iter::once(&self.definition)
+            .chain(self.catalog.values())
+            .collect();
         for manifest in &manifests {
             for table in &manifest.entities {
                 names.entry(table.id).or_insert_with(|| table.name.clone());
@@ -633,6 +673,14 @@ impl<A: RowApplication> Inner<A> {
     /// Deletes a held frame as pruning does. Its handle stays: committing
     /// it again is refused like a pruned one, and it is forgotten later.
     async fn delete_voided(&self, hash: Hash) -> Result<(), Error> {
+        let scope = self
+            .frame(hash)
+            .await?
+            .ok_or_else(|| Error::Corrupt("voided frame".into()))?
+            .operation_ref()?
+            .header
+            .extensions
+            .scope;
         let bytes = hash.as_bytes().to_vec();
         let mut size = self
             .conn
@@ -660,6 +708,9 @@ impl<A: RowApplication> Inner<A> {
                 [size],
             )
             .await?;
+        if let Some(id) = self.find_scope_id(scope).await? {
+            self.reseed_ledger(scope, id).await?;
+        }
         Ok(())
     }
     /// Author counters include voids and held frames of the log even when a
@@ -819,7 +870,7 @@ impl<A: RowApplication> Inner<A> {
         let mut digests = BTreeSet::new();
         let mut records = Vec::new();
         for frame in frames {
-            let mut next = frame.operation()?.header.backlink;
+            let mut next = frame.operation_ref()?.header.backlink;
             while let Some(hash) = next {
                 let found = collect_rows(
                     self.conn
@@ -906,6 +957,9 @@ impl<A: RowApplication> Inner<A> {
         if !fresh {
             return Ok(ReceiveStatus::Duplicate);
         }
+        for (_, header, _) in &voided {
+            self.no_frames_intake(header).await?;
+        }
         let digest = record.digest()?;
         self.conn
             .execute(
@@ -927,6 +981,7 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
+            self.settle_placement(&header).await?;
         }
         Ok(ReceiveStatus::Applied)
     }
@@ -1014,7 +1069,7 @@ impl<A: RowApplication> Inner<A> {
             let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
             let mut rows = Vec::with_capacity(stored.rows.len());
             for row in stored.rows {
-                let removed = self.names.retired_tables.contains(&row.scope.table);
+                let removed = !self.tables.contains(&row.scope.table);
                 let current = match removed {
                     true => None,
                     false => self
@@ -1032,7 +1087,7 @@ impl<A: RowApplication> Inner<A> {
                         .fields
                         .into_iter()
                         .map(|(field, name, value, written)| {
-                            let removed = removed || self.names.retired_fields.contains(&field);
+                            let removed = removed || !self.fields.contains(&field);
                             HeldField {
                                 current: (written && !removed)
                                     .then(|| {

@@ -94,6 +94,14 @@ impl<A: RowApplication> Inner<A> {
         };
         // An unverifiable checkpoint blocks pruning with its error.
         self.verify_record(scope, &record)?;
+        // A no-frames base covers no operation, whatever its replay cursor.
+        if record
+            .signed
+            .as_ref()
+            .is_some_and(|signed| signed.statement.no_frames())
+        {
+            return Ok(PruneStep::blocked(PruneBlock::NoCheckpoint));
+        }
         let Some(policy) = self.retention_policy(scope).await? else {
             return Ok(PruneStep::blocked(PruneBlock::NoPolicy));
         };

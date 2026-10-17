@@ -43,6 +43,11 @@ Row records name their author's bindings by digest (see
 name, once. The importer refuses a page with a missing, repeated, unnamed or
 undecodable set, and stores the sets with the rows.
 
+Every staged page will also be checked against this replica's known original
+creation claims, so a contradicting origin is refused before it becomes
+readable; see [admission evidence](admission-evidence.md#checkpoint-comparisons)
+(implementation pending).
+
 ## What is readable during an import
 
 | The scope held at `begin_rebootstrap` | Import | Readable |

@@ -165,8 +165,8 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     // The earlier bytes are untouched, and the old key does not open the new.
     let operation = second.operation().unwrap();
     let aad = encode(&operation.header.extensions).unwrap();
-    assert!(crate::wire::decrypt(&OLD, &aad, &second.body).is_err());
-    assert!(crate::wire::decrypt(&NEW, &aad, &second.body).is_ok());
+    assert!(crate::wire::decrypt(&OLD, &aad, second.body_bytes()).is_err());
+    assert!(crate::wire::decrypt(&NEW, &aad, second.body_bytes()).is_ok());
     let page = issuer
         .transfer_page(
             bob.public_key(),
@@ -306,8 +306,8 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
             .is_err()
     );
     // A checkpoint under the new key covers both epochs.
-    let signed = replica.checkpoint(f.public).await.unwrap();
-    assert_eq!(signed.statement.key_epoch.generation, 2);
+    let signed = compacted_base(&replica, &f.publisher, f.public).await;
+    assert_eq!(signed.statement.key_epoch().unwrap().generation, 2);
     assert_eq!(signed.statement.operations, 2);
     assert_eq!(replica.audit(f.public).await.unwrap().rows, 2);
     // A rotation with no later write still seals the next checkpoint.
@@ -315,8 +315,8 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .install_key_epoch(key(f.public, 3, [79; 32]))
         .await
         .unwrap();
-    let resealed = replica.checkpoint(f.public).await.unwrap();
-    assert_eq!(resealed.statement.key_epoch.generation, 3);
+    let resealed = compacted_base(&replica, &f.publisher, f.public).await;
+    assert_eq!(resealed.statement.key_epoch().unwrap().generation, 3);
     assert_eq!(resealed.statement.operations, 2);
 
     // A scope that never wrote under an earlier epoch drops it at once.
@@ -361,7 +361,7 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
 }
 
 #[tokio::test]
-async fn a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write() {
+async fn a_learned_revocation_alone_refreshes_the_base_at_its_seal_without_a_new_write() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let node = PrivateKey::new();
@@ -373,13 +373,12 @@ async fn a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write
     .await
     .unwrap();
     insert(&replica, &f, 1).await;
-    let before = replica.checkpoint(f.public).await.unwrap();
+    let before = compacted_base(&replica, &f.publisher, f.public).await;
     let learned = revoking(&f, &[PrivateKey::new().public_key()]);
     replica.learn_revocations(&learned).await.unwrap();
-    // Drive bounded automatic maintenance directly, without a timer or a write.
-    for _ in 0..8 {
-        replica.maintain_checkpoint_for_test(f.public).await;
-    }
+    // Compacting again signs the base anew at the same seal, without a write.
+    let report = replica.compact(f.public.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, before.statement.seal);
     let status = replica.checkpoint_status(f.public).await.unwrap();
     assert!(status.maintenance_error.is_none());
     let after = status.checkpoint.unwrap();
@@ -388,7 +387,7 @@ async fn a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write
         learned.digest(now().unwrap()).unwrap()
     );
     assert_ne!(after.statement.revocations, before.statement.revocations);
-    assert_eq!(after.statement.key_epoch.generation, 1);
+    assert_eq!(after.statement.key_epoch().unwrap().generation, 1);
     assert_eq!(after.statement.operations, before.statement.operations);
     assert_eq!(after.statement.rows, before.statement.rows);
     assert_eq!(after.statement.previous, Some(before.id().unwrap()));
@@ -470,8 +469,8 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
         .unwrap();
     let l = insert(&left, &f, 1).await;
     let r = insert(&right, &f, 2).await;
-    let checkpoint = left.checkpoint(f.public).await.unwrap();
-    assert_eq!(checkpoint.statement.key_epoch, epoch(&loser));
+    let checkpoint = compacted_base(&left, &f.publisher, f.public).await;
+    assert_eq!(checkpoint.statement.key_epoch(), Some(epoch(&loser)));
     assert_eq!(
         left.receive(r.clone()).await.unwrap(),
         ReceiveStatus::MissingKey
@@ -489,14 +488,17 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
         .unwrap();
     assert_eq!(rows(&left, &f).await, 2);
     assert_eq!(rows(&right, &f).await, 2);
+    // The base under the retired epoch is not offered; one at the next seal is.
+    compacted_base(&left, &f.publisher, f.public).await;
+    link_up(&left, &right, f.public.domain).await;
     assert_eq!(
         left.checkpoint_offer(b.public_key(), &credentials, f.public)
             .await
             .unwrap()
             .unwrap()
             .statement
-            .key_epoch,
-        epoch(&winner)
+            .key_epoch(),
+        Some(epoch(&winner))
     );
     assert!(
         left.retire_key_epoch(f.public, epoch(&loser))
@@ -511,8 +513,11 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
         );
     }
     assert_eq!(
-        left.checkpoint(f.public).await.unwrap().statement.key_epoch,
-        epoch(&winner)
+        compacted_base(&left, &f.publisher, f.public)
+            .await
+            .statement
+            .key_epoch(),
+        Some(epoch(&winner))
     );
     for frame in [&l, &r] {
         left.acknowledge(b.public_key(), &credentials, frame.id().unwrap(), true)
@@ -619,7 +624,7 @@ async fn concurrent_revocations_list_the_exposure_window_and_close_it_at_the_sup
                 let operation = frame.operation().unwrap();
                 let aad = encode(&operation.header.extensions).unwrap();
                 held.iter()
-                    .any(|secret| crate::wire::decrypt(secret, &aad, &frame.body).is_ok())
+                    .any(|secret| crate::wire::decrypt(secret, &aad, frame.body_bytes()).is_ok())
                     .then_some(index + 1)
             })
             .collect()

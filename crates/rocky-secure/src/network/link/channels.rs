@@ -434,7 +434,7 @@ impl Handle {
                 return Err(denied("pushed frame outside its scope"));
             }
             frame.chain()?;
-            let header = frame.operation()?.header;
+            let header = frame.operation_ref()?.header.clone();
             received.push((
                 header.public_key,
                 header
@@ -444,7 +444,7 @@ impl Handle {
             ));
         }
         let mut complete = true;
-        for status in replica.receive_all(frames).await {
+        for status in replica.receive_migration_all(frames).await {
             complete &= !matches!(
                 status?,
                 ReceiveStatus::PendingDependencies | ReceiveStatus::MissingKey

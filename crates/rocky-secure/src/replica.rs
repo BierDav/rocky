@@ -2,6 +2,8 @@ mod admission;
 mod apply;
 mod author;
 mod backup;
+mod bulk;
+pub use bulk::{MigrationMembership, MigrationStorage};
 pub(super) mod bundle;
 mod chains;
 pub(crate) mod checkpoint;
@@ -11,19 +13,32 @@ mod constraints;
 mod coordinated;
 mod evict;
 mod existence;
+mod frontiers;
 mod generation;
+mod schemas;
+mod staging;
+pub use staging::SchemaStage;
+mod inplace;
+pub use schemas::{
+    InstalledTipSchema, PendingSchema, SchemaConfig, installed_tip_schema,
+    last_in_place_switch_changes,
+};
 pub(super) mod group;
 mod held;
 mod history;
 pub use history::{HeldSeal, KeptSeals, SealViews};
 mod holdings;
 mod identity;
+#[cfg(test)]
+pub(crate) use identity::Raise;
 mod incoming;
 mod keys;
 pub(crate) mod migrate;
 pub(crate) mod moves;
 mod offload;
 mod partition;
+mod placements;
+pub use placements::{MAX_PLACEMENTS, Placement, PlacementPage, PlacementRequest};
 pub(crate) mod publication;
 mod queries;
 mod reads;
@@ -52,21 +67,21 @@ use crate::{
 pub use admission::MAX_UNCONFIGURED_PEERS;
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{
-    AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
-    LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, PrunedPage, RebootstrapReport,
-    RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
+    AuditReport, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
+    CoveredMark, CustodySummary, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport,
+    PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
 };
 pub use coordinated::{
-    BaseReport, CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError,
-    CoordinatedStatus, CutEvidence, CutProposal, CutRefusal, ENTRY_DEADLINE, EntryPeers,
-    MAX_CATCH_UP_ENTRIES, MAX_PAGE_CUTS, PeerFuture, Slot, entry_hash,
+    CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, CoordinatedStatus,
+    ENTRY_DEADLINE, EntryPeers, MAX_CATCH_UP_ENTRIES, PeerFuture, Refusal, Slot, StagedCloseStatus,
+    entry_hash,
 };
 pub use evict::EvictReport;
 pub use existence::{
     EXISTENCE_FORMAT, ExistenceBaseAttachment, ExistenceBasePage, ExistenceBasis, ExistenceEvent,
     ExistencePage, ExistenceRecord, MAX_EXISTENCE_PAGE,
 };
-pub use generation::{GenerationStatus, GenerationStep, MAX_GENERATIONS, Upgrade};
+pub use generation::GenerationStatus;
 pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};
 pub use migrate::{PLAN_ROWS, ProjectionPlan};
 pub use offload::RemotePage;
@@ -96,6 +111,7 @@ use tokio::sync::{Mutex, watch};
 /// Keys are supplied from external secret storage and are never persisted in protocol tables.
 /// A scope may hold several generations: the highest seals new writes, the
 /// others open what they sealed.
+#[derive(Clone)]
 pub struct KeyMaterial {
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
@@ -140,8 +156,8 @@ pub enum ReceiveStatus {
     Rejected,
     /// At or before this replica's pruned_prefix: already part of its checkpoint.
     Pruned,
-    /// An owner-signed cut abandoned its coordinated position: consumed
-    /// without effect, its author log continues.
+    /// The owner's recovery abandoned its coordinated write: held for its
+    /// author, never applied; its author log continues.
     Abandoned,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,6 +330,15 @@ pub(super) struct Inner<A> {
     /// The last checkpoint statement decoded per scope number, newest or
     /// verified, with its bytes.
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
+    /// Frontiers of committed history; invalidated before ordinary write attempts.
+    tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
+    /// Parsed stored-header fields, bound to their complete live bytes.
+    frontier_headers: std::sync::Mutex<tips::StoredHeaders>,
+    migration_syntax: std::sync::Mutex<bulk::syntax::StoredDescriptorSyntax>,
+    #[cfg(test)]
+    frontier_scans: AtomicU64,
+    #[cfg(test)]
+    frontier_decodes: AtomicU64,
     node_author: Option<identity::NodeAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
@@ -321,6 +346,10 @@ pub(super) struct Inner<A> {
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
     pub(super) graphs: BTreeMap<rocky_core::Scope, rocky_credentials::TipGraph>,
+    catalog: BTreeMap<Commitment, rocky_core::ApplicationManifest>,
+    path_fields: std::sync::Mutex<BTreeMap<(TipId, TipId), schemas::PathFields>>,
+    /// Positions of a domain's nodes only a partition's custody can place.
+    custody_required: std::sync::Mutex<BTreeSet<(rocky_core::Scope, u32, u64)>>,
     /// The live tables, the tip they hold and their observers.
     pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
@@ -334,13 +363,12 @@ pub(super) struct Inner<A> {
     /// under an earlier value are refused.
     pub(super) authority: u64,
     pub(super) authority_events: watch::Sender<u64>,
-    /// Earlier definition generations, all admitted.
-    previous: Vec<generation::Previous>,
-    /// Removed and re-added tables and fields of the recorded lineage.
-    names: generation::Names,
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
     rebuilding_tip: bool,
+    /// Supplied exclusions wait until the stored projection and L verify,
+    /// then reconcile atomically through learn_revocations before open returns.
+    opening_revocations: Option<RevocationSet>,
     /// During a tip rebuild: the scope's replay base is a seal on the new
     /// tip's path, so the rebuild starts from it.
     tip_base: bool,
@@ -394,13 +422,14 @@ pub(super) struct Inner<A> {
     /// The generation each admitted session peer declared in its hello:
     /// what it can admit. Chains name none.
     pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
-    /// Verified owner-signed cuts of each coordinated log, in order.
-    cuts: BTreeMap<rocky_core::TipLog, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
-    /// Fails after the cut rollback step with this number commits.
+    /// Fails publication after this step: 1 journaled, 2 committed at
+    /// the coordinator, 3 inside the admission transaction.
     #[cfg(test)]
-    cut_fault: Option<i64>,
+    publication_fault: Option<u8>,
+    #[cfg(test)]
+    schema_stage_pause: Option<staging::StagePause>,
     #[cfg(test)]
     plan_fault: Option<(migrate::PlanStage, usize)>,
     /// The stage fault exits the process instead of returning an error.
@@ -409,20 +438,32 @@ pub(super) struct Inner<A> {
     /// Adopts generations in a domain with a tip graph, which production
     /// refuses until schema changes are seals.
     #[cfg(test)]
-    pub(super) generations_with_graph: bool,
-    #[cfg(test)]
     pub(super) fail_before_commit: usize,
+    #[cfg(test)]
+    pub(super) fail_sql_commit: bool,
     /// Tip switches rebuild from the replay base, as without kept seals.
     #[cfg(test)]
     pub(super) rebuild_switches: bool,
+    /// Scopes rebuilt from a kept seal's rows by tip switches.
+    #[cfg(test)]
+    pub(super) rewound: usize,
     #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
     pub(super) group_fault: Option<group::GroupFault>,
+    /// Pauses the next receive after its early checks, before it queues:
+    /// signals the first sender, then waits for the second.
+    #[cfg(test)]
+    receive_gate: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     #[cfg(test)]
     pub(super) group_commits: usize,
     #[cfg(test)]
     pub(super) checkpoints: usize,
+    #[cfg(test)]
+    pub(super) audit_global_passes: usize,
     #[cfg(test)]
     pub(super) busy_hook: Option<Box<dyn FnMut(usize) + Send + Sync>>,
 }
@@ -437,6 +478,8 @@ pub(super) struct Flusher {
     path: PathBuf,
     #[cfg(test)]
     flushes: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    failures: std::sync::atomic::AtomicUsize,
     /// Copies the file at every flush, to simulate losing later commits.
     #[cfg(test)]
     copy: std::sync::Mutex<Option<PathBuf>>,
@@ -453,6 +496,16 @@ impl Flusher {
     pub(super) fn flush(&self, commit: u64) -> Result<(), Error> {
         if self.durable() >= commit {
             return Ok(());
+        }
+        #[cfg(test)]
+        if self
+            .failures
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(Error::Io(std::io::Error::other(
+                "injected device flush failure",
+            )));
         }
         // `sync_all` is `F_FULLFSYNC` on Apple platforms, like `fullfsync=1`.
         // Windows requires write access for FlushFileBuffers.
@@ -549,7 +602,8 @@ impl<A> EncryptedReplica<A> {
 }
 fn protocol_schema() -> impl Iterator<Item = &'static str> {
     [
-        generation::SCHEMA,
+        schemas::SCHEMA,
+        staging::SCHEMA,
         tips::SCHEMA,
         tip_drop::SCHEMA,
         migrate::SCHEMA,
@@ -557,10 +611,12 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         rebuild::SCHEMA,
         removal::SCHEMA,
         held::SCHEMA,
+        placements::SCHEMA,
         history::SCHEMA,
         coordinated::SCHEMA,
-        coordinated::cut::SCHEMA,
-        coordinated::proposal::SCHEMA,
+        coordinated::abandoned::SCHEMA,
+        coordinated::statements::SCHEMA,
+        coordinated::relay::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
@@ -577,6 +633,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         constraints::SCHEMA,
         chains::SCHEMA,
         publication::SCHEMA,
+        bulk::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().copied())
@@ -655,6 +712,15 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
             )));
         }
     }
+    // Admission evidence is never an empty journal by absence.
+    if rows(&conn, "SELECT 1 FROM secure_admission_context WHERE id=1")
+        .await?
+        .is_empty()
+    {
+        return Err(Error::Corrupt(
+            "admission evidence context is missing".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -710,24 +776,34 @@ pub(super) fn check_config(
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn open(path: impl AsRef<Path>, app: A, config: SecureConfig) -> Result<Self, Error> {
-        Self::open_upgrading(path, app, config, None).await
+        Self::open_configured(path, app, config, None).await
     }
-    /// Opens a file installed with an earlier generation of the configured
-    /// definition, activating `upgrade` atomically first, or a file already
-    /// at it. A pending projection plan finishes before this returns. See
-    /// `docs/runtime/generations.md`.
-    pub async fn open_upgrading(
+    /// Installs an enrollment's authenticated graph and explicit bookmark.
+    pub async fn open_following(
+        path: impl AsRef<Path>,
+        app: A,
+        config: SecureConfig,
+        graph: rocky_credentials::TipGraph,
+        bookmark: Option<String>,
+    ) -> Result<Self, Error> {
+        Self::open_configured(path, app, config, Some((graph, bookmark))).await
+    }
+    async fn open_configured(
         path: impl AsRef<Path>,
         app: A,
         mut config: SecureConfig,
-        upgrade: Option<Upgrade>,
+        bootstrap: Option<(rocky_credentials::TipGraph, Option<String>)>,
     ) -> Result<Self, Error> {
-        let manifest = config
+        let genesis = config
             .manifest
             .verify(config.publisher)
             .map_err(credential)?;
-        if app.manifest().hash() != manifest.hash() {
-            return Err(denied("compiled application differs from signed manifest"));
+        let manifest = app.manifest();
+        if genesis.publisher != manifest.publisher
+            || genesis.app != manifest.app
+            || genesis.domains != manifest.domains
+        {
+            return Err(denied("compiled application differs from the domain root"));
         }
         check_config(&config, &manifest)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
@@ -752,6 +828,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             flushes: Default::default(),
             #[cfg(test)]
+            failures: Default::default(),
+            #[cfg(test)]
             copy: Default::default(),
         });
         let mut inner = Inner {
@@ -762,6 +840,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chain: Chain::new(config.credentials.clone())?,
             chains: Default::default(),
             decoded_checkpoints: Default::default(),
+            tip_frontiers: Default::default(),
+            frontier_headers: Default::default(),
+            migration_syntax: Default::default(),
+            #[cfg(test)]
+            frontier_scans: AtomicU64::new(0),
+            #[cfg(test)]
+            frontier_decodes: AtomicU64::new(0),
             node_author: Some(identity::NodeAuthor::new(&config)?),
             config,
             credential_signer: None,
@@ -770,6 +855,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             manifest: manifest.hash(),
             workspace: workspace::Workspace::new(rocky_credentials::genesis_tip(manifest.hash())),
             graphs: BTreeMap::new(),
+            catalog: BTreeMap::new(),
+            path_fields: Default::default(),
+            custody_required: Default::default(),
             line_nodes: BTreeMap::new(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
@@ -778,10 +866,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             revision: 0,
             authority: 1,
             authority_events: watch::channel(1).0,
-            previous: Vec::new(),
-            names: generation::Names::default(),
             strict_projection: false,
             rebuilding_tip: false,
+            opening_revocations: None,
             tip_base: false,
             publishing: false,
             settling: Default::default(),
@@ -806,33 +893,42 @@ impl<A: RowApplication> EncryptedReplica<A> {
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
             peer_tips: BTreeMap::new(),
-            cuts: BTreeMap::new(),
             #[cfg(test)]
             stage_fault: None,
             #[cfg(test)]
-            cut_fault: None,
+            #[cfg(test)]
+            publication_fault: None,
+            #[cfg(test)]
+            schema_stage_pause: None,
             #[cfg(test)]
             plan_fault: None,
             #[cfg(test)]
             stage_exit: false,
             #[cfg(test)]
-            generations_with_graph: false,
-            #[cfg(test)]
             fail_before_commit: 0,
             #[cfg(test)]
+            fail_sql_commit: false,
+            #[cfg(test)]
             rebuild_switches: false,
+            #[cfg(test)]
+            rewound: 0,
             #[cfg(test)]
             retry_before_commit: 0,
             #[cfg(test)]
             group_fault: None,
             #[cfg(test)]
+            receive_gate: None,
+            #[cfg(test)]
             group_commits: 0,
             #[cfg(test)]
             checkpoints: 0,
             #[cfg(test)]
+            audit_global_passes: 0,
+            #[cfg(test)]
             busy_hook: None,
         };
         // Schema, metadata and later additive tables install in one transaction.
+        let supplied_revocations = inner.config.revocations.clone();
         transaction!(&mut inner, |inner| {
             let tables = rows(
                 &inner.conn,
@@ -865,24 +961,92 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         [checkpoint::Lt::new().to_bytes()],
                     )
                     .await?;
+                inner.create_admission_context().await?;
             }
             if tables.is_empty() {
-                inner.seed(upgrade.as_ref()).await?;
+                if inner.manifest != genesis.hash() && bootstrap.is_none() {
+                    return Err(denied(
+                        "a new replica must install its authenticated genesis first",
+                    ));
+                }
+                inner.store_schema(&inner.definition, &[]).await?;
+                inner.store_schema(&genesis, &[]).await?;
+                let (grants, selectors) = inner
+                    .config
+                    .credentials
+                    .verify_selectors(
+                        inner.config.publisher,
+                        inner.config.node.public_key(),
+                        &inner.config.revocations,
+                        now()?,
+                    )
+                    .map_err(credential)?;
+                let scopes: BTreeSet<_> = grants
+                    .iter()
+                    .map(|grant| grant.scope.domain)
+                    .chain(selectors.iter().map(|grant| grant.domain))
+                    .chain(inner.config.keys.iter().map(|key| key.scope.domain))
+                    .collect();
+                if inner.definition.domains.iter().any(|rule| {
+                    !scopes.iter().any(|scope| {
+                        scope.app == inner.definition.app && scope.domain == rule.domain
+                    })
+                }) {
+                    return Err(denied(
+                        "each installed domain requires an authenticated scope",
+                    ));
+                }
+                for scope in scopes {
+                    inner
+                        .conn
+                        .execute(
+                            "INSERT INTO secure_tip_graphs VALUES(?,?)",
+                            [encode(&scope)?, genesis.hash().to_vec()],
+                        )
+                        .await?;
+                }
+                if let Some((graph, bookmark)) = &bootstrap {
+                    if graph.genesis_schema != genesis.hash() {
+                        return Err(denied("enrollment genesis mismatch"));
+                    }
+                    let statements = tips::graph_statements(graph);
+                    for statement in &statements {
+                        statement.verify(inner.config.publisher, graph, None)?;
+                    }
+                    let mut graph = graph.clone();
+                    graph
+                        .exclude_revoked(&inner.config.revocations)
+                        .map_err(credential)?;
+                    let target = match bookmark {
+                        Some(name) => graph
+                            .bookmark(name)
+                            .map_err(credential)?
+                            .ok_or_else(|| denied("enrollment bookmark missing"))?,
+                        None => graph.genesis(),
+                    };
+                    if graph.schema(target).map_err(credential)? != inner.manifest {
+                        return Err(denied("enrollment schema mismatch"));
+                    }
+                    for statement in statements {
+                        inner.conn.execute("INSERT OR IGNORE INTO secure_tip_statements(digest,statement) VALUES(?,?)", [statement.id()?.to_vec(), encode(&statement)?]).await?;
+                    }
+                    if let Some(name) = bookmark {
+                        inner.invalidate_context();
+                        inner.workspace.tip = target;
+                        inner.workspace.followed = Some((graph.scope, name.clone()));
+                        inner.store_followed(graph.scope, name, target).await?;
+                        identity = generation::identity(target, inner.config.node.public_key())?;
+                    }
+                }
             } else {
-                inner.load_generations().await?;
+                inner.load_schemas().await?;
                 inner.load_tip_graphs().await?;
-                let stored = inner.stored_identity().await?;
                 if inner.workspace.followed.is_some() {
                     identity =
                         generation::identity(inner.workspace.tip, inner.config.node.public_key())?;
                 }
-                let activated = if inner.workspace.followed.is_some() {
-                    false
-                } else {
-                    inner.activate(&stored, upgrade.as_ref()).await?
-                };
                 inner
-                    .load_revocations((!activated).then_some(identity.as_slice()))
+                    .load_revocations(&supplied_revocations, Some(identity.as_slice()))
                     .await?;
             }
             inner
@@ -895,9 +1059,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.bind_node_author(&inner.config.credentials).await?;
             Ok(())
         })?;
-        inner.load_generations().await?;
+        inner.load_schemas().await?;
         inner.load_tip_graphs().await?;
-        inner.finish_plan().await?;
+        if !inner.schema_switching().await? {
+            inner.finish_plan().await?;
+        }
         inner.load_typed().await?;
         inner.load_partitions().await?;
         inner.revision = inner.stored_revision().await?;
@@ -907,19 +1073,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
         inner.load_direct().await?;
-        inner.load_cuts().await?;
-        // A rollback a crash interrupted resumes at its durable cursor,
-        // before the projection is checked against history.
-        while inner.cut_step().await? {}
-        inner.pull_again().await?;
+        inner.rebuild_voided().await?;
         inner.verify_open().await?;
+        let opening_revocations = inner.opening_revocations.take();
         let replica = Self {
             inner: Arc::new(Mutex::new(inner)),
             queue: Arc::default(),
             revisions,
             domain_log: Arc::default(),
         };
-        replica.settle().await?;
+        if let Some(revocations) = opening_revocations {
+            replica.learn_revocations(&revocations).await?;
+        } else {
+            replica.settle().await?;
+        }
         Ok(replica)
     }
     /// Wakes after a frame group commits, including keyless custody receipt.
@@ -1016,7 +1183,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         frames: Vec<EncryptedFrame>,
     ) -> Vec<Result<ReceiveStatus, Error>> {
-        self.receive_with(frames, true)
+        self.receive_with(frames, true, false)
             .await
             .into_iter()
             .map(|result| result.map(|status| status.value))
@@ -1028,18 +1195,62 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         frames: Vec<EncryptedFrame>,
     ) -> Vec<Result<Buffered<ReceiveStatus>, Error>> {
-        self.receive_with(frames, false).await
+        self.receive_with(frames, false, false).await
     }
-    async fn receive_with(
+    pub(super) async fn receive_with(
         &self,
         frames: Vec<EncryptedFrame>,
         exposed: bool,
+        proofs: bool,
     ) -> Vec<Result<Buffered<ReceiveStatus>, Error>> {
         let mut work = Vec::new();
         let mut positions = Vec::new();
         let mut results: Vec<Option<Result<Buffered<ReceiveStatus>, Error>>> =
             (0..frames.len()).map(|_| None).collect();
         for (index, frame) in frames.into_iter().enumerate() {
+            if let Some(membership) = &frame.migration {
+                if !proofs {
+                    results[index] = Some(Err(denied("proof-bearing receive required")));
+                    continue;
+                }
+                if let Some(signed) = &membership.descriptor {
+                    if signed.statement.publication != membership.publication {
+                        results[index] = Some(Err(denied("migration descriptor identity")));
+                        continue;
+                    }
+                    if let Err(error) = self.admit_migration_publication((**signed).clone()).await {
+                        results[index] = Some(Err(error));
+                        continue;
+                    }
+                }
+            }
+            let verified = {
+                let inner = self.inner.lock().await;
+                match now() {
+                    Ok(time) => inner.check_migration_frame(&frame, time).await.map(|_| ()),
+                    Err(error) => Err(error),
+                }
+            };
+            if let Err(error) = verified {
+                results[index] = Some(Err(error));
+                continue;
+            }
+            // Covered history of a scope proven empty at a seal is a conflict;
+            // an early exit, `receive_step` decides under the storing lock.
+            let contradicted = match frame.operation_ref() {
+                Ok(operation) => {
+                    self.inner
+                        .lock()
+                        .await
+                        .refuse_no_frames_contradiction(&operation.header)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = contradicted {
+                results[index] = Some(Err(error));
+                continue;
+            }
             if let Err(error) = self.discover_partition(&frame).await {
                 results[index] = Some(Err(error));
                 continue;
@@ -1047,6 +1258,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let weight = frame.weight();
             positions.push(index);
             work.push((group::Work::Receive(frame), weight));
+        }
+        #[cfg(test)]
+        {
+            let gate = self.inner.lock().await.receive_gate.take();
+            if let Some((reached, resume)) = gate {
+                let _ = reached.send(());
+                let _ = resume.await;
+            }
         }
         for (index, result) in positions.into_iter().zip(self.submit(work, exposed).await) {
             results[index] = Some(match result {
@@ -1145,7 +1364,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether a mutation handle committed, whatever its writes were. A
     /// caller that lost a commit's answer checks this before planning the
     /// writes again. Handles are retained as `RetentionLimits` describes.
-    /// A handle whose write an owner-signed cut abandoned reports that.
+    /// A handle whose write the owner's recovery abandoned reports that.
     pub async fn handle_committed(&self, handle: Commitment) -> Result<bool, Error> {
         let inner = self.inner.lock().await;
         let mut result = inner
@@ -1199,7 +1418,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let old_author = inner.node_author.clone();
         let old_nodes = inner.line_nodes.clone();
         let old_followed = inner.workspace.followed.clone();
+        let old_revocations = inner.config.revocations.clone();
         let result = transaction!(inner, |inner| {
+            inner.invalidate_context();
+            // Checks inside the commit, such as installing a pulled state,
+            // see the merged set.
+            inner.config.revocations = merged.clone();
             inner.graphs = old_graphs.clone();
             inner.workspace.tip = old_tip;
             inner.node_author = old_author.clone();
@@ -1216,13 +1440,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         });
         if let Err(error) = result {
+            inner.invalidate_context();
             inner.graphs = old_graphs;
             inner.workspace.tip = old_tip;
             inner.node_author = old_author;
             inner.line_nodes = old_nodes;
             inner.workspace.followed = old_followed;
+            inner.config.revocations = old_revocations;
             return Err(error);
         }
+        inner.invalidate_context();
         inner.config.revocations = merged;
         inner.bump_authority();
         inner.publish_revision().await?;
@@ -1285,8 +1512,39 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.fail_before_commit = failures;
     }
     #[cfg(test)]
+    pub(crate) async fn retry_open_revocations_for_test(
+        &self,
+        supplied: RevocationSet,
+    ) -> Result<RevocationSet, Error> {
+        let mut inner = self.inner.lock().await;
+        inner.config.revocations = supplied.clone();
+        transaction!(inner, |inner| {
+            inner.load_revocations(&supplied, None).await?;
+            inner.injected_commit_fault()?;
+            Ok(())
+        })?;
+        Ok(inner
+            .opening_revocations
+            .take()
+            .unwrap_or_else(|| inner.config.revocations.clone()))
+    }
+    #[cfg(test)]
     pub(crate) async fn inject_group_fault(&self, fault: Option<group::GroupFault>) {
         self.inner.lock().await.group_fault = fault;
+    }
+    /// Pauses the next receive after its early checks; returns a signal that
+    /// it reached the pause and the sender that resumes it.
+    #[cfg(test)]
+    pub(crate) async fn gate_next_receive(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached, at_gate) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        self.inner.lock().await.receive_gate = Some((reached, resumed));
+        (at_gate, resume)
     }
     #[cfg(test)]
     pub(crate) async fn group_commits(&self) -> usize {
@@ -1328,6 +1586,34 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn stored_and_memory_revision(&self) -> (u64, u64) {
         let inner = self.inner.lock().await;
         (inner.stored_revision().await.unwrap(), inner.revision)
+    }
+    #[cfg(test)]
+    pub(crate) async fn install_pulled_for_test(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        let mut inner = self.inner.lock().await;
+        let id = inner
+            .find_scope_id(scope)
+            .await?
+            .ok_or_else(|| denied("unknown scope"))?;
+        transaction!(inner, |inner| {
+            Ok(inner.install_pulled(scope, id).await?
+                == checkpoint::pulled::PulledInstall::Installed)
+        })
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_catalog_entry_for_test(
+        &self,
+        manifest: Commitment,
+        definition: Option<rocky_core::ApplicationManifest>,
+    ) -> Option<rocky_core::ApplicationManifest> {
+        let mut inner = self.inner.lock().await;
+        inner.invalidate_context();
+        match definition {
+            Some(definition) => inner.catalog.insert(manifest, definition),
+            None => inner.catalog.remove(&manifest),
+        }
     }
 }
 impl<A: RowApplication> Inner<A> {
@@ -1436,17 +1722,7 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let operation = frame.operation()?;
-        let extension = &operation.header.extensions;
-        let reach = self.frame_reach(
-            extension.scope.domain,
-            extension.tip,
-            extension
-                .author
-                .ok_or_else(|| denied("node author missing"))?,
-            extension.author_sequence,
-            operation.header.timestamp,
-        )?;
+        let reach = self.frame_reach(frame)?;
         if matches!(reach, tips::FrameReach::Unfollowed) {
             return Err(denied(
                 "frame belongs to a tip this replica does not follow",
@@ -1459,17 +1735,36 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let operation = frame.operation()?;
-        let extension = &operation.header.extensions;
+        let operation = frame.operation_ref()?;
+        let frame_manifest = self.manifest_of_tip(operation.header.extensions.tip)?;
+        if !self.catalog.contains_key(&frame_manifest)
+            && self.frame_reach(frame)? == tips::FrameReach::Held
+        {
+            return Err(denied("held source schema is not installed"));
+        }
         // Only bytes are shared by digest: the chain is verified here, for
         // every frame, against the current revocations.
-        let credentials = frame.chain()?.credentials();
+        self.verify_header_authority(&operation.header, frame.chain()?.credentials(), time)
+    }
+    /// A signed row header's write authority under `credentials`, the chain
+    /// its digest names, against the current revocations.
+    pub(super) fn verify_header_authority(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        credentials: &CredentialChain,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let extension = &header.extensions;
         let manifest = &self.definition;
-        let frame_manifest = self.manifest_of_tip(extension.tip)?;
-        self.admits(frame_manifest)?;
+        let source = self.catalog.get(&self.manifest_of_tip(extension.tip)?);
         if extension.scope.domain.app != manifest.app
             || !self.domains.contains(&extension.scope.domain.domain)
-            || !self.tables.contains(&extension.scope.table)
+            || source.is_some_and(|definition| {
+                !definition
+                    .entities
+                    .iter()
+                    .any(|table| table.id == extension.scope.table)
+            })
         {
             return Err(denied("wrong app/domain/table/manifest"));
         }
@@ -1481,21 +1776,21 @@ impl<A: RowApplication> Inner<A> {
             Some(tuple) => credentials
                 .verify_partition_author(
                     self.config.publisher,
-                    operation.header.public_key,
+                    header.public_key,
                     number,
                     extension.scope,
                     tuple,
-                    self.revocations_for(frame_manifest, &self.config.revocations)?,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,
             None => credentials
                 .verify_author(
                     self.config.publisher,
-                    operation.header.public_key,
+                    header.public_key,
                     number,
                     extension.scope.table,
-                    self.revocations_for(frame_manifest, &self.config.revocations)?,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,
@@ -1607,8 +1902,13 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let (_, bytes) = self.retained().await?;
-        let bytes = bytes.saturating_sub(self.staged_bytes().await?);
-        if bytes.saturating_add(incoming as u64) > self.limits.hard_bytes as u64 {
+        let bytes = bytes
+            .checked_sub(self.migration_bytes().await?)
+            .ok_or_else(|| Error::Corrupt("migration accounting exceeds history".into()))?;
+        if bytes
+            .checked_add(incoming as u64)
+            .is_none_or(|total| total > self.limits.hard_bytes as u64)
+        {
             return Err(Error::Backpressure);
         }
         Ok(())
@@ -1647,22 +1947,13 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn path(&self) -> &Path {
         self._owner.path()
     }
-    async fn stored_identity(&self) -> Result<Vec<u8>, Error> {
-        match rows(
-            &self.conn,
-            "SELECT identity FROM secure_metadata WHERE id=1",
-        )
-        .await?
-        .first()
-        .map(Vec::as_slice)
-        {
-            Some([SqlValue::Blob(identity)]) => Ok(identity.clone()),
-            _ => Err(denied("missing secure metadata")),
-        }
-    }
-    /// Checks an existing file's identity, when given, and holds the union
-    /// of the retained and the supplied revocations.
-    async fn load_revocations(&mut self, identity: Option<&[u8]>) -> Result<(), Error> {
+    /// Checks the file identity and defers new exclusions until its stored
+    /// state has verified under the retained revocations.
+    async fn load_revocations(
+        &mut self,
+        supplied: &RevocationSet,
+        identity: Option<&[u8]>,
+    ) -> Result<(), Error> {
         let mut metadata = self
             .conn
             .query(
@@ -1679,19 +1970,15 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("secure file identity mismatch"));
         }
         let stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
-        let mut merged = self.config.revocations.clone();
+        let mut merged = supplied.clone();
         merged
             .merge(&stored, self.config.publisher, self.definition.app, now()?)
             .map_err(credential)?;
-        if merged != stored {
-            self.conn
-                .execute(
-                    "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1",
-                    [merged.to_bytes().map_err(credential)?],
-                )
-                .await?;
-        }
-        self.config.revocations = merged;
+        self.opening_revocations = (merged != stored).then_some(merged);
+        self.invalidate_context();
+        // Verify the stored projection and L before applying the new exclusion
+        // through the ordinary atomic revocation path.
+        self.config.revocations = stored;
         *self
             .local
             .lock()

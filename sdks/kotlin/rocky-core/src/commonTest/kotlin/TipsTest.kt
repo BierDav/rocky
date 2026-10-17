@@ -95,6 +95,18 @@ class TipsTest {
     }
 
     @Test
+    fun recoverSendsTheActionAndKeepsItsRefusals() = runBlocking {
+        val (transport, tips) = recordingTips()
+        assertEquals("tip-main", tips.recover().tip)
+        assertEquals("recover", transport.calls.single().action())
+        for ((code, retryable) in listOf("rejected" to false, "stale_recovery" to false, "behind" to true)) {
+            val refusing = recordingTips { throw RockyException(code, retryable, "refused") }.second
+            val failure = assertFailsWith<RockyException> { refusing.recover() }
+            assertEquals(code to retryable, failure.code to failure.retryable)
+        }
+    }
+
+    @Test
     fun pullSendsTheSeal() = runBlocking {
         val (transport, tips) = recordingTips()
         assertEquals("tip-main", tips.pull("seal-id").tip)
@@ -154,11 +166,11 @@ class TipsTest {
         """{
           "scope":"domain","genesis":"genesis","schema":"schema","genesis_minimum":2,
           "seals":[
-            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true,"checkpoints":[{"id":"record","scope":"items","checkpoint":"body","signer":"node","authority":"issuer","rows":7}],"held":"kept"},
+            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true,"checkpoints":[{"id":"record","scope":"items","checkpoint":"body","signer":"node","authority":"issuer","rows":7}],"held":"kept","recovery":{"retained":1,"replaced":18446744073709551615}},
             {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false,"checkpoints":[],"held":null},
             {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false,"checkpoints":[],"held":null}
           ],
-          "openings":[{"id":"branch","seal":"continued","minimum_in_sync":3}],
+          "openings":[{"id":"branch","seal":"continued","schema":"schema","minimum_in_sync":3}],
           "bookmarks":[{"name":"main","tip":"continued","moves":[
             {"id":"created","from":null,"to":"genesis","authority":"owner","revoked":false},
             {"id":"advance","from":"genesis","to":"continued","authority":"issuer","revoked":false},
@@ -188,13 +200,14 @@ class TipsTest {
                     true,
                     listOf(TipCheckpoint("record", "items", "body", "node", TipAuthority.ISSUER, 7uL)),
                     TipHeld.KEPT,
+                    TipRecovery(1uL, ULong.MAX_VALUE),
                 ),
                 TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true, false, emptyList()),
                 TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false, false, emptyList()),
             ),
             value.seals,
         )
-        assertEquals(TipOpening("branch", "continued", 3u), value.openings.single())
+        assertEquals(TipOpening("branch", "continued", "schema", 3u), value.openings.single())
         assertEquals(BookmarkMove("created", null, "genesis", TipAuthority.OWNER, false), value.bookmarks.first().moves.first())
         assertEquals(listOf(LosingMove("main/1", "lost", "other")), value.bookmarks.first().losers)
         assertEquals("continued", value.bookmarks.first().tip)

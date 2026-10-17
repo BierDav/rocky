@@ -287,6 +287,12 @@ refuses an unknown version.
 Every completion-gate item above holds. Phase 15 is implemented with the
 limits below.
 
+The plateau probe's selected counts, `((1, 0), 1, 0, 0, 4, 1, 1)` at cycles
+16 and 64, are unchanged by phase 17. They measure row-state reclamation; the
+[admission evidence](../runtime/admission-evidence.md#growth-and-accounting)
+phase 17 specifies grows with births and must be reported beside them, in
+encoded bytes, allocated pages and file and WAL bytes, never inside them.
+
 ### Remaining limits after phase 15
 
 The earlier slices' open lists remain history. Unchanged scope bases are now

@@ -18,11 +18,9 @@ The coordinator verifies metadata only; its genesis anchor and exact retained
 entry hashes let the node verify the original frames before rejoining. Missing
 entries or a gap outside the hash window keep appends refused.
 
-What no device holds is abandoned only by an owner-signed cut: devices fence
-the abandoned positions, roll their effects back and guard any scope whose
-replay base holds them until a clean checkpoint is imported. See
-[stuck recovery](stuck-recovery.md) and
-[decision 0074](../decisions/0074-owner-signed-recovery-cuts.md).
+What no device holds is abandoned only by the owner's recovery seal of the
+stuck tip: every device holds the abandoned writes for their authors and
+rolls their effects back. See [stuck recovery](stuck-recovery.md).
 
 ## External effects
 

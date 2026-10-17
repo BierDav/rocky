@@ -124,6 +124,16 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
     let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
     let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
     let row = setup(&f, &a, &b, &partitions).await;
+    let original = crate::tests::stored_frames(
+        &b,
+        "SELECT header,body FROM secure_operations ORDER BY sequence",
+    )
+    .await
+    .into_iter()
+    .find(|frame| frame.scope().unwrap() == row.change.scope)
+    .unwrap();
+    let original_payload = payload(&b, &original).await.unwrap();
+    let original_proof = original_payload.proof(&row.change.row).unwrap();
     let offline = edit(&f, &a, &row, "ticked", 20).await;
     let mover = session(&f, &b, &partitions).await;
     let frames = mover
@@ -137,6 +147,37 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
         .await
         .unwrap();
     assert_eq!(frames.len(), 2);
+    for (index, frame) in frames.iter().enumerate() {
+        let operation = frame.operation_ref().unwrap();
+        let opened = payload(&b, frame).await.unwrap();
+        let membership = opened.membership().unwrap();
+        assert_eq!(usize::from(membership.index), index);
+        assert_eq!(membership.members.len(), 2);
+        if let Some(write) = opened
+            .writes()
+            .iter()
+            .find(|write| write.change.before.is_none())
+        {
+            let carried = opened.carried(&write.change.row).unwrap();
+            assert_eq!(
+                encode(&carried.proof).unwrap(),
+                encode(original_proof).unwrap()
+            );
+            assert_ne!(
+                carried.proof.stamp().author.key().unwrap(),
+                operation.header.public_key
+            );
+            assert_eq!(
+                carried.stamps,
+                original_payload.writes()[0]
+                    .published_fields()
+                    .iter()
+                    .map(|field| (*field, original_proof.stamp().clone()))
+                    .collect()
+            );
+            assert!(carried.moved_from.is_some());
+        }
+    }
     assert_eq!(title(&f, &b, partitions[0]).await, None);
     assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
     // Either first member leaves the old row visible until the partner arrives.
@@ -147,6 +188,15 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
     );
     assert_eq!(title(&f, &a, partitions[1]).await, None);
     a.receive(frames[1].clone()).await.unwrap();
+    // The carry below a's own marks is observed, never a second origin.
+    let identity = RowIdentity::new(1, 1).unwrap().integer();
+    for replica in [&a, &b] {
+        let claims = crate::storage::rows(&replica.inner.lock().await.conn, &format!("SELECT kind FROM secure_admission_claims WHERE identity={identity} AND allocation=(SELECT allocation FROM secure_admission_claims WHERE identity={identity} AND kind=1) ORDER BY kind")).await.unwrap();
+        assert_eq!(
+            claims,
+            vec![vec![SqlValue::Integer(0)], vec![SqlValue::Integer(1)]]
+        );
+    }
     assert_eq!(title(&f, &a, partitions[0]).await, None);
     assert_eq!(
         title(&f, &a, partitions[1]).await.as_deref(),
@@ -401,8 +451,8 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
         1
     );
     for name in ["items", "attachments"] {
-        let checkpoint = b.checkpoint(f.scope(name, partitions[1])).await.unwrap();
-        assert_eq!(checkpoint.statement.format, 15);
+        let checkpoint = compacted_base(&b, &f.publisher, f.scope(name, partitions[1])).await;
+        assert_eq!(checkpoint.statement.format, 16);
         assert_eq!(checkpoint.statement.moves.count, 1);
         b.rebuild_projection(f.scope(name, partitions[1]))
             .await
@@ -547,7 +597,7 @@ async fn payload(
     crate::wire::RowPayload::decode(&crate::wire::decrypt(
         &key.key,
         &encode(&operation.header.extensions)?,
-        &frame.body,
+        frame.body_bytes(),
     )?)
 }
 

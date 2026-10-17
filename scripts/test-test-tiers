@@ -75,5 +75,41 @@ class ArchivedExecutables(unittest.TestCase):
         self.assertNotIn("CARGO_BIN_EXE_other", environment)
 
 
+class SuiteExemption(unittest.TestCase):
+    def run_source(self, name, exempt_result):
+        suite = {"binary-id": "rocky-sdk::migrations"}
+        other = {"binary-id": "rocky-sdk::service"}
+        migration = (suite, "a_migration_of_100000_rows_converges_on_every_member")
+        ordinary = (other, "rollback")
+        exemption = "binary_id(=rocky-sdk::migrations) & test(=a_migration_of_100000_rows_converges_on_every_member)"
+        config = SimpleNamespace(tiers={"e2e": {"suite-exempt-filter": exemption}})
+        source = SimpleNamespace(name=name, list=lambda expr, ignored: [migration])
+        good = ([(source, other, "rollback", 12.0)], [], 13.0)
+        with patch.object(tiers, "run_nextest", side_effect=[good, exempt_result]) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = tiers.run_tier(source, config, "e2e", "all()", [migration, ordinary])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[3], [ordinary])
+        self.assertEqual(run.call_args_list[1].args[3], [migration])
+        self.assertIn(f"!({exemption})", run.call_args_list[0].args[2])
+        return result
+
+    def test_each_build_runs_the_full_exempt_test_without_charging_its_wall(self):
+        for build in ("workspace", "sdk-no-default"):
+            with self.subTest(build=build):
+                timing = (None, {"binary-id": "rocky-sdk::migrations"}, "migration", 500.0)
+                timed, failed, wall, exempt = self.run_source(build, ([timing], [], 501.0))
+                self.assertEqual(len(timed), 2)
+                self.assertEqual(failed, [])
+                self.assertEqual((wall, exempt), (13.0, 501.0))
+
+    def test_exempt_assertion_failures_and_timeouts_still_fail(self):
+        for failure in ("migration assertion failed", "migration timed out"):
+            with self.subTest(failure=failure):
+                _, failed, wall, exempt = self.run_source("workspace", ([], [failure], 600.0))
+                self.assertEqual(failed, [failure])
+                self.assertEqual((wall, exempt), (13.0, 600.0))
+
+
 if __name__ == "__main__":
     unittest.main()

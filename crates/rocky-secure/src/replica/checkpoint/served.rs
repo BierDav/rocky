@@ -38,6 +38,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         inner.flush()?;
         inner.authorize_peer(peer, credentials, scope)?;
+        // A no-frames base needs no key: its original statement is served.
+        if !inner.importing.contains(&scope)
+            && !inner.importing(scope).await?
+            && let Some(signed) = inner.no_frames_base(scope).await?
+            && signed.statement.seal == Some(seal)
+        {
+            return Ok(inner
+                .served_checkpoint(scope)
+                .await?
+                .map(|(_, signed)| signed)
+                .filter(|signed| signed.signer() != peer));
+        }
         if inner.scope_key(scope).is_err()
             || inner.importing.contains(&scope)
             || inner.importing(scope).await?
@@ -45,7 +57,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Ok(None);
         }
-        inner.settle(scope).await?;
         let Some(id) = inner.find_scope_id(scope).await? else {
             return Ok(None);
         };
@@ -69,7 +80,8 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Option<(i64, SignedCheckpoint, Served)>, Error> {
         let current = |signed: &SignedCheckpoint| -> Result<bool, Error> {
             Ok(signed.statement.seal == Some(seal)
-                && signed.statement.key_epoch == self.scope_key(scope)?.0
+                && (signed.statement.no_frames()
+                    || signed.statement.key_epoch() == Some(self.scope_key(scope)?.0))
                 && signed.verify_authority(self, now()?).is_ok())
         };
         if let Some(record) = self.checkpoint_record(id, true).await?
@@ -149,7 +161,9 @@ impl<A: RowApplication> Inner<A> {
         let Some(kept) = self.kept_rewind(seal).await? else {
             return Ok(None);
         };
-        let (mark, through) = kept.at(id);
+        let Some((mark, through)) = kept.at(id) else {
+            return Ok(None);
+        };
         let signed_seal = self
             .graph_for(scope.domain)?
             .seal_by_id(seal)
@@ -267,12 +281,37 @@ impl<A: RowApplication> Inner<A> {
         }
         let tip = signed_seal.statement.tip;
         let (handles, handle_digest) = self.handle_set().await?;
+        let previous_marks = previous
+            .as_ref()
+            .map_or(&[][..], |(_, signed)| &signed.statement.identities);
+        let identities = match self
+            .covered_identity_marks(id, previous_marks, &frontier)
+            .await?
+        {
+            Some(identities)
+                if self
+                    .check_covered_identities("secure_served_rows", id, &identities)
+                    .await
+                    .is_ok() =>
+            {
+                identities
+            }
+            _ => {
+                for sql in [
+                    "DELETE FROM secure_served WHERE scope=?",
+                    "DELETE FROM secure_served_rows WHERE scope=?",
+                ] {
+                    self.conn.execute(sql, [id]).await?;
+                }
+                return Ok(None);
+            }
+        };
         let frontier: Vec<LogPosition> = frontier.into_values().collect();
         let statement = CheckpointStatement {
             format: CHECKPOINT_FORMAT,
             seal: Some(seal),
             partition: self.partitions.get(&scope).cloned(),
-            identities: self.identity_marks(scope).await?,
+            identities,
             moves: self.served_moves(id).await?,
             tip,
             schema: self
@@ -280,7 +319,9 @@ impl<A: RowApplication> Inner<A> {
                 .schema,
             revocations: self.revocation_digest()?,
             scope,
-            key_epoch: self.scope_key(scope)?.0,
+            state: CheckpointState::Keyed {
+                key_epoch: self.scope_key(scope)?.0,
+            },
             sequence: previous
                 .as_ref()
                 .map_or(0, |(_, signed)| signed.statement.sequence)
@@ -300,7 +341,6 @@ impl<A: RowApplication> Inner<A> {
                 digest: handle_digest.digest(),
             },
             custody: self.custody_summary(id, through).await?,
-            coordinated: self.seal_binding(scope, id, through).await?,
         };
         let signed = self.sign_checkpoint(statement)?;
         self.conn

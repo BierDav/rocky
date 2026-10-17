@@ -6,7 +6,6 @@ use crate::{
     Failure,
     enrollment::{IDENTITY, Intent, Settings, exchange, now},
     groups::GroupRecord,
-    schema::Schema,
     secrets::Vault,
     service::ServiceError,
     transport::{Protocol, Transport},
@@ -26,11 +25,12 @@ const SKEW: u64 = 300;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bundle {
+    format: u32,
     mesh: MeshId,
     domain: DomainId,
-    schema: Schema,
-    manifest: String,
-    lineage: Vec<crate::generation::Step>,
+    record: crate::tip_schemas::Record,
+    genesis: String,
+    bootstrap: crate::tip_schemas::Bootstrap,
     revocations: RevocationSet,
     /// The identity's links: issuer links and its own capability.
     links: CredentialChain,
@@ -75,11 +75,12 @@ impl Settings {
             .ok_or("missing node credential")?
             .capability;
         let bundle = Bundle {
+            format: 2,
             mesh: self.mesh,
             domain: self.domain,
-            schema: self.schema.clone(),
-            manifest: self.manifest.clone(),
-            lineage: self.lineage.clone(),
+            record: crate::tip_schemas::Record::new(&self.schema, self.generation),
+            genesis: self.genesis.clone(),
+            bootstrap: self.schema_bootstrap()?,
             revocations: self.revocations.clone(),
             links: self.identity_links(),
             profile: self.profile.clone(),
@@ -145,6 +146,10 @@ impl Settings {
         .await?;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(&request, &secret)?)?;
+        if bundle.format != 2 {
+            return Err("unsupported identity enrollment format".into());
+        }
+        bundle.record.bytes()?;
         let identity = provider.public_key()?;
         if bundle
             .links
@@ -157,13 +162,14 @@ impl Settings {
         let mut settings = Settings::installed(
             (intent.installation.clone(), intent.stored_identity),
             (record.publisher, identity, provider),
-            (bundle.mesh, bundle.domain, bundle.schema.clone()),
-            bundle.manifest.clone(),
+            (bundle.mesh, bundle.domain, bundle.record.schema.clone()),
+            bundle.genesis.clone(),
             bundle.ttl,
         );
-        settings.lineage = bundle.lineage;
-        // The schema and lineage are the publisher's.
-        settings.verify_lineage()?;
+        settings.generation = bundle.record.generation;
+        settings.bootstrap = Some(bundle.bootstrap);
+        // The followed graph authenticates the schema record.
+        settings.verify_schema()?;
         settings.learn_revocations(&bundle.revocations)?;
         let domain = settings.domain()?;
         let issues = bundle

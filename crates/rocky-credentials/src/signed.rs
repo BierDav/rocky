@@ -192,65 +192,6 @@ impl SignedManifest {
     }
 }
 
-/// A publisher's transition from one signed manifest to the next. See
-/// `docs/runtime/generations.md`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedTransition {
-    body: Vec<u8>,
-    endorsement: Endorsement,
-}
-const TRANSITION: &str = "rocky.signed-transition.v2";
-impl SignedTransition {
-    /// The owner signs.
-    pub fn sign(
-        transition: &rocky_core::GenerationTransition,
-        owner: &dyn IdentityProvider,
-    ) -> Result<Self, Error> {
-        Self::endorse(transition, owner, &CredentialChain(Vec::new()))
-    }
-    /// The owner, or an issuer through `chain`, signs.
-    pub fn endorse(
-        transition: &rocky_core::GenerationTransition,
-        signer: &dyn IdentityProvider,
-        chain: &CredentialChain,
-    ) -> Result<Self, Error> {
-        transition.validate()?;
-        let body = transition.canonical();
-        Ok(Self {
-            endorsement: Endorsement::sign(signer, chain, TRANSITION, &body)?,
-            body,
-        })
-    }
-    pub fn verify(&self, publisher: PublicKey) -> Result<rocky_core::GenerationTransition, Error> {
-        let transition = rocky_core::GenerationTransition::from_canonical(&self.body)?;
-        self.endorsement
-            .verify(publisher, TRANSITION, &self.body)
-            .map_err(|_| denied("invalid transition signature"))?;
-        Ok(transition)
-    }
-    /// As `verify`, by a signer no statement of `revocations` ended.
-    pub fn verify_current(
-        &self,
-        publisher: PublicKey,
-        revocations: &RevocationSet,
-        time: u64,
-    ) -> Result<rocky_core::GenerationTransition, Error> {
-        let transition = self.verify(publisher)?;
-        self.endorsement
-            .verify_current(publisher, TRANSITION, &self.body, revocations, time)?;
-        Ok(transition)
-    }
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        encode(self)
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(
-            bytes,
-            rocky_core::MAX_TRANSITION_IDS * 34 + 1024 + MAX_ENDORSEMENT_BYTES,
-        )
-    }
-}
-
 /// One link of a chain. It names no generation: grants name tables and
 /// fields by name, so a chain holds in every generation of its domain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,12 +403,16 @@ impl CredentialChain {
                 None => false,
             };
             let held = capability.grants.len() + extended.partitions.len();
+            let trusted_node = capability.kind == PrincipalKind::Node
+                && parent
+                    .as_ref()
+                    .is_some_and(|(_, held)| held.trusted.is_some());
             if signed.issuer != issuer
                 || stale
                 || capability.not_before >= capability.expires
                 || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || (held == 0 && !extended.issues && extended.trusted.is_none())
+                || (held == 0 && !extended.issues && extended.trusted.is_none() && !trusted_node)
                 || held > 64
                 || !signed.issuer.verify(
                     &signing_bytes(CAPABILITY_LABEL, capability)?,

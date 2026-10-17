@@ -1,4 +1,35 @@
 use super::*;
+use identity::receipts;
+use std::borrow::Cow;
+
+pub(super) struct Materialization<'p> {
+    pub rows: Vec<(RowChange, Materialized)>,
+    pub admission: Admission,
+    pub payload: Cow<'p, RowPayload>,
+}
+
+/// What admitting one frame adds to the admission evidence: a first
+/// admission's receipt, and restorations minted on re-admission.
+#[derive(Default)]
+pub(super) struct Admission {
+    receipt: Option<receipts::FrameReceipt>,
+    restorations: Vec<receipts::Restoration>,
+    observations: Vec<receipts::CarryObservation>,
+}
+/// How a birth is admitted.
+enum Class {
+    /// Not a numeric birth.
+    Plain,
+    /// A first admission's original creation.
+    Created(rocky_core::RowIdentity, Commitment),
+    /// A first admission's carried creation.
+    Carried(rocky_core::RowIdentity, Commitment, PublicKey),
+    /// An original assignment or carry this file admitted before.
+    Exact,
+    Observe(receipts::CarryObservation),
+    /// A withheld birth restored now, with its receipt.
+    Restore(u64, rocky_core::RowIdentity, Commitment),
+}
 
 impl<A: RowApplication> Inner<A> {
     /// Admits one frame's exact writes against `grants` and merges each with
@@ -9,12 +40,52 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         writes: &[RowWrite],
         grants: &[rocky_core::ResourceGrant],
-    ) -> Result<Vec<(RowChange, Materialized)>, Error> {
+        opened_payload: Option<&RowPayload>,
+    ) -> Result<(Vec<(RowChange, Materialized)>, Admission), Error> {
+        let Materialization {
+            rows, admission, ..
+        } = self
+            .materialize_retaining(frame, writes, grants, opened_payload)
+            .await?;
+        Ok((rows, admission))
+    }
+    pub(super) async fn materialize_retaining<'p>(
+        &self,
+        frame: &EncryptedFrame,
+        writes: &[RowWrite],
+        grants: &[rocky_core::ResourceGrant],
+        opened_payload: Option<&'p RowPayload>,
+    ) -> Result<Materialization<'p>, Error> {
         if writes.is_empty() || writes.len() > 32 {
             return Err(denied("row change quota"));
         }
-        let operation = frame.operation()?;
+        let operation = frame.operation_ref()?;
         let scope = operation.header.extensions.scope;
+        if let Some(graph) = self.graphs.get(&scope.domain) {
+            let source = graph
+                .schema_any(operation.header.extensions.tip)
+                .map_err(credential)?;
+            let definition = self
+                .catalog
+                .get(&source)
+                .ok_or_else(|| denied("source tip schema is not installed"))?;
+            let fields: BTreeSet<_> = definition.fields.iter().map(|field| field.id).collect();
+            if !definition
+                .entities
+                .iter()
+                .any(|table| table.id == scope.table)
+                || writes.iter().any(|write| {
+                    write
+                        .change
+                        .before
+                        .iter()
+                        .chain(&write.change.after)
+                        .any(|image| image.keys().any(|field| !fields.contains(field)))
+                })
+            {
+                return Err(denied("frame fields are outside its source tip schema"));
+            }
+        }
         // Authority covers the writes as signed; the current generation
         // applies what it still names, the same way on every device.
         for write in writes {
@@ -41,198 +112,425 @@ impl<A: RowApplication> Inner<A> {
         if operation.header.extensions.existence as usize > logged {
             return Err(denied("frame miscounts its existence records"));
         }
-        let current: Vec<RowWrite> = writes
-            .iter()
-            .filter_map(|write| self.names.current(write, operation.header.timestamp))
-            .collect();
-        let writes = current.as_slice();
+        let fields = self.path_fields(scope.domain, operation.header.extensions.tip)?;
+        // Admission evidence names each birth by its place in the signed
+        // write list, so ordinals survive the path filter.
+        let mut current = Vec::new();
+        let mut withheld = Vec::new();
+        for (ordinal, write) in writes.iter().enumerate() {
+            let ordinal = u8::try_from(ordinal).map_err(|_| denied("row change quota"))?;
+            match fields.current(write) {
+                Some(kept) => current.push((ordinal, kept)),
+                None if write.change.before.is_none() => withheld.push(ordinal),
+                None => {}
+            }
+        }
         let mut changed = BTreeSet::new();
         self.app
-            .validate_changes(&exact(writes))
+            .validate_changes(
+                &current
+                    .iter()
+                    .map(|(_, write)| write.change.clone())
+                    .collect::<Vec<_>>(),
+            )
             .map_err(|message| denied(&message))?;
         let mut result = Vec::new();
         let mut identities = BTreeSet::new();
         let extension = &operation.header.extensions;
+        // Every comparison uses the marks the frame entered with.
         let marks = self.identity_marks(scope).await?;
-        let finalized = self.seal_finalized(scope).await?;
-        let payload = self.row_payload(frame)?;
-        let ceiling = Stamp {
-            clock: operation.header.timestamp,
-            author: operation.header.public_key.into(),
-            sequence: operation.header.seq_num,
+        let own = self.own_marks(scope).await?;
+        let allocation = self.optional_allocation_of(scope).await?;
+        let allocation_marks = match allocation {
+            Some((_, allocation)) if allocation != scope => self.identity_marks(allocation).await?,
+            _ => marks.clone(),
         };
-        for write in writes {
-            if self
-                .app
-                .row_partition(&write.change)
-                .map_err(|error| denied(&error))?
-                != extension.partition
-            {
-                return Err(denied("row image differs from authenticated partition"));
+        let prior = self.receipt_of(operation.hash).await?;
+        let payload = match opened_payload {
+            Some(payload) => Cow::Borrowed(payload),
+            None => Cow::Owned(self.row_payload(frame)?),
+        };
+        let (rows, admission) = {
+            let payload = payload.as_ref();
+            if let Some((_, receipt)) = &prior {
+                self.check_frame_receipt(receipt, frame, writes, payload)
+                    .await?;
             }
-
-            let change = &write.change;
-            self.app
-                .validate_write(write)
-                .map_err(|message| denied(&message))?;
-            if change.scope != scope
-                || !changed.insert(self.storage_row(change)?)
-                || change
-                    .before
-                    .iter()
-                    .chain(change.after.iter())
-                    .any(|fields| {
-                        fields.len() > 256
-                            || fields.keys().any(|field| !self.fields.contains(field))
-                    })
-            {
-                return Err(denied(
-                    "row/field transition denied; permission fields never change by row writes",
-                ));
-            }
-            let current = self.row(scope, self.storage_row(change)?).await?;
-            // A re-added table's row created before its baseline is ignored,
-            // and so is every later write to it.
-            if current.is_none()
-                && change.before.is_some()
-                && self.names.tables.contains_key(&scope.table)
-            {
-                continue;
-            }
-            // A row an abandoned coordinated write created never existed.
-            if current.is_none()
-                && change.before.is_some()
-                && self.abandoned_dependency(&operation.header).await?
-            {
-                self.consume(
-                    operation.hash,
-                    "the row's creation was abandoned by an owner-signed cut",
-                )
-                .await?;
-                continue;
-            }
-            let carried = payload.carried(&change.row);
-            if let Some(carried) = carried {
-                if payload.membership().is_none() {
-                    return Err(denied("a move or follow requires a transaction bundle"));
+            let mut bindings = moves::FrameBindings::default();
+            let mut snapshot = receipts::BirthSnapshot {
+                permanent: marks.clone(),
+                own: own.clone(),
+                allocation: allocation_marks,
+                ledger: if current.is_empty() {
+                    identity::IdentityLedger::default()
+                } else if prior.is_some() {
+                    identity::IdentityLedger::seeded(&self.ledger_entry(scope).await?)?
+                } else {
+                    identity::IdentityLedger::seeded(&self.ledger_marks(scope).await?)?
+                },
+                summary: self.summary_marks(scope).await?,
+                receipt: prior.clone(),
+                claims: Default::default(),
+            };
+            let mut births: Vec<receipts::Birth> = withheld
+                .iter()
+                .map(|ordinal| receipts::Birth {
+                    ordinal: *ordinal,
+                    disposition: receipts::Disposition::Filtered,
+                })
+                .collect();
+            let mut restorations = Vec::new();
+            let mut observations = Vec::new();
+            let finalized = self.seal_finalized(scope).await?;
+            let ceiling = Stamp {
+                clock: operation.header.timestamp,
+                author: operation.header.public_key.into(),
+                sequence: operation.header.seq_num,
+            };
+            for (ordinal, write) in &current {
+                let change = &write.change;
+                let carried = payload.carried(&change.row);
+                let current = self.row(scope, self.storage_row(change)?).await?;
+                let birth = match change.before {
+                    None => self
+                        .app
+                        .row_identity(change)
+                        .map_err(|message| denied(&message))?,
+                    Some(_) => None,
+                };
+                let mut class = Class::Plain;
+                if let Some(identity) = birth {
+                    if !identities.insert(identity) {
+                        return Err(denied("forged row author or reused identity sequence"));
+                    }
+                    let signer = match carried {
+                        Some(carried) => carried.proof.stamp().author.key()?,
+                        None => operation.header.public_key,
+                    };
+                    let provenance = match carried {
+                        Some(carried) => carried.proof.provenance()?,
+                        None => payload
+                            .proof(&change.row)
+                            .ok_or_else(|| denied("numeric birth requires a creation proof"))?
+                            .provenance()?,
+                    };
+                    let decision = self
+                        .classify_birth(
+                            allocation.ok_or_else(|| denied("identity allocation unavailable"))?,
+                            &mut snapshot,
+                            receipts::BirthInput {
+                                frame: operation.hash,
+                                ordinal: *ordinal,
+                                identity,
+                                provenance,
+                                signer,
+                                author: extension.author,
+                                carried: carried.is_some(),
+                                existing: current.is_some(),
+                                finalized,
+                                target: self.workspace.tip,
+                                first: true,
+                            },
+                        )
+                        .await?;
+                    class = match decision {
+                        receipts::BirthClass::Created => Class::Created(identity, provenance),
+                        receipts::BirthClass::Carried => {
+                            Class::Carried(identity, provenance, signer)
+                        }
+                        receipts::BirthClass::Exact => Class::Exact,
+                        receipts::BirthClass::Observe(observation) => Class::Observe(observation),
+                        receipts::BirthClass::Restore(restoration) => {
+                            Class::Restore(restoration.receipt, identity, provenance)
+                        }
+                        receipts::BirthClass::Suppressed(reason) => {
+                            if let Some(reason) = reason {
+                                self.consume(operation.hash, reason).await?;
+                            }
+                            if prior.is_none() {
+                                births.push(receipts::Birth {
+                                    ordinal: *ordinal,
+                                    disposition: receipts::Disposition::Consumed { identity },
+                                });
+                            }
+                            continue;
+                        }
+                    };
                 }
-                self.check_carried(write, carried, &ceiling)?;
-            }
-            if let Some(identity) = self
-                .app
-                .row_identity(change)
-                .map_err(|message| denied(&message))?
-                && change.before.is_none()
-            {
-                let mark = marks.iter().find(|mark| mark.author == identity.author());
-                if (carried.is_none() && extension.author != Some(identity.author()))
-                    || mark.is_some_and(|mark| {
-                        let signer = carried
-                            .map_or(operation.header.public_key.into(), |carried| {
-                                carried.proof.stamp().author
-                            });
-                        signer != mark.signer
-                            || (carried.is_none()
-                                && identity.sequence() <= mark.sequence
-                                && !(finalized && current.is_some()))
-                    })
-                    || !identities.insert(identity)
+                let restoring = matches!(class, Class::Restore(..));
+                // A restored birth that fails a creation check stays withheld;
+                // its frame was admitted already.
+                let checked = self
+                    .check_write(write, scope, &mut changed, extension.partition.clone())
+                    .await;
+                match checked {
+                    Ok(()) => {}
+                    Err(error) if restoring && receipts::semantic_refusal(&error) => continue,
+                    Err(error) => return Err(error),
+                }
+                // A row an abandoned coordinated write created never existed.
+                if current.is_none()
+                    && change.before.is_some()
+                    && self.abandoned_dependency(&operation.header).await?
                 {
-                    return Err(denied("forged row author or reused identity sequence"));
+                    self.consume(
+                        operation.hash,
+                        "the row's creation was abandoned by an owner-signed cut",
+                    )
+                    .await?;
+                    continue;
                 }
+                if let Some(carried) = carried {
+                    if payload.membership().is_none() {
+                        return Err(denied("a move or follow requires a transaction bundle"));
+                    }
+                    self.check_carried(write, carried, &ceiling)?;
+                }
+                if finalized
+                    && ((change.before.is_some() && current.is_none())
+                        || (change.before.is_none() && current.is_some()))
+                {
+                    if carried.is_some() {
+                        return Err(denied("move or follow is behind the pruned_prefix"));
+                    }
+                    self.consume(
+                        operation.hash,
+                        "row is unavailable behind the finalized seal",
+                    )
+                    .await?;
+                    if let (Class::Created(identity, _), None) = (&class, &prior) {
+                        births.push(receipts::Birth {
+                            ordinal: *ordinal,
+                            disposition: receipts::Disposition::Consumed {
+                                identity: *identity,
+                            },
+                        });
+                    }
+                    continue;
+                }
+                let (actual, mut record) = merge_row(write, current, operation, carried)?;
+                if change.before.is_none()
+                    && carried.is_none()
+                    && let Some(identity) = birth
+                {
+                    let proof = payload
+                        .proof(&change.row)
+                        .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
+                    let verified = proof
+                        .verify_with_bindings(
+                            self.config.publisher,
+                            self.manifest_of_tip(extension.tip)?,
+                            scope.table,
+                            identity,
+                            &ceiling,
+                            Some(&mut bindings),
+                        )
+                        .and_then(|()| match proof.stamp() == &ceiling {
+                            true => Ok(()),
+                            false => Err(denied("birth proof must name its creating frame stamp")),
+                        });
+                    match verified {
+                        Ok(()) => {}
+                        Err(error) if restoring && receipts::semantic_refusal(&error) => continue,
+                        Err(error) => return Err(error),
+                    }
+                    record.proof = Some(proof.stored()?);
+                }
+                record.key = Some(change.row);
+                record.identity = birth
+                    .or(self
+                        .app
+                        .row_identity(change)
+                        .map_err(|message| denied(&message))?)
+                    .map(|identity| identity.integer());
+                // Validate both the signed transition and the actual candidate under concurrent merges.
+                if changes(&actual) {
+                    let valid = self
+                        .app
+                        .validate_changes(std::slice::from_ref(&actual))
+                        .map_err(|message| denied(&message));
+                    match valid {
+                        Ok(()) => {}
+                        Err(error) if restoring && receipts::semantic_refusal(&error) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                match class {
+                    Class::Created(identity, provenance) if prior.is_none() => {
+                        births.push(receipts::Birth {
+                            ordinal: *ordinal,
+                            disposition: receipts::Disposition::Created {
+                                identity,
+                                provenance,
+                            },
+                        })
+                    }
+                    Class::Carried(identity, provenance, signer) => births.push(receipts::Birth {
+                        ordinal: *ordinal,
+                        disposition: receipts::Disposition::Carried {
+                            identity,
+                            provenance,
+                            signer,
+                        },
+                    }),
+                    Class::Restore(receipt, identity, provenance) => {
+                        restorations.push(receipts::Restoration {
+                            receipt,
+                            frame: operation.hash,
+                            ordinal: *ordinal,
+                            identity,
+                            allocation: allocation
+                                .ok_or_else(|| denied("identity allocation unavailable"))?
+                                .1,
+                            provenance,
+                            target: self.workspace.tip,
+                        })
+                    }
+                    Class::Observe(observation) => observations.push(observation),
+                    Class::Created(..) | Class::Exact | Class::Plain => {}
+                }
+                result.push((actual, record));
             }
-            if finalized
-                && ((change.before.is_some() && current.is_none())
-                    || (change.before.is_none() && current.is_some()))
-            {
-                if carried.is_some() {
-                    return Err(denied("move or follow is behind the pruned_prefix"));
-                }
-                self.consume(
-                    operation.hash,
-                    "row is unavailable behind the finalized seal",
+            self.app
+                .validate_changes(
+                    &result
+                        .iter()
+                        .map(|(change, _)| change.clone())
+                        .filter(changes)
+                        .collect::<Vec<_>>(),
                 )
-                .await?;
-                continue;
-            }
-            let (actual, mut record) = merge_row(write, current, &operation, carried)?;
-            if change.before.is_none()
-                && carried.is_none()
-                && let Some(identity) = self
-                    .app
-                    .row_identity(change)
-                    .map_err(|error| denied(&error))?
-            {
-                let proof = payload
-                    .proof(&change.row)
-                    .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
-                proof.verify(
-                    self.config.publisher,
-                    self.manifest_of_tip(extension.tip)?,
-                    scope.table,
-                    identity,
-                    &ceiling,
-                )?;
-                if proof.stamp() != &ceiling {
-                    return Err(denied("birth proof must name its creating frame stamp"));
+                .map_err(|message| denied(&message))?;
+            births.sort_by_key(|birth| birth.ordinal);
+            let receipt = match (&prior, births.is_empty()) {
+                (None, false) => {
+                    let target = (!withheld.is_empty()).then_some(self.workspace.tip);
+                    Some(receipts::FrameReceipt {
+                        frame: operation.hash,
+                        signer: operation.header.public_key,
+                        author: extension.author,
+                        scope,
+                        allocation: allocation
+                            .map_or(receipts::ReceiptAllocation::Unresolved, |(_, scope)| {
+                                receipts::ReceiptAllocation::Bound(scope)
+                            }),
+                        sequence: operation.header.seq_num,
+                        author_sequence: extension.author_sequence,
+                        tip: extension.tip,
+                        schema: self.manifest_of_tip(extension.tip)?,
+                        target,
+                        floor: target.map(|_| {
+                            extension
+                                .author
+                                .and_then(|author| own.get(&author).copied())
+                                .unwrap_or(0)
+                        }),
+                        writes: u8::try_from(writes.len())
+                            .map_err(|_| denied("row change quota"))?,
+                        births,
+                    })
                 }
-                record.proof = Some(proof.stored()?);
-            }
-            record.key = Some(change.row);
-            record.identity = self
-                .app
-                .row_identity(change)
-                .map_err(|message| denied(&message))?
-                .map(|identity| identity.integer());
-            // Validate both the signed transition and the actual candidate under concurrent merges.
-            if changes(&actual) {
-                self.app
-                    .validate_changes(std::slice::from_ref(&actual))
-                    .map_err(|message| denied(&message))?;
-            }
-            result.push((actual, record));
-        }
-        self.app
-            .validate_changes(
-                &result
-                    .iter()
-                    .map(|(change, _)| change.clone())
-                    .filter(changes)
-                    .collect::<Vec<_>>(),
+                _ => None,
+            };
+            (
+                result,
+                Admission {
+                    receipt,
+                    restorations,
+                    observations,
+                },
             )
+        };
+        Ok(Materialization {
+            rows,
+            admission,
+            payload,
+        })
+    }
+    /// The checks every applied write passes: its partition, the
+    /// application's write rule, its scope, one write per row and the
+    /// installed fields.
+    pub(super) async fn check_write(
+        &self,
+        write: &RowWrite,
+        scope: ResourceScope,
+        changed: &mut BTreeSet<Commitment>,
+        partition: Option<rocky_core::PartitionTuple>,
+    ) -> Result<(), Error> {
+        if self
+            .app
+            .row_partition(&write.change)
+            .map_err(|error| denied(&error))?
+            != partition
+        {
+            return Err(denied("row image differs from authenticated partition"));
+        }
+        let change = &write.change;
+        self.app
+            .validate_write(write)
             .map_err(|message| denied(&message))?;
-        Ok(result)
+        if change.scope != scope
+            || !changed.insert(self.storage_row(change)?)
+            || change
+                .before
+                .iter()
+                .chain(change.after.iter())
+                .any(|fields| {
+                    fields.len() > 256 || fields.keys().any(|field| !self.fields.contains(field))
+                })
+        {
+            return Err(denied(
+                "row/field transition denied; permission fields never change by row writes",
+            ));
+        }
+        Ok(())
     }
     pub(super) async fn write_materialized(
         &self,
         frame: &EncryptedFrame,
         materialized: Vec<(RowChange, Materialized)>,
+        admission: Admission,
+        opened_payload: Option<&RowPayload>,
     ) -> Result<(), Error> {
-        let operation = frame.operation()?;
-        let payload = self.row_payload(frame)?;
+        let operation = frame.operation_ref()?;
+        let decoded;
+        let payload = match opened_payload {
+            Some(payload) => payload,
+            None => {
+                decoded = self.row_payload(frame)?;
+                &decoded
+            }
+        };
         let scope = operation.header.extensions.scope;
         let id = self.scope_id(scope).await?;
-        // Consumed births reserve identities even when their row is definitely dropped.
-        for write in payload.clone().into_writes() {
-            if write.change.before.is_none()
-                && let Some(identity) = self
-                    .app
-                    .row_identity(&write.change)
-                    .map_err(|message| denied(&message))?
-            {
-                self.put_identity_mark(
-                    scope,
-                    &checkpoint::IdentityMark {
-                        author: identity.author(),
-                        signer: match payload.carried(&write.change.row) {
-                            Some(carried) => carried.proof.stamp().author.key()?,
-                            None => operation.header.public_key,
-                        },
-                        sequence: identity.sequence(),
-                    },
-                )
-                .await?;
+        // Consumed births reserve identities even when their row is
+        // definitely dropped; the frame is replay-eligible here, so the
+        // ledger folds them too.
+        for birth in self.payload_birth_marks(frame, payload)? {
+            self.put_identity_mark(
+                scope,
+                &birth.mark,
+                if birth.carried {
+                    identity::Raise::Carried
+                } else {
+                    identity::Raise::Own
+                },
+            )
+            .await?;
+            if !birth.carried {
+                self.fold_ledger(scope, &birth.mark).await?;
             }
+        }
+        if let Some(receipt) = admission.receipt {
+            self.append_admission(receipts::EntryKind::Frame(receipt))
+                .await?;
+        }
+        for restoration in admission.restorations {
+            self.append_admission(receipts::EntryKind::Restoration(restoration))
+                .await?;
+        }
+        for observation in admission.observations {
+            self.append_admission(receipts::EntryKind::CarryObservation(observation))
+                .await?;
         }
         // The scope digest follows every stored row in the same transaction.
         let (rows, tombstones, digest, applied) = self.scope_state(id).await?;
@@ -257,6 +555,7 @@ impl<A: RowApplication> Inner<A> {
                         signer: operation.header.public_key,
                         sequence: identity.sequence(),
                     },
+                    identity::Raise::Own,
                 )
                 .await?;
             }
@@ -297,7 +596,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied + 1)
             .await?;
-        self.note_applied(id, &operation).await?;
+        self.note_applied(id, operation).await?;
         if let Some(held) = payload.reauthors() {
             if payload.membership().is_none() {
                 return Err(denied("held re-authoring requires a transaction bundle"));

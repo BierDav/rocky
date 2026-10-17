@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 9;
+pub(super) const HANDSHAKE_VERSION: u32 = 14;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -177,13 +177,13 @@ impl Link {
         credentials: CredentialChain,
         expected: Option<PublicKey>,
     ) -> Result<Self, Error> {
-        Self::open_as(
+        Box::pin(Self::open_as(
             stream,
             replica,
             (local, credentials),
             expected,
             (HANDSHAKE_VERSION, false),
-        )
+        ))
         .await?
         .ok_or_else(|| denied("link handshake required"))
     }
@@ -195,13 +195,13 @@ impl Link {
         local: PrivateKey,
         credentials: CredentialChain,
     ) -> Result<Option<Self>, Error> {
-        Self::open_as(
+        Box::pin(Self::open_as(
             stream,
             replica,
             (local, credentials),
             None,
             (HANDSHAKE_VERSION, true),
-        )
+        ))
         .await
     }
     /// A handshake under another version, as another build runs.
@@ -213,13 +213,13 @@ impl Link {
         expected: Option<PublicKey>,
         version: u32,
     ) -> Result<Self, Error> {
-        Self::open_as(
+        Box::pin(Self::open_as(
             stream,
             replica,
             (local, credentials),
             expected,
             (version, false),
-        )
+        ))
         .await?
         .ok_or_else(|| denied("link handshake required"))
     }
@@ -401,7 +401,38 @@ pub async fn scope_token<A: RowApplication>(
             .map(|log| (log.author, log.held))
             .collect();
         let existence: Vec<_> = inner.existence_frontier(scope).await?.into_iter().collect();
-        let bytes = encode(&(logs, existence))?;
+        let mut metadata = Vec::new();
+        if let Some(graph) = inner.graphs.get(&scope.domain) {
+            for seal in &graph.seals {
+                metadata.push(seal.id().map_err(credential)?);
+            }
+            for opening in &graph.openings {
+                metadata.push(opening.id().map_err(credential)?);
+            }
+            for movement in &graph.moves {
+                metadata.push(movement.id().map_err(credential)?);
+            }
+            for line in &graph.genesis_lines {
+                metadata.push(line.id().map_err(credential)?);
+            }
+            for proof in &graph.finalities {
+                metadata.push(proof.id().map_err(credential)?);
+            }
+            for checkpoint in &graph.checkpoints {
+                metadata.push(checkpoint.id().map_err(credential)?);
+            }
+            for carry in &graph.carries {
+                metadata.push(carry.id().map_err(credential)?);
+            }
+        }
+        for (_, batch) in inner.pending_tips(None).await? {
+            for statement in batch.iter().filter(|s| s.scope() == scope.domain) {
+                metadata.push(statement.id()?);
+            }
+        }
+        metadata.sort_unstable();
+        metadata.dedup();
+        let bytes = encode(&(logs, existence, metadata))?;
         (bytes, inner.flusher.clone(), inner.commit)
     };
     flusher.flush(commit)?;
@@ -720,7 +751,7 @@ mod tests {
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v9");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v14");
     }
 }
 

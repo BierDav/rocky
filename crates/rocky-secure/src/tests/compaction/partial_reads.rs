@@ -1,0 +1,257 @@
+//! Reads need only the scopes they read; authoring and finality need the
+//! whole domain. A missing scope is refused, never read as empty.
+use super::*;
+use crate::{Companion, MAX_SNAPSHOT_ROWS};
+
+/// `a` holds two items and three tags, sealed and compacted.
+async fn source(lineage: &Lineage, dir: &TempDir, key: &PrivateKey) -> Replica {
+    let a = open(lineage, dir, "a", key).await;
+    follow_main(lineage, &a).await;
+    insert(&a, "x", "first").await;
+    insert(&a, "y", "second").await;
+    // More tags than one page holds.
+    let sql = session(&a).await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    for tag in 0..300 {
+        identity_insert(
+            &sql,
+            "INSERT INTO tags(key,label) VALUES(?,?)",
+            vec![text(&format!("t{tag:03}")), text("label")],
+        )
+        .await
+        .unwrap();
+    }
+    sql.run("COMMIT", vec![]).await.unwrap();
+    seal(lineage, &a).await;
+    assert!(
+        a.compact(lineage.domain, 0)
+            .await
+            .unwrap()
+            .compacted
+            .is_some()
+    );
+    a
+}
+/// A joiner of `a` that imported its items base only.
+async fn items_only(lineage: &Lineage, dir: &TempDir, a: &Replica, key: &PrivateKey) -> Replica {
+    let j = open(lineage, dir, "j", key).await;
+    crate::tests::exchange_graphs(a, &j, lineage.domain).await;
+    j.follow_bookmark(lineage.domain, "main").await.unwrap();
+    import_checkpoint(lineage, a, &j, key, lineage.scope("items")).await;
+    j
+}
+async fn read(replica: &Replica, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error> {
+    session(replica)
+        .await
+        .run(sql, vec![])
+        .await
+        .map(|rows| rows.rows)
+}
+/// Persistent readiness state and the stored and in-memory revisions.
+async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
+    let rows = crate::storage::rows(
+        &replica.inner.lock().await.conn,
+        "SELECT (SELECT count(*) FROM secure_scope_state),(SELECT count(*) FROM secure_seal_anchors),(SELECT count(*) FROM secure_rebootstrap),(SELECT count(*) FROM secure_evicted_logs),(SELECT count(*) FROM secure_seal_bounds),(SELECT count(*) FROM secure_checkpoints)",
+    )
+    .await
+    .unwrap();
+    (rows, replica.stored_and_memory_revision().await)
+}
+async fn author_refused(replica: &Replica) {
+    let error = identity_insert(
+        &session(replica).await,
+        "INSERT INTO items(key,title) VALUES(?,?)",
+        vec![text("w"), text("refused")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("verified seal rebootstrap"),
+        "{error}"
+    );
+}
+/// What a joiner with verified items and unverified tags may and may not do.
+async fn scoped(lineage: &Lineage, j: &Replica) {
+    let before = state(j).await;
+    assert_eq!(
+        titles(j).await,
+        vec![
+            vec![text("x"), text("first")],
+            vec![text("y"), text("second")]
+        ]
+    );
+    let page = j
+        .snapshot_page(lineage.scope("items"), None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    assert!(page.complete);
+    assert_eq!(
+        read(j, "SELECT 1").await.unwrap(),
+        vec![vec![SqlValue::Integer(1)]]
+    );
+    for sql in [
+        "SELECT key FROM tags",
+        "SELECT items.key FROM items LEFT JOIN tags ON tags.key=items.key",
+        "SELECT key FROM items WHERE key IN (SELECT key FROM tags)",
+    ] {
+        assert!(read(j, sql).await.is_err(), "{sql}");
+    }
+    assert!(
+        j.snapshot_page(lineage.scope("tags"), None, MAX_SNAPSHOT_ROWS)
+            .await
+            .is_err()
+    );
+    // Reads change nothing.
+    assert_eq!(state(j).await, before);
+    author_refused(j).await;
+    let status = j.compaction_status(lineage.domain).await.unwrap();
+    assert!(status.finalized.is_none() && status.waiting.is_some());
+}
+
+#[tokio::test]
+async fn a_verified_scope_reads_while_an_unbegun_one_waits_and_authoring_stays_blocked() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = source(&lineage, &dir, &keys[0]).await;
+    let j = items_only(&lineage, &dir, &a, &keys[1]).await;
+    scoped(&lineage, &j).await;
+    // The same after a reopen without any network.
+    drop(j);
+    let j = open(&lineage, &dir, "j", &keys[1]).await;
+    scoped(&lineage, &j).await;
+}
+
+/// A direct import in progress: its verified pages show, incomplete.
+async fn partial(a: &Replica, j: &Replica, tags: ResourceScope) {
+    let page = j
+        .snapshot_page(tags, None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    assert!(!page.complete);
+    let shown = page.rows.len();
+    assert!(shown >= 1);
+    // A row the import has not reached is unavailable, never deleted.
+    let source = a
+        .snapshot_page(tags, None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    if let Some(missing) = source.rows.keys().find(|row| !page.rows.contains_key(*row)) {
+        assert!(matches!(
+            j.companion(tags, *missing).await.unwrap(),
+            Companion::Unavailable
+        ));
+    }
+    assert_eq!(read(j, "SELECT key FROM tags").await.unwrap().len(), shown);
+    author_refused(j).await;
+}
+
+#[tokio::test]
+async fn a_direct_import_shows_its_verified_pages_incomplete_until_it_finishes() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = source(&lineage, &dir, &keys[0]).await;
+    let j = items_only(&lineage, &dir, &a, &keys[1]).await;
+    let tags = lineage.scope("tags");
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, j.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = a
+        .checkpoint_offer(keys[1].public_key(), &credentials, tags)
+        .await
+        .unwrap()
+        .unwrap();
+    let checkpoint = offered.id().unwrap();
+    j.begin_rebootstrap(offered).await.unwrap();
+    // A page holds at most 256 rows.
+    let first = a
+        .checkpoint_page(
+            keys[1].public_key(),
+            &credentials,
+            tags,
+            checkpoint,
+            None,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+    assert!(first.next.is_some());
+    let next = first.next;
+    j.stage_checkpoint_page(first).await.unwrap();
+    partial(&a, &j, tags).await;
+    drop(j);
+    let j = open(&lineage, &dir, "j", &keys[1]).await;
+    partial(&a, &j, tags).await;
+    let mut after = next;
+    while let Some(cursor) = after {
+        let page = a
+            .checkpoint_page(
+                keys[1].public_key(),
+                &credentials,
+                tags,
+                checkpoint,
+                Some(cursor),
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        j.stage_checkpoint_page(page).await.unwrap();
+    }
+    j.finish_rebootstrap(tags).await.unwrap();
+    let page = j
+        .snapshot_page(tags, None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    assert!(page.complete);
+    assert_eq!(page.rows.len(), 300);
+    insert(&j, "w", "authored once whole").await;
+}
+
+#[tokio::test]
+async fn an_unauthenticated_staged_statement_proves_nothing_for_its_scope() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = source(&lineage, &dir, &keys[0]).await;
+    let j = items_only(&lineage, &dir, &a, &keys[1]).await;
+    let tags = lineage.scope("tags");
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, j.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = a
+        .checkpoint_offer(keys[1].public_key(), &credentials, tags)
+        .await
+        .unwrap()
+        .unwrap();
+    j.begin_rebootstrap(offered.clone()).await.unwrap();
+    for tamper in [
+        (|s: &mut crate::CheckpointStatement| s.sequence += 1) as fn(&mut _),
+        |s| s.seal = Some([7; 32]),
+        |s| s.schema += 1,
+    ] {
+        let mut forged = offered.clone();
+        tamper(&mut forged.statement);
+        j.inner
+            .lock()
+            .await
+            .conn
+            .execute(
+                "UPDATE secure_rebootstrap SET signed=?",
+                [forged.to_bytes().unwrap()],
+            )
+            .await
+            .unwrap();
+        assert!(read(&j, "SELECT key FROM tags").await.is_err());
+        assert!(
+            j.snapshot_page(tags, None, MAX_SNAPSHOT_ROWS)
+                .await
+                .is_err()
+        );
+        // The verified items scope stays readable.
+        assert_eq!(titles(&j).await.len(), 2);
+    }
+}

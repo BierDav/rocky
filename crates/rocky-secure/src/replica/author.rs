@@ -1,5 +1,25 @@
 use super::*;
 
+#[cfg(test)]
+struct PayloadOpeningTrace(Option<Hash>);
+#[cfg(test)]
+impl PayloadOpeningTrace {
+    fn start(frame: &EncryptedFrame, hash: Hash) -> Self {
+        crate::AUTHOR_PAYLOAD_TRACE.with(|trace| {
+            if let Some(trace) = trace.borrow_mut().as_mut() {
+                trace.push((frame.clone(), 0));
+            }
+        });
+        Self(crate::AUTHOR_PAYLOAD_FRAME.with(|active| active.replace(Some(hash))))
+    }
+}
+#[cfg(test)]
+impl Drop for PayloadOpeningTrace {
+    fn drop(&mut self) {
+        crate::AUTHOR_PAYLOAD_FRAME.with(|active| active.set(self.0));
+    }
+}
+
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn author_transaction(
         &mut self,
@@ -70,13 +90,8 @@ impl<A: RowApplication> Inner<A> {
             .change
             .scope;
         self.ensure_tip_writable(scope.domain)?;
-        if self.compaction_lost(scope.domain).await?.is_some() {
-            return Err(denied(
-                "the workspace waits for a rebootstrap at the winning seal",
-            ));
-        }
+        self.require_workspace_base(scope.domain).await?;
         self.ensure_tip_restored().await?;
-        self.ensure_cut_clean(scope).await?;
         let partition = self
             .app
             .row_partition(&writes[0].change)
@@ -96,6 +111,15 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let signer = self.node_author.as_ref();
+        // Off the genesis line the original node's log does not continue:
+        // a write there needs this identity's node for the line.
+        if signer.is_none()
+            && let Some((domain, _)) = &self.workspace.followed
+            && let Ok(graph) = self.graph_for(*domain)
+            && graph.line_root(self.workspace.tip).map_err(credential)? != graph.genesis()
+        {
+            return Err(denied("the followed line has no node of this identity yet"));
+        }
         let signing_key = signer.map_or(&self.config.node, |author| &author.key);
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
@@ -251,13 +275,12 @@ impl<A: RowApplication> Inner<A> {
                     "dependency must be applied in the same encryption scope",
                 ));
             }
-            clock = clock.max(frame.operation()?.header.timestamp);
+            clock = clock.max(frame.operation_ref()?.header.timestamp);
         }
         if previous.len() > 64 {
             return Err(denied("dependency quota"));
         }
-        // Hybrid time: past every value it saw and at least the wall clock,
-        // so stamps compare with a generation's baseline.
+        // Hybrid time: past every observed value and at least the wall clock.
         let clock = clock
             .checked_add(1)
             .ok_or_else(|| denied("logical clock exhausted"))?
@@ -326,16 +349,28 @@ impl<A: RowApplication> Inner<A> {
             )?,
         )?;
         self.verify_frame(&frame, time)?;
-        let operation = frame.operation()?;
-        let materialized = self.materialize(&frame, writes, &grants).await?;
-        self.check_budget(frame.weight()).await?;
+        let operation = frame.operation_ref()?;
+        #[cfg(test)]
+        let payload_trace = PayloadOpeningTrace::start(&frame, operation.hash);
+        let apply::Materialization {
+            rows: materialized,
+            admission,
+            payload: opened,
+        } = self
+            .materialize_retaining(&frame, writes, &grants, None)
+            .await?;
+        self.check_budget(
+            usize::try_from(frame.stored_bytes()?).map_err(|_| denied("stored frame size"))?,
+        )
+        .await?;
         self.keep_chain(frame.chain()?).await?;
+        self.no_frames_intake(&operation.header).await?;
         TransactionStore(self.conn.clone())
             .insert_operation(
                 operation.hash,
                 &operation.header,
                 operation.body.as_ref(),
-                &frame.header,
+                frame.header_bytes(),
                 &scope,
             )
             .await?;
@@ -357,10 +392,14 @@ impl<A: RowApplication> Inner<A> {
         Box::pin(self.author_existence(
             scope,
             &effective,
-            frame.operation()?.header.extensions.author_sequence,
+            frame.operation_ref()?.header.extensions.author_sequence,
         ))
         .await?;
-        self.write_materialized(&frame, materialized).await?;
+        self.write_materialized(&frame, materialized, admission, Some(opened.as_ref()))
+            .await?;
+        drop(opened);
+        #[cfg(test)]
+        drop(payload_trace);
         self.conn
             .execute(
                 "INSERT INTO secure_outbox VALUES(?)",
@@ -371,5 +410,21 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("INSERT INTO secure_node_tips VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET tip=excluded.tip", [encode(&scope.domain)?, signing_key.public_key().as_bytes().to_vec(), encode(&self.workspace.tip)?]).await?;
         self.record_key(key).await?;
         Ok(frame)
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub(crate) async fn author_payload_for_test(
+        &self,
+        writes: &[RowWrite],
+        body: &[u8],
+    ) -> Result<EncryptedFrame, Error> {
+        let mut inner = self.inner.lock().await;
+        transaction!(inner, |inner| {
+            inner
+                .author_frame(writes, &[], now()?, |_| Ok(body.to_vec()))
+                .await
+        })
     }
 }

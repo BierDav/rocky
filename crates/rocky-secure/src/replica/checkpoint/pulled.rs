@@ -3,12 +3,15 @@
 //! path passes the seal installs it as the scope's replay base. See
 //! `docs/runtime/kept-seals.md`.
 use super::*;
+use rocky_core::Scope;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_pulled(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,signed BLOB NOT NULL,sets BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_pulled_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_pulled_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_pulled_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
+    // Seals whose state the next sessions pull from peers.
+    "CREATE TABLE IF NOT EXISTS secure_wanted_seals(domain BLOB NOT NULL,seal BLOB NOT NULL,PRIMARY KEY(domain,seal))",
 ];
 /// The staging tables and the pulled tables that keep their contents.
 const KEPT: [(&str, &str); 3] = [
@@ -18,6 +21,89 @@ const KEPT: [(&str, &str); 3] = [
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Asks the next sync sessions to pull `seal`'s state from peers that
+    /// keep it, until this node holds it.
+    pub async fn want_seal(&self, domain: Scope, seal: Commitment) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .graph_for(domain)?
+            .seal_by_id(seal)
+            .map_err(credential)?;
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_wanted_seals VALUES(?,?)",
+                    [encode(&domain)?, seal.to_vec()],
+                )
+                .await?;
+            Ok(())
+        })?;
+        inner.flush()
+    }
+    /// The seals still to pull, oldest request first; those now held are
+    /// no longer wanted.
+    pub async fn wanted_seals(&self, domain: Scope) -> Result<Vec<Commitment>, Error> {
+        let mut inner = self.inner.lock().await;
+        let mut wanted = Vec::new();
+        for record in collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT seal FROM secure_wanted_seals WHERE domain=? ORDER BY rowid",
+                    [encode(&domain)?],
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Blob(seal)] = record.as_slice() else {
+                return Err(Error::Corrupt("wanted seal".into()));
+            };
+            wanted.push(row_of(seal)?);
+        }
+        let mut held = Vec::new();
+        for seal in &wanted {
+            if inner.graph_for(domain).is_err() || inner.held_seal(domain, *seal).await?.is_some() {
+                held.push(*seal);
+            }
+        }
+        if !held.is_empty() {
+            transaction!(inner, |inner| {
+                for seal in &held {
+                    inner
+                        .conn
+                        .execute(
+                            "DELETE FROM secure_wanted_seals WHERE domain=? AND seal=?",
+                            [encode(&domain)?, seal.to_vec()],
+                        )
+                        .await?;
+                }
+                Ok(())
+            })?;
+            inner.flush()?;
+        }
+        wanted.retain(|seal| !held.contains(seal));
+        Ok(wanted)
+    }
+    /// The held scopes of `domain` whose state at `seal` a pull still
+    /// needs: neither their replay base nor a pulled state sits there.
+    pub async fn seal_pull_scopes(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Vec<ResourceScope>, Error> {
+        let inner = self.inner.lock().await;
+        let mut scopes = Vec::new();
+        for (scope, id) in inner.domain_scopes(domain).await? {
+            if inner.base_seal(id).await? != Some(seal)
+                && inner.pulled_seal(id).await? != Some(seal)
+            {
+                scopes.push(scope);
+            }
+        }
+        Ok(scopes)
+    }
     /// Starts pulling `signed`, a peer's checkpoint at a seal, to hold that
     /// seal's state: its pages stage as for an import, and
     /// `finish_seal_pull` keeps them aside. The scope's rows do not change.

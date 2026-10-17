@@ -28,6 +28,11 @@ pub(super) enum CheckpointMessage {
     CheckpointOffer {
         scope: ResourceScope,
     },
+    /// The peer's checkpoint of a scope at a seal it keeps.
+    SealOffer {
+        scope: ResourceScope,
+        seal: Commitment,
+    },
     Checkpoint {
         signed: Option<Box<SignedCheckpoint>>,
         /// The cut records the checkpoint's binding names.
@@ -44,7 +49,87 @@ pub(super) enum CheckpointMessage {
     },
 }
 
+/// How pulling a seal's state from one peer ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SealPull {
+    /// This node holds the seal's state now.
+    Held,
+    /// The peer keeps no state there for some scope.
+    Unavailable,
+    /// The session's byte budget ran low; staged pages remain.
+    Exhausted,
+}
+
 impl NativeSession {
+    /// Pulls `seal`'s state from the peer for every held scope of the
+    /// followed domain that lacks it: the peer's base there, or a
+    /// checkpoint it signs of the seal it keeps. Scopes the peer cannot
+    /// serve are left to another peer. Nothing changes in the rows;
+    /// following a tip whose path passes the seal installs it.
+    pub async fn pull_seal<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        seal: Commitment,
+    ) -> Result<SealPull, Error> {
+        let Some((domain, _)) = replica.followed_bookmark().await else {
+            return Err(denied("follow a bookmark before pulling a seal"));
+        };
+        let mut missing = false;
+        for scope in replica.seal_pull_scopes(domain, seal).await? {
+            self.ensure_holding(replica, &[scope]).await?;
+            self.send(CheckpointMessage::SealOffer { scope, seal })
+                .await?;
+            let Some(signed) = self.offered(replica, scope).await? else {
+                missing = true;
+                continue;
+            };
+            if signed.statement.seal != Some(seal) {
+                return Err(denied("the peer offers another seal's checkpoint"));
+            }
+            let checkpoint = signed.id()?;
+            let (after, complete) = match replica.rebootstrap_progress(scope).await? {
+                Some((staged, cursor, complete)) if staged == checkpoint => (cursor, complete),
+                _ => {
+                    replica.begin_seal_pull(*signed).await?;
+                    (None, false)
+                }
+            };
+            if !self
+                .fetch_pages(
+                    replica,
+                    scope,
+                    checkpoint,
+                    (after, complete),
+                    CHECKPOINT_PAGE,
+                )
+                .await?
+            {
+                return Ok(SealPull::Exhausted);
+            }
+            replica.finish_seal_pull(scope).await?;
+        }
+        Ok(if missing {
+            SealPull::Unavailable
+        } else {
+            SealPull::Held
+        })
+    }
+    /// Pulls from the peer every seal this replica wants. Returns false
+    /// once the session's budget runs low.
+    pub async fn pull_wanted_seals<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<bool, Error> {
+        let Some((domain, _)) = replica.followed_bookmark().await else {
+            return Ok(true);
+        };
+        for seal in replica.wanted_seals(domain).await? {
+            if self.pull_seal(replica, seal).await? == SealPull::Exhausted {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     /// Imports the peer's checkpoint of a scope and switches to it. An
     /// interrupted import of the same checkpoint continues where it stopped.
     pub async fn rebootstrap<A: RowApplication>(
@@ -175,6 +260,14 @@ impl NativeSession {
     ) -> Result<Option<Box<SignedCheckpoint>>, Error> {
         self.send(CheckpointMessage::CheckpointOffer { scope })
             .await?;
+        self.offered(replica, scope).await
+    }
+    /// The answer to an offer of `scope`.
+    async fn offered<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<Option<Box<SignedCheckpoint>>, Error> {
         let CheckpointMessage::Checkpoint { signed, cuts } =
             self.reply::<CheckpointMessage>().await?
         else {
@@ -197,19 +290,38 @@ impl NativeSession {
     ) -> Result<Option<RebootstrapReport>, Error> {
         let scope = signed.statement.scope;
         let checkpoint = signed.id()?;
-        let (mut after, mut complete) = match replica.rebootstrap_progress(scope).await? {
+        let progress = match replica.rebootstrap_progress(scope).await? {
             Some((staged, cursor, complete)) if staged == checkpoint => (cursor, complete),
             _ => {
                 replica.begin_rebootstrap(*signed).await?;
                 (None, false)
             }
         };
+        if !self
+            .fetch_pages(replica, scope, checkpoint, progress, quota)
+            .await?
+        {
+            return Ok(None);
+        }
+        let report = replica.finish_rebootstrap(scope).await?;
+        Ok(Some(report))
+    }
+    /// Stages the pages of `checkpoint` after `after` until it is
+    /// complete. Returns false once the session's budget runs low.
+    async fn fetch_pages<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+        checkpoint: Commitment,
+        (mut after, mut complete): (Option<Commitment>, bool),
+        quota: usize,
+    ) -> Result<bool, Error> {
         // Whether the page after `after` is already asked for.
         let mut asked = false;
         while !complete {
             if !asked {
                 if self.low(quota) {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 self.send(CheckpointMessage::CheckpointPull {
                     scope,
@@ -242,8 +354,7 @@ impl NativeSession {
             }
             replica.stage_checkpoint_page(*page).await?;
         }
-        let report = replica.finish_rebootstrap(scope).await?;
-        Ok(Some(report))
+        Ok(true)
     }
     /// Serves until the session ends or an answer fails; returns how many
     /// checkpoint pages the peer asked for.
@@ -383,6 +494,21 @@ impl NativeSession {
             CheckpointMessage::CheckpointOffer { scope } => {
                 let signed = replica
                     .checkpoint_offer(self.peer, &self.credentials, scope)
+                    .await?;
+                let named = signed
+                    .as_ref()
+                    .map_or(0, |signed| signed.statement.coordinated.cuts);
+                let mut cuts = replica.cuts_for(&[scope], &[]).await?;
+                cuts.retain(|cut| cut.record.statement.sequence <= named);
+                self.send(CheckpointMessage::Checkpoint {
+                    signed: signed.map(Box::new),
+                    cuts,
+                })
+                .await
+            }
+            CheckpointMessage::SealOffer { scope, seal } => {
+                let signed = replica
+                    .seal_checkpoint_offer(self.peer, &self.credentials, scope, seal)
                     .await?;
                 let named = signed
                     .as_ref()

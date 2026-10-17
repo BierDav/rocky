@@ -87,6 +87,8 @@ pub(super) fn text(value: &str) -> SqlValue {
 pub(super) struct Lineage {
     publisher: PrivateKey,
     pub(super) domain: Scope,
+    /// Every table keeps an existence log.
+    pub(super) existence: bool,
 }
 impl Lineage {
     /// The publisher key, which also owns the domain.
@@ -103,7 +105,11 @@ impl Lineage {
             ),
             domain: DOMAIN,
         };
-        Self { publisher, domain }
+        Self {
+            publisher,
+            domain,
+            existence: false,
+        }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
         let mut items = vec![
@@ -125,6 +131,15 @@ impl Lineage {
                     column("label", Affinity::Text, true),
                 ],
             ));
+        }
+        // An existence log names rows by `id`.
+        for table in tables.iter_mut().filter(|_| self.existence) {
+            table.existence_log = true;
+            table.primary_key = vec!["id".into()];
+            table.create_sql = table
+                .create_sql
+                .replace(" PRIMARY KEY", "")
+                .replace("id INTEGER NOT NULL", "id INTEGER NOT NULL PRIMARY KEY");
         }
         LogicalSchema {
             format: LOGICAL_SCHEMA_FORMAT,

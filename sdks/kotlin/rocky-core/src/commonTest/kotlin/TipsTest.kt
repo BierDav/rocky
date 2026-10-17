@@ -95,6 +95,14 @@ class TipsTest {
     }
 
     @Test
+    fun pullSendsTheSeal() = runBlocking {
+        val (transport, tips) = recordingTips()
+        assertEquals("tip-main", tips.pull("seal-id").tip)
+        assertEquals(JsonPrimitive("seal-id"), transport.calls.single().getValue("seal"))
+        assertEquals("pull", transport.calls.single().action())
+    }
+
+    @Test
     fun openRefusesAZeroMinimumBeforeSending() = runBlocking {
         val (transport, tips) = recordingTips()
         assertFailsWith<IllegalArgumentException> { tips.open("seal-id", 0u) }
@@ -146,9 +154,9 @@ class TipsTest {
         """{
           "scope":"domain","genesis":"genesis","schema":"schema","genesis_minimum":2,
           "seals":[
-            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true,"checkpoints":[{"id":"record","scope":"items","checkpoint":"body","signer":"node","authority":"issuer","rows":7}]},
-            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false,"checkpoints":[]},
-            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false,"checkpoints":[]}
+            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false,"final":true,"checkpoints":[{"id":"record","scope":"items","checkpoint":"body","signer":"node","authority":"issuer","rows":7}],"held":"kept"},
+            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true,"final":false,"checkpoints":[],"held":null},
+            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false,"final":false,"checkpoints":[],"held":null}
           ],
           "openings":[{"id":"branch","seal":"continued","minimum_in_sync":3}],
           "bookmarks":[{"name":"main","tip":"continued","moves":[
@@ -179,6 +187,7 @@ class TipsTest {
                     false,
                     true,
                     listOf(TipCheckpoint("record", "items", "body", "node", TipAuthority.ISSUER, 7uL)),
+                    TipHeld.KEPT,
                 ),
                 TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true, false, emptyList()),
                 TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false, false, emptyList()),

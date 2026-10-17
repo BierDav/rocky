@@ -62,8 +62,12 @@ val sealed = tips.seal()                                   // main moves on
 val seal = tips.inspect().seals.single { it.id == sealed.tip }.id
 val dev = tips.open(seal, minimumInSync = 1u)
 tips.createBookmark("dev", dev)
-tips.follow("dev")                                         // rebuilds the workspace
+tips.follow("dev")                                         // switches the workspace
 ```
+
+A branch opens only on a seal this device holds. A switch onto a kept seal's
+path costs the rows changed since it; see [kept seals](kept-seals.md), which
+also covers pulling a seal's state with `tips.pull`.
 
 `minimumInSync` names the minimum in-sync size of the tip's coordinated log;
 a device cannot know the coordinator's domain minimum, so it is required.

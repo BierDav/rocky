@@ -1,7 +1,8 @@
 # 16. Kept seals and read-only views
 
-Status: in progress. Slices 1–5 are implemented; one gate item remains
-([below](#what-remains)). See the [guide](../runtime/kept-seals.md).
+Status: implemented. All five slices and the completion gate hold; see the
+[evidence](16-kept-seals-and-views-evidence.md) and the
+[guide](../runtime/kept-seals.md).
 Owner: `rocky-secure` workspace, history tables and views; `rocky-storage`
 connections; `rocky-sdk` and `sdks/kotlin` configuration and connections.
 Depends on [phase 15](15-lazy-compaction.md). Follow the
@@ -79,18 +80,3 @@ shaped exactly like the live tables.
 - Writes through a read-only connection fail with SQLite's read-only error.
 - Switching from `main` to a branch two seals back and returning costs
   time proportional to the rows changed since that seal, not to the table.
-
-## What remains
-
-Verified in `rocky-secure` (`tests::kept`), `rocky-sdk`
-(`a_connection_bound_to_a_kept_seal_reads_it_and_never_writes`) and the Room
-qualification (`aDaoReadsASealKeptTwoSealsAgoUnchanged`):
-
-- every gate item except the switching cost;
-- seal pulls are replica calls; the network session and SDK do not drive
-  them, and a peer serves one only when its replay base sits at the seal.
-
-Switching tips still rebuilds a scope's rows from its replay base, so its
-cost grows with the table. Meeting the last gate item needs a switch that
-restores a kept seal's rows from the history tables and replays only the
-target's operations after it.

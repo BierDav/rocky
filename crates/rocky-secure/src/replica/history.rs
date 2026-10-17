@@ -8,17 +8,27 @@ use super::*;
 use rocky_core::Scope;
 use std::sync::atomic::AtomicUsize;
 
+mod rewind;
+pub(super) use rewind::{KEPT_ROWS, KeptBound};
+
 pub(super) const SCHEMA: &[&str] = &[
     // The live tables' change counter. A change made at `version` records
     // the version it replaces with that number; `paused` while a bulk
-    // rebuild records its difference itself.
-    "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL)",
-    // Kept seals: the counter's value while the live tables held each one.
-    "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE) WITHOUT ROWID",
+    // rebuild records its difference itself, `rows_paused` for stored rows.
+    "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL,rows_paused INTEGER NOT NULL DEFAULT 0)",
+    // Kept seals: the counter's value while the live tables held each one,
+    // the schema then and each scope's last applied position the seal
+    // includes.
+    "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE,manifest BLOB NOT NULL,bounds BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_kept_config(id INTEGER PRIMARY KEY CHECK(id=1),bookmarked INTEGER NOT NULL,latest INTEGER NOT NULL,every INTEGER NOT NULL)",
     // Each kept seal's tables as they were: their columns, and the frozen
     // copy a later removal or migration left in their place.
     "CREATE TABLE IF NOT EXISTS secure_kept_tables(seal BLOB NOT NULL,tab TEXT NOT NULL,columns BLOB NOT NULL,frozen TEXT,PRIMARY KEY(seal,tab)) WITHOUT ROWID",
+    rewind::ROWS,
+    rewind::ROWS_BY_VERSION,
+    rewind::ROWS_DELETE,
+    rewind::ROWS_UPDATE,
+    rewind::ROWS_INSERT,
 ];
 
 /// The seals a node keeps, among those of the tips it follows. A seal is
@@ -344,7 +354,7 @@ impl<A: RowApplication> Inner<A> {
         let result = async {
             if outer {
                 self.conn
-                    .execute("INSERT INTO secure_kept_clock VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1", ())
+                    .execute("INSERT INTO secure_kept_clock(id,version,paused) VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1", ())
                     .await?;
             }
             for history in self.histories() {
@@ -490,15 +500,20 @@ impl<A: RowApplication> Inner<A> {
         Ok(seals)
     }
     /// Inside the caller's transaction, records that the live tables hold
-    /// `seal`'s state now.
-    pub(super) async fn mark_seal(&self, seal: Commitment) -> Result<(), Error> {
+    /// `seal`'s state now, which includes each scope's applied positions
+    /// through its bound.
+    pub(super) async fn mark_seal(
+        &self,
+        seal: Commitment,
+        bounds: &[KeptBound],
+    ) -> Result<(), Error> {
         if self.workspace.typed.is_none() {
             return Ok(());
         }
         self.conn
             .execute(
-                format!("INSERT OR IGNORE INTO secure_kept_marks VALUES(?,{CLOCK})"),
-                [seal.to_vec()],
+                format!("INSERT OR IGNORE INTO secure_kept_marks VALUES(?,{CLOCK},?,?)"),
+                [seal.to_vec(), self.manifest.to_vec(), encode(&bounds)?],
             )
             .await?;
         for history in self.histories() {
@@ -516,7 +531,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "INSERT INTO secure_kept_clock VALUES(1,2,0) ON CONFLICT(id) DO UPDATE SET version=version+1",
+                "INSERT INTO secure_kept_clock(id,version,paused) VALUES(1,2,0) ON CONFLICT(id) DO UPDATE SET version=version+1",
                 (),
             )
             .await?;
@@ -556,15 +571,24 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if released {
-            for history in self.histories() {
-                self.conn.execute(history.prune(), ()).await?;
-            }
+            self.prune_history().await?;
         }
         for seal in bookmarked {
-            if !marks.iter().any(|(known, _)| *known == seal) && self.live_at(domain, seal).await? {
-                self.mark_seal(seal).await?;
+            if !marks.iter().any(|(known, _)| *known == seal)
+                && let Some(bounds) = self.live_bounds(domain, seal).await?
+            {
+                self.mark_seal(seal, &bounds).await?;
             }
         }
+        Ok(())
+    }
+    /// Deletes the versions of live tables and stored rows that no kept
+    /// seal needs.
+    async fn prune_history(&self) -> Result<(), Error> {
+        for history in self.histories() {
+            self.conn.execute(history.prune(), ()).await?;
+        }
+        self.conn.execute(rewind::PRUNE_ROWS, ()).await?;
         Ok(())
     }
     /// Forgets kept `seal` and drops its frozen copies; the caller prunes
@@ -583,6 +607,7 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [seal.to_vec()]).await?;
         }
+        self.drop_served(seal).await?;
         Ok(())
     }
     /// The tables kept `seal` shows, as they were there.
@@ -632,9 +657,18 @@ impl<A: RowApplication> Inner<A> {
     /// Whether the live tables hold `seal`'s state: it is finalized on the
     /// followed path and no held scope applied anything it excludes.
     pub(super) async fn live_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
+        Ok(self.live_bounds(domain, seal).await?.is_some())
+    }
+    /// `live_at`, with each held scope's last position the seal includes.
+    async fn live_bounds(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Option<Vec<KeptBound>>, Error> {
         let Some(depth) = self.finalized_depth(domain, seal).await? else {
-            return Ok(false);
+            return Ok(None);
         };
+        let mut bounds = Vec::new();
         for (_, id) in self.domain_scopes(domain).await? {
             let bound = match collect_rows(
                 self.conn
@@ -660,10 +694,11 @@ impl<A: RowApplication> Inner<A> {
                     {
                         record.position
                     }
-                    _ => return Ok(false),
+                    _ => return Ok(None),
                 },
                 _ => return Err(Error::Corrupt("seal bound".into())),
             };
+            bounds.push((id, bound));
             let beyond = collect_rows(
                 self.conn
                     .query(
@@ -674,10 +709,10 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
             if !beyond.is_empty() {
-                return Ok(false);
+                return Ok(None);
             }
         }
-        Ok(true)
+        Ok(Some(bounds))
     }
     /// How this node holds `seal`'s state, if it does.
     pub(super) async fn held_seal(
@@ -977,9 +1012,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                             .await?
                             .iter()
                             .any(|(seal, _)| *seal == newest)
-                            && inner.live_at(domain, newest).await?
+                            && let Some(bounds) = inner.live_bounds(domain, newest).await?
                         {
-                            inner.mark_seal(newest).await?;
+                            inner.mark_seal(newest, &bounds).await?;
                         }
                     }
                 }
@@ -1040,9 +1075,7 @@ impl<A: RowApplication> Inner<A> {
             for (seal, _) in self.kept_marks().await? {
                 self.release_seal(seal).await?;
             }
-            for history in self.histories() {
-                self.conn.execute(history.prune(), ()).await?;
-            }
+            self.prune_history().await?;
         }
         Ok(())
     }
@@ -1115,7 +1148,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "INSERT INTO secure_kept_clock VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1",
+                "INSERT INTO secure_kept_clock(id,version,paused) VALUES(1,1,1) ON CONFLICT(id) DO UPDATE SET paused=1",
                 (),
             )
             .await?;

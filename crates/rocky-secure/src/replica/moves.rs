@@ -1034,6 +1034,14 @@ impl<A: RowApplication> Inner<A> {
         )
         .await
     }
+    /// Move links of the rows of a kept seal's served checkpoint.
+    pub(super) async fn served_moves(&self, scope: i64) -> Result<checkpoint::SetSummary, Error> {
+        self.move_summary(
+            "SELECT row,fields FROM secure_served_rows WHERE scope=?",
+            scope,
+        )
+        .await
+    }
     /// Move links of the rows a direct import stored.
     pub(super) async fn imported_moves(&self, scope: i64) -> Result<checkpoint::SetSummary, Error> {
         self.move_summary(

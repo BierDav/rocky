@@ -515,3 +515,360 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
     let status = b.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.rebootstrap, None);
 }
+
+/// What a switch must reproduce: stored rows, scope digests and the table.
+async fn workspace_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
+    let inner = replica.inner.lock().await;
+    let mut state = Vec::new();
+    for sql in [
+        "SELECT scope,row,fields FROM secure_rows ORDER BY scope,row",
+        "SELECT scope,rows,tombstones,digest FROM secure_scope_state ORDER BY scope",
+        "SELECT key,title FROM items ORDER BY key",
+        "SELECT scope,id,created,deleted FROM secure_existence ORDER BY scope,id",
+    ] {
+        state.push(crate::storage::rows(&inner.conn, sql).await.unwrap());
+    }
+    state
+}
+fn same_state(left: &[Vec<Vec<SqlValue>>], right: &[Vec<Vec<SqlValue>>]) {
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        let only_left: Vec<_> = left.iter().filter(|row| !right.contains(row)).collect();
+        let only_right: Vec<_> = right.iter().filter(|row| !left.contains(row)).collect();
+        assert!(
+            only_left.is_empty() && only_right.is_empty(),
+            "part {index}: {} rows only here, {} only there",
+            only_left.len(),
+            only_right.len(),
+        );
+    }
+}
+/// Rows the engine changed while following `bookmark`.
+async fn follow_changing(lineage: &Lineage, replica: &Replica, bookmark: &str) -> u64 {
+    let changes = async || {
+        let inner = replica.inner.lock().await;
+        inner.conn.connection().total_changes().unwrap()
+    };
+    let before = changes().await;
+    replica
+        .follow_bookmark(lineage.domain, bookmark)
+        .await
+        .unwrap();
+    changes().await - before
+}
+
+#[tokio::test]
+async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_since() {
+    use crate::TipStatement;
+    use rocky_credentials::{
+        BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
+        TIP_OPENING_FORMAT, TipOpeningStatement,
+    };
+    const ROWS: i64 = 400;
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "alice", &key).await;
+    follow_main(&lineage, &replica).await;
+    replica
+        .keep_seals(KeptSeals {
+            latest: 2,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    let sql = session(&replica).await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    let first_id = sql.next_id("items").await.unwrap().integer();
+    sql.run(
+        "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO items(key,title,id) SELECT printf('%06d',i),printf('item number %06d',i),?+i FROM n",
+        vec![SqlValue::Integer(ROWS - 1), SqlValue::Integer(first_id)],
+    )
+    .await
+    .unwrap();
+    sql.run("COMMIT", vec![]).await.unwrap();
+    let first = seal(&lineage, &replica).await.id().unwrap();
+    replica.finalize_path(lineage.domain).await.unwrap();
+    update(&replica, "000001", "changed after the first seal").await;
+    update(&replica, "000002", "changed after the first seal").await;
+    delete(&replica, "000003").await;
+    insert(&replica, "new", "added after the first seal").await;
+    seal(&lineage, &replica).await;
+    replica.finalize_path(lineage.domain).await.unwrap();
+    update(&replica, "000001", "changed after the second seal").await;
+    delete(&replica, "000004").await;
+    let main_tip = replica.followed_tip().await;
+    let on_main = workspace_state(&replica).await;
+
+    let opening = SignedTipOpening::sign(
+        TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            scope: lineage.domain,
+            seal: first,
+            minimum_in_sync: 1,
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    let bookmark = SignedBookmarkMove::sign(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "dev".into(),
+            from: None,
+            to: Some(opening.tip().unwrap()),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    replica
+        .publish_tip_statements(&[
+            TipStatement::Opening(opening),
+            TipStatement::Bookmark(bookmark),
+        ])
+        .await
+        .unwrap();
+    let to_dev = follow_changing(&lineage, &replica, "dev").await;
+    assert_eq!(
+        titles(&replica).await,
+        at_seal(&replica, first, TITLES).await
+    );
+    let on_dev = workspace_state(&replica).await;
+    let to_main = follow_changing(&lineage, &replica, "main").await;
+    assert_eq!(replica.followed_tip().await, main_tip);
+    let back = workspace_state(&replica).await;
+    assert_eq!(back[2], on_main[2]);
+
+    // A rebuild from the replay base reaches the same states, writing
+    // every row.
+    replica.inner.lock().await.rebuild_switches = true;
+    let rebuilt_dev = follow_changing(&lineage, &replica, "dev").await;
+    same_state(&workspace_state(&replica).await, &on_dev);
+    let rebuilt_main = follow_changing(&lineage, &replica, "main").await;
+    same_state(&workspace_state(&replica).await, &back);
+    eprintln!(
+        "rows changed: {to_dev} to the branch, {to_main} back; rebuilt {rebuilt_dev} and {rebuilt_main}"
+    );
+    assert!(rebuilt_dev > 2 * ROWS as u64 && rebuilt_main > 2 * ROWS as u64);
+    assert!(to_dev < 64 && to_main < 64, "{to_dev} and {to_main}");
+    // Finalizing again the seal the branch did not pass drops what it
+    // dropped before.
+    replica.finalize_path(lineage.domain).await.unwrap();
+    same_state(&workspace_state(&replica).await, &on_main);
+}
+
+#[tokio::test]
+async fn a_branch_on_a_kept_seal_keeps_its_own_writes_across_switches() {
+    branch_writes_across_switches(Lineage::new()).await;
+}
+
+#[tokio::test]
+async fn a_branch_on_a_kept_seal_keeps_its_existence_log_across_switches() {
+    let mut lineage = Lineage::new();
+    lineage.existence = true;
+    branch_writes_across_switches(lineage).await;
+}
+
+async fn branch_writes_across_switches(lineage: Lineage) {
+    use crate::{LineNode, TipStatement};
+    use rocky_credentials::{
+        BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
+        TIP_OPENING_FORMAT, TipOpeningStatement,
+    };
+    let dir = TempDir::new().unwrap();
+    let (identity, node) = (PrivateKey::new(), PrivateKey::new());
+    let replica = lineage
+        .open_certified(
+            &dir.path().join("alice.db"),
+            (&identity, &node),
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap();
+    follow_main(&lineage, &replica).await;
+    replica
+        .keep_seals(KeptSeals {
+            every: true,
+            ..KeptSeals::default()
+        })
+        .await
+        .unwrap();
+    for (key, title) in [("a", "one"), ("b", "two"), ("c", "three")] {
+        insert(&replica, key, title).await;
+    }
+    let first = seal(&lineage, &replica).await.id().unwrap();
+    replica.finalize_path(lineage.domain).await.unwrap();
+    update(&replica, "a", "main after the seal").await;
+    insert(&replica, "d", "main only").await;
+    let opening = SignedTipOpening::sign(
+        TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            scope: lineage.domain,
+            seal: first,
+            minimum_in_sync: 1,
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    let bookmark = SignedBookmarkMove::sign(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "dev".into(),
+            from: None,
+            to: Some(opening.tip().unwrap()),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    replica
+        .publish_tip_statements(&[
+            TipStatement::Opening(opening),
+            TipStatement::Bookmark(bookmark),
+        ])
+        .await
+        .unwrap();
+    replica
+        .follow_bookmark(lineage.domain, "dev")
+        .await
+        .unwrap();
+    let branch_node = PrivateKey::new();
+    replica
+        .register_line_node(LineNode {
+            credentials: lineage.certified(3, &identity, &branch_node),
+            key: branch_node,
+        })
+        .await
+        .unwrap();
+    update(&replica, "b", "dev").await;
+    delete(&replica, "c").await;
+    insert(&replica, "e", "dev only").await;
+    let dev = rows(&[("a", "one"), ("b", "dev"), ("e", "dev only")]);
+    assert_eq!(titles(&replica).await, dev);
+    let main = rows(&[
+        ("a", "main after the seal"),
+        ("b", "two"),
+        ("c", "three"),
+        ("d", "main only"),
+    ]);
+    let mut fast = Vec::new();
+    for (bookmark, expected) in [("main", &main), ("dev", &dev), ("main", &main)] {
+        replica
+            .follow_bookmark(lineage.domain, bookmark)
+            .await
+            .unwrap();
+        assert_eq!(&titles(&replica).await, expected, "{bookmark}");
+        fast.push(workspace_state(&replica).await);
+    }
+    if lineage.existence {
+        assert!(scalar(&replica, "SELECT count(*) FROM secure_existence_log").await >= 6);
+    }
+    replica.inner.lock().await.rebuild_switches = true;
+    for (bookmark, fast) in ["dev", "main"].into_iter().zip(&fast[1..]) {
+        replica
+            .follow_bookmark(lineage.domain, bookmark)
+            .await
+            .unwrap();
+        same_state(&workspace_state(&replica).await, fast);
+    }
+}
+
+#[tokio::test]
+async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_it() {
+    use crate::TipStatement;
+    use rocky_credentials::{
+        BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
+        TIP_OPENING_FORMAT, TipOpeningStatement,
+    };
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    a.keep_seals(KeptSeals {
+        every: true,
+        ..KeptSeals::default()
+    })
+    .await
+    .unwrap();
+    insert(&a, "a", "one").await;
+    insert(&a, "b", "two").await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let first = seal(&lineage, &a).await.id().unwrap();
+    update(&a, "a", "after the first seal").await;
+    delete(&a, "b").await;
+    let second = seal(&lineage, &a).await.id().unwrap();
+    a.finalize_path(lineage.domain).await.unwrap();
+    sync(&lineage, &a, &b, &keys[1]).await;
+    // A keeps both seals and never compacted: it has no replay base, so
+    // what it serves of the first comes from its history tables.
+    assert_eq!(
+        b.compact(lineage.domain, 0).await.unwrap().compacted,
+        Some(second)
+    );
+    assert_eq!(a.kept_seals().await.unwrap(), vec![first, second]);
+    assert_eq!(
+        scalar(&a, "SELECT count(*) FROM secure_checkpoints").await,
+        0
+    );
+    assert_eq!(b.held_seal(lineage.domain, first).await.unwrap(), None);
+
+    b.want_seal(lineage.domain, first).await.unwrap();
+    assert_eq!(b.wanted_seals(lineage.domain).await.unwrap(), vec![first]);
+    let (near, far) = crate::network::link::testing::tcp().await;
+    let (session, mut served) = crate::network::link::testing::sessions_over(
+        near,
+        far,
+        (&b, keys[1].clone(), lineage.credentials(3, &keys[1])),
+        (&a, keys[0].clone(), lineage.credentials(3, &keys[0])),
+    )
+    .await
+    .unwrap();
+    let pull = async {
+        let mut session = session;
+        session.pull_wanted_seals(&b).await.unwrap()
+    };
+    let (pulled, ()) = tokio::join!(pull, async { while served.serve_once(&a).await.is_ok() {} });
+    assert!(pulled);
+    assert_eq!(
+        b.held_seal(lineage.domain, first).await.unwrap(),
+        Some(crate::HeldSeal::Checkpoint)
+    );
+    assert!(b.wanted_seals(lineage.domain).await.unwrap().is_empty());
+    assert_eq!(scalar(&a, "SELECT count(*) FROM secure_served").await, 1);
+
+    let opening = SignedTipOpening::sign(
+        TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            scope: lineage.domain,
+            seal: first,
+            minimum_in_sync: 1,
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    let bookmark = SignedBookmarkMove::sign(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "dev".into(),
+            from: None,
+            to: Some(opening.tip().unwrap()),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    b.publish_tip_statements(&[
+        TipStatement::Opening(opening),
+        TipStatement::Bookmark(bookmark),
+    ])
+    .await
+    .unwrap();
+    b.follow_bookmark(lineage.domain, "dev").await.unwrap();
+    assert_eq!(titles(&b).await, rows(&[("a", "one"), ("b", "two")]));
+    // Releasing the seal forgets what A served of it.
+    a.keep_seals(KeptSeals::default()).await.unwrap();
+    assert_eq!(scalar(&a, "SELECT count(*) FROM secure_served").await, 0);
+}

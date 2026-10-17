@@ -823,12 +823,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await;
         }
         let (generation, key) = inner.scope_key(scope)?;
-        let Some((id, signed)) = inner.served_checkpoint(scope).await? else {
-            return Err(denied("no checkpoint to transfer"));
+        // The base the peer bootstraps from, or a seal's state it pulls.
+        let (id, signed, served) = match inner.served_checkpoint(scope).await? {
+            Some((id, signed)) if signed.id()? == checkpoint => (id, signed, served::Served::Base),
+            offered => match inner.served_seal_checkpoint(scope, checkpoint).await? {
+                Some(found) => found,
+                None if offered.is_some() => {
+                    return Err(denied("checkpoint superseded; restart the rebootstrap"));
+                }
+                None => return Err(denied("no checkpoint to transfer")),
+            },
         };
-        if signed.id()? != checkpoint {
-            return Err(denied("checkpoint superseded; restart the rebootstrap"));
-        }
         if after.is_none() {
             // The checkpoint carries this device's frames it covers.
             let logs: Vec<_> = signed
@@ -859,7 +864,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .query(
-                    "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? AND (? IS NULL OR row<=?) ORDER BY row LIMIT ?",
+                    format!("SELECT row,fields FROM {} WHERE scope=? AND row>? AND (? IS NULL OR row<=?) ORDER BY row LIMIT ?", served.rows()),
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(after.map(|row| row.to_vec()).unwrap_or_default()),
@@ -914,8 +919,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 named.insert(digest);
                 plain.bindings.push(serde_bytes::ByteBuf::from(set));
             }
-            let (_, clock) = inner
-                .stub(record.creation)
+            let clock = inner
+                .creation_clock(record.creation)
                 .await?
                 .ok_or_else(|| Error::Corrupt("checkpoint row creation is unknown".into()))?;
             row_of(row)?;
@@ -1209,19 +1214,23 @@ impl<A: RowApplication> Inner<A> {
         let reapply = self.supersede(scope, &statement, &mut report).await?;
         let blob = encode(&scope)?;
         if rewrite {
-            self.conn
-                .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
-                .await?;
-            self
-                .conn
-                .execute(
-                    match direct {
-                        true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
-                        false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
-                    },
-                    bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
-                )
-                .await?;
+            self.in_rows_bulk(scope, async {
+                self.conn
+                    .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                    .await?;
+                self
+                    .conn
+                    .execute(
+                        match direct {
+                            true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
+                            false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
+                        },
+                        bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
+                    )
+                    .await?;
+                Ok(())
+            })
+            .await?;
         }
         let permanent = self.identity_marks(scope).await?;
         self.conn

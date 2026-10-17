@@ -112,6 +112,13 @@ impl Node {
                 };
                 self.seal_followed(scope, close).await?;
             }
+            "pull" => {
+                self.replica
+                    .want_seal(scope, digest(request, "seal")?)
+                    .await
+                    .map_err(refused)?;
+                self.wake_sync();
+            }
             "open" => {
                 let minimum = request["minimum_in_sync"]
                     .as_u64()
@@ -678,7 +685,7 @@ impl Node {
         self.replica.finalize_path(scope).await?;
         if self.replica.held_seal(scope, seal).await?.is_none() {
             return Err(refused(
-                "this device does not hold the seal's state; pull it from a device that keeps it, or seal now",
+                "this device does not hold the seal's state; pull it from a device that keeps it with the tips action pull, or seal now",
             ));
         }
         let opening = SignedTipOpening::endorse(

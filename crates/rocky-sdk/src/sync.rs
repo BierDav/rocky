@@ -357,6 +357,11 @@ async fn rows(
             session.close().await?;
             continue;
         }
+        // Seals the application asked to hold, from a peer that keeps them.
+        if !session.pull_wanted_seals(replica).await? {
+            session.close().await?;
+            continue;
+        }
         let mut exhausted = false;
         if !replica.tip_statements(None, 1).await?.is_empty() {
             for scope in scopes {

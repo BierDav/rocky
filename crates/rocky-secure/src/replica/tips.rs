@@ -862,6 +862,10 @@ impl<A: RowApplication> Inner<A> {
             }
             return Ok(());
         }
+        // A kept seal the new path passes: scopes start from its rows.
+        let rewind = self.rewind_seal(domain).await?;
+        #[cfg(test)]
+        let rewind = rewind.filter(|_| !self.rebuild_switches);
         let scopes = rows(&self.conn, "SELECT scope FROM secure_scope_state").await?;
         for record in scopes {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
@@ -872,6 +876,24 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             }
             let id = self.scope_id(scope).await?;
+            // Restoring a kept seal's rows replays only what followed it.
+            if let Some(rewind) = &rewind
+                && self.rewinds(scope, id).await?
+            {
+                let touched = self
+                    .rewind_rows(scope, id, rewind.at(id), i64::MAX, true)
+                    .await?;
+                let frontier = self
+                    .graph_for(domain)?
+                    .seal_by_id(rewind.seal)
+                    .map_err(credential)?
+                    .statement
+                    .frontier
+                    .clone();
+                self.rebuild_existence_beyond(scope, &frontier, &touched)
+                    .await?;
+                continue;
+            }
             // A base at a seal the new tip's state passes through stays.
             let kept = self
                 .checkpoint_record(id, true)

@@ -10,9 +10,10 @@ are in [phase 16](../features_09/16-kept-seals-and-views.md).
 
 A domain's live tables hold the tip the followed bookmark points to, under
 their plain names, in the same file and transaction as history. Following
-another bookmark rebuilds them. Every other state is read-only and reached
-through the views below. A second writable workspace is an
-[idea](../ideas/additional_live_workspaces.md), not part of the runtime.
+another bookmark switches them, as [below](#switching-tips). Every other
+state is read-only and reached through the views below. A second writable
+workspace is an [idea](../ideas/additional_live_workspaces.md), not part of
+the runtime.
 
 ## Choosing the seals to keep
 
@@ -21,6 +22,7 @@ through the views below. A second writable workspace is an
 | `tips.keep(KeptSeals)` | `EncryptedReplica::keep_seals` | `keep` with `kept` | the configuration |
 | `tips.kept()` | `EncryptedReplica::kept_seal_config` | `kept` | the configuration |
 | `tips.inspect()` | `EncryptedReplica::held_seal` | `inspect`, each seal's `held` | how a seal is held |
+| `tips.pull(seal)` | `EncryptedReplica::want_seal` | `pull` with `seal` | the tip status |
 
 `KeptSeals` names, among the seals of the tips the node follows:
 
@@ -51,12 +53,22 @@ A node *holds* a seal whose state it has (`held` in `inspect`):
 
 Opening a branch on a seal, or following a bookmark onto a tip that starts
 from one, is refused when the node does not hold it and no replay base lies
-on that tip's path. The node pulls the seal's state from a peer
-(`EncryptedReplica::begin_seal_pull`, `stage_checkpoint_page`,
-`finish_seal_pull`), or seals now. A pulled state is kept aside without
-changing any row; following a tip whose path passes the seal installs it as
-the replay base. Today a peer offers its replay base checkpoint, so it serves
-the pull when its base sits at that seal.
+on that tip's path. The node then pulls the seal's state from a peer, or
+seals now:
+
+1. `pull` names the seal; the node wants it until it holds it.
+2. Each sync session asks its peer for every held scope's checkpoint at a
+   wanted seal (`NativeSession::pull_seal`). The peer serves its replay base
+   when that sits at the seal, else signs a checkpoint of the seal it keeps,
+   from its history tables. A peer serves only scopes it reads in whole;
+   another peer may serve the rest.
+3. The pulled state is kept aside without changing any row. `inspect` shows
+   the seal `checkpoint` once every held scope has it, and the refused call
+   succeeds. Following a tip whose path passes the seal installs the state
+   as the replay base.
+
+Keeping the latest seal on a device that reads every scope, such as an
+issuer, lets the others pull from it.
 
 ## History tables
 
@@ -66,7 +78,9 @@ transaction, while a kept seal still needs it. A kept seal's state is the
 live rows unchanged since the seal plus the history rows valid at it, so
 storage grows with the rows that changed, not with the number of seals:
 keeping five seals of a table where 1% of rows change between seals adds
-about 5%.
+about 5%. The encrypted stored rows behind the live tables keep their
+replaced versions the same way, in `secure_stored_history`; a switch and a
+pulled checkpoint start from them.
 
 Schema changes keep sealed states readable:
 
@@ -96,9 +110,24 @@ Binding a seal the node does not keep fails when the connection opens.
 An unbound connection names history explicitly, in a read statement of its
 own: `"items@<seal hex>"` or `"items@main"`.
 
+## Switching tips
+
+Following a bookmark onto a tip whose path passes a kept seal restores only
+the stored rows that changed since that seal, from history, and replays the
+tip's own operations after it. Only rows that differ from the live ones are
+written and projected, and an existence log indexes again only the ids those
+rows or records past the seal name. Switching from `main` to a branch two
+seals back and returning so costs time proportional to the rows changed since
+the seal, not to the table. The newest kept seal on the new path that this
+node finalized and kept under the installed schema is used.
+
+Without such a seal, or for a scope in a constraint group or whose replay
+base lies off the path, the switch rebuilds that scope from its replay base.
+
 ## Limits
 
-- Following a bookmark rebuilds the live tables from the replay base, so its
-  cost grows with the table, not with the rows changed since the seal.
-- Seal pulls are replica calls; the network session and SDK do not drive them
-  yet.
+- Returning to a path finalizes again, at the next maintenance step, the
+  seals the other path did not pass; finalizing scans the scopes a seal
+  changes.
+- A seal's state is held only once every scope this node holds has it; a
+  peer that reads fewer scopes serves part of it.

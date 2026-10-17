@@ -14,7 +14,10 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_existence_replay(scope BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,signer,sequence)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_existence_archive(base BLOB PRIMARY KEY,scope BLOB NOT NULL,attachment BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_existence_archive_rows(base BLOB NOT NULL,id INTEGER NOT NULL,created BLOB,deleted BLOB,PRIMARY KEY(base,id)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_existence_log(scope BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,record BLOB NOT NULL,PRIMARY KEY(scope,signer,sequence)) WITHOUT ROWID",
+    // Each record's frame position and row id, to find what a switch changes.
+    "CREATE TABLE IF NOT EXISTS secure_existence_log(scope BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,record BLOB NOT NULL,author INTEGER NOT NULL,position INTEGER NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(scope,signer,sequence)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_existence_log_position ON secure_existence_log(scope,author,position)",
+    "CREATE INDEX IF NOT EXISTS secure_existence_log_id ON secure_existence_log(scope,id)",
     "CREATE TABLE IF NOT EXISTS secure_existence_base(scope BLOB PRIMARY KEY,attachment BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_existence_base_rows(scope BLOB NOT NULL,id INTEGER NOT NULL,created BLOB,deleted BLOB,PRIMARY KEY(scope,id)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_existence_stage(scope BLOB PRIMARY KEY,attachment BLOB NOT NULL,cursor INTEGER NOT NULL,complete INTEGER NOT NULL,count INTEGER NOT NULL,digest BLOB NOT NULL) WITHOUT ROWID",
@@ -453,19 +456,22 @@ impl<A: RowApplication> Inner<A> {
             self.conn
             .execute(
                 "INSERT INTO secure_existence VALUES(?,?,?,?) ON CONFLICT(scope,id) DO UPDATE SET created=excluded.created,deleted=excluded.deleted",
-                bindings(vec![scope.clone(), id, created, deleted]),
+                bindings(vec![scope.clone(), id.clone(), created, deleted]),
             )
             .await?;
         }
         self.conn
             .execute(
-                "INSERT INTO secure_existence_log VALUES(?,?,?,?,?)",
+                "INSERT INTO secure_existence_log VALUES(?,?,?,?,?,?,?,?)",
                 bindings(vec![
                     scope,
                     signer,
                     SqlValue::Integer(statement.sequence as i64),
                     SqlValue::Blob(hash.to_vec()),
                     SqlValue::Blob(record.to_bytes()?),
+                    SqlValue::Integer(i64::from(statement.author)),
+                    SqlValue::Integer(statement.author_sequence as i64),
+                    id,
                 ]),
             )
             .await?;
@@ -479,28 +485,100 @@ impl<A: RowApplication> Inner<A> {
             .execute("DELETE FROM secure_existence WHERE scope=?", [blob.clone()])
             .await?;
         for row in records {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                return Err(corrupt());
-            };
-            let record = ExistenceRecord::from_bytes(bytes)?;
-            let statement = &record.statement;
-            if let Some(graph) = self.graphs.get(&scope.domain)
-                && !self.visible_frame(
-                    graph,
-                    statement.tip,
-                    statement.author,
-                    statement.author_sequence,
-                    self.workspace.tip,
-                )?
-            {
-                continue;
-            }
-            let column = match statement.event {
-                ExistenceEvent::Created => "created",
-                ExistenceEvent::Deleted => "deleted",
-            };
-            self.conn.execute(format!("INSERT INTO secure_existence(scope,id,{column}) VALUES(?,?,?) ON CONFLICT(scope,id) DO UPDATE SET {column}=CASE WHEN {column} IS NULL OR excluded.{column}<{column} THEN excluded.{column} ELSE {column} END"),bindings(vec![SqlValue::Blob(blob.clone()),SqlValue::Integer(statement.id.integer()),SqlValue::Blob(record.hash()?.to_vec())])).await?;
+            self.index_visible_existence(scope, &blob, &row).await?;
         }
+        Ok(())
+    }
+    /// `rebuild_tip_existence` after a switch that left every record a
+    /// `frontier` includes visible: only the ids of `touched` rows and of
+    /// records beyond the frontier are indexed again.
+    pub(super) async fn rebuild_existence_beyond(
+        &self,
+        scope: ResourceScope,
+        frontier: &[rocky_credentials::AuthorMark],
+        touched: &BTreeSet<i64>,
+    ) -> Result<(), Error> {
+        let blob = encode(&scope)?;
+        let mut ids = touched.clone();
+        let mut author = -1;
+        while let Some([SqlValue::Integer(next)]) = rows_with(
+            &self.conn,
+            "SELECT MIN(author) FROM secure_existence_log WHERE scope=? AND author>?",
+            vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(author)],
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            author = *next;
+            let included = frontier
+                .iter()
+                .find(|mark| i64::from(mark.author) == author)
+                .map_or(-1, |mark| mark.sequence as i64);
+            for row in rows_with(
+                &self.conn,
+                "SELECT id FROM secure_existence_log WHERE scope=? AND author=? AND position>?",
+                vec![
+                    SqlValue::Blob(blob.clone()),
+                    SqlValue::Integer(author),
+                    SqlValue::Integer(included),
+                ],
+            )
+            .await?
+            {
+                if let [SqlValue::Integer(id)] = row.as_slice() {
+                    ids.insert(*id);
+                }
+            }
+        }
+        for id in ids {
+            self.conn
+                .execute(
+                    "DELETE FROM secure_existence WHERE scope=? AND id=?",
+                    bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
+                )
+                .await?;
+            for row in rows_with(
+                &self.conn,
+                "SELECT record FROM secure_existence_log WHERE scope=? AND id=? ORDER BY signer,sequence",
+                vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)],
+            )
+            .await?
+            {
+                self.index_visible_existence(scope, &blob, &row).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Indexes one stored record of `scope`'s log if the followed tip
+    /// shows its frame.
+    async fn index_visible_existence(
+        &self,
+        scope: ResourceScope,
+        blob: &[u8],
+        row: &[SqlValue],
+    ) -> Result<(), Error> {
+        let [SqlValue::Blob(bytes)] = row else {
+            return Err(corrupt());
+        };
+        let record = ExistenceRecord::from_bytes(bytes)?;
+        let statement = &record.statement;
+        if let Some(graph) = self.graphs.get(&scope.domain)
+            && !self.visible_frame(
+                graph,
+                statement.tip,
+                statement.author,
+                statement.author_sequence,
+                self.workspace.tip,
+            )?
+        {
+            return Ok(());
+        }
+        let column = match statement.event {
+            ExistenceEvent::Created => "created",
+            ExistenceEvent::Deleted => "deleted",
+        };
+        self.conn.execute(format!("INSERT INTO secure_existence(scope,id,{column}) VALUES(?,?,?) ON CONFLICT(scope,id) DO UPDATE SET {column}=CASE WHEN {column} IS NULL OR excluded.{column}<{column} THEN excluded.{column} ELSE {column} END"),bindings(vec![SqlValue::Blob(blob.to_vec()),SqlValue::Integer(statement.id.integer()),SqlValue::Blob(record.hash()?.to_vec())])).await?;
         Ok(())
     }
     /// Whether the existence log of `scope` holds a creation of `id` and no

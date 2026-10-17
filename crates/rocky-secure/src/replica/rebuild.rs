@@ -91,27 +91,31 @@ impl<A: RowApplication> Inner<A> {
             cursor = last;
         }
         let blob = encode(&scope)?;
-        self.conn
-            .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
-            .await?;
-        for table in ["secure_checkpoint_rows", "secure_checkpoint_scratch"] {
-            if self.ignores_base() && table == "secure_checkpoint_rows" {
-                continue;
+        self.in_rows_bulk(scope, async {
+            self.conn
+                .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                .await?;
+            for table in ["secure_checkpoint_rows", "secure_checkpoint_scratch"] {
+                if self.ignores_base() && table == "secure_checkpoint_rows" {
+                    continue;
+                }
+                self.conn
+                    .execute(
+                        format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=? AND fields<>X''"),
+                        bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
+                    )
+                    .await?;
             }
+            // A row a finalized seal dropped from the base.
             self.conn
                 .execute(
-                    format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=? AND fields<>X''"),
+                    "DELETE FROM secure_rows WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
                     bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                 )
                 .await?;
-        }
-        // A row a finalized seal dropped from the base.
-        self.conn
-            .execute(
-                "DELETE FROM secure_rows WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
-                bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
-            )
-            .await?;
+            Ok(())
+        })
+        .await?;
         self.conn
             .execute("DELETE FROM secure_checkpoint_scratch WHERE scope=?", [id])
             .await?;

@@ -1034,3 +1034,64 @@ mod races {
         Ok(())
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_pulls_a_seal_an_issuer_keeps_and_opens_a_branch_there() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    // An issuer reads every scope the owner holds; it keeps the seals.
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite_as(json!({"kind": "issuer"})).await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    main(&a).await;
+    b.sync().await.expect("sync");
+    ok(&b, "follow", json!({"name": "main"})).await;
+    ok(&b, "keep", json!({"kept": {"every": true}})).await;
+    a.add(1, "milk").await;
+    let first = ok(&a, "seal", json!({})).await["tip"].clone();
+    a.add(2, "eggs").await;
+    let second = ok(&a, "seal", json!({})).await["tip"].clone();
+    b.sync().await.expect("sync");
+    ok(&b, "compaction", json!({})).await;
+    let held = |inspection: &Value, seal: &Value| {
+        inspection["seals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|known| known["id"] == *seal)
+            .map(|known| known["held"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(held(&ok(&b, "inspect", json!({})).await, &first), "kept");
+    // The owner compacts past the first seal and no longer holds it.
+    assert_eq!(
+        ok(&a, "compact", json!({"keep": 0})).await["compacted"],
+        second
+    );
+    assert_eq!(
+        held(&ok(&a, "inspect", json!({})).await, &first),
+        Value::Null
+    );
+    let open = json!({"seal": first, "minimum_in_sync": 1});
+    let refused = message(tips(&a, "open", open.clone()).await.unwrap_err());
+    assert!(refused.contains("pull"), "{refused}");
+
+    ok(&a, "pull", json!({"seal": first})).await;
+    a.sync().await.expect("sync");
+    assert_eq!(
+        held(&ok(&a, "inspect", json!({})).await, &first),
+        "checkpoint"
+    );
+    let tip = ok(&a, "open", open).await["tip"].clone();
+    ok(&a, "create", json!({"name": "dev", "tip": tip})).await;
+    ok(&a, "follow", json!({"name": "dev"})).await;
+    assert_eq!(a.titles().await, ["milk"]);
+    Ok(())
+}

@@ -708,13 +708,47 @@ impl<A: RowApplication> Inner<A> {
         for change in &changed {
             self.reproject(change.scope).await?;
         }
-        // The live tables hold the seal's state now.
-        if keep {
-            self.mark_seal(seal.id().map_err(credential)?).await?;
-        }
         let mut drops = Vec::new();
         for change in &changed {
-            drops.push((change.id, self.seal_drops(change.scope).await?));
+            drops.push((
+                change.scope,
+                change.id,
+                self.seal_drops(change.scope).await?,
+            ));
+        }
+        // The live tables hold the seal's state now. Its stored rows take
+        // what finalizing changes, which no live table shows, so that they
+        // are what a replay through the seal leaves.
+        if keep {
+            for (scope, _, rows) in &drops {
+                let blob = encode(scope)?;
+                for (row, fields) in rows {
+                    match fields {
+                        Some(fields) => {
+                            self.conn
+                                .execute(
+                                    "UPDATE secure_rows SET fields=? WHERE scope=? AND row=?",
+                                    [fields.clone(), blob.clone(), row.to_vec()],
+                                )
+                                .await?
+                        }
+                        None => {
+                            self.conn
+                                .execute(
+                                    "DELETE FROM secure_rows WHERE scope=? AND row=?",
+                                    [blob.clone(), row.to_vec()],
+                                )
+                                .await?
+                        }
+                    };
+                }
+            }
+            let bounds: Vec<history::KeptBound> = changes
+                .iter()
+                .map(|change| (change.id, change.through))
+                .collect();
+            self.mark_seal(seal.id().map_err(credential)?, &bounds)
+                .await?;
         }
         self.conn
             .execute(
@@ -734,7 +768,7 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        for (id, rows) in drops {
+        for (_, id, rows) in drops {
             for (row, fields) in rows {
                 self.conn
                     .execute(

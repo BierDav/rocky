@@ -412,6 +412,9 @@ pub(super) struct Inner<A> {
     pub(super) generations_with_graph: bool,
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
+    /// Tip switches rebuild from the replay base, as without kept seals.
+    #[cfg(test)]
+    pub(super) rebuild_switches: bool,
     #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
@@ -566,6 +569,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         checkpoint::SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
         checkpoint::PULLED_SCHEMA,
+        checkpoint::SERVED_SCHEMA,
         compaction::SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
@@ -815,6 +819,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             generations_with_graph: false,
             #[cfg(test)]
             fail_before_commit: 0,
+            #[cfg(test)]
+            rebuild_switches: false,
             #[cfg(test)]
             retry_before_commit: 0,
             #[cfg(test)]

@@ -63,6 +63,12 @@ class Tips internal constructor(private val client: RockyClient) {
     /** The seals this device keeps. */
     suspend fun kept(): KeptSeals = KeptSeals.decode(call("kept"))
 
+    /**
+     * Asks the next syncs to pull [seal]'s state from a device that keeps it, so that [open] and [follow] may start
+     * there; nothing changes in the rows. [inspect] shows the seal `held` once pulled.
+     */
+    suspend fun pull(seal: String): TipStatus = TipStatus.decode(call("pull") { put("seal", seal) })
+
     /** Creates [name] on [tip], or on the followed tip when omitted. */
     suspend fun createBookmark(name: String, tip: String? = null): TipStatus = TipStatus.decode(
         call("create") {

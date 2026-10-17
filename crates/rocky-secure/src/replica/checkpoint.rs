@@ -7,6 +7,8 @@ mod create;
 mod prune;
 mod pulled;
 pub(crate) use pulled::SCHEMA as PULLED_SCHEMA;
+mod served;
+pub(crate) use served::SCHEMA as SERVED_SCHEMA;
 mod transfer;
 use super::*;
 pub use audit::AuditReport;
@@ -554,12 +556,24 @@ pub(super) struct Log {
 pub(super) enum Overlay {
     Build,
     Scratch,
+    /// The scratch rows over the stored rows, not the checkpoint rows.
+    Rewind,
 }
 impl Overlay {
     pub(super) fn table(self) -> &'static str {
         match self {
             Self::Build => "secure_checkpoint_overlay",
-            Self::Scratch => "secure_checkpoint_scratch",
+            Self::Scratch | Self::Rewind => "secure_checkpoint_scratch",
+        }
+    }
+    fn under(self) -> &'static str {
+        match self {
+            Self::Build | Self::Scratch => {
+                "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?"
+            }
+            Self::Rewind => {
+                "SELECT fields FROM secure_rows WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?) AND row=?"
+            }
         }
     }
 }
@@ -776,6 +790,30 @@ impl<A: RowApplication> Inner<A> {
             Some(row) => Some((row.get::<i64>(0)?, row.get::<i64>(1)? as u64)),
             None => None,
         })
+    }
+    /// The clock of a stored row's creation: its stub once pruned, else
+    /// its retained operation's.
+    pub(super) async fn creation_clock(&self, hash: Hash) -> Result<Option<u64>, Error> {
+        if let Some((_, clock)) = self.stub(hash).await? {
+            return Ok(Some(clock));
+        }
+        match collect_rows(
+            self.conn
+                .query(
+                    "SELECT header FROM secure_operations WHERE hash=?",
+                    [hash.as_bytes().to_vec()],
+                )
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Blob(header)]) => Ok(Some(
+                decode::<p2panda_core::Header<Extensions>>(header)?.timestamp,
+            )),
+            _ => Ok(None),
+        }
     }
     pub(super) async fn put_stub(
         &self,
@@ -1027,22 +1065,27 @@ impl<A: RowApplication> Inner<A> {
             .map(|key| (key.generation, key.key))
             .ok_or_else(|| denied("checkpoint needs the scope key"))
     }
-    /// One stored row record from an overlay, else from the checkpoint rows.
-    /// An empty overlay record marks a base row a finalized seal dropped.
+    /// One stored row record from an overlay, else from the checkpoint rows,
+    /// or the stored rows for a rewind. An empty overlay record marks a row
+    /// a finalized seal dropped or a kept seal did not have.
     pub(super) async fn replay_row(
         &self,
         overlay: Overlay,
         scope: i64,
         row: Commitment,
     ) -> Result<Option<Vec<u8>>, Error> {
-        for table in [overlay.table(), "secure_checkpoint_rows"] {
-            if self.ignores_base() && table == "secure_checkpoint_rows" {
+        let over = format!(
+            "SELECT fields FROM {} WHERE scope=? AND row=?",
+            overlay.table()
+        );
+        for (index, sql) in [over.as_str(), overlay.under()].into_iter().enumerate() {
+            if index == 1 && self.ignores_base() && !matches!(overlay, Overlay::Rewind) {
                 continue;
             }
             let mut result = self
                 .conn
                 .query(
-                    format!("SELECT fields FROM {table} WHERE scope=? AND row=?"),
+                    sql.to_string(),
                     bindings(vec![SqlValue::Integer(scope), SqlValue::Blob(row.to_vec())]),
                 )
                 .await?;

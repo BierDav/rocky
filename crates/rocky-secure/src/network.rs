@@ -19,6 +19,7 @@ use tokio::{
 
 mod chains;
 mod checkpoints;
+pub use checkpoints::SealPull;
 mod contacts;
 pub mod link;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};

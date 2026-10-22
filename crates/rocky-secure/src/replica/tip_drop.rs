@@ -186,18 +186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
             }
             if let Some(id) = inner.find_scope_id(*scope).await?
-                && (!collect_rows(
-                    inner
-                        .conn
-                        .query(
-                            "SELECT 1 FROM secure_checkpoints WHERE scope=? LIMIT 1",
-                            [id],
-                        )
-                        .await?,
-                )
-                .await?
-                .is_empty()
-                    || inner.has_pruned_prefix(*scope).await?)
+                && inner.history_covers_tip(graph, id, *author, tip).await?
             {
                 return Err(denied("checkpoint history prevents dropping tip frames"));
             }
@@ -253,6 +242,51 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// Whether scope `id`'s compacted history may hold frames of `tip`:
+    /// `author`'s log there lost a pruned prefix, or a checkpoint sits at a
+    /// seal whose state includes `tip`. A tip's frames come from its own
+    /// line's author logs, and a seal's state holds only its ancestry.
+    async fn history_covers_tip(
+        &self,
+        graph: &rocky_credentials::TipGraph,
+        id: i64,
+        author: PublicKey,
+        tip: TipId,
+    ) -> Result<bool, Error> {
+        if !rows(
+            &self.conn,
+            &format!(
+                "SELECT 1 FROM secure_logs WHERE scope={id} AND author=x'{}' AND pruned_prefix>=0",
+                author.to_hex()
+            ),
+        )
+        .await?
+        .is_empty()
+        {
+            return Ok(true);
+        }
+        for record in rows(
+            &self.conn,
+            &format!("SELECT signed FROM secure_checkpoints WHERE scope={id}"),
+        )
+        .await?
+        {
+            let [SqlValue::Blob(bytes)] = record.as_slice() else {
+                return Err(Error::Corrupt("checkpoint".into()));
+            };
+            let Some(seal) = SignedCheckpoint::from_bytes(bytes)?.statement.seal else {
+                return Ok(true);
+            };
+            let Ok(sealed) = graph.seal_by_id(seal) else {
+                return Ok(true);
+            };
+            let sealed = sealed.statement.tip;
+            if sealed == tip || Self::descends(graph, sealed, tip)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(super) async fn ensure_tip_restored(&self) -> Result<(), Error> {
         let graph = self
             .graphs

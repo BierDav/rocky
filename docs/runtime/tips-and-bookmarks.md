@@ -112,6 +112,9 @@ workspace refuses writes, and a failed enrollment is recorded as
 `drop(tip)` releases a tip the device no longer follows. It refuses the
 followed tip and its ancestors, and its own writes until a peer that reads
 them reported holding them, by acknowledgment or frontier, as pruning counts.
+It also refuses frames compacted history may hold: when their author's log
+lost a pruned prefix, or a checkpoint of their scope sits at a seal whose
+state includes the tip. A base at a seal the tip opened on does not.
 
 A device that bootstrapped a table from a checkpoint holds no author
 positions for it: it neither seals nor switches to a branch whose base it

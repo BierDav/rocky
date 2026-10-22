@@ -267,7 +267,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Whether `tip` continues or opens on a seal of `ancestor`, directly
     /// or through further seals.
-    fn descends(
+    pub(in crate::replica) fn descends(
         graph: &rocky_credentials::TipGraph,
         tip: TipId,
         ancestor: TipId,

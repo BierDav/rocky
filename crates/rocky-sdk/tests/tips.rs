@@ -779,6 +779,38 @@ mod trusted {
         Ok(())
     }
 
+    /// A device that compacted, and released history, at main's seal still
+    /// drops a branch it wrote on: its base holds no frame of the branch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_compacted_device_drops_a_branch_it_wrote_on() -> Result<(), Failure> {
+        let house = household(2).await?;
+        let owner = &house.owner;
+        let [t, u] = &house.devices[..] else {
+            return Err("devices".into());
+        };
+        trust(owner, t).await;
+        let main_tip = ok(t, "status", json!({})).await["tip"].clone();
+        u.ok(json!({"type": "retention", "collection": "items",
+            "policy": {"required": [], "behind": [], "copies": 1, "window": 0}}))
+            .await;
+        settle(&[t, u, owner]).await;
+        let compacted = ok(u, "compact", json!({"keep": 0})).await;
+        assert_eq!(compacted["compacted"], main_tip, "{compacted}");
+        let dev =
+            ok(t, "open", json!({"seal": main_tip, "minimum_in_sync": 1})).await["tip"].clone();
+        ok(t, "create", json!({"name": "dev", "tip": dev})).await;
+        ok(t, "follow", json!({"name": "dev"})).await;
+        u.sync().await.expect("graph sync");
+        ok(u, "follow", json!({"name": "dev"})).await;
+        u.add(3, "u on dev").await;
+        settle(&[t, u]).await;
+        assert_eq!(t.titles().await, ["before", "u on dev"]);
+        ok(u, "follow", json!({"name": "main"})).await;
+        ok(u, "drop", json!({"tip": dev})).await;
+        assert_eq!(u.titles().await, ["before"]);
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_trusted_identity_moves_main_back_and_the_abandoned_writes_are_held()
     -> Result<(), Failure> {

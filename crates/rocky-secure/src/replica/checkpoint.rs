@@ -1254,7 +1254,12 @@ impl<A: RowApplication> Inner<A> {
             };
             let frame = EncryptedFrame::bare(header.clone(), body.clone());
             let operation = frame.operation_ref()?;
-            if !self.replay_eligible(status, operation, self.rebuilding_tip)? {
+            // A frame of another line, such as a branch this device left, is
+            // no part of the target's state.
+            if !self.replay_eligible(status, operation, self.rebuilding_tip)?
+                || (self.graphs.contains_key(&scope.domain)
+                    && !self.on_path(scope.domain, operation.header.extensions.tip, target)?)
+            {
                 last = Some(*position);
                 continue;
             }

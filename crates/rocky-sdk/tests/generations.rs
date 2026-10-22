@@ -1224,3 +1224,68 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     a.close().await;
     Ok(())
 }
+
+/// An owner tries a migration on a branch, returns to `main` and keeps
+/// sealing and compacting there: finalizing replays only frames on the
+/// seal's own path.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::create(&a_dir, network("a"))?;
+    a.follow_main_migrating().await;
+    a.ok(json!({"type": "tips", "action": "keep", "kept": {"every": true}}))
+        .await;
+    let b = Device::join(
+        &b_dir,
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    a.add(1, "cherries").await;
+    b.sync().await.expect("sync");
+    let seal = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
+    let dev = a
+        .ok(json!({"type": "tips", "action": "open", "seal": seal, "minimum_in_sync": 1}))
+        .await["tip"]
+        .clone();
+    a.ok(json!({"type": "tips", "action": "create", "name": "dev", "tip": dev}))
+        .await;
+    a.ok(json!({"type": "tips", "action": "follow", "name": "dev"}))
+        .await;
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, REQUIRED, network("a")))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    introduce(&a, &b).await;
+    a.ok(json!({"type": "tips", "action": "follow", "name": "main"}))
+        .await;
+    // A sync pass switches the database to main's schema.
+    for _ in 0..3 {
+        let _ = a.sync().await;
+        let _ = b.sync().await;
+    }
+    assert_eq!(
+        generation(&a).await["pending"],
+        Value::Null,
+        "{}",
+        generation(&a).await
+    );
+    assert_eq!(generation(&a).await["current"]["schema"], 1);
+    a.add(2, "apples").await;
+    let back = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
+    a.add(3, "bread").await;
+    a.ok(json!({"type": "tips", "action": "seal"})).await;
+    // Finalizing main's seals replays no frame of the branch.
+    let compacted = a
+        .ok(json!({"type": "tips", "action": "compact", "keep": 1}))
+        .await;
+    assert!(compacted["compacted"].is_string(), "{compacted}");
+    // The owner holds main's seals and may roll back to one.
+    a.ok(json!({"type": "tips", "action": "open", "seal": back, "minimum_in_sync": 1}))
+        .await;
+    b.close().await;
+    a.close().await;
+    Ok(())
+}

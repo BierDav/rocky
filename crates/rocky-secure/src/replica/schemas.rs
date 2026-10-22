@@ -336,6 +336,22 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn path_fields(&self, scope: Scope, source: TipId) -> Result<PathFields, Error> {
         self.path_fields_to(scope, source, self.workspace.tip)
     }
+    /// Whether `tip` is `target` or one of its ancestors.
+    pub(super) fn on_path(&self, scope: Scope, tip: TipId, target: TipId) -> Result<bool, Error> {
+        let graph = self.graph_for(scope)?;
+        let mut cursor = target;
+        let mut visited = BTreeSet::new();
+        while visited.insert(cursor) {
+            if cursor == tip {
+                return Ok(true);
+            }
+            match Self::tip_parent(graph, cursor)? {
+                Some((parent, _)) => cursor = parent,
+                None => return Ok(false),
+            }
+        }
+        Err(denied("cyclic tip path"))
+    }
     /// Fields present at every tip from `source` through `target`, an
     /// ancestor-or-self path: a base at a seal keeps its own tip's fields.
     pub(super) fn path_fields_to(

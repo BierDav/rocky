@@ -468,6 +468,7 @@ impl<A: RowApplication> Inner<A> {
             inner.finish_switch(record).await
         });
         if let Err(error) = switched {
+            self.abandon_switch_history();
             self.workspace.typed = previous;
             return Err(error);
         }

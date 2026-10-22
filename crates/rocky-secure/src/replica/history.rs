@@ -290,6 +290,9 @@ pub(crate) struct Bulk {
     depth: AtomicUsize,
     /// Live tables copied before the outermost rebuild began.
     copied: std::sync::Mutex<BTreeSet<String>>,
+    /// A schema switch records its own difference: a rebuild inside it
+    /// records nothing, since the new tables' history is not installed yet.
+    switching: std::sync::atomic::AtomicBool,
 }
 
 impl<A: RowApplication> Inner<A> {
@@ -412,7 +415,7 @@ impl<A: RowApplication> Inner<A> {
     /// Before a bulk rebuild of `tables`, by SQL name: copies them and
     /// pauses the triggers, when a seal is kept.
     pub(super) async fn begin_bulk(&self, tables: &[String]) -> Result<bool, Error> {
-        if !self.kept().await? {
+        if self.workspace.bulk.switching.load(Ordering::SeqCst) || !self.kept().await? {
             return Ok(false);
         }
         let outer = self.workspace.bulk.depth.fetch_add(1, Ordering::SeqCst) == 0;
@@ -1244,7 +1247,13 @@ impl<A: RowApplication> Inner<A> {
                 (),
             )
             .await?;
+        self.workspace.bulk.switching.store(true, Ordering::SeqCst);
         Ok(Some(Switching { copied }))
+    }
+    /// Ends a switch that failed before `end_switch_history`; its
+    /// transaction rolls the copies back.
+    pub(super) fn abandon_switch_history(&self) {
+        self.workspace.bulk.switching.store(false, Ordering::SeqCst);
     }
     /// After the switch installed `new`'s live tables and their history:
     /// records, over the columns they kept, what the switch changed.
@@ -1277,6 +1286,7 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute("UPDATE secure_kept_clock SET paused=0 WHERE id=1", ())
             .await?;
+        self.workspace.bulk.switching.store(false, Ordering::SeqCst);
         Ok(())
     }
     /// Copies `history`'s live rows before a bulk change.

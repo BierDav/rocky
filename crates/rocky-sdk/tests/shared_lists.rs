@@ -414,6 +414,75 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     Ok(())
 }
 
+/// An issuer that keeps every seal migrates its lists: the constrained
+/// switch records its own history difference, and the rebuild inside it
+/// records nothing into history tables the new schema has not installed.
+#[tokio::test]
+async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = root.path().join("a");
+    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    issuer
+        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
+        .await?;
+    issuer
+        .call(json!({"type":"tips","action":"keep","kept":{"every":true}}))
+        .await?;
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Weekly')",
+        )
+        .await?;
+    for title in ["Milk", "Bread"] {
+        issuer
+            .insert(
+                "items",
+                Some(&list),
+                &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'{title}')"),
+            )
+            .await?;
+    }
+    let kept = issuer.call(json!({"type":"tips","action":"seal"})).await?["tip"].clone();
+    issuer
+        .call(json!({"type":"tips","action":"compact","keep":1}))
+        .await?;
+    issuer.database.close().await?;
+
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+            ))
+            .await?,
+        [json!("Milk"), json!("Bread")]
+    );
+    // The seal stays kept across the migration.
+    let inspected = issuer
+        .call(json!({"type":"tips","action":"inspect"}))
+        .await?;
+    let kept_seals = inspected["nodes"][0]["kept_seals"].clone();
+    assert!(
+        kept_seals
+            .as_array()
+            .is_some_and(|seals| seals.contains(&kept)),
+        "{inspected}"
+    );
+    issuer.database.close().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

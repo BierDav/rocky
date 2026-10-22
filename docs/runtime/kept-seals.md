@@ -114,7 +114,10 @@ Schema changes keep sealed states readable:
 
 - after an additive change, a kept seal selects only its own columns;
 - before a removal or migration that drops or narrows a table, each kept seal
-  freezes a copy of only that table's state.
+  freezes a copy of only that table's state;
+- a switch that recreates constrained or partitioned tables records its own
+  difference into history; the constraint rebuild inside it records nothing,
+  since the new tables' history is installed only at the end of the switch.
 
 ## Read-only connections
 
@@ -158,4 +161,6 @@ base lies off the path, the switch rebuilds that scope from its replay base.
   seals the other path did not pass; finalizing scans the scopes a seal
   changes.
 - A seal's state is held only once every scope this node holds has it; a
-  peer that reads fewer scopes serves part of it.
+  peer that reads fewer scopes serves part of it. A seal kept before a schema
+  change that adds a table therefore stays kept but is no longer reported
+  held, and no branch opens on it.

@@ -10,6 +10,10 @@ interface ListDao {
     @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY id")
     fun observeAll(): Flow<List<ShoppingList>>
 
+    /** The held lists once, for a read-only view of a seal. */
+    @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY id")
+    suspend fun all(): List<ShoppingList>
+
     @Insert suspend fun insert(list: ShoppingList)
 
     /** Verifies the id `partitions.nextId("lists")` prepared, inside the inserting transaction. */

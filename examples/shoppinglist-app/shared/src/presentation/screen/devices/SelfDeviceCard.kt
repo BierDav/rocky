@@ -42,7 +42,7 @@ internal fun SelfDeviceCard(me: HouseholdDevice, state: DevicesState, now: Long,
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Networking enabled", style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.width(8.dp))
-                Switch(snapshot?.network?.networkingEnabled == true, onOnline, Modifier.semantics { contentDescription = "Networking enabled" }, enabled = snapshot != null)
+                Switch(state.online, onOnline, Modifier.semantics { contentDescription = "Networking enabled" }, enabled = snapshot != null)
             }
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -19,6 +19,8 @@ import org.example.examples.shopping.presentation.screen.approvals.ApprovalsKey
 import org.example.examples.shopping.presentation.screen.approvals.ApprovalsScreen
 import org.example.examples.shopping.presentation.screen.devices.DevicesKey
 import org.example.examples.shopping.presentation.screen.devices.DevicesScreen
+import org.example.examples.shopping.presentation.screen.history.HistoryKey
+import org.example.examples.shopping.presentation.screen.history.HistoryScreen
 import org.example.examples.shopping.presentation.screen.lists.ListsKey
 import org.example.examples.shopping.presentation.screen.lists.ListsScreen
 import org.example.examples.shopping.presentation.screen.opening.OpeningKey
@@ -40,6 +42,7 @@ val tabs = listOf(
     NavigationItem(ApprovalsKey, "Approvals", Icons.Filled.Gavel),
     NavigationItem(DevicesKey, "Devices", Icons.Filled.Devices),
     NavigationItem(SyncKey, "Sync", Icons.Filled.Sync),
+    NavigationItem(HistoryKey, "History", Icons.Filled.History),
 )
 
 /** The root screen of each session state; null while the household is open, when its tabs show. */
@@ -68,6 +71,7 @@ fun AppNavHost(navigator: Navigator) {
         entry<ApprovalsKey>(metadata = tab) { TabTopBar("Approvals") { ApprovalsScreen() } }
         entry<DevicesKey>(metadata = tab) { TabTopBar("Devices") { DevicesScreen() } }
         entry<SyncKey>(metadata = tab) { TabTopBar("Sync") { SyncScreen() } }
+        entry<HistoryKey>(metadata = tab) { TabTopBar("History") { HistoryScreen() } }
         entry<PairingOfferKey>(metadata = DialogSceneStrategy.dialog()) { key ->
             PairingOfferScreen(
                 key,

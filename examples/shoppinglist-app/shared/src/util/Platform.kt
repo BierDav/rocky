@@ -45,6 +45,10 @@ internal suspend fun removeDirectory(path: String) {
     PlatformFile(path).delete(recursively = true, mustExist = false)
 }
 
+internal suspend fun removeFile(path: String) {
+    PlatformFile(path).delete(mustExist = false)
+}
+
 /** The file's text, or null when it does not exist. */
 internal suspend fun readText(path: String): String? {
     val file = PlatformFile(path)

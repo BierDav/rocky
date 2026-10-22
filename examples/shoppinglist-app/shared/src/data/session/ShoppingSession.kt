@@ -87,6 +87,22 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
         start { ShoppingNode.resume(platform, digest) }
     }
 
+    /**
+     * Closes and reopens the open installation after [before] ran on it. Opening publishes this app's schema when the
+     * followed bookmark has an older one; see `docs/runtime/shopping-seals.md`.
+     */
+    fun reopen(before: suspend (ShoppingNode) -> Unit = {}) {
+        val open = state.value as? SessionState.Open ?: return
+        start {
+            try {
+                before(open.node)
+            } finally {
+                open.node.close()
+            }
+            ShoppingNode.resume(platform)
+        }
+    }
+
     /** After a failed setup: removes what it left, so another code can be used. */
     fun startOver() {
         if (state.value !is SessionState.Failed || RockyDatabase.exists(platform.directory)) return

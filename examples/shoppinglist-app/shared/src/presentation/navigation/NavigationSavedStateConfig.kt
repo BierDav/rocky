@@ -6,6 +6,7 @@ import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import org.example.examples.shopping.presentation.screen.approvals.ApprovalsKey
 import org.example.examples.shopping.presentation.screen.devices.DevicesKey
+import org.example.examples.shopping.presentation.screen.history.HistoryKey
 import org.example.examples.shopping.presentation.screen.lists.ListsKey
 import org.example.examples.shopping.presentation.screen.opening.OpeningKey
 import org.example.examples.shopping.presentation.screen.pairing.PairingOfferKey
@@ -27,6 +28,7 @@ val navigationSavedStateConfig = SavedStateConfiguration {
             subclass(ApprovalsKey::class, ApprovalsKey.serializer())
             subclass(DevicesKey::class, DevicesKey.serializer())
             subclass(SyncKey::class, SyncKey.serializer())
+            subclass(HistoryKey::class, HistoryKey.serializer())
         }
     }
 }

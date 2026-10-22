@@ -56,7 +56,7 @@ fun main(args: Array<String>) {
         }.exceptionOrNull()
         val millis = (System.nanoTime() - started) / 1_000_000
         failed = failed || error != null
-        println("${if (error == null) "PASS" else "FAIL"} $name ($millis ms)${error?.let { ": ${it.message}" } ?: ""}")
+        println("${if (error == null) "PASS" else "FAIL"} $name ($millis ms)${error?.let { ": ${it.message}${it.cause?.let { cause -> " (${cause.message})" } ?: ""}" } ?: ""}")
         notes.forEach { println("  $it") }
         results += buildJsonObject {
             put("scenario", name)
@@ -76,6 +76,8 @@ private val scenarios: List<Pair<String, (Run) -> Unit>> = listOf(
     "exclusion-revocation" to Run::exclusionAndRevocation,
     "relink" to Run::relink,
     "creator-loss" to Run::creatorLoss,
+    "seals" to Run::seals,
+    "branch" to Run::branch,
 )
 
 // iroh binds UDP.
@@ -223,6 +225,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
     private val labels = mutableMapOf<String, String>()
     fun device(name: String) = Device(name, root).also { opened += it }
     fun custody(invitation: String, vararg devices: Device) = Custody(root, peer, invitation, devices.map { it.contact() }).also { opened += it }
+    fun voters() = Voters(File(root, "voters").apply { mkdirs() }).also { opened += it }
     override fun close() {
         opened.asReversed().forEach { runCatching { it.close() } }
     }

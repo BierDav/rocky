@@ -120,7 +120,8 @@ class Approvals internal constructor(
                 mutableStatus.value = Coordinated.Waiting("Waiting for the household's coordination key to sync")
                 return@collectLatest
             }
-            val members = Members((devices.filter { it.profile == GrantProfile.Issuer }.map { it.node } + self).sorted().toSet())
+            // The service trusts identities, which certify their nodes.
+            val members = Members((devices.filter { it.profile == GrantProfile.Issuer }.map { it.user } + rocky.session().principal).sorted().toSet())
             val now = epochMillis() / 1000
             when {
                 // The founder's first revision names its members once there are any; nothing was sent yet.
@@ -166,7 +167,7 @@ class Approvals internal constructor(
         }
     }
 
-    /** Trusted node keys, stored in canonical sorted order. */
+    /** Trusted identity keys, stored in canonical sorted order. */
     private data class Members(val trusted: Set<String>) {
         override fun toString() = trusted.sorted().joinToString(",")
         companion object {

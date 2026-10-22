@@ -11,6 +11,10 @@ interface ShoppingDao {
     @Query("SELECT * FROM items WHERE list = :list AND (:includeCompleted OR completed = 0) AND instr(lower(title), :search) > 0 ORDER BY position, id")
     fun observeAll(list: Long, search: String = "", includeCompleted: Boolean = true): Flow<List<ShoppingItem>>
 
+    /** The items once, in list order, for a read-only view of a seal. */
+    @Query("SELECT * FROM items WHERE list = :list ORDER BY position, id")
+    suspend fun all(list: Long): List<ShoppingItem>
+
     @Insert suspend fun insert(item: ShoppingItem)
 
     /** Rocky reserves the next id of [list] inside the caller's write transaction; a rollback releases it. */

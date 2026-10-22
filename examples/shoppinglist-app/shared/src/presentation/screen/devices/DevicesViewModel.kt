@@ -57,6 +57,8 @@ data class DevicesState(
     val snapshot: DatabaseStatus? = null,
     val lastTransferAtEpochMillis: Long? = null,
     val domain: String = "",
+    /** The persisted **Networking enabled** switch. */
+    val online: Boolean = true,
 )
 
 @Inject
@@ -118,8 +120,8 @@ class DevicesViewModel(private val session: ShoppingSession) : NodeViewModel(ses
         }
         val lastTransfer = node.rocky.activity().filterIsInstance<RockyEvent.Synced>()
             .map<RockyEvent.Synced, Long?> { it.atEpochMillis }.onStart { emit(null) }
-        combine(devices, node.rocky.observeStatus(), lastTransfer) { state, snapshot, transfer ->
-            state.copy(snapshot = snapshot, lastTransferAtEpochMillis = transfer, domain = node.rocky.domain)
+        combine(devices, node.rocky.observeStatus(), lastTransfer, node.online) { state, snapshot, transfer, online ->
+            state.copy(snapshot = snapshot, lastTransferAtEpochMillis = transfer, domain = node.rocky.domain, online = online)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DevicesState())
 
@@ -131,7 +133,7 @@ class DevicesViewModel(private val session: ShoppingSession) : NodeViewModel(ses
         invitation.value = null
     }
 
-    fun setNetworkingEnabled(online: Boolean) = write { rocky.setNetworkingEnabled(online) }
+    fun setNetworkingEnabled(online: Boolean) = write { setOnline(online) }
     fun reset() = session.reset()
 
     /** Sends a partial device the key of [list]. */

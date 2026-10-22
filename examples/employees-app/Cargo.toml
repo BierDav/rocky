@@ -4,6 +4,7 @@ description = "Public employee rows and separately encrypted payroll companions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

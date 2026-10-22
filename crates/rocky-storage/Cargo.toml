@@ -4,6 +4,7 @@ description = "SQLite access, row capture and errors shared by the runtimes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [features]

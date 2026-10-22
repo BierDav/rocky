@@ -82,3 +82,10 @@ Use [the documentation index](docs/README.md) to select a focused guide.
 - [Current implementation roadmap](docs/features_09/README.md)
 - [Current architecture proposal](docs/proposals/architecture-proposal-v4.md)
 - [Engine decision](docs/runtime/write-concurrency.md#engine)
+
+## License
+
+Rocky DB is licensed under the [Functional Source License, Version 1.1, ALv2
+Future License](LICENSE) (`FSL-1.1-ALv2`). You may use, copy, modify and
+redistribute it for any purpose that does not compete with us. Two years after a
+release, that version also becomes available under the Apache License 2.0.

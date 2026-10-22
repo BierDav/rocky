@@ -4,6 +4,7 @@ description = "Signed manifests, capabilities and revocations, identities, key p
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

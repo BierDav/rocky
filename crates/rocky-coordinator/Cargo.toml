@@ -4,6 +4,7 @@ description = "Generic execution fencing, head confirmation and request deduplic
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [features]

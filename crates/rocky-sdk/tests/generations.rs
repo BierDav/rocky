@@ -1140,3 +1140,87 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     a.close().await;
     Ok(())
 }
+
+/// A node that keeps every seal migrates its database: the history of a
+/// table the migration adds a field to gains the field, and the kept seal
+/// still reads the table as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let directory = root.path().join("a");
+    let a = Device::create(&directory, None)?;
+    a.follow_main_migrating().await;
+    a.ok(json!({"type": "tips", "action": "keep", "kept": {"every": true}}))
+        .await;
+    a.add(1, "cherries").await;
+    a.add(2, "apples").await;
+    let kept = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
+    a.ok(json!({"type": "tips", "action": "compact", "keep": 1}))
+        .await;
+    a.close().await;
+    let a = Device::new(Database::open(open(&directory, REQUIRED, None))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    assert_eq!(
+        rows(&a, "SELECT title, position FROM items ORDER BY position").await,
+        json!([
+            [text("apples"), text("0000")],
+            [text("cherries"), text("0001")]
+        ])
+    );
+    let inspected = a.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let held = inspected["seals"]
+        .as_array()
+        .and_then(|seals| seals.iter().find(|seal| seal["id"] == kept))
+        .map(|seal| seal["held"].clone());
+    assert_eq!(held, Some(json!("kept")), "{inspected}");
+    a.close().await;
+    Ok(())
+}
+
+/// The second schema with a nullable `rank` instead of `note` and `tags`:
+/// another version 2 an issuer may publish at the same time.
+const RIVAL: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+
+/// Issuers that publish different schemas apart end on one tip: the losing
+/// issuer's database switches to the winner's schema, which its own
+/// application does not declare.
+#[tokio::test(flavor = "multi_thread")]
+async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::create(&a_dir, network("a"))?;
+    a.follow_main_migrating().await;
+    let b = Device::new(Database::join(
+        open(&b_dir, SCHEMA, network("b")),
+        &a.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    introduce(&a, &b).await;
+    b.add(1, "apples").await;
+    b.sync().await.expect("sync");
+    a.close().await;
+    b.close().await;
+    let a = Device::new(Database::open(open(&a_dir, SECOND, None))?)?;
+    let b = Device::new(Database::open(open(&b_dir, RIVAL, None))?)?;
+    let winner = generation(&a).await["manifest"].clone();
+    assert_ne!(winner, generation(&b).await["manifest"]);
+    a.close().await;
+    b.close().await;
+    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let b = Device::new(Database::open(open(&b_dir, RIVAL, network("b")))?)?;
+    introduce(&a, &b).await;
+    for _ in 0..4 {
+        b.sync().await.expect("sync");
+        a.sync().await.expect("sync");
+    }
+    // The owner's tip wins; the issuer's database follows it to the owner's schema.
+    let status = generation(&b).await;
+    assert_eq!(tip(&a).await, tip(&b).await, "{status}");
+    assert_eq!(status["manifest"], winner, "{status}");
+    assert_eq!(status["pending"], Value::Null, "{status}");
+    assert_eq!(b.titles().await, ["apples"]);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}

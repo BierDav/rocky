@@ -856,7 +856,8 @@ impl<A: RowApplication> Inner<A> {
             .stored_definition(graph.schema_any(target).map_err(credential)?)
             .await?;
         let mut fields = PathFields::of(&target_definition);
-        if source == target || graph.continues(source, target).map_err(credential)? {
+        // A source on a losing line continues to nothing: the target's own fields apply.
+        if source == target || graph.continues(source, target).unwrap_or(false) {
             let mut cursor = target;
             while cursor != source {
                 cursor = Self::tip_parent(graph, cursor)?

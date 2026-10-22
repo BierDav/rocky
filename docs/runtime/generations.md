@@ -169,7 +169,9 @@ migration is never merged, so rows an `insert` step adds appear once.
   late writes across a `continue`; an old application across a migration
   re-authoring its held write; required and nullable fields; a crash on
   either side of the switch; fetching a required schema from a member; two
-  issuers publishing apart (`main/1`); a dev branch whose schema a device on
+  issuers publishing apart (`main/1`), also with different schemas, the
+  loser switching to the winner's; a node keeping every seal migrating; a
+  dev branch whose schema a device on
   `main` never fetches; an offline migration published on reconnect.
 - SDK `tests/migrations.rs`: a migration refused before signing, one that
   fails and withdraws, a committed one never repeated, issuers migrating

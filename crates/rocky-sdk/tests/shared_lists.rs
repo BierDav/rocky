@@ -336,6 +336,84 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     Ok(())
 }
 
+/// A shared list's history follows its collection's retention policy:
+/// compacting at a seal releases the operations behind it, including the
+/// deleted row's, once another device acknowledged them.
+#[tokio::test]
+async fn compacting_releases_a_shared_lists_history_under_its_collections_policy()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer =
+        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    let invitation = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer =
+        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    writer.call(json!({"type":"sync"})).await?;
+    let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
+    issuer
+        .call(json!({"type":"retention","collection":"items","policy":policy}))
+        .await?;
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
+        )
+        .await?;
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    issuer
+        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+        .await?;
+    for title in ["Milk", "Eggs", "Flour"] {
+        issuer
+            .insert(
+                "items",
+                Some(&list),
+                &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'{title}')"),
+            )
+            .await?;
+    }
+    issuer
+        .call(json!({"type":"sql","sql":"DELETE FROM items WHERE title='Eggs'"}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    let titles = format!("SELECT title FROM items WHERE list = {list} ORDER BY title");
+    assert_eq!(
+        writer.column(&titles).await?,
+        [json!("Flour"), json!("Milk")]
+    );
+    issuer.call(json!({"type":"tips","action":"seal"})).await?;
+    let compacted = issuer
+        .call(json!({"type":"tips","action":"compact","keep":0}))
+        .await?;
+    assert!(
+        compacted["pruned"].as_u64() >= Some(4),
+        "the list's items were not released: {compacted}"
+    );
+    assert_eq!(
+        issuer.column(&titles).await?,
+        [json!("Flour"), json!("Milk")]
+    );
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

@@ -7,7 +7,8 @@ How the SDK configures retention and uses
 
 Every granted SDK collection gets a persisted `RetentionPolicy` when no policy
 exists. The defaults are `copies = 1`, `window = 256`, and empty `required` and
-`behind` sets. Pruning still requires a verified, flushed checkpoint and at
+`behind` sets. A partition without a policy of its own follows its
+collection's. Pruning still requires a verified, flushed checkpoint and at
 least one other acknowledged copy. It never releases a sole copy. No timer
 silently declares peers behind; the application calls
 [`tips.compact(keep)`](lazy-compaction.md#compacting) explicitly.

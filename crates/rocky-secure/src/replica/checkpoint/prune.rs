@@ -66,6 +66,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// The scope's own policy; a partition without one follows its
+    /// collection's, the policy of the unpartitioned scope of its table.
     pub(crate) async fn retention_policy(
         &self,
         scope: ResourceScope,
@@ -77,10 +79,25 @@ impl<A: RowApplication> Inner<A> {
                 [encode(&scope)?],
             )
             .await?;
-        match result.next().await? {
-            Some(row) => Ok(Some(decode(&row.get::<Vec<u8>>(0)?)?)),
-            None => Ok(None),
+        if let Some(row) = result.next().await? {
+            return Ok(Some(decode(&row.get::<Vec<u8>>(0)?)?));
         }
+        if !self.partitions.contains_key(&scope) {
+            return Ok(None);
+        }
+        for row in rows(&self.conn, "SELECT scope,policy FROM secure_retention").await? {
+            let [SqlValue::Blob(collection), SqlValue::Blob(policy)] = row.as_slice() else {
+                return Err(Error::Corrupt("retention policy".into()));
+            };
+            let collection: ResourceScope = decode(collection)?;
+            if collection.domain == scope.domain
+                && collection.table == scope.table
+                && !self.partitions.contains_key(&collection)
+            {
+                return Ok(Some(decode(policy)?));
+            }
+        }
+        Ok(None)
     }
     pub(in crate::replica) async fn prune_step(
         &mut self,

@@ -44,14 +44,19 @@ internal fun <T> retrying(what: String, vararg devices: Device, attempts: Int = 
     throw AssertionError("gave up on $what", last)
 }
 
-/** Polls [condition] with sync passes on [devices] in between. */
+/** Polls [condition] with sync passes on [devices] in between; a timeout reports each device's tips and generation. */
 internal fun eventually(what: String, vararg devices: Device, attempts: Int = 60, condition: () -> Boolean) {
     repeat(attempts) {
         if (condition()) return
         devices.forEach { it.settle(1) }
         Thread.sleep(250)
     }
-    expect(condition()) { "timed out waiting for $what" }
+    expect(condition()) {
+        "timed out waiting for $what; " +
+            devices.joinToString("; ") { device ->
+                "${device.name}: ${runCatching { device.tips() }.getOrElse { it.message }} ${runCatching { device.call("generation") }.getOrElse { it.message }}"
+            }
+    }
 }
 
 /**
@@ -105,7 +110,6 @@ internal fun Run.seals() {
     notes += "member before compacting: ${member.storage()}"
     val (memberRound, memberCompaction) = timed { member.maintain() }
     notes += "member compaction round: $memberRound"
-    notes += "member items retention: ${member.call("retention", "collection" to "items", "maintain" to true)}"
     expect(memberRound.text("compacted") == second) { "member compacted at ${memberRound.text("compacted")}, not $second" }
     expect(memberRound.getValue("pruned").jsonPrimitive.long > 0) { "the member released nothing: $memberRound" }
     phone.online(true)
@@ -200,4 +204,151 @@ internal fun Run.branch() {
     expect(dev !in member.storage().getValue("tips").jsonArray.map { it.text }) { "the member kept dev's frames after dropping it" }
     eventually("dev's deletion to reach the member", member, trusted) { !member.tips().getValue("bookmarks").jsonObject.containsKey("dev") }
     notes += "main's log stayed at $mainPosition; the member dropped dev and every device reads main"
+}
+
+/** Reopens under app version [app]; a new endpoint, so [peers] learn its contact again. */
+internal fun Device.reopen(app: Int, vararg peers: Device, coordinator: String? = null) = apply {
+    open("reopen", "app" to app, "coordinator" to coordinator)
+    introduce(this, *peers)
+}
+
+/** Reopens under app version [app] without a network: what opening publishes stays here until [attach]. */
+internal fun Device.reopenOffline(app: Int, coordinator: String? = null) = apply {
+    call("shut")
+    open("resumeOffline", "app" to app, "coordinator" to coordinator)
+}
+
+internal fun Device.attach(vararg peers: Device) = apply {
+    call("attach", "listen" to listen)
+    introduce(this, *peers)
+}
+
+internal fun introduce(device: Device, vararg peers: Device) {
+    for (peer in peers) {
+        peer.call("addPeer", "contact" to device.contact())
+        device.call("addPeer", "contact" to peer.contact())
+    }
+}
+
+internal fun Device.schemaVersion(): Long = call("generation").jsonObject.getValue("current").jsonObject.getValue("schema").jsonPrimitive.long
+internal fun Device.categories(list: Long): List<String> = call("query", "sql" to "SELECT name FROM categories WHERE list = $list ORDER BY ${if (schemaVersion() >= 8) "position, " else ""}name, id").jsonArray.map { it.jsonArray[0].text }
+internal fun Device.held(): JsonArray = call("held").jsonArray
+
+/** An app version 7 household: a trusted desktop and full members, each list shared with them. */
+internal fun Run.household7(vararg members: String, issuers: List<String> = emptyList()): List<Device> {
+    val trusted = device("trusted").open("create", "app" to 7)
+    val joined = issuers.map { name ->
+        device(name).open("join", "invitation" to trusted.call("pairing", "profile" to "issuer").text, "app" to 7)
+    } +
+        members.map { name ->
+            device(name).open("join", "invitation" to trusted.call("pairing", "profile" to "writer").text, "app" to 7)
+        }
+    joined.forEach { it.sync() }
+    return listOf(trusted) + joined
+}
+
+/**
+ * Slice 3: the trusted desktop tries app version 8's schema and migration on `dev`, then seals `main` and migrates it
+ * with networking off, and publishes on reconnecting. The member, on app version 7, wrote `main` meanwhile: its write
+ * comes back as a held change, which its app re-authors. The phone never fetched dev's schema.
+ */
+internal fun Run.publish() {
+    val (trusted, member, phone) = household7("member", "phone")
+    // Members find each other by discovery in the app; here, by contact.
+    introduce(member, phone)
+    val weekly = trusted.call("createList", "title" to "Weekly").jsonPrimitive.long
+    for (name in listOf("Fruit", "Dairy", "Bakery")) trusted.call("addCategoryRaw", "list" to weekly, "name" to name)
+    for (title in listOf("Milk", "Bread")) trusted.call("add", "list" to weekly, "title" to title)
+    shareAll(trusted, weekly, member, phone)
+    eventually("both members to hold Weekly", member, phone, trusted) { member.items(weekly).size == 2 && phone.items(weekly).size == 2 }
+
+    // Tried on dev: app version 8 publishes its schema there, and its migration runs on dev's state.
+    trusted.call("seal")
+    trusted.call("branch", "name" to "dev")
+    trusted.reopen(8, member, phone)
+    expect(trusted.bookmark() == "dev" && trusted.schemaVersion() == 8L) { "dev did not migrate: ${trusted.call("generation")}" }
+    val ordered = listOf("Bakery", "Dairy", "Fruit")
+    expect(trusted.categories(weekly) == ordered) { "dev ordered ${trusted.categories(weekly)}" }
+    member.settle(3)
+    phone.settle(3)
+    for (device in listOf(member, phone)) {
+        val generation = device.call("generation").jsonObject
+        expect(device.schemaVersion() == 7L && generation["pending"] == JsonNull) { "${device.name} on main saw dev's schema: $generation" }
+    }
+    notes += "tried: app version 8 migrated dev on the trusted desktop; main's devices stayed on schema 7 with nothing pending"
+
+    // Published: main sealed, then migrated offline; the member writes main meanwhile.
+    // Main's older schema replaces dev's at the end of the next sync pass; app version 8 is then ahead of it.
+    expect(trusted.call("follow", "name" to "main").text == "Pending") { "following main: ${trusted.call("generation")}" }
+    eventually("main's schema to replace dev's", trusted) { trusted.call("switched").text != "Pending" }
+    expect(trusted.call("switched").text == "Ahead") { "after switching: ${trusted.call("generation")}" }
+    trusted.call("seal")
+    val (_, migrating) = timed { trusted.reopenOffline(8) }
+    expect(trusted.bookmark() == "main" && trusted.schemaVersion() == 8L) { "main did not migrate offline: ${trusted.call("generation")}" }
+    member.call("add", "list" to weekly, "title" to "Butter")
+    eventually("the member's write to reach the phone on main", member, phone) { "Butter" in phone.items(weekly) }
+    expect(phone.schemaVersion() == 7L && member.schemaVersion() == 7L) { "the offline migration left the trusted desktop" }
+    notes += "published offline: the migration ran in $migrating ms with networking off; main's devices still on 7"
+
+    val (_, adoption) = timed {
+        trusted.attach(member, phone)
+        eventually("the member and phone to follow schema 8", member, phone, trusted) { member.schemaVersion() == 8L && phone.schemaVersion() == 8L }
+    }
+    notes += "on reconnecting, the member and phone adopted schema 8 in $adoption ms"
+    val held = member.held()
+    expect(held.size == 1 && held.single().jsonObject.getValue("rows").jsonArray.any { "Butter" in it.text }) { "member held $held" }
+    // The member's app is still version 7 and re-authors its write as a new one.
+    member.call("reauthor", "id" to held.single().jsonObject.text("id"))
+    expect(member.held().isEmpty()) { "the held change stayed" }
+    val expected = listOf("Bread", "Butter", "Milk")
+    for (device in listOf(trusted, member, phone)) {
+        eventually("${device.name} to read the re-authored write", device, trusted, member) { device.items(weekly) == expected }
+        expect(device.categories(weekly) == ordered) { "${device.name} ordered ${device.categories(weekly)}" }
+    }
+    trusted.call("leave", "name" to "dev", "delete" to true)
+    notes += "held: the member's offline Butter came back held and its version 7 app re-authored it; every device reads $expected"
+}
+
+/**
+ * Slice 4: two issuers publish different schemas at once and the household ends on one, the other listed as
+ * `main/1`. Then an issuer seals `main` forward while the owner moves it back to the latest seal; every device
+ * follows the owner.
+ */
+internal fun Run.raceAndRollback() {
+    val (owner, left, right, member) = household7("member", issuers = listOf("left", "right"))
+    val weekly = owner.call("createList", "title" to "Weekly").jsonPrimitive.long
+    owner.call("add", "list" to weekly, "title" to "Milk")
+    shareAll(owner, weekly, left, right, member)
+    val everyone = listOf(owner, left, right, member)
+    eventually("everyone to hold Weekly", *everyone.toTypedArray()) { everyone.all { it.items(weekly) == listOf("Milk") } }
+
+    // Concurrent publication: each issuer migrates main offline to its own version 8.
+    left.reopenOffline(CURRENT_APP)
+    right.reopenOffline(RIVAL_APP)
+    expect(left.tip() != right.tip()) { "both issuers published one tip" }
+    left.attach(owner, member)
+    right.attach(owner, member, left)
+    eventually("every device to end on one tip", *everyone.toTypedArray()) { everyone.map { it.tip() }.distinct().size == 1 }
+    val losers = owner.tips().getValue("losers").jsonObject
+    expect(losers.keys == setOf("main/1")) { "losers $losers" }
+    val winner = owner.tip()
+    notes += "race: the household ended on ${winner.take(8)}; inspection lists main/1 → ${losers["main/1"]?.jsonPrimitive?.contentOrNull?.take(8)}"
+    for (device in everyone) eventually("${device.name} to read Weekly on the winner", device, owner) { device.items(weekly) == listOf("Milk") }
+
+    // Rollback: the owner keeps every seal and moves main back to the latest; an issuer seals forward meanwhile.
+    val back = owner.call("seal").text
+    eventually("every device to follow the seal", *everyone.toTypedArray()) { everyone.all { it.tip() == back } }
+    member.call("add", "list" to weekly, "title" to "Late")
+    member.settle(2)
+    owner.maintain()
+    owner.online(false)
+    left.call("seal")
+    val rolled = owner.call("rollBack", "seal" to back).text
+    owner.online(true)
+    eventually("every device to follow the owner's rollback", *everyone.toTypedArray()) { everyone.all { it.tip() == rolled } }
+    notes += "rollback: an issuer sealed main forward while the owner moved it back; all ${everyone.size} devices follow ${rolled.take(8)}"
+    for (device in everyone) eventually("${device.name} to read Weekly at the rollback", device, owner) { device.items(weekly) == listOf("Milk") }
+    val held = member.held()
+    expect(held.size == 1) { "the member's write past the seal: $held" }
+    notes += "the member's write past the seal came back held: ${held.single().jsonObject.getValue("rows")}"
 }

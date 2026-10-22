@@ -22,7 +22,7 @@ import org.example.examples.shopping.data.db.entity.ShoppingList
         ShoppingList::class, Category::class, ShoppingItem::class, ItemCategory::class,
         RequestRow::class, DecisionRow::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 @ConstructedBy(ShoppingDatabaseConstructor::class)

@@ -4,9 +4,10 @@ import rocky.*
 
 /**
  * Room tables plus trusted-only device management; list envelopes travel by direct delivery. Version 7 orders items
- * and gives them any number of categories; see `docs/runtime/shopping-schema-7.md`.
+ * and gives them any number of categories; version 8 orders categories. See `docs/runtime/shopping-schema-7.md` and
+ * `docs/runtime/shopping-schema-8.md`.
  */
-val ShoppingSchema = schema("shopping", version = 7) {
+val ShoppingSchema = schema("shopping", version = 8) {
     table("lists") {
         text("title")
         primaryKey("id")
@@ -15,8 +16,10 @@ val ShoppingSchema = schema("shopping", version = 7) {
     table("categories") {
         integer("list")
         text("name")
+        text("position", default = "")
         primaryKey("list", "id")
         partitionBy("list", group = "list")
+        index("index_categories_list_position", "list", "position")
         reference("list", "lists", onDelete = Delete.Cascade)
     }
     table("items") {
@@ -46,6 +49,7 @@ val ShoppingSchema = schema("shopping", version = 7) {
         grantedLike = "items"
     }
     itemsMigration()
+    categoriesMigration()
     table("requests") {
         text("key")
         text("title")
@@ -75,6 +79,7 @@ val shoppingRoomOverlay: SchemaBuilder.() -> Unit = {
         grantedLike = "items"
     }
     itemsMigration()
+    categoriesMigration()
     trustedTables()
 }
 
@@ -86,6 +91,14 @@ private fun SchemaBuilder.itemsMigration() = migration(7) {
     sql("UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))")
     insert("item_categories", "SELECT list, id AS item, category FROM items WHERE category IS NOT NULL")
     sql("UPDATE items SET category = NULL WHERE category IS NOT NULL")
+}
+
+/**
+ * Version 8, run once by the trusted device that publishes it: each list's categories are placed by name. A
+ * migration closes the tip it leaves, so writes made on it meanwhile come back as held changes.
+ */
+private fun SchemaBuilder.categoriesMigration() = migration(8) {
+    sql("UPDATE categories SET position = printf('%09d5', (SELECT count(*) FROM categories AS earlier WHERE earlier.list = categories.list AND (earlier.name < categories.name OR (earlier.name = categories.name AND earlier.id < categories.id))))")
 }
 
 /** The tables of a list's group. */

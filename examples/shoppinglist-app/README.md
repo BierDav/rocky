@@ -124,8 +124,8 @@ A deployment supplies a current format-2 coordinator bundle in `coordinator.json
 in the household directory. The retired provider certificate is refused, and
 an absent configuration leaves decisions unavailable.
 The founder creates a household coordination key in a table only trusted devices
-read. Trusted devices register their node keys and renew the domain control
-before it expires. Requester and decider fields contain node keys; members label
+read. Trusted devices register their identities and renew the domain control
+before it expires. Only trusted devices compose the service; members ask without it. Requester and decider fields contain node keys; members label
 them **This device** or **Another device**, while trusted devices can display
 registry names. The service sees generic log metadata, never titles or decisions.
 A request is never a command or a forwarded ticket: ordinary replication carries
@@ -167,11 +167,19 @@ the open database's lifetime; see [SDK activity](../../docs/runtime/activity.md)
 The top badge shows **Live** only while an authenticated link is open. Raw
 inbound connection counts do not imply successful synchronization.
 
-The current Room schema is version 7. A version 6 household upgrades: the
-first trusted device to open it runs the schema's SQL migration, and every other
-device moves its database to version 7 when it meets it, keeping its version 6
-edits; a version 6 app keeps syncing. See
-[schema 7](../../docs/runtime/shopping-schema-7.md). An existing household that cannot open
+The current Room schema is version 8, which orders categories. A trusted
+device publishes a newer schema on the bookmark it follows when it opens, and
+every other device following that bookmark moves its database to it; older apps
+keep syncing. See [schema 7](../../docs/runtime/shopping-schema-7.md) and
+[schema 8](../../docs/runtime/shopping-schema-8.md).
+
+## History
+
+The **History** tab selects the bookmark the device follows (`main` by
+default), opens and leaves branches, seals `main` on demand and shows a kept
+seal's lists read-only. It lists held changes, which it re-authors or drops.
+Trusted devices seal `main` every 100 writes and keep every seal; every device
+compacts. See [shopping on seals](../../docs/runtime/shopping-seals.md). An existing household that cannot open
 shows **Retry** and preserves its data. A failure in Room’s background invalidation
 tracker also closes the open node and shows **Retry**; retry opens fresh SQL
 sessions without deleting the household.

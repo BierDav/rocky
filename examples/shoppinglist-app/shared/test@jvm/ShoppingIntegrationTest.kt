@@ -203,7 +203,7 @@ class ShoppingIntegrationTest {
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
     @Test fun `the hand-declared schema is the Room export's`() {
-        val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/7.json").readText()
+        val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/8.json").readText()
         assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
     }

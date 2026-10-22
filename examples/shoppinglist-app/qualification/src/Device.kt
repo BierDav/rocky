@@ -11,10 +11,13 @@ import org.example.examples.shopping.data.db.ShoppingSchema
 import org.example.examples.shopping.data.db.list
 import org.example.examples.shopping.data.household.Household
 import org.example.examples.shopping.data.household.NodeKind
+import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.data.tips.HouseholdTips
 import org.example.examples.shopping.data.tips.TipsState
 import rocky.*
+import rocky.room.ROOM_PROFILE
 import rocky.room.setRockyDatabase
+import rocky.sqlite.RockySQLiteDriver
 import java.io.File
 
 /** Marks a reply line; native logging shares stdout. */
@@ -55,16 +58,19 @@ private class DeviceProcess {
     private var directory: File? = null
     private var attached: RockyNetworkService? = null
     private val database get() = runtime ?: error("no open device")
-    private val repository get() = ShoppingRepository(room ?: error("no open device"), database)
+    private val repository get() = ShoppingRepository(room ?: error("no Room on app version $app"), database)
+
+    /** The app version this process runs; Room's entities are the current version's, so older apps write raw SQL. */
+    private var app = CURRENT_APP
     private fun tips(sealAfter: ULong = HouseholdTips.SEAL_AFTER) = HouseholdTips(database, { Room.databaseBuilder<ShoppingDatabase>(it) }, directory!!.path, sealAfter)
 
-    private suspend fun opened(directory: File, open: suspend () -> RockyDatabase): JsonElement {
+    private suspend fun opened(directory: File, app: Int, open: suspend () -> RockyDatabase): JsonElement {
         val opened = open()
         runtime = opened
+        this.app = app
         this.directory = directory
         file = File(directory, "rocky.sqlite")
-        room = Room.databaseBuilder<ShoppingDatabase>(File(directory, "shopping").absolutePath)
-            .setRockyDatabase(opened).build()
+        room = if (app == CURRENT_APP) Room.databaseBuilder<ShoppingDatabase>(File(directory, "shopping").absolutePath).setRockyDatabase(opened).build() else null
         tips().keepSeals()
         return buildJsonObject {
             put("node", opened.session().node)
@@ -74,9 +80,12 @@ private class DeviceProcess {
     }
 
     suspend fun handle(request: JsonObject): JsonElement {
-        fun loopback() = PeerTransport.Iroh.isolated(request.text("listen"))
+        // `default` reaches devices outside this host, such as a phone, through relays and discovery.
+        fun loopback() = if (request["transport"]?.jsonPrimitive?.contentOrNull == "default") PeerTransport.Iroh() else PeerTransport.Iroh.isolated(request.text("listen"))
         fun directory() = File(request.text("directory"))
-        fun schema() = appSchema(request["app"]?.jsonPrimitive?.int ?: CURRENT_APP)
+        val requested = request["app"]?.jsonPrimitive?.intOrNull ?: CURRENT_APP
+        fun schema() = appSchema(requested)
+        suspend fun opened(directory: File, open: suspend () -> RockyDatabase) = opened(directory, requested, open)
         fun coordinator() = request["coordinator"]?.jsonPrimitive?.contentOrNull?.let { ServiceCoordinator(File(it).readText()) }
         val list = { request.long("list") }
         return when (request.text("op")) {
@@ -109,6 +118,21 @@ private class DeviceProcess {
                 opened(directory()) {
                     RockyDatabase.resume(directory(), schema(), loopback(), automaticSync = false, coordinator = coordinator(), confirmation = request["confirmation"]?.jsonPrimitive?.contentOrNull)
                 }
+            }
+
+            // Closes the database and keeps the process, for reopening under another app version.
+            "shut" -> {
+                close()
+                JsonNull
+            }
+
+            // A read through Rocky's SQL, for columns an older app's Room entities lack; each cell as text.
+            "query" -> JsonArray(rows(request.text("sql")).map { row -> JsonArray(row.map(::JsonPrimitive)) })
+
+            // As app version 7 adds a category, without version 8's position.
+            "addCategoryRaw" -> {
+                val list = list()
+                JsonPrimitive(database.write { nextId("categories", list).also { execute("INSERT INTO categories(list, name, id) VALUES(?, ?, ?)", list, request.text("name"), it) } })
             }
 
             "generation" -> database.generation()
@@ -144,8 +168,15 @@ private class DeviceProcess {
 
             "follow" -> JsonPrimitive(tips().follow(request.text("name")).name)
 
+            "switched" -> JsonPrimitive(tips().switched().name)
+
             "leave" -> {
                 tips().leave(request.text("name"), request["delete"]?.jsonPrimitive?.boolean ?: false)
+                JsonNull
+            }
+
+            "drop" -> {
+                database.tips.drop(request.text("tip"))
                 JsonNull
             }
 
@@ -159,6 +190,20 @@ private class DeviceProcess {
                     }
                 },
             )
+
+            // A kept seal's items through a read-only connection bound to it, whatever this app's Room version.
+            "view" -> {
+                val connection = RockySQLiteDriver(database, ROOM_PROFILE, binding = RockyBinding.Seal(request.text("seal"))).open("view")
+                try {
+                    connection.prepare("SELECT title, completed FROM items ORDER BY title").use { statement ->
+                        val items = mutableListOf<JsonPrimitive>()
+                        while (statement.step()) items += JsonPrimitive(statement.getText(0) + if (statement.getLong(1) != 0L) " [x]" else "")
+                        JsonArray(items)
+                    }
+                } finally {
+                    connection.close()
+                }
+            }
 
             "held" -> JsonArray(
                 database.heldChanges().changes.map { change ->
@@ -211,7 +256,7 @@ private class DeviceProcess {
                 JsonPrimitive(database.coordinatedStatus().position)
             }
 
-            "decisions" -> JsonArray(room!!.approvals().decisions().first().map { JsonPrimitive(it.key) })
+            "decisions" -> JsonArray(rows("SELECT key FROM decisions ORDER BY key").map { JsonPrimitive(it[0]) })
 
             "coordinated" -> JsonPrimitive(database.coordinatedStatus().position)
 
@@ -227,7 +272,7 @@ private class DeviceProcess {
                 RockyDatabase.install(directory().path, ShoppingSchema, request.getValue("supplied").jsonObject, transport = loopback())
             }
 
-            "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, loopback(), automaticSync = false) }
+            "resume" -> opened(directory()) { RockyDatabase.resume(directory(), schema(), loopback(), automaticSync = false, coordinator = coordinator()) }
 
             "pairing" -> JsonPrimitive(
                 when (val profile = request.text("profile")) {
@@ -237,6 +282,11 @@ private class DeviceProcess {
                     else -> error("unknown profile $profile")
                 }.uri,
             )
+
+            // The app's own pairing link, as Devices → Add device shows it.
+            "appPairing" -> JsonPrimitive(PairingCode(NodeKind.of(request.text("kind"))!!, request.text("name"), database.pairing(NodeKind.of(request.text("kind"))!!.profile).uri).toString())
+
+            "registry" -> JsonArray(database.devices().filter { !it.revoked }.map { JsonPrimitive(it.node) })
 
             "contact" -> buildJsonObject {
                 val contact = database.contact()
@@ -287,19 +337,48 @@ private class DeviceProcess {
                 }
             }
 
-            "createList" -> JsonPrimitive(repository.createList(request.text("title")))
+            "createList" -> JsonPrimitive(
+                if (room != null) {
+                    repository.createList(request.text("title"))
+                } else {
+                    val id = database.partitions.nextId("lists")
+                    database.write {
+                        check(nextId("lists") == id) { "list id $id was taken" }
+                        execute("INSERT INTO lists(id, title) VALUES(?, ?)", id, request.text("title"))
+                    }
+                    id
+                },
+            )
 
             "addCategory" -> JsonPrimitive(repository.addCategory(list(), request.text("name")))
 
-            "add" -> JsonPrimitive(repository.add(list(), request.text("title"), setOfNotNull(request.longOrNull("category"))))
+            "add" -> JsonPrimitive(
+                if (room != null) {
+                    repository.add(list(), request.text("title"), setOfNotNull(request.longOrNull("category")))
+                } else {
+                    val list = list()
+                    database.write {
+                        nextId("items", list).also { execute("INSERT INTO items(list, key, title, completed, id) VALUES(?, ?, ?, ?, ?)", list, java.util.UUID.randomUUID().toString(), request.text("title"), false, it) }
+                    }
+                },
+            )
 
             "check" -> {
-                repository.check(list(), request.long("id"), request.getValue("completed").jsonPrimitive.boolean)
+                val completed = request.getValue("completed").jsonPrimitive.boolean
+                if (room != null) {
+                    repository.check(list(), request.long("id"), completed)
+                } else {
+                    database.write { execute("UPDATE items SET completed = ? WHERE list = ? AND id = ?", completed, list(), request.long("id")) }
+                }
                 JsonNull
             }
 
             "delete" -> {
-                repository.delete(list(), request.long("id"))
+                if (room != null) {
+                    repository.delete(list(), request.long("id"))
+                } else {
+                    database.write { execute("DELETE FROM items WHERE list = ? AND id = ?", list(), request.long("id")) }
+                }
                 JsonNull
             }
 
@@ -319,7 +398,7 @@ private class DeviceProcess {
             }
 
             "share" -> {
-                repository.share(list(), request.getValue("recipients").jsonArray.map { it.jsonPrimitive.content })
+                database.list(list()).share(request.getValue("recipients").jsonArray.map { it.jsonPrimitive.content })
                 JsonNull
             }
 
@@ -337,7 +416,7 @@ private class DeviceProcess {
                 val tables = if (database.isIssuer) listOf("keys", "identities") else listOf("devices", "keys", "identities")
                 val checks = tables.associateWith { table ->
                     val error = runCatching {
-                        room!!.useReaderConnection { reader -> reader.usePrepared("SELECT * FROM $table") { it.step() } }
+                        room?.useReaderConnection { reader -> reader.usePrepared("SELECT * FROM $table") { it.step() } } ?: rows("SELECT * FROM $table")
                     }.exceptionOrNull()
                     JsonPrimitive(error?.message ?: "table exists")
                 }
@@ -350,17 +429,24 @@ private class DeviceProcess {
                 }
             }
 
-            "lists" -> JsonArray(room!!.lists().observeAll().first().map { JsonPrimitive("${it.id}:${it.title}") })
+            "lists" -> JsonArray(
+                if (room != null) {
+                    room!!.lists().observeAll().first().map { JsonPrimitive("${it.id}:${it.title}") }
+                } else {
+                    rows("SELECT id, title FROM lists WHERE row_kind = 0 ORDER BY id").map { JsonPrimitive("${it[0]}:${it[1]}") }
+                },
+            )
 
             "items" -> {
-                val links = room!!.itemCategories().observe(list()).first().groupBy({ it.item }, { it.category })
+                val list = list()
+                val links = rows("SELECT item, category FROM item_categories WHERE list = $list").groupBy({ it[0]!!.toLong() }, { it[1]!!.toLong() })
                 JsonArray(
-                    room!!.items().observeAll(list()).first().sortedBy { it.title }.map { item ->
+                    rows("SELECT id, title, completed FROM items WHERE list = $list ORDER BY title").map { (id, title, completed) ->
                         buildJsonObject {
-                            put("id", item.id)
-                            put("title", item.title)
-                            put("completed", item.completed)
-                            links[item.id]?.sorted()?.let { put("categories", JsonArray(it.map(::JsonPrimitive))) }
+                            put("id", id!!.toLong())
+                            put("title", title)
+                            put("completed", completed == "1" || completed == "true")
+                            links[id.toLong()]?.sorted()?.let { put("categories", JsonArray(it.map(::JsonPrimitive))) }
                         }
                     },
                 )
@@ -380,6 +466,15 @@ private class DeviceProcess {
             else -> error("unknown op ${request.text("op")}")
         }
     }
+
+    /** Rows of a read through Rocky's SQL, each cell as text. */
+    private suspend fun rows(sql: String): List<List<String?>> = database.read(
+        buildJsonObject {
+            put("sql", sql)
+            put("values", JsonArray(emptyList()))
+            put("max_rows", 1024)
+        },
+    ).getValue("rows").jsonArray.map { row -> row.jsonArray.map { cell -> (cell as? JsonObject)?.get("value")?.jsonPrimitive?.contentOrNull } }
 
     private fun scalar(sql: String): Long {
         val process = ProcessBuilder("sqlite3", "-readonly", file!!.path, sql).redirectErrorStream(true).start()

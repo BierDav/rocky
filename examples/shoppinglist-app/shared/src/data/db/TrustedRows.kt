@@ -10,7 +10,7 @@ import rocky.SchemaBuilder
  * Tables only trusted devices read: device names and kinds, each trusted device's open pairing code, and the
  * household's coordination tenant. Members hold no grant on them. Room declares none of them, and the application never queries them on members.
  */
-internal val trustedTables: SchemaBuilder.() -> Unit = {
+val trustedTables: SchemaBuilder.() -> Unit = {
     table("devices") {
         text("node")
         text("name")

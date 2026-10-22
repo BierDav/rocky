@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit
 fun main(args: Array<String>) {
     if (args.firstOrNull() == "live-links") return liveLinks(args.drop(1))
     if (args.firstOrNull() == "required-schema") return requiredSchema()
+    // One device process on stdin and stdout, for driving devices by hand next to a phone.
+    if (args.firstOrNull() == "device") return main()
     val peer = File(System.getenv("ROCKY_PEER") ?: error("set ROCKY_PEER to the rocky-peer executable"))
     check(peer.canExecute()) { "$peer is not executable" }
     val evidence = File(System.getenv("ROCKY_EVIDENCE") ?: Files.createTempDirectory("shopping-qualification").toString())
@@ -78,6 +80,8 @@ private val scenarios: List<Pair<String, (Run) -> Unit>> = listOf(
     "creator-loss" to Run::creatorLoss,
     "seals" to Run::seals,
     "branch" to Run::branch,
+    "publish" to Run::publish,
+    "race-rollback" to Run::raceAndRollback,
 )
 
 // iroh binds UDP.

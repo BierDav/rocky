@@ -11,7 +11,7 @@ seals. The native seal-compaction evidence is in
 | Command | Runs |
 | --- | --- |
 | `./examples/shoppinglist-app/check` | Required schema, JVM and Android shared tests, desktop and Android builds; stops at the first failing step |
-| `./examples/shoppinglist-app/qualify` | Packaged peer and [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt), with Room repositories in separate JVMs; evidence in `local/shopping-qualification/evidence.json` |
+| `./examples/shoppinglist-app/qualify` | Packaged peer, three loopback `rocky-voter` processes and the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt), with Room repositories in separate JVMs; evidence in `local/shopping-qualification/evidence.json` |
 | `cargo test -p rocky-sdk --test shopping_release` | Native custody, move/checkpoint join and restart scenarios |
 | `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` | Required schema by hand and from Room, installed natively |
 | `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and partitioned schema refusals |
@@ -19,7 +19,8 @@ seals. The native seal-compaction evidence is in
 
 `ROCKY_SCENARIOS=gate,relink` selects harness scenarios. App modules contain
 no Rust source. The custody process is the packaged
-[always-on peer](always-on-peer.md).
+[always-on peer](always-on-peer.md). `ROCKY_PEER` and `ROCKY_VOTER` name
+prebuilt `rocky-peer` and `rocky-voter` executables; otherwise `qualify` builds them.
 
 ## Current scenarios
 
@@ -45,6 +46,34 @@ Approval numbering uses [coordinated writes](coordinated-writes.md). The
 isolated-iroh harness does not configure a coordinator, so it does not qualify
 that path across processes. `ApprovalsTest` exercises the application's
 configured JVM coordinator path separately.
+
+## Seal scenarios
+
+[Phase 20](../features_09/20-seal-qualification.md) adds four scenarios on
+[the app's seal policy](shopping-seals.md). A device process may run app
+version 7 (a frozen copy of its schema), the current version 8, or a rival
+version 8 used only for concurrent publication.
+
+| Scenario | Coverage |
+| --- | --- |
+| `seals` | Policy seal, three seals, the phone offline across one; member and phone compact and release history; the trusted desktop reads two and three seals ago through views |
+| `branch` | Over voters: `dev` opened on main's latest seal, the member follows and both write; a coordinated decision on each tip's own log; the phone holds no dev frame; the member drops dev |
+| `publish` | App 8 tried on `dev`, then `main` sealed and migrated offline and published on reconnecting; the version 7 member's write comes back held and is re-authored |
+| `race-rollback` | Two issuers publish different version 8 schemas offline; one tip wins and the other is `main/1`; an issuer seals forward while the owner rolls back; every device follows the owner |
+
+Members compose no coordinator in these scenarios, as in the app.
+
+`./kotlin run -m qualification -- device` runs one device process on stdin and
+stdout, one JSON request per line, for driving desktop devices by hand next to
+a phone. With `"transport": "default"` it uses relays and discovery, so a
+phone off this host reaches it; `appPairing` returns the app's pairing link.
+
+## Known failures
+
+`gate` fails its member-directory audit (the member's file names the trusted
+device's node key as a frame author) and `creator-loss` delivers no list key to
+the writer the second issuer enrolls. Both fail identically on the code before
+phase 20 and are not seal regressions; they remain open.
 
 ## Constraints and moves
 

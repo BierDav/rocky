@@ -1,7 +1,9 @@
 # 20. Seal qualification
 
-Status: in progress (2026-10-21); application implementation started, device
-scenarios not yet executed.
+Status: implemented with limits (2026-10-22). All slices pass in the
+multi-process harness and on an Android emulator with desktop processes; the
+physical-phone run is outstanding, and coordinated households cannot publish a
+migration ([evidence](20-seal-qualification-evidence.md#limits)).
 Owner: `examples/shoppinglist-app` and its qualification harness. Depends on
 [phases 17](17-schema-changes-through-seals.md) and
 [19](19-recovery-as-a-bookmark-move.md). Follow the

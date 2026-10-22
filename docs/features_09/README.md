@@ -21,7 +21,9 @@ The [round38 restoration record](17-original-prefix-restoration-evidence.md) tra
 the exact original-prefix repair and real-service prerequisites; it does not
 accept the whole roadmap or start phase 20.
 Phases 14 and 19 share the repaired readiness path and await current-format
-requalification; phase20 application work is now in progress. The earlier
+requalification. Phase 20 is implemented with limits
+([evidence](20-seal-qualification-evidence.md)): the physical-phone run is
+outstanding and coordinated households cannot publish a migration. The earlier
 100,000-row e2e passes are baseline evidence
 ([phase 19 evidence](19-recovery-as-a-bookmark-move-evidence.md)).
 Phases 14–17, 19 and 20 replace

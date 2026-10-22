@@ -381,7 +381,7 @@ async fn deleting_a_sparse_readded_field_never_restores_its_old_value() {
     let field = lineage.definition(5).item_id("field", "items.note");
     let records = crate::storage::rows(
         &replica.inner.lock().await.conn,
-        "SELECT fields FROM secure_rows",
+        "SELECT fields FROM secure_row_records",
     )
     .await
     .unwrap();
@@ -393,7 +393,17 @@ async fn deleting_a_sparse_readded_field_never_restores_its_old_value() {
     struct StoredFields {
         fields: std::collections::BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,
     }
-    let record: StoredFields = p2panda_core::cbor::decode_cbor(bytes.as_slice()).unwrap();
+    let canonical = encode(
+        &replica
+            .inner
+            .lock()
+            .await
+            .decode_record(bytes)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let record: StoredFields = p2panda_core::cbor::decode_cbor(canonical.as_slice()).unwrap();
     assert!(record.fields.keys().all(|key| key.as_ref() != &field));
     let frames = session(&replica)
         .await

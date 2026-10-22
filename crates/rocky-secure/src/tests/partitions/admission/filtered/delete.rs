@@ -161,7 +161,7 @@ async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_par
             frame.body_bytes(),
         )
         .unwrap();
-        for write in crate::wire::RowPayload::decode(&plaintext)
+        for write in crate::wire::RowPayload::decode_test(&plaintext, frame, &app)
             .unwrap()
             .into_writes()
         {

@@ -7,11 +7,14 @@ pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
 mod create;
 mod no_frames;
+mod origin_legend;
+mod proof_headers;
 mod prune;
 pub(super) mod pulled;
 pub(crate) use pulled::SCHEMA as PULLED_SCHEMA;
 mod served;
 pub(crate) use served::SCHEMA as SERVED_SCHEMA;
+pub(super) use served::Served;
 #[cfg(test)]
 mod replay_test_support;
 mod transfer;
@@ -21,13 +24,14 @@ use super::*;
 pub(super) enum ReplayMode {
     Mint,
     Check,
+    Rows,
 }
 pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, PrunedPage, RebootstrapReport};
 #[cfg(test)]
-pub(crate) use transfer::{forge_page, forge_page_bindings};
+pub(crate) use transfer::{forge_page, forge_page_bindings, forge_page_legend, page_header_count};
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_compaction_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -37,6 +41,12 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_retained(id INTEGER PRIMARY KEY CHECK(id=1),records INTEGER NOT NULL,bytes INTEGER NOT NULL,handles INTEGER NOT NULL,handle_digest BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_applied(position INTEGER PRIMARY KEY AUTOINCREMENT,scope INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE)",
     "CREATE INDEX IF NOT EXISTS secure_applied_scope ON secure_applied(scope,position)",
+    "CREATE TABLE IF NOT EXISTS secure_finalization_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_birth_positions(scope INTEGER NOT NULL,position INTEGER NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,position,author)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_birth_position_operation ON secure_birth_positions(position)",
+    "CREATE TABLE IF NOT EXISTS secure_row_positions(scope INTEGER NOT NULL,row BLOB NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(scope,row,position)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_row_position_operations ON secure_row_positions(position,scope,row)",
+    "CREATE TRIGGER IF NOT EXISTS secure_row_positions_delete AFTER DELETE ON secure_applied BEGIN DELETE FROM secure_row_positions WHERE position=OLD.position; DELETE FROM secure_birth_positions WHERE position=OLD.position; END",
     "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,pruned_prefix INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,position INTEGER NOT NULL,sets BLOB NOT NULL,signed BLOB NOT NULL,PRIMARY KEY(scope,sequence))",
@@ -46,6 +56,7 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL,direct INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_page_headers(scope INTEGER NOT NULL,view INTEGER NOT NULL,header BLOB NOT NULL,first_row BLOB NOT NULL,PRIMARY KEY(scope,view,header)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -123,7 +134,7 @@ pub struct CustodySummary {
     pub sole: SetSummary,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 16;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 17;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -619,7 +630,7 @@ impl Overlay {
                 "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?"
             }
             Self::Rewind => {
-                "SELECT fields FROM secure_rows WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?) AND row=?"
+                "SELECT fields FROM secure_row_records WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?) AND row=?"
             }
         }
     }
@@ -664,20 +675,20 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("checkpoint base row".into()));
                 };
                 after = key.clone();
-                let mut row: Materialized = decode(bytes)?;
+                let mut row = self.decode_record(bytes).await?;
                 let next = if !fields.tables.contains(&scope.table) {
                     Some(Vec::new())
                 } else if fields.strip(scope.table, &mut row) {
-                    Some(encode(&row)?)
+                    Some(self.encode_record(&row).await?)
                 } else {
                     None
                 };
                 if let Some(next) = next {
                     let key = row_of(key)?;
                     if next.is_empty() {
-                        sets.remove(&key, bytes)?;
+                        sets.remove_stored(self, &key, bytes).await?;
                     } else {
-                        sets.replace(&key, Some(bytes), &next)?;
+                        sets.replace_stored(self, &key, Some(bytes), &next).await?;
                     }
                     self.conn
                         .execute(
@@ -1227,7 +1238,11 @@ impl<A: RowApplication> Inner<A> {
         let records = collect_rows(
             self.conn
                 .query(
-                    "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT ?",
+                    if mode == ReplayMode::Rows {
+                        "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=?1 AND a.position IN(SELECT p.position FROM secure_finalization_rows r JOIN secure_row_positions p ON p.scope=r.scope AND p.row=r.row WHERE r.scope=?1 AND p.position>?2 AND p.position<=?3) ORDER BY a.position LIMIT ?4"
+                    } else {
+                        "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT ?"
+                    },
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Integer(after),
@@ -1252,7 +1267,7 @@ impl<A: RowApplication> Inner<A> {
                     "an applied operation after the checkpoint is not retained".into(),
                 ));
             };
-            let frame = EncryptedFrame::bare(header.clone(), body.clone());
+            let frame = self.chained_frame(header.clone(), body.clone()).await?;
             let operation = frame.operation_ref()?;
             // A frame of another line, such as a branch this device left, is
             // no part of the target's state.
@@ -1279,6 +1294,18 @@ impl<A: RowApplication> Inner<A> {
             let mut created = false;
             // Births compare with the marks the frame entered with, as live
             // application loads them once per frame.
+            if mode == ReplayMode::Rows {
+                *ledger = self
+                    .row_replay_ledger(
+                        scope,
+                        id,
+                        position
+                            .checked_sub(1)
+                            .ok_or_else(|| Error::Corrupt("applied position underflow".into()))?,
+                        target,
+                    )
+                    .await?;
+            }
             let entry = ledger.clone();
             let mut identities = BTreeSet::new();
             let path_fields =
@@ -1295,7 +1322,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
             let allocation = match mode {
-                ReplayMode::Mint => self.optional_allocation_of(scope).await?,
+                ReplayMode::Mint | ReplayMode::Rows => self.optional_allocation_of(scope).await?,
                 ReplayMode::Check => self.allocation_binding(scope).await?,
             };
             let allocation_marks = match allocation {
@@ -1324,8 +1351,20 @@ impl<A: RowApplication> Inner<A> {
                     Some(live) => self.storage_row(&live.change)?,
                     None => write.change.row,
                 };
+                if mode == ReplayMode::Rows {
+                    let mut selected = self
+                        .conn
+                        .query(
+                            "SELECT 1 FROM secure_finalization_rows WHERE scope=? AND row=?",
+                            bindings(vec![SqlValue::Integer(id), SqlValue::Blob(row.to_vec())]),
+                        )
+                        .await?;
+                    if selected.next().await?.is_none() {
+                        continue;
+                    }
+                }
                 let old = self.replay_row(overlay, id, row).await?;
-                let current: Option<Materialized> = old.as_deref().map(decode).transpose()?;
+                let current: Option<Materialized> = self.optional_record(old.as_deref()).await?;
                 let carried = payload.carried(&write.change.row);
                 let identity = if write.change.before.is_none() {
                     live.as_ref()
@@ -1343,10 +1382,7 @@ impl<A: RowApplication> Inner<A> {
                         return Err(denied("forged row author or reused identity sequence"));
                     }
                     let (signer, provenance) = match carried {
-                        Some(carried) => (
-                            carried.proof.stamp().author.key()?,
-                            carried.proof.provenance()?,
-                        ),
+                        Some(carried) => (carried.proof.signer()?, carried.proof.provenance()?),
                         None => (
                             operation.header.public_key,
                             payload
@@ -1391,8 +1427,8 @@ impl<A: RowApplication> Inner<A> {
                 }
                 let ceiling = Stamp {
                     clock: operation.header.timestamp,
-                    author: operation.header.public_key.into(),
-                    sequence: operation.header.seq_num,
+                    author: operation.header.extensions.author.unwrap_or(0),
+                    sequence: operation.header.extensions.author_sequence,
                 };
                 if restoration.is_some() {
                     let checked = async {
@@ -1521,8 +1557,22 @@ impl<A: RowApplication> Inner<A> {
                     ))
                     .await?;
                 }
-                let new = encode(&record)?;
-                sets.replace(&row, old.as_deref(), &new)?;
+                let new = match mode {
+                    ReplayMode::Mint | ReplayMode::Rows => {
+                        if let Some(proof) = payload
+                            .carried(&write.change.row)
+                            .map(|carried| &carried.proof)
+                            .or_else(|| payload.proof(&write.change.row))
+                            .filter(|_| record.proof.is_some())
+                        {
+                            self.keep_bindings(proof).await?;
+                        }
+                        self.encode_record(&record).await?
+                    }
+                    ReplayMode::Check => self.encode_existing_record(&record).await?,
+                };
+                sets.replace_stored(self, &row, old.as_deref(), &new)
+                    .await?;
                 self.conn
                     .execute(
                         format!("INSERT OR REPLACE INTO {} VALUES(?,?,?)", overlay.table()),

@@ -22,7 +22,7 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Cross-platform monitoring for network interface changes"
-readme = "README.md"
+readme = false
 keywords = [
     "networking",
     "interfaces",

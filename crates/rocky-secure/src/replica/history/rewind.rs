@@ -23,9 +23,9 @@ macro_rules! active {
 macro_rules! needed {
     ($image:literal) => {
         concat!(
-            "EXISTS(SELECT 1 FROM secure_kept_marks WHERE mark>=COALESCE((SELECT MAX(p.version) FROM secure_stored_history AS p WHERE p.scope=",
+            "EXISTS(SELECT 1 FROM secure_kept_marks WHERE mark>=COALESCE((SELECT MAX(p.version) FROM secure_stored_history AS p WHERE p.scope=(SELECT scope FROM secure_scope_state WHERE id=",
             $image,
-            ".scope AND p.row=",
+            ".scope) AND p.row=",
             $image,
             ".row),-1))"
         )
@@ -38,7 +38,7 @@ pub(super) const ROWS_BY_VERSION: &str = "CREATE INDEX IF NOT EXISTS secure_stor
 pub(super) const ROWS_DELETE: &str = concat!(
     "CREATE TRIGGER IF NOT EXISTS secure_kept_rows_delete BEFORE DELETE ON secure_rows FOR EACH ROW WHEN ",
     active!(),
-    " BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT OLD.scope,OLD.row,",
+    " BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT (SELECT scope FROM secure_scope_state WHERE id=OLD.scope),OLD.row,",
     clock!(),
     ",OLD.fields WHERE ",
     needed!("OLD"),
@@ -47,7 +47,7 @@ pub(super) const ROWS_DELETE: &str = concat!(
 pub(super) const ROWS_UPDATE: &str = concat!(
     "CREATE TRIGGER IF NOT EXISTS secure_kept_rows_update BEFORE UPDATE OF fields ON secure_rows FOR EACH ROW WHEN ",
     active!(),
-    " AND OLD.fields IS NOT NEW.fields BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT OLD.scope,OLD.row,",
+    " AND OLD.fields IS NOT NEW.fields BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT (SELECT scope FROM secure_scope_state WHERE id=OLD.scope),OLD.row,",
     clock!(),
     ",OLD.fields WHERE ",
     needed!("OLD"),
@@ -58,11 +58,11 @@ pub(super) const ROWS_UPDATE: &str = concat!(
 pub(super) const ROWS_INSERT: &str = concat!(
     "CREATE TRIGGER IF NOT EXISTS secure_kept_rows_insert BEFORE INSERT ON secure_rows FOR EACH ROW WHEN ",
     active!(),
-    " BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT NEW.scope,NEW.row,",
+    " BEGIN INSERT OR IGNORE INTO secure_stored_history SELECT (SELECT scope FROM secure_scope_state WHERE id=NEW.scope),NEW.row,",
     clock!(),
     ",NULL WHERE NOT EXISTS(SELECT 1 FROM secure_rows AS r WHERE r.scope=NEW.scope AND r.row=NEW.row) AND ",
     needed!("NEW"),
-    "; INSERT OR IGNORE INTO secure_stored_history SELECT r.scope,r.row,",
+    "; INSERT OR IGNORE INTO secure_stored_history SELECT (SELECT scope FROM secure_scope_state WHERE id=r.scope),r.row,",
     clock!(),
     ",r.fields FROM secure_rows AS r WHERE r.scope=NEW.scope AND r.row=NEW.row AND r.fields IS NOT NEW.fields AND ",
     needed!("r"),
@@ -72,7 +72,7 @@ pub(super) const ROWS_INSERT: &str = concat!(
 pub(super) const PRUNE_ROWS: &str = "DELETE FROM secure_stored_history WHERE NOT EXISTS(SELECT 1 FROM secure_kept_marks AS k WHERE k.mark<secure_stored_history.version AND k.mark>=COALESCE((SELECT MAX(p.version) FROM secure_stored_history AS p WHERE p.scope=secure_stored_history.scope AND p.row=secure_stored_history.row AND p.version<secure_stored_history.version),-1))";
 
 /// Stored rows of scope `?1` at the kept seal marked `?2`.
-pub(in crate::replica) const KEPT_ROWS: &str = "SELECT r.row AS row,r.fields AS fields FROM secure_rows AS r WHERE r.scope=?1 AND NOT EXISTS(SELECT 1 FROM secure_stored_history AS p WHERE p.scope=r.scope AND p.row=r.row AND p.version>?2) UNION ALL SELECT h.row,h.fields FROM secure_stored_history AS h WHERE h.scope=?1 AND h.version>?2 AND h.fields IS NOT NULL AND h.version=(SELECT MIN(p.version) FROM secure_stored_history AS p WHERE p.scope=h.scope AND p.row=h.row AND p.version>?2)";
+pub(in crate::replica) const KEPT_ROWS: &str = "SELECT r.row AS row,r.fields AS fields FROM secure_row_records AS r WHERE r.scope=?1 AND NOT EXISTS(SELECT 1 FROM secure_stored_history AS p WHERE p.scope=r.scope AND p.row=r.row AND p.version>?2) UNION ALL SELECT h.row,h.fields FROM secure_stored_history AS h WHERE h.scope=?1 AND h.version>?2 AND h.fields IS NOT NULL AND h.version=(SELECT MIN(p.version) FROM secure_stored_history AS p WHERE p.scope=h.scope AND p.row=h.row AND p.version>?2)";
 
 const BEFORE: &str = "secure_stored_history_before";
 
@@ -134,7 +134,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                format!("INSERT INTO temp.{BEFORE} SELECT scope,row,fields FROM main.secure_rows WHERE scope=?"),
+                format!("INSERT INTO temp.{BEFORE} SELECT scope,row,fields FROM main.secure_row_records WHERE scope=?"),
                 [blob.to_vec()],
             )
             .await?;
@@ -152,13 +152,13 @@ impl<A: RowApplication> Inner<A> {
                 concat!(
                     "INSERT OR IGNORE INTO main.secure_stored_history SELECT b.scope,b.row,",
                     clock!(),
-                    ",b.fields FROM temp.secure_stored_history_before AS b WHERE NOT EXISTS(SELECT 1 FROM main.secure_rows AS a WHERE a.scope=b.scope AND a.row=b.row AND a.fields IS b.fields) AND ",
+                    ",b.fields FROM temp.secure_stored_history_before AS b WHERE NOT EXISTS(SELECT 1 FROM main.secure_row_records AS a WHERE a.scope=b.scope AND a.row=b.row AND a.fields IS b.fields) AND ",
                     needed!("b")
                 ),
                 concat!(
                     "INSERT OR IGNORE INTO main.secure_stored_history SELECT a.scope,a.row,",
                     clock!(),
-                    ",NULL FROM main.secure_rows AS a WHERE a.scope=?1 AND NOT EXISTS(SELECT 1 FROM temp.secure_stored_history_before AS b WHERE b.scope=a.scope AND b.row=a.row) AND ",
+                    ",NULL FROM main.secure_row_records AS a WHERE a.scope=?1 AND NOT EXISTS(SELECT 1 FROM temp.secure_stored_history_before AS b WHERE b.scope=a.scope AND b.row=a.row) AND ",
                     needed!("a")
                 ),
             ] {
@@ -369,7 +369,7 @@ impl<A: RowApplication> Inner<A> {
             let chunk = collect_rows(
                 self.conn
                     .query(
-                        "SELECT s.row,s.fields,r.fields FROM secure_checkpoint_scratch AS s LEFT JOIN secure_rows AS r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND s.row>?3 ORDER BY s.row LIMIT ?4",
+                        "SELECT s.row,s.fields,r.fields FROM secure_checkpoint_scratch AS s LEFT JOIN secure_row_records AS r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND s.row>?3 ORDER BY s.row LIMIT ?4",
                         bindings(vec![
                             SqlValue::Blob(blob.clone()),
                             SqlValue::Integer(id),
@@ -395,7 +395,7 @@ impl<A: RowApplication> Inner<A> {
                 };
                 after = row.clone();
                 for record in [&old, &new].into_iter().flatten() {
-                    touched.extend(decode::<Materialized>(record)?.identity);
+                    touched.extend(self.decode_record(record).await?.identity);
                 }
                 if new == old {
                     continue;
@@ -403,28 +403,29 @@ impl<A: RowApplication> Inner<A> {
                 let key = checkpoint::row_of(&row)?;
                 match (&old, &new) {
                     (Some(old), None) => {
-                        sets.remove(&key, old)?;
+                        sets.remove_stored(self, &key, old).await?;
                         for sql in [
-                            "DELETE FROM secure_rows WHERE scope=? AND row=?",
+                            "DELETE FROM secure_row_records WHERE scope=? AND row=?",
                             "DELETE FROM secure_move_rows WHERE scope=? AND row=?",
                         ] {
                             self.conn.execute(sql, [blob.clone(), row.clone()]).await?;
                         }
                     }
                     (old, Some(new)) => {
-                        sets.replace(&key, old.as_deref(), new)?;
+                        sets.replace_stored(self, &key, old.as_deref(), new).await?;
                         self.conn
                             .execute(
-                                "INSERT INTO secure_rows VALUES(?,?,?,X'') ON CONFLICT(scope,row) DO UPDATE SET fields=excluded.fields",
+                                "INSERT INTO secure_row_records VALUES(?,?,?)",
                                 [blob.clone(), row.clone(), new.clone()],
                             )
                             .await?;
-                        self.index_row_key(&blob, &row, &decode(new)?).await?;
+                        self.index_row_key(&blob, &row, &self.decode_record(new).await?)
+                            .await?;
                     }
                     (None, None) => continue,
                 }
-                let old: Option<Materialized> = old.as_deref().map(decode).transpose()?;
-                let new: Option<Materialized> = new.as_deref().map(decode).transpose()?;
+                let old: Option<Materialized> = self.optional_record(old.as_deref()).await?;
+                let new: Option<Materialized> = self.optional_record(new.as_deref()).await?;
                 projections.push((old, new));
             }
             if chunk.len() < STEP_ROWS {

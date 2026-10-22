@@ -281,7 +281,7 @@ impl<A: RowApplication> Inner<A> {
                             .carried(&write.change.row)
                             .ok_or_else(|| corrupt("carry missing from frame"))?;
                         if carried.proof.provenance()? != *provenance
-                            || carried.proof.stamp().author.key()? != *signer
+                            || carried.proof.signer()? != *signer
                         {
                             return Err(corrupt("carried provenance differs from its frame"));
                         }

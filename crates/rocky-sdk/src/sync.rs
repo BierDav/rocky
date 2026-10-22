@@ -22,9 +22,11 @@ pub(crate) struct Upstream<'a> {
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
     pub renew_from: Option<rocky_core::Commitment>,
-    /// Whether a scope's staged import of another node's checkpoint waits
-    /// for that signer, given its last staged row, instead of restarting
-    /// from this peer's checkpoint.
+    /// Failed optional imports in this process, by exact scope and checkpoint.
+    pub state_failures: &'a std::sync::Mutex<
+        std::collections::BTreeMap<(ResourceScope, rocky_core::Commitment), u8>,
+    >,
+    /// Whether an active staged import should continue with its original signer.
     pub keep: Option<&'a dyn Fn(ResourceScope, PublicKey, Option<rocky_core::Commitment>) -> bool>,
 }
 
@@ -370,12 +372,68 @@ async fn rows(
         }
         for scope in &exchange.changed {
             // Restore the peer's retained base before publishing local edits.
-            let mut pulled = session.catch_up(replica, *scope, QUOTA).await?;
+            let mut pulled = session
+                .catch_up_with_state(replica, *scope, QUOTA, true)
+                .await?;
             let mut moved = Moved {
                 pulled: pulled.frames,
                 bytes: pulled.bytes,
                 ..Moved::default()
             };
+            if let Some(advice) = pulled.state.take() {
+                let key = (*scope, advice.checkpoint);
+                let failures = upstream
+                    .state_failures
+                    .lock()
+                    .map_err(|_| "state retry guard poisoned")?
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0);
+                if deferred(replica, upstream, *scope, Some(advice.checkpoint)).await? {
+                    transfer.add(*scope, moved);
+                    continue;
+                }
+                if failures < 3 {
+                    progress(true);
+                    match session
+                        .bootstrap_advised_scope(replica, *scope, QUOTA, Some(&advice))
+                        .await
+                    {
+                        Ok(Some(report)) => {
+                            pulled = report.catch_up;
+                            moved.pulled += pulled.frames;
+                            moved.bytes += pulled.bytes;
+                            moved.checkpoint = report
+                                .rebootstrap
+                                .map(|imported| (imported.checkpoint, imported.superseded));
+                        }
+                        result => {
+                            *upstream
+                                .state_failures
+                                .lock()
+                                .map_err(|_| "state retry guard poisoned")?
+                                .entry(key)
+                                .or_default() += 1;
+                            // A failed channel is closed by the link; the next sync retries
+                            // this exact checkpoint, then falls back to frames after three failures.
+                            return Err(match result {
+                                Err(error) => error.into(),
+                                _ => "the peer withdrew the advised checkpoint".into(),
+                            });
+                        }
+                    }
+                    if !pulled.exhausted {
+                        progress(false);
+                    }
+                } else {
+                    replica
+                        .cancel_rebootstrap(*scope, advice.checkpoint)
+                        .await?;
+                    pulled = session.catch_up(replica, *scope, QUOTA).await?;
+                    moved.pulled += pulled.frames;
+                    moved.bytes += pulled.bytes;
+                }
+            }
             if pulled.behind
                 && !pulled.exhausted
                 && deferred(replica, upstream, *scope, None).await?

@@ -17,6 +17,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.conn.execute("SAVEPOINT replay_boundary", ()).await?;
         let result = async {
+            inner.keep_chain(frame.chain()?).await?;
             let id = inner.scope_id(scope).await?;
             inner.conn.execute(
                 "INSERT INTO secure_operations(hash,author,scope,sequence,header,body,status,chain) VALUES(?,?,?,?,?,?,'applied',?)",
@@ -30,13 +31,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     SqlValue::Blob(operation.header.extensions.chain.to_vec()),
                 ]),
             ).await?;
+            positions::insert(&inner.conn, &operation.header, 0, false, true).await?;
             inner.conn.execute("INSERT INTO secure_applied(scope,hash) VALUES(?,?)", bindings(vec![SqlValue::Integer(id),SqlValue::Blob(operation.hash.as_bytes().to_vec())])).await?;
             let position = match rows(&inner.conn, "SELECT max(position) FROM secure_applied").await?[0][0] {
                 SqlValue::Integer(position) => position,
                 _ => panic!("applied position"),
             };
             inner.conn.execute(
-                "INSERT INTO secure_checkpoint_scratch SELECT ?,row,fields FROM secure_rows WHERE scope=?",
+                "INSERT INTO secure_checkpoint_scratch SELECT ?,row,fields FROM secure_row_records WHERE scope=?",
                 bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(&scope)?)]),
             ).await?;
             let mut sets = Sets::new();
@@ -44,13 +46,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                     panic!("scratch row")
                 };
-                sets.replace(&row_of(row)?, None, fields)?;
+                sets.replace_stored(&inner, &row_of(row)?, None, fields).await?;
+                // A real materialization interns its signer set before audit replays it.
+                let mut candidate = inner.decode_record(fields).await?;
+                candidate.authors.insert(operation.header.extensions.author.unwrap_or(0), operation.header.public_key);
+                inner.intern_author_set(&candidate.authors, true).await?;
             }
             let tables = [
-                "secure_checkpoint_scratch", "secure_rows", "secure_identity_ledger",
+                "secure_checkpoint_scratch", "secure_row_records", "secure_identity_ledger",
                 "secure_identity_marks", "secure_identity_own", "secure_identity_summary",
                 "secure_admission_context", "secure_admission_entries", "secure_admission_claims",
-                "secure_admission_carries", "secure_metadata",
+                "secure_admission_carries", "secure_metadata", "secure_row_authors",
+                "secure_row_origins", "secure_field_names", "secure_stamp_authors",
             ];
             let mut before = Vec::new();
             for table in tables {
@@ -74,6 +81,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .conn
             .execute("ROLLBACK TO replay_boundary", ())
             .await?;
+        inner.invalidate_context();
         inner.conn.execute("RELEASE replay_boundary", ()).await?;
         result
     }

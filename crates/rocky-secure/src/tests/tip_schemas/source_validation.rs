@@ -43,9 +43,15 @@ pub(in crate::tests) fn reseal(
         .collect();
     let body = RowPayload::stamp_body(&body, proofs, carried).unwrap();
     let body = RowPayload::reauthor_body(body, original.reauthors()).unwrap();
-    let plaintext = RowPayload::witness(body, original.creations().to_vec()).unwrap();
+    let plaintext = original
+        .compact_test(
+            &RowPayload::witness(body, original.creations().to_vec()).unwrap(),
+            operation.header.extensions.scope,
+        )
+        .unwrap();
     let mut extension = operation.header.extensions.clone();
     extension.chain = chain.digest();
+    extension.births = original.rebound_births_for_test(&chain).unwrap();
     crate::wire::author(
         node,
         extension,
@@ -170,11 +176,20 @@ async fn a_signed_later_foreign_source_field_cannot_hide_behind_removal() {
     let bad = reseal(&original, &node, &[40; 32], chain, writes, &payload);
     // Final signed bytes and source-epoch opening are valid; credentials grant that field.
     bad.operation_ref().unwrap();
-    assert_eq!(
-        super::staging::payload(&lineage, 3, &node, &bad)
-            .writes()
-            .len(),
-        2
+    let operation = bad.operation_ref().unwrap();
+    let malformed = crate::wire::decrypt(
+        &[40; 32],
+        &encode(&operation.header.extensions).unwrap(),
+        bad.body_bytes(),
+    )
+    .unwrap();
+    assert!(
+        RowPayload::decode_source(
+            &malformed,
+            &lineage.app(3).manifest(),
+            operation.header.extensions.scope
+        )
+        .is_err()
     );
     let receiver = target(
         &lineage,
@@ -186,10 +201,10 @@ async fn a_signed_later_foreign_source_field_cannot_hide_behind_removal() {
         .receive_held_frames(vec![bad.clone()])
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("foreign field"), "{error}");
+    assert!(error.to_string().contains("source table schema"), "{error}");
     let before = super::super::compaction::audit::snapshot(&receiver).await;
     let error = receiver.settle().await.unwrap_err();
-    assert!(error.to_string().contains("foreign field"), "{error}");
+    assert!(error.to_string().contains("source table schema"), "{error}");
     assert_eq!(
         super::super::compaction::audit::snapshot(&receiver).await,
         before
@@ -527,7 +542,7 @@ async fn a_later_invalid_source_member_leaves_the_removed_table_bundle_unstored(
     )
     .await;
     let error = reader.receive_held_frames(frames).await.unwrap_err();
-    assert!(error.to_string().contains("foreign field"), "{error}");
+    assert!(error.to_string().contains("source table schema"), "{error}");
     let before = super::super::compaction::audit::snapshot(&reader).await;
     assert!(
         reader
@@ -535,7 +550,7 @@ async fn a_later_invalid_source_member_leaves_the_removed_table_bundle_unstored(
             .await
             .unwrap_err()
             .to_string()
-            .contains("foreign field")
+            .contains("source table schema")
     );
     assert_eq!(
         super::super::compaction::audit::snapshot(&reader).await,

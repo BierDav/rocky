@@ -859,7 +859,7 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     let (a_key, c_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (c, c_credentials) = open(&f, &dir.path().join("c.db"), &c_key).await;
-    for index in 0..6 {
+    for index in 0..40 {
         a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
             .await
             .unwrap();
@@ -1442,6 +1442,32 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
         assert!(all_rows(&f, &b).await.is_empty());
         let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
         assert_eq!(cursor, None);
+    }
+    let before = crate::tests::compaction::audit::snapshot(&b).await;
+    for defect in 0..7 {
+        let mut malformed = first.clone();
+        crate::replica::checkpoint::forge_page_legend(
+            &mut malformed,
+            &key,
+            &a_key,
+            |legend, creations, _origins| match defect {
+                0 => legend.clear(),
+                1 => legend.push(legend[0].clone()),
+                2 => legend.push("a".into()),
+                3 => creations.clear(),
+                4 => creations.push(creations[0]),
+                5 => creations.swap(0, 1),
+                _ => {
+                    creations.push(Hash::new(b"unused page creation"));
+                    creations.sort();
+                }
+            },
+        );
+        assert!(
+            b.stage_checkpoint_page(malformed).await.is_err(),
+            "legend defect {defect}"
+        );
+        assert_eq!(crate::tests::compaction::audit::snapshot(&b).await, before);
     }
     b.stage_checkpoint_page(first).await.unwrap();
     assert!(!all_rows(&f, &b).await.is_empty());

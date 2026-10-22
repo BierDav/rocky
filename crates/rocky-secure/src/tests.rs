@@ -1616,3 +1616,5 @@ fn node_number(node: PublicKey) -> u32 {
 }
 
 mod bulk;
+
+mod positions;

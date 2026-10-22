@@ -209,15 +209,20 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     let config = lineage.config(4, &carol_key);
     let key = config.keys.iter().find(|key| key.scope == items).unwrap();
     assert_eq!(operation.header.extensions.generation, key.generation);
-    let opened = crate::wire::RowPayload::decode(
-        &crate::wire::decrypt(
-            &key.key,
-            &encode(&operation.header.extensions).unwrap(),
-            frame.body_bytes(),
+    let opened = carol
+        .inner
+        .lock()
+        .await
+        .decode_row_payload(
+            frame,
+            &crate::wire::decrypt(
+                &key.key,
+                &encode(&operation.header.extensions).unwrap(),
+                frame.body_bytes(),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap();
     assert_eq!(opened.reauthors(), Some(change.id));
     assert!(opened.membership().is_some());
     assert!(!opened.creations().is_empty());

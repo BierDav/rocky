@@ -376,7 +376,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .and_then(|c| c.node(table.scope))
                     .is_none()
                 {
-                    reproject(&inner.conn, &typed, table).await?;
+                    reproject(inner, &typed, table).await?;
                 }
             }
             Ok(false)
@@ -656,6 +656,14 @@ impl<A: RowApplication> Inner<A> {
         let stored: Vec<Vec<SqlValue>> =
             rows_with(&self.conn, &table.select, key(&current)).await?;
         let wanted = winner.as_ref().and_then(live).map(|_| current.clone());
+        self.index_seal_slot(
+            typed,
+            scope,
+            new.key
+                .ok_or_else(|| Error::Corrupt("missing projection key".into()))?,
+            wanted.as_deref(),
+        )
+        .await?;
         if stored.first() == wanted.as_ref() || (stored.is_empty() && wanted.is_none()) {
             return Ok(());
         }
@@ -717,14 +725,14 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| denied("missing typed schema"))?;
             self.in_bulk(
                 std::slice::from_ref(&table.table.sql_name),
-                reproject(&self.conn, typed, table),
+                reproject(self, typed, table),
             )
             .await?;
         }
         Ok(())
     }
     /// Rebuilds a scope's typed table from its stored rows, after a bulk
-    /// change of `secure_rows`.
+    /// change of `secure_row_records`.
     pub(super) async fn reproject(&self, scope: ResourceScope) -> Result<(), Error> {
         self.index_row_keys().await?;
         self.reindex_move_scope(scope).await?;
@@ -745,7 +753,7 @@ impl<A: RowApplication> Inner<A> {
                 self.touch(&table.table.sql_name);
                 self.in_bulk(
                     std::slice::from_ref(&table.table.sql_name),
-                    reproject(&self.conn, &typed, table),
+                    reproject(self, &typed, table),
                 )
                 .await
             }
@@ -765,59 +773,72 @@ async fn rows_with(
 
 /// Replaces a typed table's rows by the live stored rows of its scope, or
 /// of every partition scope of a partitioned table.
-pub(super) async fn reproject(
-    conn: &crate::scoped_connection::ScopedConnection,
+pub(super) async fn reproject<A: RowApplication>(
+    inner: &Inner<A>,
     typed: &Typed,
     table: &Projected,
 ) -> Result<(), Error> {
+    let conn = &inner.conn;
     conn.execute(format!("DELETE FROM {}", quoted(&table.table.sql_name)), ())
         .await?;
     let records = if typed.partitioned(table) {
-        stored_winners(conn, None, |scope| {
+        stored_winners(inner, None, |scope| {
             typed
                 .by_scope(scope)
                 .is_some_and(|projected| projected.table.id == table.table.id)
         })
         .await?
     } else {
-        winners(conn, table.scope).await?
+        winners(inner, table.scope).await?
     };
     for record in records {
         let values = typed
             .rows
             .values(&table.table, &record.fields)
             .map_err(Error::Corrupt)?;
+        let scope = typed.row_scope(table, &values)?;
+        inner
+            .index_seal_slot(
+                typed,
+                scope,
+                record
+                    .key
+                    .ok_or_else(|| Error::Corrupt("missing projection key".into()))?,
+                Some(&values),
+            )
+            .await?;
         conn.execute(table.upsert.clone(), storage::bindings(values))
             .await?;
     }
     Ok(())
 }
 /// The live incarnation with the latest creation at each key of a scope.
-pub(super) async fn winners(
-    conn: &crate::scoped_connection::ScopedConnection,
+pub(super) async fn winners<A: RowApplication>(
+    inner: &Inner<A>,
     scope: ResourceScope,
 ) -> Result<Vec<Materialized>, Error> {
-    stored_winners(conn, Some(scope), |_| true).await
+    stored_winners(inner, Some(scope), |_| true).await
 }
 /// The live winners of `scope`, or of every stored scope `keep` accepts.
-async fn stored_winners(
-    conn: &crate::scoped_connection::ScopedConnection,
+async fn stored_winners<A: RowApplication>(
+    inner: &Inner<A>,
     scope: Option<ResourceScope>,
     keep: impl Fn(ResourceScope) -> bool,
 ) -> Result<Vec<Materialized>, Error> {
+    let conn = &inner.conn;
     let mut after = (Vec::new(), Vec::new());
     let mut winners: BTreeMap<(ResourceScope, Commitment), Materialized> = BTreeMap::new();
     loop {
         let (sql, params) = match scope {
             Some(scope) => (
-                "SELECT scope,row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256",
+                "SELECT scope,row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT 256",
                 vec![
                     SqlValue::Blob(encode(&scope)?),
                     SqlValue::Blob(after.1.clone()),
                 ],
             ),
             None => (
-                "SELECT scope,row,fields FROM secure_rows WHERE (scope,row)>(?,?) ORDER BY scope,row LIMIT 256",
+                "SELECT scope,row,fields FROM secure_row_records WHERE (scope,row)>(?,?) ORDER BY scope,row LIMIT 256",
                 vec![
                     SqlValue::Blob(after.0.clone()),
                     SqlValue::Blob(after.1.clone()),
@@ -839,7 +860,7 @@ async fn stored_winners(
             if !keep(scope) {
                 continue;
             }
-            let record: Materialized = decode(bytes)?;
+            let record = inner.decode_record(bytes).await?;
             if record.deleted {
                 continue;
             }

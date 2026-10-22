@@ -542,7 +542,7 @@ async fn items_follow_the_list_existence_log_without_the_list_scope() {
         puppets
     );
     assert_eq!(rows(&sb, ITEMS).await, visible);
-    let held = stored(&b, "SELECT DISTINCT scope FROM secure_rows").await;
+    let held = stored(&b, "SELECT DISTINCT scope FROM secure_row_records").await;
     assert_eq!(
         held,
         vec![vec![SqlValue::Blob(encode(&erp.scope("items")).unwrap())]]

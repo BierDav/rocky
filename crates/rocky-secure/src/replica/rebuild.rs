@@ -1,7 +1,6 @@
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_rows_shadow(scope BLOB NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,stamp BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE INDEX IF NOT EXISTS secure_operation_scope_hash ON secure_operations(scope,hash)",
     "CREATE INDEX IF NOT EXISTS secure_operation_status_hash ON secure_operations(status,hash)",
     // Serves the pending check of every read and the replay scan.
@@ -119,7 +118,7 @@ impl<A: RowApplication> Inner<A> {
         let blob = encode(&scope)?;
         self.in_rows_bulk(scope, async {
             self.conn
-                .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                .execute("DELETE FROM secure_row_records WHERE scope=?", [blob.clone()])
                 .await?;
             for table in ["secure_checkpoint_rows", "secure_checkpoint_scratch"] {
                 if self.ignores_base() && table == "secure_checkpoint_rows" {
@@ -127,7 +126,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 self.conn
                     .execute(
-                        format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=? AND fields<>X''"),
+                        format!("INSERT OR REPLACE INTO secure_row_records SELECT ?,row,fields FROM {table} WHERE scope=? AND fields<>X''"),
                         bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                     )
                     .await?;
@@ -135,7 +134,7 @@ impl<A: RowApplication> Inner<A> {
             // A row a finalized seal dropped from the base.
             self.conn
                 .execute(
-                    "DELETE FROM secure_rows WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
+                    "DELETE FROM secure_row_records WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
                     bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                 )
                 .await?;

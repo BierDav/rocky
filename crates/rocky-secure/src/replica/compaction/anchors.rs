@@ -118,7 +118,7 @@ impl<A: RowApplication> Inner<A> {
                     .or_insert(mark.sequence.saturating_add(1));
             }
         }
-        let (held, last, _) = self
+        let (held, last) = self
             .held_positions(
                 scope.domain,
                 &[(scope, Some(id))],

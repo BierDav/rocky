@@ -2,12 +2,9 @@
 
 ## Start here
 
-- Read [README.md](README.md) for project status and entry points.
-- Read [the accepted roadmap](docs/features_09/README.md) and its linked architecture
-  before selecting new implementation work. Older phase plans are historical or
-  deferred integration references, not competing next-work instructions.
-- Read [docs/modules.md](docs/modules.md) to choose the owning crate.
-- Read [docs/development.md](docs/development.md) for tooling and checks.
+- Read [README.md](README.md) for a short project overview.
+- Use source code, manifests, module declarations and tests to establish current
+  behavior and choose the owning crate. Verify phase prerequisites against code.
 - Follow applicable nested `AGENTS.md` files before editing a subtree.
 
 ## Version control
@@ -17,9 +14,9 @@
 - Use `jj status`, `jj diff`, `jj log` and `jj file list` to inspect work.
 - Git-backed remote transport is accessed through `jj git fetch` / `jj git push`.
 - Preserve unrelated changes. Do not abandon or restore someone else's work.
-- Describe changes with [Conventional Commits](docs/commits.md); release versions
+- Describe changes with Conventional Commits; release versions
   are computed from them. Check with `scripts/commitlint --jj`; push with
-  `jj push` (`scripts/jj-push`), which checks first. See [linting](docs/linting.md).
+  `jj push` (`scripts/jj-push`), which checks first.
 - Do not push, rewrite shared history or create bookmarks unless the task calls
   for it. Leave completed edits in the current change unless asked otherwise.
 
@@ -34,18 +31,18 @@
 - Exclude generated output and benchmark evidence from ordinary code searches
   by selecting the relevant source directory, rather than searching everything.
 
-## Documentation and comments
+## Code structure and comments
 
-- Prefer documentation under `docs/` over long explanations embedded in code.
-- Keep code comments short and focused on intent, invariants or surprising
-  constraints. Avoid essays and narration of obvious code.
-- Keep API documentation concise; move extended examples and design rationale
-  to a focused document and link it where useful.
-- Around 200 lines, consider splitting a document by reader task or topic.
-  This is a review signal, not a hard limit or a reason for arbitrary fragments.
-- Link related documents instead of duplicating explanations or instructions.
-- Update the relevant documentation when behavior or module ownership changes.
-- Follow [docs/documentation.md](docs/documentation.md) for writing and splitting.
+- As a side task during implementation, remove unnecessary code and simplify
+  existing code wherever practical. Keep the codebase lean, preserve required
+  behavior and keep cleanup relevant to the work at hand.
+- Keep the code easy to navigate with focused modules, clear names and explicit
+  ownership. Follow definitions and callers instead of maintaining file inventories.
+- Keep only AGENTS instructions, the simple root README and `docs/features_10`
+  as project documentation. Do not recreate removed guides or architecture docs.
+- Keep comments and API docs short, focused on intent, invariants or surprising
+  constraints. Express behavior through code and meaningful tests.
+- Record phase status and measured evidence within `docs/features_10`.
 
 ## Implementation boundaries
 
@@ -74,7 +71,7 @@
 ## Verification
 
 - During development, use `./scripts/check --unit`, `cargo test -p <package>`
-  and targeted checks. Keep each test within its [tier](docs/testing.md)'s budget.
+  and targeted checks. Keep each test within its configured tier's budget.
 - Before finishing workspace changes, run `./scripts/lint` and `./scripts/check`
   from any directory. `./scripts/lint --fix` applies formatting.
 - Test meaningful behavior, invariants and regressions, not trivial duplication.

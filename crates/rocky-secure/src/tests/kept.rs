@@ -524,7 +524,7 @@ async fn workspace_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
     let inner = replica.inner.lock().await;
     let mut state = Vec::new();
     for sql in [
-        "SELECT scope,row,fields FROM secure_rows ORDER BY scope,row",
+        "SELECT scope,row,fields FROM secure_row_records ORDER BY scope,row",
         "SELECT scope,rows,tombstones,digest FROM secure_scope_state ORDER BY scope",
         "SELECT key,title FROM items ORDER BY key",
         "SELECT scope,id,created,deleted FROM secure_existence ORDER BY scope,id",

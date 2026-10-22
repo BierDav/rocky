@@ -142,11 +142,18 @@ impl<A: RowApplication> Inner<A> {
                         .await?;
                 }
             }
-            rows += inner
-                .conn
-                .execute(
-                    "DELETE FROM secure_rows WHERE rowid IN (SELECT rowid FROM secure_rows WHERE scope=? LIMIT ?)",
+            let mut removing = inner.conn.query("SELECT count(*) FROM (SELECT row FROM secure_row_records WHERE scope=? LIMIT ?)", bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?;
+            let count: i64 = removing
+                .next()
+                .await?
+                .ok_or_else(|| Error::Corrupt("evicted row count".into()))?
+                .get(0)?;
+            rows += count as u64;
+            drop(removing);
+            inner.conn.execute(
+                    "DELETE FROM secure_row_records WHERE scope=? AND row IN (SELECT row FROM secure_row_records WHERE scope=? LIMIT ?)",
                     bindings(vec![
+                        SqlValue::Blob(blob.clone()),
                         SqlValue::Blob(blob.clone()),
                         SqlValue::Integer(STEP_ROWS as i64),
                     ]),

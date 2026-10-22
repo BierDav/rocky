@@ -2,7 +2,7 @@
 //! finalizes the state at each seal of its followed path once it holds every
 //! frame through the seal's frontier: rows dead there stay dead. Compacting
 //! moves the replay base to a finalized seal and releases the evidence
-//! behind it. See `docs/runtime/lazy-compaction.md`.
+//! behind it.
 use super::checkpoint::{
     CHECKPOINT_FORMAT, CheckpointStatement, LogPosition, Overlay, PruneBlock, STEP_OPERATIONS,
     STEP_ROWS, SetSummary, Sets,
@@ -11,6 +11,11 @@ use super::*;
 use rocky_core::Scope;
 use rocky_credentials::SignedSeal;
 mod anchors;
+mod incremental;
+mod indexed;
+mod oracle;
+mod row_positions;
+pub(super) use indexed::check_schema as check_incremental_schema;
 mod readiness;
 mod rebootstrap;
 pub use rebootstrap::{FrameReplay, SealRebootstrap};
@@ -78,7 +83,17 @@ impl<A: RowApplication> Inner<A> {
         if self.workspace.followed.as_ref().map(|(scope, _)| *scope) != Some(domain) {
             return Ok(Vec::new());
         }
-        tip_path_seals(graph, self.workspace.tip)
+        let mut cache = self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (domain, self.workspace.tip);
+        if let Some(path) = cache.paths.get(&key) {
+            return Ok(path.clone());
+        }
+        let path = tip_path_seals(graph, self.workspace.tip)?;
+        cache.paths.insert(key, path.clone());
+        Ok(path)
     }
     /// Where `seal` lies on the followed path; none off it.
     pub(super) fn path_index(
@@ -241,8 +256,11 @@ impl<A: RowApplication> Inner<A> {
             };
             let old = self.replay_row(overlay, id, row).await?;
             match (&old, fields.is_empty()) {
-                (Some(old), true) => sets.remove(&row, old)?,
-                (old, false) => sets.replace(&row, old.as_deref(), &fields)?,
+                (Some(old), true) => sets.remove_stored(self, &row, old).await?,
+                (old, false) => {
+                    sets.replace_stored(self, &row, old.as_deref(), &fields)
+                        .await?
+                }
                 (None, true) => continue,
             }
             self.conn
@@ -277,7 +295,8 @@ impl<A: RowApplication> Inner<A> {
     }
     /// The positions `blocking_gaps` checks, over `scopes` (open) of
     /// `domain`; a placement counts only outside every held scope.
-    pub(super) async fn held_positions(
+    #[cfg(test)]
+    pub(super) async fn scan_held_positions(
         &self,
         domain: Scope,
         scopes: &[(ResourceScope, Option<i64>)],
@@ -302,7 +321,7 @@ impl<A: RowApplication> Inner<A> {
             else {
                 return Err(Error::Corrupt("frame header".into()));
             };
-            let e = self.stored_header(bytes)?;
+            let e = self.oracle_header(bytes)?;
             if e.scope.domain != domain
                 || (*pending != 0 && ready.contains(&e.scope) && self.has_scope_key(e.scope))
                 || (*placed != 0 && held_scopes.contains(&e.scope))
@@ -337,7 +356,8 @@ impl<A: RowApplication> Inner<A> {
         held: &BTreeSet<ResourceScope>,
         logged: &BTreeSet<ResourceScope>,
     ) -> Result<Positions, Error> {
-        self.held_positions(domain, scopes, held, logged).await
+        let _oracle = self.position_oracles.start();
+        self.scan_held_positions(domain, scopes, held, logged).await
     }
     #[cfg(test)]
     pub(crate) async fn seal_waits_for_test(
@@ -394,7 +414,7 @@ impl<A: RowApplication> Inner<A> {
             .map(|(scope, _)| *scope)
             .filter(|scope| self.existence_table(*scope))
             .collect();
-        let (held, last, counted) = self
+        let (held, last) = self
             .held_positions(domain, &open, &held_scopes, &logged)
             .await?;
         for (scope, id) in &open {
@@ -439,7 +459,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
-            let records = self.existence_positions(*scope).await?;
             for mark in &seal.statement.frontier {
                 let from = self
                     .seal_starts(*id, previous)
@@ -450,12 +469,13 @@ impl<A: RowApplication> Inner<A> {
                 if from > mark.sequence {
                     continue;
                 }
-                let sum = |counts: Option<&BTreeMap<u64, u64>>| -> u64 {
-                    counts.map_or(0, |counts| {
-                        counts.range(from..=mark.sequence).map(|(_, n)| n).sum()
-                    })
-                };
-                if sum(records.get(&mark.author)) < sum(counted.get(&(*scope, mark.author))) {
+                let records = self
+                    .existence_count(*scope, mark.author, from, mark.sequence)
+                    .await?;
+                let signed = self
+                    .position_existence_sum(*scope, mark.author, from, mark.sequence, true)
+                    .await?;
+                if records < signed {
                     return Ok(Some(format!(
                         "missing existence records of author {} through the seal's frontier",
                         mark.author
@@ -473,7 +493,8 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
         tip: TipId,
-    ) -> Result<Vec<(Commitment, Option<Vec<u8>>)>, Error> {
+        indexed: bool,
+    ) -> Result<Vec<(Commitment, Option<Materialized>)>, Error> {
         // Only fields the sealed tip has: a later additive column is not its state.
         let sealed = self.path_fields(scope.domain, tip)?;
         let typed = self.workspace.typed.clone();
@@ -492,18 +513,42 @@ impl<A: RowApplication> Inner<A> {
             _ => None,
         };
         let blob = encode(&scope)?;
+        let id = self.scope_id(scope).await?;
+        let (missing, shape_fields) = if indexed {
+            self.seal_shape_predicate(scope, tip, 5)?
+        } else {
+            ("0".into(), Vec::new())
+        };
+        let sql = if indexed {
+            if table.is_some() {
+                format!(
+                    "SELECT row,fields FROM secure_rows WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?1) AND row>?2 AND row IN (SELECT row FROM secure_rows WHERE scope=?4 AND live=0 UNION SELECT row FROM secure_seal_candidates WHERE scope=?4 UNION SELECT row FROM secure_rows WHERE scope=?4 AND shape IN (SELECT s.shape FROM secure_scope_shapes s WHERE s.scope=?4 AND ({missing}))) ORDER BY row LIMIT ?3"
+                )
+            } else {
+                "SELECT row,fields FROM secure_rows WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?1) AND row>?2 AND live=0 ORDER BY row LIMIT ?3".into()
+            }
+        } else {
+            "SELECT row,fields FROM secure_row_records WHERE scope=?1 AND row>?2 ORDER BY row LIMIT ?3".into()
+        };
         let mut drops = Vec::new();
         let mut after = Vec::new();
         loop {
             let records = collect_rows(
                 self.conn
                     .query(
-                        "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
-                        bindings(vec![
-                            SqlValue::Blob(blob.clone()),
-                            SqlValue::Blob(after.clone()),
-                            SqlValue::Integer(STEP_ROWS as i64),
-                        ]),
+                        sql.clone(),
+                        bindings({
+                            let mut params = vec![
+                                SqlValue::Blob(blob.clone()),
+                                SqlValue::Blob(after.clone()),
+                                SqlValue::Integer(STEP_ROWS as i64),
+                            ];
+                            if indexed && table.is_some() {
+                                params.push(SqlValue::Integer(id));
+                                params.extend(shape_fields.iter().cloned());
+                            }
+                            params
+                        }),
                     )
                     .await?,
             )
@@ -517,7 +562,7 @@ impl<A: RowApplication> Inner<A> {
                 };
                 after = key.clone();
                 let row = checkpoint::row_of(key)?;
-                let mut record: Materialized = decode(fields)?;
+                let mut record = self.decode_record(fields).await?;
                 if record.deleted {
                     drops.push((row, None));
                     continue;
@@ -574,22 +619,20 @@ impl<A: RowApplication> Inner<A> {
                     }
                 }
                 if changed {
-                    drops.push((row, Some(encode(&record)?)));
+                    drops.push((row, Some(record)));
                 }
             }
         }
     }
     /// Per held scope: its applied positions after its last bound that
-    /// `seal` excludes and the last one it includes. A scope changes when
-    /// the seal includes any, or, for a seal to `keep`, when its live rows
-    /// hold any it excludes; once a constrained one does, every
-    /// constrained scope changes, its dependencies may have.
+    /// `seal` excludes and the last one it includes. Pending drops and
+    /// constraint dependencies also make a scope participate.
     async fn seal_changes(
         &self,
         domain: Scope,
         seal: &SignedSeal,
         scopes: &[(ResourceScope, i64)],
-        keep: bool,
+        indexed: bool,
     ) -> Result<Vec<SealChange>, Error> {
         let graph = self.graph_for(domain)?;
         let constrained = |scope: ResourceScope| {
@@ -603,7 +646,18 @@ impl<A: RowApplication> Inner<A> {
         let mut changes = Vec::new();
         for (scope, id) in scopes {
             let bound = self.last_bound(*id).await?;
-            let records = collect_rows(
+            let mut change = SealChange {
+                scope: *scope,
+                id: *id,
+                through: bound,
+                excluded: Vec::new(),
+                changed: false,
+            };
+            if indexed {
+                (change.through, change.excluded) =
+                    self.indexed_seal_cut(*scope, *id, bound, seal).await?;
+            } else {
+                let records = collect_rows(
                 self.conn
                     .query(
                         "SELECT a.position,a.hash,o.header FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? ORDER BY a.position",
@@ -612,40 +666,46 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
             )
             .await?;
-            let mut change = SealChange {
-                scope: *scope,
-                id: *id,
-                through: bound,
-                excluded: Vec::new(),
-                changed: false,
-            };
-            for record in records {
-                let [
-                    SqlValue::Integer(position),
-                    SqlValue::Blob(hash),
-                    SqlValue::Blob(header),
-                ] = record.as_slice()
-                else {
-                    return Err(Error::Corrupt(
-                        "an applied operation after the last finalized seal is not retained".into(),
-                    ));
-                };
-                let header: p2panda_core::Header<Extensions> = decode(header)?;
-                let e = &header.extensions;
-                let author = e.author.ok_or_else(|| denied("node author missing"))?;
-                if self.visible_frame(
-                    graph,
-                    e.tip,
-                    author,
-                    e.author_sequence,
-                    seal.statement.tip,
-                )? {
-                    change.through = *position;
-                } else {
-                    change.excluded.push((*position, hash.clone()));
+                for record in records {
+                    let [
+                        SqlValue::Integer(position),
+                        SqlValue::Blob(hash),
+                        SqlValue::Blob(header),
+                    ] = record.as_slice()
+                    else {
+                        return Err(Error::Corrupt(
+                            "an applied operation after the last finalized seal is not retained"
+                                .into(),
+                        ));
+                    };
+                    let header: p2panda_core::Header<Extensions> = decode(header)?;
+                    let e = &header.extensions;
+                    let author = e.author.ok_or_else(|| denied("node author missing"))?;
+                    if self.visible_frame(
+                        graph,
+                        e.tip,
+                        author,
+                        e.author_sequence,
+                        seal.statement.tip,
+                    )? {
+                        change.through = *position;
+                    } else {
+                        change.excluded.push((*position, hash.clone()));
+                    }
                 }
             }
-            change.changed = change.through > bound || (keep && !change.excluded.is_empty());
+            change.changed = change.through > bound || !change.excluded.is_empty();
+            if !change.changed {
+                change.changed = if indexed {
+                    self.has_indexed_seal_drops(*scope, seal.statement.tip, *id)
+                        .await?
+                } else {
+                    !self
+                        .seal_drops(*scope, seal.statement.tip, false)
+                        .await?
+                        .is_empty()
+                };
+            }
             changes.push(change);
         }
         if changes
@@ -686,6 +746,7 @@ fn offset(path: &[SignedSeal], finalized: &[Finalized]) -> Option<usize> {
 /// Positions of every node's frames, voids and placements a replica holds:
 /// per node, per open scope's last frame, and per logged scope the
 /// existence records each frame counts.
+#[cfg(test)]
 type Positions = (
     BTreeMap<u32, BTreeSet<u64>>,
     BTreeMap<(ResourceScope, u32), u64>,
@@ -698,7 +759,7 @@ pub(super) fn blocking_gaps(
     seal: &SignedSeal,
     starts: &BTreeMap<u32, u64>,
     scopes: &[(ResourceScope, Option<i64>)],
-    held: &BTreeMap<u32, BTreeSet<u64>>,
+    held: &BTreeMap<u32, positions::Runs>,
     last: &BTreeMap<(ResourceScope, u32), u64>,
     limit: usize,
 ) -> Vec<(u32, u64)> {
@@ -726,35 +787,49 @@ pub(super) fn blocking_gaps(
         }
         let positions = held.get(&mark.author);
         let mut expected = threshold;
-        for position in positions
-            .into_iter()
-            .flat_map(|positions| positions.range(threshold..=mark.sequence))
-            .copied()
-            .chain(std::iter::once(mark.sequence.saturating_add(1)))
-        {
-            while expected < position && expected <= mark.sequence {
+        for (start, end) in positions.into_iter().flat_map(|p| p.0.iter()) {
+            if *end < expected {
+                continue;
+            }
+            if *start > mark.sequence {
+                break;
+            }
+            while expected < *start && expected <= mark.sequence {
                 gaps.push((mark.author, expected));
                 if gaps.len() >= limit {
                     return gaps;
                 }
                 expected += 1;
             }
-            expected = position.saturating_add(1);
+            expected = expected.max(end.saturating_add(1));
+        }
+        while expected <= mark.sequence {
+            gaps.push((mark.author, expected));
+            if gaps.len() >= limit {
+                return gaps;
+            }
+            let Some(next) = expected.checked_add(1) else {
+                break;
+            };
+            expected = next;
         }
     }
     gaps
 }
-fn highest_missing(positions: Option<&BTreeSet<u64>>, from: u64, to: u64) -> Option<u64> {
+fn highest_missing(positions: Option<&positions::Runs>, from: u64, to: u64) -> Option<u64> {
     let mut expected = to;
     if let Some(positions) = positions {
-        for position in positions.range(from..=to).rev() {
-            if *position != expected {
+        for (start, end) in positions.0.iter().rev() {
+            if *start > expected {
+                continue;
+            }
+            if *end < expected {
                 return Some(expected);
             }
-            if expected == from {
+            if *start <= from {
                 return None;
             }
-            expected -= 1;
+            expected = start - 1;
         }
     }
     Some(expected)
@@ -762,16 +837,16 @@ fn highest_missing(positions: Option<&BTreeSet<u64>>, from: u64, to: u64) -> Opt
 
 impl<A: RowApplication> Inner<A> {
     /// Finalizes the domain's state at `seal`, inside the caller's
-    /// transaction: each changed scope's excluded operations move after its
-    /// included ones, its rows are rebuilt at the frontier, what is dead
-    /// there is recorded, and its rows are rebuilt again with every
-    /// operation. Unchanged scopes are not touched.
-    async fn finalize_seal(
+    /// transaction. Excluded operations move after included ones; frontier
+    /// drops are recorded before replaying the tail. Tests also run the
+    /// full scope rebuild through this transaction boundary.
+    async fn finalize_seal_impl(
         &mut self,
         domain: Scope,
         seal: &SignedSeal,
         scopes: &[(ResourceScope, Option<i64>)],
         keep: bool,
+        incremental: bool,
     ) -> Result<(), Error> {
         let mut materialized = Vec::new();
         for (scope, _) in scopes {
@@ -793,7 +868,9 @@ impl<A: RowApplication> Inner<A> {
                 self.clear_checkpoints(*scope, id).await?;
             }
         }
-        let changes = self.seal_changes(domain, seal, &materialized, keep).await?;
+        let changes = self
+            .seal_changes(domain, seal, &materialized, incremental)
+            .await?;
         let depth = match self
             .finalized_depth(domain, seal.id().map_err(credential)?)
             .await?
@@ -818,8 +895,35 @@ impl<A: RowApplication> Inner<A> {
         let changed: Vec<&SealChange> = changes.iter().filter(|change| change.changed).collect();
         // Application order stays causal: every operation the seal
         // excludes, in order, after every one it includes.
+        self.conn
+            .execute("DELETE FROM secure_finalization_rows", ())
+            .await?;
         for change in &changed {
             for (position, hash) in &change.excluded {
+                let births = collect_rows(self.conn.query("SELECT author,signer,sequence FROM secure_birth_positions WHERE scope=? AND position=?", [change.id, *position]).await?).await?;
+                let touched = collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT row FROM secure_row_positions WHERE position=?",
+                            [*position],
+                        )
+                        .await?,
+                )
+                .await?;
+                for row in &touched {
+                    let [SqlValue::Blob(row)] = row.as_slice() else {
+                        return Err(Error::Corrupt("row position".into()));
+                    };
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO secure_finalization_rows VALUES(?,?)",
+                            bindings(vec![
+                                SqlValue::Integer(change.id),
+                                SqlValue::Blob(row.clone()),
+                            ]),
+                        )
+                        .await?;
+                }
                 self.conn
                     .execute("DELETE FROM secure_applied WHERE position=?", [*position])
                     .await?;
@@ -832,6 +936,18 @@ impl<A: RowApplication> Inner<A> {
                         ]),
                     )
                     .await?;
+                for birth in births {
+                    let [author, signer, sequence] = birth.as_slice() else {
+                        return Err(Error::Corrupt("birth position".into()));
+                    };
+                    self.conn.execute("INSERT INTO secure_birth_positions SELECT ?,position,?,?,? FROM secure_applied WHERE hash=?", bindings(vec![SqlValue::Integer(change.id), author.clone(), signer.clone(), sequence.clone(), SqlValue::Blob(hash.clone())])).await?;
+                }
+                for row in touched {
+                    let [SqlValue::Blob(row)] = row.as_slice() else {
+                        return Err(Error::Corrupt("row position".into()));
+                    };
+                    self.conn.execute("INSERT INTO secure_row_positions SELECT ?,?,position FROM secure_applied WHERE hash=?", bindings(vec![SqlValue::Integer(change.id), SqlValue::Blob(row.clone()), SqlValue::Blob(hash.clone())])).await?;
+                }
             }
         }
         // A scope whose every applied operation the seal includes already
@@ -853,23 +969,42 @@ impl<A: RowApplication> Inner<A> {
                 Some([SqlValue::Integer(last)]) => *last,
                 _ => return Err(Error::Corrupt("applied positions".into())),
             };
-            if change.excluded.is_empty() && change.through >= last {
+            if (incremental || !self.has_scope_key(change.scope))
+                && change.excluded.is_empty()
+                && change.through >= last
+            {
                 whole.insert(change.id);
             }
         }
         for change in changed.iter().filter(|change| !whole.contains(&change.id)) {
-            self.restore_rows(change.scope, change.through).await?;
+            if incremental {
+                self.restore_seal_rows(change.scope, change.through).await?;
+            } else {
+                self.restore_rows(change.scope, change.through).await?;
+            }
         }
         for change in changed.iter().filter(|change| !whole.contains(&change.id)) {
-            self.reproject(change.scope).await?;
+            if !incremental {
+                self.reproject(change.scope).await?;
+            }
+        }
+        if incremental {
+            Box::pin(self.resolve(None)).await?;
         }
         let mut drops = Vec::new();
         for change in &changed {
-            drops.push((
-                change.scope,
-                change.id,
-                self.seal_drops(change.scope, seal.statement.tip).await?,
-            ));
+            let mut rows = Vec::new();
+            for (row, record) in self
+                .seal_drops(change.scope, seal.statement.tip, incremental)
+                .await?
+            {
+                let fields = match record {
+                    Some(record) => Some(self.encode_record(&record).await?),
+                    None => None,
+                };
+                rows.push((row, fields));
+            }
+            drops.push((change.scope, change.id, rows));
         }
         let unchanged: BTreeSet<i64> = drops
             .iter()
@@ -879,23 +1014,36 @@ impl<A: RowApplication> Inner<A> {
         // The live tables hold the seal's state now. Its stored rows take
         // what finalizing changes, which no live table shows, so that they
         // are what a replay through the seal leaves.
-        if keep {
-            for (scope, _, rows) in &drops {
+        if keep || incremental {
+            for (scope, id, rows) in &drops {
                 let blob = encode(scope)?;
                 for (row, fields) in rows {
+                    if incremental {
+                        self.conn
+                            .execute(
+                                "INSERT OR IGNORE INTO secure_finalization_rows VALUES(?,?)",
+                                bindings(vec![
+                                    SqlValue::Integer(*id),
+                                    SqlValue::Blob(row.to_vec()),
+                                ]),
+                            )
+                            .await?;
+                        self.replace_seal_row(*scope, *row, fields.as_deref())
+                            .await?;
+                        continue;
+                    }
                     match fields {
-                        Some(fields) => {
-                            self.conn
-                                .execute(
-                                    "UPDATE secure_rows SET fields=? WHERE scope=? AND row=?",
-                                    [fields.clone(), blob.clone(), row.to_vec()],
-                                )
-                                .await?
-                        }
+                        Some(fields) => self
+                            .conn
+                            .execute(
+                                "UPDATE secure_row_records SET fields=? WHERE scope=? AND row=?",
+                                [fields.clone(), blob.clone(), row.to_vec()],
+                            )
+                            .await?,
                         None => {
                             self.conn
                                 .execute(
-                                    "DELETE FROM secure_rows WHERE scope=? AND row=?",
+                                    "DELETE FROM secure_row_records WHERE scope=? AND row=?",
                                     [blob.clone(), row.to_vec()],
                                 )
                                 .await?
@@ -903,6 +1051,8 @@ impl<A: RowApplication> Inner<A> {
                     };
                 }
             }
+        }
+        if keep {
             let bounds: Vec<history::KeptBound> = changes
                 .iter()
                 .map(|change| (change.id, change.through))
@@ -949,9 +1099,23 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .filter(|change| !unchanged.contains(&change.id))
         {
-            self.restore_rows(change.scope, i64::MAX).await?;
-            self.reproject(change.scope).await?;
+            if incremental {
+                self.replay_seal_tail(change.scope, change.through).await?;
+                let ledger = self
+                    .row_replay_ledger(change.scope, change.id, i64::MAX, self.workspace.tip)
+                    .await?;
+                self.replace_ledger(change.scope, ledger).await?;
+            } else {
+                self.restore_rows(change.scope, i64::MAX).await?;
+                self.reproject(change.scope).await?;
+            }
         }
+        if incremental {
+            Box::pin(self.resolve(None)).await?;
+        }
+        self.conn
+            .execute("DELETE FROM secure_finalization_rows", ())
+            .await?;
         self.conn
             .execute(
                 "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
@@ -1411,7 +1575,10 @@ impl<A: RowApplication> Inner<A> {
         // rebuilds them; rows dropped at a seal take theirs along.
         sets.creations = 0;
         sets.creation_digest = checkpoint::Lt::new();
-        for creation in self.base_creations(id).await? {
+        let base_creations = self
+            .index_page_headers(id, &checkpoint::Served::Base)
+            .await?;
+        for creation in base_creations.iter().copied() {
             let (_, clock) = self
                 .stub(creation)
                 .await?
@@ -1506,7 +1673,7 @@ impl<A: RowApplication> Inner<A> {
                 [id],
             )
             .await?;
-        for creation in self.base_creations(id).await? {
+        for creation in base_creations {
             self.conn
                 .execute(
                     "INSERT OR IGNORE INTO secure_compaction_live_creations VALUES(?,?)",
@@ -1523,12 +1690,8 @@ impl<A: RowApplication> Inner<A> {
             let records = collect_rows(
                 self.conn
                     .query(
-                        "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
-                        bindings(vec![
-                            SqlValue::Blob(blob.clone()),
-                            SqlValue::Blob(after.clone()),
-                            SqlValue::Integer(STEP_ROWS as i64),
-                        ]),
+                        "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                        bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Blob(after.clone()), SqlValue::Integer(STEP_ROWS as i64)]),
                     )
                     .await?,
             )
@@ -1541,7 +1704,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("stored row".into()));
                 };
                 after = key.clone();
-                let record: Materialized = decode(fields)?;
+                let record = self.decode_record(fields).await?;
                 self.conn
                     .execute(
                         "INSERT OR IGNORE INTO secure_compaction_live_creations VALUES(?,?)",
@@ -1575,39 +1738,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.reseed_ledger(scope, id).await?;
         Ok(true)
-    }
-}
-
-impl<A: RowApplication> Inner<A> {
-    /// The creation operations of scope `id`'s base rows.
-    async fn base_creations(&self, id: i64) -> Result<BTreeSet<Hash>, Error> {
-        let mut creations = BTreeSet::new();
-        let mut after = Vec::new();
-        loop {
-            let records = collect_rows(
-                self.conn
-                    .query(
-                        "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
-                        bindings(vec![
-                            SqlValue::Integer(id),
-                            SqlValue::Blob(after.clone()),
-                            SqlValue::Integer(STEP_ROWS as i64),
-                        ]),
-                    )
-                    .await?,
-            )
-            .await?;
-            if records.is_empty() {
-                return Ok(creations);
-            }
-            for record in records {
-                let [SqlValue::Blob(key), SqlValue::Blob(fields)] = record.as_slice() else {
-                    return Err(Error::Corrupt("base row".into()));
-                };
-                after = key.clone();
-                creations.insert(decode::<Materialized>(fields)?.creation);
-            }
-        }
     }
 }
 
@@ -1670,6 +1800,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.flush()?;
         inner.publish_revision().await
     }
+    /// Whether any held scope still needs a replay base at `seal`.
+    pub async fn needs_base_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
+        let inner = self.inner.lock().await;
+        for (_, id) in inner.domain_scopes(domain).await? {
+            if inner.base_seal(id).await? != Some(seal) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn compaction_status(&self, domain: Scope) -> Result<CompactionStatus, Error> {
         let inner = self.inner.lock().await;
         inner.graph_for(domain)?;
@@ -1760,4 +1901,52 @@ pub(super) fn tip_path_seals(
     }
     seals.reverse();
     Ok(seals)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gap_at_the_maximum_sequence_terminates() {
+        use rocky_core::{AppId, DomainId, MeshId};
+        use rocky_credentials::{AuthorMark, SEAL_FORMAT, SealAction, SealStatement};
+        let domain = Scope {
+            mesh: MeshId([1; 16]),
+            app: AppId([2; 16]),
+            domain: DomainId([3; 16]),
+        };
+        let scope = ResourceScope {
+            domain,
+            encryption: [4; 32],
+            table: [5; 32],
+        };
+        let mut seal = SignedSeal::sign(
+            SealStatement {
+                format: SEAL_FORMAT,
+                scope: domain,
+                tip: TipId([6; 32]),
+                frontier: vec![AuthorMark {
+                    author: 1,
+                    sequence: 1,
+                }],
+                action: SealAction::Continue { schema: [7; 32] },
+                recovery: None,
+            },
+            &PrivateKey::new(),
+        )
+        .unwrap();
+        seal.statement.frontier[0].sequence = u64::MAX;
+        assert_eq!(
+            blocking_gaps(
+                &seal,
+                &BTreeMap::from([(1, u64::MAX)]),
+                &[(scope, None)],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                32
+            ),
+            vec![(1, u64::MAX)]
+        );
+    }
 }

@@ -20,12 +20,17 @@ pub struct RemotePage {
 }
 #[derive(Serialize, Deserialize)]
 struct RemotePlain {
+    version: u8,
+    manifest: serde_bytes::ByteArray<32>,
     scope: ResourceScope,
     after: Option<Commitment>,
     revision: u64,
     complete: bool,
     frontier: Vec<FrontierLog>,
-    rows: Vec<(Commitment, RowFields)>,
+    rows: Vec<(
+        serde_bytes::ByteArray<32>,
+        BTreeMap<u32, serde_bytes::ByteBuf>,
+    )>,
     next: Option<Commitment>,
 }
 
@@ -61,13 +66,37 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .page(scope, after, max_rows, MAX_SECURE_FRAME / 4)
             .await?;
         let frontier = inner.frontier(scope).await?;
+        let fields = inner
+            .definition
+            .field_ordinals(scope.table)
+            .map_err(|_| denied("source table schema is not installed"))?;
+        let rows = page
+            .rows
+            .into_iter()
+            .map(|(row, values)| {
+                let values = values
+                    .into_iter()
+                    .map(|(field, value)| {
+                        Ok((
+                            fields.ordinal(field).ok_or_else(|| {
+                                denied("remote row field is outside its source schema")
+                            })?,
+                            value.into(),
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?;
+                Ok((row.into(), values))
+            })
+            .collect::<Result<_, Error>>()?;
         let plain = RemotePlain {
+            version: 1,
+            manifest: inner.manifest.into(),
             scope,
             after,
             revision: page.revision,
             complete: page.complete,
             frontier: frontier.logs,
-            rows: page.rows.into_iter().collect(),
+            rows,
             next: page.next,
         };
         EncryptedPackage::seal(scope, generation, PackageKind::Read, &key, &encode(&plain)?)
@@ -91,10 +120,43 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("remote read outside request"));
         }
         let plain: RemotePlain = decode(&package.open(&key.key)?)?;
-        if plain.scope != scope || plain.after != after || plain.rows.len() > MAX_SNAPSHOT_ROWS {
+        if plain.version != 1
+            || plain.scope != scope
+            || plain.after != after
+            || plain.rows.len() > MAX_SNAPSHOT_ROWS
+        {
             return Err(denied("remote read outside request"));
         }
-        let rows: BTreeMap<_, _> = plain.rows.into_iter().collect();
+        if plain.rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(denied("remote read rows out of order"));
+        }
+        let manifest = plain.manifest.into_array();
+        let definition = inner
+            .catalog
+            .get(&manifest)
+            .or_else(|| (manifest == inner.manifest).then_some(&inner.definition))
+            .ok_or_else(|| denied("remote read source schema is not installed"))?;
+        let fields = definition
+            .field_ordinals(scope.table)
+            .map_err(|_| denied("remote read source table schema is not installed"))?;
+        let rows: BTreeMap<_, _> = plain
+            .rows
+            .into_iter()
+            .map(|(row, values)| {
+                let values = values
+                    .into_iter()
+                    .map(|(ordinal, value)| {
+                        Ok((
+                            fields.field(ordinal).ok_or_else(|| {
+                                denied("remote row ordinal is outside its source schema")
+                            })?,
+                            value.into_vec(),
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?;
+                Ok((row.into_array(), values))
+            })
+            .collect::<Result<_, Error>>()?;
         if rows
             .keys()
             .any(|row| after.is_some_and(|after| *row <= after))

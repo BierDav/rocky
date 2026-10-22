@@ -169,6 +169,11 @@ async fn missing_mandatory_evidence_is_refused_before_schema_creation() {
     for (index, attack) in [
         "DROP TABLE secure_identity_own",
         "DROP TABLE secure_admission_carries",
+        "DROP TABLE secure_position_ranges",
+        "DROP TABLE secure_log_ranges",
+        "DROP TABLE secure_existence_counts",
+        "DROP TABLE secure_position_sources",
+        "DROP TRIGGER secure_positions_status",
         "DELETE FROM secure_admission_context",
     ]
     .into_iter()
@@ -188,8 +193,10 @@ async fn missing_mandatory_evidence_is_refused_before_schema_creation() {
         );
         // Failed open never backfills a missing mandatory table.
         let (owner, conn) = crate::database::DatabaseOwner::open(&path).await.unwrap();
-        if attack.starts_with("DROP TABLE") {
-            let name = attack.strip_prefix("DROP TABLE ").unwrap();
+        if let Some(name) = attack
+            .strip_prefix("DROP TABLE ")
+            .or_else(|| attack.strip_prefix("DROP TRIGGER "))
+        {
             assert!(
                 crate::storage::collect_rows(
                     conn.query("SELECT 1 FROM sqlite_schema WHERE name=?", [name])

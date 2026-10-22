@@ -412,8 +412,8 @@ async fn read_and_replay_queries_use_indexes() {
     for sql in [
         "SELECT 1 FROM secure_operations WHERE scope=x'00' AND status='pending' LIMIT 1",
         "SELECT hash,header FROM secure_operations WHERE scope=x'00' AND status='applied' AND hash>x'' ORDER BY hash LIMIT 32",
-        "SELECT row,fields FROM secure_rows WHERE scope=x'00' AND row>x'' ORDER BY row LIMIT 256",
-        "SELECT fields FROM secure_rows_shadow WHERE scope=x'00' AND row=x'00'",
+        "SELECT row,fields FROM secure_row_records WHERE scope=x'00' AND row>x'' ORDER BY row LIMIT 256",
+        "SELECT fields FROM secure_checkpoint_overlay WHERE scope=1 AND row=x'00'",
     ] {
         let plan = format!(
             "{:?}",

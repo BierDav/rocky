@@ -99,22 +99,26 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
             &[("m", &m), ("a", &a), ("t", &t)]
         );
     }
-    trace.m_sync = Some(step!(
-        "setup.retention.m_sync",
-        m.sync().await,
-        &[("m", &m), ("a", &a), ("t", &t)]
-    ));
-    assert_eq!(
-        step!(
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        trace.m_sync = Some(step!(
+            "setup.retention.m_sync",
+            m.sync().await,
+            &[("m", &m), ("a", &a), ("t", &t)]
+        ));
+        let rows = step!(
             "setup.retention.m_read",
             m.keys().await,
             &[("m", &m), ("a", &a), ("t", &t)]
-        )
-        .as_array()
-        .ok_or("rows")?
-        .len(),
-        258
-    );
+        );
+        if rows.as_array().ok_or("rows")?.len() == 258 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "member did not converge before compaction: {rows}"
+        );
+    }
     step!(
         "setup.retention.t_sync",
         t.sync().await,
@@ -165,11 +169,22 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
                 "compaction[{}]",
                 if std::ptr::eq(peer, &m) { "m" } else { "t" }
             ),
-            peer.tips("compact", json!({"keep":1})).await,
+            peer.tips("compaction", json!({})).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         );
         assert_eq!(compacted["compacted"], latest, "{compacted}");
-        assert!(compacted["pruned"].as_u64() > Some(0), "{compacted}");
+        let retention = step!(
+            "compaction.retention",
+            peer.call(json!({"type":"retention", "collection":"counts"}))
+                .await,
+            &[("m", &m), ("a", &a), ("t", &t)]
+        );
+        assert!(
+            retention["pruned_prefix"]
+                .as_array()
+                .is_some_and(|logs| !logs.is_empty()),
+            "{retention}"
+        );
         assert_eq!(
             seal(
                 &step!(

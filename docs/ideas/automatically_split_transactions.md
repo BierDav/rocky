@@ -1,1 +1,0 @@
-or find a solution how to distribute large scale updates caused due to schema migration

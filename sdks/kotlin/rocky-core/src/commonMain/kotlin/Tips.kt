@@ -47,7 +47,8 @@ class Tips internal constructor(private val client: RockyClient) {
 
     /**
      * Finalizes ready seals of the followed path and compacts at the newest one that is final or has [keep] seals
-     * after it. A seal that is not final can still lose a race; keeping seals avoids a rebootstrap then.
+     * after it. Final seals compact automatically during sync. Call this for earlier compaction at nonfinal
+     * seals, which can still lose a race; keeping seals avoids a rebootstrap then.
      */
     suspend fun compact(keep: UInt = 0u): TipCompaction = TipCompaction.decode(call("compact") { put("keep", keep.toLong()) })
 

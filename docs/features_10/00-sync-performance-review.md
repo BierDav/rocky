@@ -9,7 +9,7 @@ they are measurements, not service levels.
 
 The 100,000-row migration fixture (`rocky-sdk::migrations`,
 `a_migration_of_100000_rows_converges_on_every_member`) on 2026-10-19
-([phase 17 timing](../features_09/17-schema-changes-through-seals-performance.md)):
+(phase 17 timing):
 
 | Stage | Time | Rate |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ plus the proof, encrypted. Syncing 5 MB of rows moved 570 MB and wrote 1 GB.
    to 430 rows/s for frames. A checkpoint exists only at a seal, after an
    explicit `compact`, and only when finalization is not blocked. In the
    migration workload the successor tip is open, so all rows travel as
-   frames. [Checkpoint instead of history](../optimizations_on_demand/checkpoint-instead-of-history.md)
+   frames. Checkpoint instead of history
    described the symptom; the cause is that the design makes states rare.
 2. **Finalizing a seal costs two full rebuilds per changed scope**
    (`crates/rocky-secure/src/replica/compaction.rs`, `finalize_seal`):
@@ -88,7 +88,7 @@ statement count of finding 5 are deferred until a sampled profile of the
 member stage on the phase 4 format shows their share; finding 7 is a link
 protocol change deferred for the same reason and because the in-process
 fixture does not measure it. Neither is forgotten: both stay listed in
-[optimizations on demand](../optimizations_on_demand/README.md) once this
+optimizations on demand once this
 roadmap is accepted.
 
 ## Reproduce

@@ -49,7 +49,7 @@ impl<A: RowApplication> Inner<A> {
         let path = self.path_seals(domain)?;
         let scopes = self.readiness_scopes(domain).await?;
         let held_scopes = self.custody_scopes(now()?)?;
-        let (held, last, _) = self
+        let (held, last) = self
             .held_positions(domain, &scopes, &held_scopes, &BTreeSet::new())
             .await?;
         let mut checks = Vec::new();
@@ -350,6 +350,7 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        positions::insert(&self.conn, header, 2, false, false).await?;
         self.custody_required
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

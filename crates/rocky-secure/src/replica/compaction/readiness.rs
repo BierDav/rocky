@@ -5,7 +5,8 @@ impl<A: RowApplication> Inner<A> {
     pub(in crate::replica) fn has_scope_key(&self, scope: ResourceScope) -> bool {
         self.config.keys.iter().any(|key| key.scope == scope)
     }
-    pub(in crate::replica) async fn deferred_at(
+    #[cfg(test)]
+    pub(in crate::replica) async fn scan_deferred_at(
         &self,
         scope: ResourceScope,
         seal: &SignedSeal,
@@ -26,8 +27,7 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("frame header".into()));
             };
-            let header: p2panda_core::Header<Extensions> = decode(bytes)?;
-            let e = &header.extensions;
+            let e = self.oracle_header(bytes)?;
             if seal
                 .statement
                 .frontier

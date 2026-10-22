@@ -163,10 +163,7 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
                 encode(&carried.proof).unwrap(),
                 encode(original_proof).unwrap()
             );
-            assert_ne!(
-                carried.proof.stamp().author.key().unwrap(),
-                operation.header.public_key
-            );
+            assert_ne!(carried.proof.signer().unwrap(), operation.header.public_key);
             assert_eq!(
                 carried.stamps,
                 original_payload.writes()[0]
@@ -452,7 +449,7 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
     );
     for name in ["items", "attachments"] {
         let checkpoint = compacted_base(&b, &f.publisher, f.scope(name, partitions[1])).await;
-        assert_eq!(checkpoint.statement.format, 16);
+        assert_eq!(checkpoint.statement.format, 17);
         assert_eq!(checkpoint.statement.moves.count, 1);
         b.rebuild_projection(f.scope(name, partitions[1]))
             .await
@@ -594,11 +591,14 @@ async fn payload(
         .iter()
         .find(|key| key.scope == operation.header.extensions.scope)
         .ok_or_else(|| crate::Error::Rejected("missing key".into()))?;
-    crate::wire::RowPayload::decode(&crate::wire::decrypt(
-        &key.key,
-        &encode(&operation.header.extensions)?,
-        frame.body_bytes(),
-    )?)
+    inner.decode_row_payload(
+        frame,
+        &crate::wire::decrypt(
+            &key.key,
+            &encode(&operation.header.extensions)?,
+            frame.body_bytes(),
+        )?,
+    )
 }
 
 #[path = "row_moves_process.rs"]
@@ -636,8 +636,8 @@ async fn proof_replay_and_future_stamps_require_the_current_move_contract() {
     let operation = insertion.operation().unwrap();
     let ceiling = crate::replica::Stamp {
         clock: operation.header.timestamp,
-        author: operation.header.public_key.into(),
-        sequence: operation.header.seq_num,
+        author: operation.header.extensions.author.unwrap_or(0),
+        sequence: operation.header.extensions.author_sequence,
     };
     let inner = b.inner.lock().await;
     inner.check_carried(&write, &carried, &ceiling).unwrap();
@@ -645,7 +645,7 @@ async fn proof_replay_and_future_stamps_require_the_current_move_contract() {
     future.stamps.values_mut().next().unwrap().clock = ceiling.clock + 1;
     assert!(inner.check_carried(&write, &future, &ceiling).is_err());
     let mut forged = serde_json::to_value(&carried.proof).unwrap();
-    forged["version"] = serde_json::json!(2);
+    forged["version"] = serde_json::json!(3);
     let invalid: crate::replica::moves::CreationProof = serde_json::from_value(forged).unwrap();
     assert!(
         invalid

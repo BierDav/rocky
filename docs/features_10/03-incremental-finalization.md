@@ -1,15 +1,14 @@
 # 3. Incremental finalization
 
-Status: specified, not started. Owner: `rocky-secure` compaction and
+Status: complete and qualified on 2026-10-24. All gates passed;
+see [evidence](03-incremental-finalization-evidence.md). Owner: `rocky-secure` compaction and
 constraints. Depends on [phase 1](01-held-positions-as-tables.md). Effort:
 two to three weeks. Follow the [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
 
-Read [lazy compaction](../runtime/lazy-compaction.md#finalizing),
-[mergeable constraints](../runtime/mergeable-constraints.md),
-[kept seals](../runtime/kept-seals.md) and
-[review finding 2](00-sync-performance-review.md#findings).
+Inspect the owning modules and their tests for current behavior, and the
+[performance review](00-sync-performance-review.md) for the measured baseline.
 
 After this phase finalizing a seal costs the operations the seal excludes
 and the rows they touched. A seal in a quiet stream, which excludes nothing,
@@ -45,8 +44,8 @@ test suite's oracle.
   result. Every existing late-frame, kept-seal, existence, constraint and
   plateau probe runs with the comparison on.
 - **Format.** `secure_row_positions` and the `live` column are mandatory;
-  the replica file moves one version (combined with phase 1's bump when
-  both land together, else `v34`).
+  the replica file is `v35`, following phase 4's `v34`. Older files are
+  refused before writes; no migration or index backfill is supported.
 
 ## Ordered slices
 
@@ -55,8 +54,7 @@ test suite's oracle.
 2. Drops by index; the unchanged-scope path without rebuilds; the oracle.
 3. The affected-rows rebuild for scopes with excluded operations,
    including constraint dependents and the kept path.
-4. Guides: lazy compaction's finalizing steps and limits; scaling limits'
-   known costs.
+4. Update phase status and evidence in this directory.
 
 ## Completion gate
 

@@ -1,14 +1,13 @@
 # 1. Held positions as tables
 
-Status: specified, not started. Owner: `rocky-secure` positions, readiness
-and frontiers. Depends on nothing. Effort: about a week. Follow the
+Status: complete (2026-10-23); see [evidence](01-held-positions-evidence.md).
+Owner: `rocky-secure` positions, readiness and frontiers. Depends on nothing. Effort: about a week. Follow the
 [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
 
-Read [lazy compaction](../runtime/lazy-compaction.md#finalizing),
-[replica roles](../runtime/replica-roles.md#syncing-a-scope) and
-[review finding 3](00-sync-performance-review.md#findings).
+Inspect the owning modules and their tests for current behavior, and the
+[performance review](00-sync-performance-review.md) for the measured baseline.
 
 After this phase, deciding whether a seal is ready and computing a scope's
 frontier read a handful of rows. No maintenance step, status call, sync
@@ -57,22 +56,31 @@ CREATE TABLE secure_position_ranges(
   PRIMARY KEY(scope,author,kind,pending,start)) WITHOUT ROWID;
 CREATE TABLE secure_existence_counts(
   scope BLOB NOT NULL, author INTEGER NOT NULL, sequence INTEGER NOT NULL,
-  count INTEGER NOT NULL, PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID;
+  count INTEGER NOT NULL, settled_count INTEGER NOT NULL,
+  PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID;
 CREATE TABLE secure_log_ranges(
   scope BLOB NOT NULL, author BLOB NOT NULL,      -- signing public key
   tip BLOB NOT NULL, applied INTEGER NOT NULL,    -- 1 for applied/abandoned/held
+  domain_author INTEGER NOT NULL, delta INTEGER NOT NULL,
   start INTEGER NOT NULL, end INTEGER NOT NULL,
-  PRIMARY KEY(scope,author,tip,applied,start)) WITHOUT ROWID;
+  PRIMARY KEY(scope,author,tip,applied,domain_author,delta,start)) WITHOUT ROWID;
 ```
+
+`secure_position_sources` retains decoded coordinates by `(hash,kind)` so bulk
+status changes and deletion can update the indexes without header decoding.
+Log runs include the domain author and the affine domain/log sequence offset;
+`settled_count` preserves pending/key filtering when existence claims conflict.
+The [evidence](01-held-positions-evidence.md#indexed-coordinates-and-transactional-writers)
+records why these additions are necessary to preserve the existing contracts.
 
 `held_positions` becomes: ranges of the domain's scopes, filtered by the
 same predicates it applies today, with `last` as the maximum `end` of a
 ready scope's settled frames and `counted` summed from
 `secure_existence_counts` over `start..=mark`. `deferred_at` reads the
 frame ranges of the keyless scope. `compute_tip_frontier` reads
-`secure_log_ranges` for the tips on the workspace path, applies
-`frame_path.admits` per tip rather than per frame, and walks runs instead
-of positions. The frontier cache stays; invalidation now costs a few rows.
+`secure_log_ranges` for the tips on the workspace path, clips each affine run against
+`frame_path.admits` in domain coordinates and walks runs instead of positions.
+The frontier cache stays; invalidation now costs a few rows.
 
 ## Writers
 
@@ -84,8 +92,9 @@ of positions. The frontier cache stays; invalidation now costs a few rows.
 | Placement stored, replaced or pruned | Placement position added or removed |
 | Prune batch, checkpoint switch, eviction, tip drop, restore, held replay base | Positions removed with their frames; a pruned prefix needs no row because `secure_logs.pruned_prefix` already starts the frontier |
 
-Each writer is a method on the positions module taking the decoded header
-fields it already has; none decodes a header again.
+Inserts call the positions module with the decoded header fields they already
+have. Module-owned triggers maintain status and deletion changes, including
+bulk SQL, in the same transaction; none decodes a header again.
 
 ## Ordered slices
 
@@ -94,14 +103,15 @@ fields it already has; none decodes a header again.
 2. Readiness (`held_positions`, `deferred_at`, existence sums) on the
    tables; `cfg(test)` equality against the scan; the audit oracle.
 3. Frontiers on `secure_log_ranges`; the same equality and oracle.
-4. Guides: lazy compaction's finalizing section and limits, replica roles'
-   frontier paragraph, the formats table.
+4. Update phase status and evidence in this directory.
 
 ## Completion gate
 
 - With 10,000 frames of one author in one scope and a waiting seal,
   `seal_waits` and `tip_frontier` after invalidation each take ≤ 5 ms,
-  and the `cfg(test)` scan counter stays at zero outside `audit`.
+  and normal-query header scans and decodes stay at zero. The always-enabled
+  `cfg(test)` equality oracle has separate scan, decode and elapsed-time
+  accounting; its time is excluded from this production-query gate.
 - The existing secure, SDK and e2e suites pass unchanged with the equality
   check enabled, including placements, voids, eviction, tip drop,
   checkpoint import, restore and held replay bases.

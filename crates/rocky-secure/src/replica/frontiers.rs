@@ -19,6 +19,11 @@ impl<A> Inner<A> {
     /// Also used after rollback and after restoring an earlier in-memory context.
     pub(crate) fn invalidate_context(&self) {
         self.invalidate_frontiers();
+        self.invalidate_records();
+        *self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
         self.path_fields
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -52,6 +57,20 @@ impl<A> Inner<A> {
 
 #[cfg(test)]
 impl<A: RowApplication> Inner<A> {
+    pub(crate) fn checked_seal_path(
+        &self,
+        domain: rocky_core::Scope,
+    ) -> Result<Vec<rocky_credentials::SignedSeal>, Error> {
+        let cached = self.path_seals(domain)?;
+        let expected = if self.workspace.followed.as_ref().map(|(scope, _)| *scope) == Some(domain)
+        {
+            compaction::tip_path_seals(self.graph_for(domain)?, self.workspace.tip)?
+        } else {
+            Vec::new()
+        };
+        assert_eq!(cached, expected);
+        Ok(cached)
+    }
     pub(crate) async fn reload_frontier_graphs(&mut self) -> Result<(), Error> {
         self.load_tip_graphs().await
     }
@@ -73,7 +92,7 @@ impl<A> Inner<A> {
         (
             cache.generation,
             cache.entries.len(),
-            self.frontier_scans.load(Ordering::Relaxed),
+            self.frontier_queries.load(Ordering::Relaxed),
             self.frontier_decodes.load(Ordering::Relaxed),
         )
     }

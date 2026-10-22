@@ -235,7 +235,7 @@ impl<A: RowApplication> Inner<A> {
         // The frames replayed from the start fold the replay ledger again;
         // permanent marks and admission evidence stay.
         for sql in [
-            "DELETE FROM secure_rows WHERE scope=?",
+            "DELETE FROM secure_row_records WHERE scope=?",
             "DELETE FROM secure_move_rows WHERE scope=?",
             "DELETE FROM secure_identity_ledger WHERE scope=?",
         ] {

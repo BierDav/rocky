@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 mod binding_tests;
+mod compact;
 
 struct VerifiedBindings<'a> {
     chain: &'a [rocky_credentials::AuthorBinding],
@@ -41,6 +42,10 @@ pub(super) fn bindings_digest(encoded: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.author-bindings.v1", encoded)
 }
 
+pub(super) fn header_digest(header: &[u8]) -> Commitment {
+    rocky_core::commitment("rocky.creation-header.v1", header)
+}
+
 /// A creation proof as a row record stores it. The author bindings its
 /// signature covers repeat on every row an author creates, so they are
 /// stored once in `secure_author_bindings` and named here by digest.
@@ -53,25 +58,85 @@ pub(crate) struct StoredProof {
     #[serde(with = "serde_bytes")]
     table: Commitment,
     id: rocky_core::RowIdentity,
+    #[serde(with = "serde_bytes")]
+    provenance: Commitment,
     stamp: Stamp,
     #[serde(with = "serde_bytes")]
     bindings: Commitment,
-    signature: p2panda_core::Signature,
+    signer: super::AuthorKey,
+    #[serde(with = "serde_bytes")]
+    header: Commitment,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct Origin {
+    version: u8,
+    #[serde(with = "serde_bytes")]
+    manifest: Commitment,
+    #[serde(with = "serde_bytes")]
+    table: Commitment,
+    stamp: Stamp,
+    #[serde(with = "serde_bytes")]
+    bindings: Commitment,
+    signer: super::AuthorKey,
+    #[serde(with = "serde_bytes")]
+    header: Commitment,
 }
 impl StoredProof {
+    pub(super) fn origin(&self) -> Origin {
+        Origin {
+            version: self.version,
+            manifest: self.manifest,
+            table: self.table,
+            stamp: self.stamp.clone(),
+            bindings: self.bindings,
+            signer: self.signer,
+            header: self.header,
+        }
+    }
+    pub(super) fn from_origin(
+        origin: Origin,
+        id: rocky_core::RowIdentity,
+        provenance: Commitment,
+    ) -> Self {
+        Self {
+            version: origin.version,
+            manifest: origin.manifest,
+            table: origin.table,
+            id,
+            provenance,
+            stamp: origin.stamp,
+            bindings: origin.bindings,
+            signer: origin.signer,
+            header: origin.header,
+        }
+    }
+    pub(super) fn identity(&self) -> rocky_core::RowIdentity {
+        self.id
+    }
+
+    pub(super) fn stamp(&self) -> &Stamp {
+        &self.stamp
+    }
+    pub(super) fn header(&self) -> Commitment {
+        self.header
+    }
     pub(super) fn bindings(&self) -> Commitment {
         self.bindings
     }
     /// The original creation statement this proof names; see [`provenance`].
-    pub(super) fn provenance(&self) -> Result<Commitment, Error> {
-        provenance(
+    pub(crate) fn provenance(&self) -> Result<Commitment, Error> {
+        let calculated = provenance(
             self.version,
             self.manifest,
             self.table,
             self.id,
             &self.stamp,
             self.bindings,
-        )
+        )?;
+        if calculated != self.provenance {
+            return Err(denied("stored creation provenance mismatch"));
+        }
+        Ok(self.provenance)
     }
 }
 /// A commitment to an original creation statement: what a row's identity
@@ -85,10 +150,13 @@ fn provenance(
     stamp: &Stamp,
     bindings: Commitment,
 ) -> Result<Commitment, Error> {
-    Ok(rocky_core::commitment(
-        "rocky.creation-provenance.v1",
-        &encode(&(version, manifest, table, id, stamp, bindings))?,
-    ))
+    if version != 2 {
+        return Err(denied("unsupported creation statement version"));
+    }
+    Ok(
+        rocky_core::CreationStatement::derived(manifest, table, id, stamp.clone(), bindings)
+            .commitment(),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,47 +168,123 @@ pub(crate) struct CreationProof {
     #[serde(with = "serde_bytes")]
     table: Commitment,
     id: rocky_core::RowIdentity,
+    #[serde(with = "serde_bytes")]
+    provenance: Commitment,
     stamp: Stamp,
     bindings: Vec<rocky_credentials::AuthorBinding>,
-    signature: p2panda_core::Signature,
+    signer: super::AuthorKey,
+    #[serde(with = "serde_bytes")]
+    header: Vec<u8>,
 }
 impl CreationProof {
-    fn bytes(&self) -> Result<Vec<u8>, Error> {
-        signing_bytes(
-            "rocky.row-creation-proof.v1",
-            &(
-                self.version,
-                self.manifest,
-                self.table,
-                self.id,
-                &self.stamp,
-                &self.bindings,
-            ),
-        )
-    }
-    pub(super) fn sign(
+    pub(super) fn statement(
         manifest: Commitment,
         table: Commitment,
         id: rocky_core::RowIdentity,
         stamp: Stamp,
         author: &identity::NodeAuthor,
     ) -> Result<Self, Error> {
-        let mut proof = Self {
-            version: 1,
+        let bindings: Vec<_> = author
+            .credentials
+            .0
+            .iter()
+            .map(|link| link.author_binding.clone())
+            .collect();
+        let provenance = provenance(
+            2,
             manifest,
             table,
             id,
+            &stamp,
+            bindings_digest(&encode(&bindings)?),
+        )?;
+        Ok(Self {
+            version: 2,
+            manifest,
+            table,
+            id,
+            provenance,
             stamp,
-            bindings: author
-                .credentials
-                .0
-                .iter()
-                .map(|link| link.author_binding.clone())
-                .collect(),
-            signature: author.key.sign(b""),
+            bindings,
+            signer: author.key.public_key().into(),
+            header: Vec::new(),
+        })
+    }
+    pub(crate) fn derived(
+        manifest: Commitment,
+        id: rocky_core::RowIdentity,
+        frame: &EncryptedFrame,
+    ) -> Result<Self, Error> {
+        let header = &frame.operation_ref()?.header;
+        let table = header.extensions.scope.table;
+        let stamp = Stamp {
+            clock: header.timestamp,
+            author: header
+                .extensions
+                .author
+                .ok_or_else(|| denied("numeric birth requires an author"))?,
+            sequence: header.extensions.author_sequence,
         };
-        proof.signature = author.key.sign(&proof.bytes()?);
-        Ok(proof)
+        let bindings: Vec<_> = frame
+            .chain()?
+            .credentials()
+            .0
+            .iter()
+            .map(|link| link.author_binding.clone())
+            .collect();
+        let provenance = provenance(
+            2,
+            manifest,
+            table,
+            id,
+            &stamp,
+            bindings_digest(&encode(&bindings)?),
+        )?;
+        Ok(Self {
+            version: 2,
+            manifest,
+            table,
+            id,
+            provenance,
+            stamp,
+            bindings,
+            signer: header.public_key.into(),
+            header: frame.header_bytes().to_vec(),
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn rebound_provenance_for_test(&self, chain: &Chain) -> Result<Commitment, Error> {
+        let bindings: Vec<_> = chain
+            .credentials()
+            .0
+            .iter()
+            .map(|link| link.author_binding.clone())
+            .collect();
+        provenance(
+            self.version,
+            self.manifest,
+            self.table,
+            self.id,
+            &self.stamp,
+            bindings_digest(&encode(&bindings)?),
+        )
+    }
+    fn authentic(&self) -> bool {
+        let Ok(header) = crate::wire::verified_header(&self.header) else {
+            return false;
+        };
+        header.public_key.as_bytes() == &self.signer.0
+            && header.timestamp == self.stamp.clock
+            && header.extensions.author == Some(self.stamp.author)
+            && header.extensions.author_sequence == self.stamp.sequence
+            && header.extensions.scope.table == self.table
+            && self.provenance().is_ok_and(|provenance| {
+                header
+                    .extensions
+                    .births
+                    .iter()
+                    .any(|birth| birth.as_ref() == &provenance)
+            })
     }
     pub(crate) fn verify(
         &self,
@@ -165,20 +309,17 @@ impl CreationProof {
         if let Some(memo) = memo.as_mut() {
             memo.own_gates += 1;
         }
-        if self.version != 1
+        if self.version != 2
             || self.manifest != manifest
             || self.table != table
             || self.id != id
+            || self.stamp.author != id.author()
             || self.stamp > *ceiling
-            || !self
-                .stamp
-                .author
-                .key()?
-                .verify(&self.bytes()?, &self.signature)
+            || !self.authentic()
         {
             return Err(denied("invalid signed row creation proof"));
         }
-        let signer = self.stamp.author.key()?;
+        let signer = self.signer()?;
         let author = id.author();
         if let Some(memo) = memo.as_mut() {
             if memo.last.as_ref().is_some_and(|old| {
@@ -218,6 +359,9 @@ impl CreationProof {
         }
         Ok(())
     }
+    pub(crate) fn signer(&self) -> Result<PublicKey, Error> {
+        self.signer.key()
+    }
     pub(crate) fn stamp(&self) -> &Stamp {
         &self.stamp
     }
@@ -225,7 +369,7 @@ impl CreationProof {
         self.manifest
     }
     /// The original creation statement this proof names.
-    pub(super) fn provenance(&self) -> Result<Commitment, Error> {
+    fn computed_provenance(&self) -> Result<Commitment, Error> {
         provenance(
             self.version,
             self.manifest,
@@ -235,6 +379,12 @@ impl CreationProof {
             bindings_digest(&encode(&self.bindings)?),
         )
     }
+    pub(crate) fn provenance(&self) -> Result<Commitment, Error> {
+        if self.computed_provenance()? != self.provenance {
+            return Err(denied("creation provenance mismatch"));
+        }
+        Ok(self.provenance)
+    }
     /// The proof as a row record stores it.
     pub(super) fn stored(&self) -> Result<StoredProof, Error> {
         Ok(StoredProof {
@@ -242,9 +392,11 @@ impl CreationProof {
             manifest: self.manifest,
             table: self.table,
             id: self.id,
+            provenance: self.provenance,
             stamp: self.stamp.clone(),
             bindings: bindings_digest(&encode(&self.bindings)?),
-            signature: self.signature,
+            signer: self.signer,
+            header: header_digest(&self.header),
         })
     }
 }
@@ -254,6 +406,7 @@ impl CreationProof {
 pub(crate) struct Carried {
     pub(crate) proof: CreationProof,
     pub(crate) stamps: BTreeMap<Commitment, Stamp>,
+    pub(crate) authors: stamp_authors::Authors,
     /// Present only on a destination insert; sealed with the source key.
     pub(crate) moved_from: Option<Vec<u8>>,
 }
@@ -271,7 +424,45 @@ pub(super) struct MoveSource {
 impl<A: RowApplication> Inner<A> {
     /// Stores the bindings of a proof a row record is about to name.
     pub(super) async fn keep_bindings(&self, proof: &CreationProof) -> Result<(), Error> {
+        self.put_creation_header(&proof.header).await?;
         self.put_bindings(&encode(&proof.bindings)?).await
+    }
+    pub(super) async fn put_creation_header(&self, header: &[u8]) -> Result<(), Error> {
+        let signed = crate::wire::verified_header(header)?;
+        if let Some(author) = signed.extensions.author {
+            self.keep_stamp_author(signed.extensions.scope.domain, author, signed.public_key)
+                .await?;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO secure_creation_headers VALUES(?,?) ON CONFLICT(digest) DO NOTHING",
+                [header_digest(header).to_vec(), header.to_vec()],
+            )
+            .await?;
+        Ok(())
+    }
+    pub(super) async fn stored_creation_header(
+        &self,
+        digest: Commitment,
+    ) -> Result<Vec<u8>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT header FROM secure_creation_headers WHERE digest=?",
+                [digest.to_vec()],
+            )
+            .await?;
+        let header: Vec<u8> = rows
+            .next()
+            .await?
+            .ok_or_else(|| Error::Corrupt("creation header of a stored row".into()))?
+            .get(0)?;
+        if header_digest(&header) != digest {
+            return Err(Error::Corrupt(
+                "stored creation header digest mismatch".into(),
+            ));
+        }
+        Ok(header)
     }
     pub(super) async fn put_bindings(&self, encoded: &[u8]) -> Result<(), Error> {
         self.conn
@@ -294,10 +485,17 @@ impl<A: RowApplication> Inner<A> {
                 [digest.to_vec()],
             )
             .await?;
-        match found.next().await? {
-            Some(row) => Ok(row.get::<Vec<u8>>(0)?),
-            None => Err(Error::Corrupt("author bindings of a stored row".into())),
+        let encoded: Vec<u8> = found
+            .next()
+            .await?
+            .ok_or_else(|| Error::Corrupt("author bindings of a stored row".into()))?
+            .get(0)?;
+        if bindings_digest(&encoded) != digest {
+            return Err(Error::Corrupt(
+                "stored author bindings digest mismatch".into(),
+            ));
         }
+        Ok(encoded)
     }
     /// A stored proof with its bindings, as a move carries it.
     pub(super) async fn carried_proof(&self, stored: &StoredProof) -> Result<CreationProof, Error> {
@@ -306,9 +504,11 @@ impl<A: RowApplication> Inner<A> {
             manifest: stored.manifest,
             table: stored.table,
             id: stored.id,
+            provenance: stored.provenance,
             stamp: stored.stamp.clone(),
             bindings: decode(&self.stored_bindings(stored.bindings).await?)?,
-            signature: stored.signature,
+            signer: stored.signer,
+            header: self.stored_creation_header(stored.header).await?,
         })
     }
     pub(crate) fn check_carried(
@@ -335,6 +535,11 @@ impl<A: RowApplication> Inner<A> {
             .after
             .as_ref()
             .ok_or_else(|| denied("cannot carry a deletion"))?;
+        if carried.authors.keys().copied().collect::<BTreeSet<_>>()
+            != carried.stamps.values().map(|stamp| stamp.author).collect()
+        {
+            return Err(denied("carried stamps require their exact signer legend"));
+        }
         if carried
             .stamps
             .keys()
@@ -366,11 +571,12 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_move_rows(scope BLOB NOT NULL,row BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_consumed(hash BLOB PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_followed(original BLOB NOT NULL,scope BLOB NOT NULL,field BLOB NOT NULL,PRIMARY KEY(original,scope,field)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_creation_headers(digest BLOB PRIMARY KEY,header BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_author_bindings(digest BLOB PRIMARY KEY,bindings BLOB NOT NULL) WITHOUT ROWID",
 ];
 /// The moved rows each commit follows. `CROSS JOIN` keeps the few marked
 /// moves as the outer loop: without it SQLite scans every stored row.
-pub(crate) const MOVE_SCAN: &str = "SELECT r.scope,r.row,r.fields FROM secure_move_rows m CROSS JOIN secure_rows r ON r.scope=m.scope AND r.row=m.row";
+pub(crate) const MOVE_SCAN: &str = "SELECT r.scope,r.row,r.fields FROM secure_move_rows m CROSS JOIN secure_row_records r ON r.scope=m.scope AND r.row=m.row";
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn consume(&self, hash: Hash, reason: &str) -> Result<(), Error> {
         self.conn
@@ -523,19 +729,23 @@ impl<A: RowApplication> Inner<A> {
         let rows = collect_rows(
             self.conn
                 .query(
-                    "SELECT fields FROM secure_rows WHERE scope=?",
+                    "SELECT fields FROM secure_row_records WHERE scope=?",
                     [encode(&scope)?],
                 )
                 .await?,
         )
         .await?;
-        rows.into_iter()
-            .map(|row| match row.as_slice() {
-                [SqlValue::Blob(bytes)] => decode::<Materialized>(bytes),
-                _ => Err(Error::Corrupt("move source row".into())),
-            })
-            .filter(|row| row.as_ref().map_or(true, |row| !row.deleted))
-            .collect()
+        let mut records = Vec::new();
+        for row in rows {
+            let [SqlValue::Blob(bytes)] = row.as_slice() else {
+                return Err(Error::Corrupt("move source row".into()));
+            };
+            let record = self.decode_record(bytes).await?;
+            if !record.deleted {
+                records.push(record);
+            }
+        }
+        Ok(records)
     }
     pub(super) async fn move_row(
         &mut self,
@@ -817,7 +1027,7 @@ impl<A: RowApplication> Inner<A> {
                             .max()
                             .unwrap_or(0)
                             + 1,
-                        author: author.key.public_key().into(),
+                        author: author.number,
                         sequence: 0,
                     },
                 );
@@ -826,6 +1036,7 @@ impl<A: RowApplication> Inner<A> {
                 (destination, key),
                 Carried {
                     proof,
+                    authors: self.carried_authors(destination.domain, &stamps).await?,
                     stamps,
                     moved_from: Some(moved_from),
                 },
@@ -936,7 +1147,7 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("move scan".into()));
             };
             let destination: ResourceScope = decode(scope)?;
-            let record: Materialized = decode(bytes)?;
+            let record = self.decode_record(bytes).await?;
             let Some(sealed) = record.moved_from.as_ref().filter(|_| !record.deleted) else {
                 continue;
             };
@@ -989,7 +1200,7 @@ impl<A: RowApplication> Inner<A> {
                     let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
                         return Err(Error::Corrupt("own updates".into()));
                     };
-                    let frame = EncryptedFrame::bare(header.clone(), body.clone());
+                    let frame = self.chained_frame(header.clone(), body.clone()).await?;
                     let operation = frame.operation_ref()?;
                     let payload = self.row_payload(&frame)?;
                     for write in payload.clone().into_writes() {
@@ -1006,8 +1217,8 @@ impl<A: RowApplication> Inner<A> {
                         }
                         let default_stamp = Stamp {
                             clock: operation.header.timestamp,
-                            author: signer.into(),
-                            sequence: operation.header.seq_num,
+                            author: operation.header.extensions.author.unwrap_or(0),
+                            sequence: operation.header.extensions.author_sequence,
                         };
                         for field in write.published_fields() {
                             let Some(value) = write
@@ -1022,7 +1233,7 @@ impl<A: RowApplication> Inner<A> {
                                 .carried(&write.change.row)
                                 .and_then(|carried| carried.stamps.get(&field))
                                 .unwrap_or(&default_stamp);
-                            if stamp.author != signer
+                            if Some(stamp.author) != operation.header.extensions.author
                                 || record.stamps.get(&field).is_some_and(|old| old >= stamp)
                             {
                                 continue;
@@ -1091,6 +1302,7 @@ impl<A: RowApplication> Inner<A> {
                 (destination, write.change.row),
                 Carried {
                     proof,
+                    authors: self.carried_authors(destination.domain, &stamps).await?,
                     stamps,
                     moved_from: None,
                 },
@@ -1115,6 +1327,7 @@ impl<A: RowApplication> Inner<A> {
             .await;
             if let Err(error) = authored {
                 self.conn.execute("ROLLBACK TO follow", ()).await?;
+                self.invalidate_context();
                 self.conn.execute("RELEASE follow", ()).await?;
                 return Err(error);
             }
@@ -1167,7 +1380,7 @@ impl<A: RowApplication> Inner<A> {
         let records = collect_rows(
             self.conn
                 .query(
-                    "SELECT row,fields FROM secure_rows WHERE scope=?",
+                    "SELECT row,fields FROM secure_row_records WHERE scope=?",
                     [blob.clone()],
                 )
                 .await?,
@@ -1177,7 +1390,7 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(row), SqlValue::Blob(bytes)] = values.as_slice() else {
                 return Err(Error::Corrupt("move index row".into()));
             };
-            let record: Materialized = decode(bytes)?;
+            let record = self.decode_record(bytes).await?;
             if record.moved_from.is_some() && !record.deleted {
                 self.conn
                     .execute(
@@ -1198,7 +1411,7 @@ impl<A: RowApplication> Inner<A> {
         while let Some(row) = rows.next().await? {
             let id: Vec<u8> = row.get(0)?;
             let bytes: Vec<u8> = row.get(1)?;
-            let row: Materialized = decode(&bytes)?;
+            let row = self.decode_record(&bytes).await?;
             if let Some(link) = row.moved_from {
                 summary.count += 1;
                 let hash =

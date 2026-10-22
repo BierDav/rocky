@@ -187,7 +187,7 @@ async fn state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
         "secure_kept_marks",
         "secure_applied",
         "secure_scope_state",
-        "secure_rows",
+        "secure_row_records",
         "secure_metadata",
         "secure_identity_marks",
         "secure_identity_own",
@@ -580,6 +580,15 @@ async fn fresh_rows_rollback_and_bounded_fallback_never_reuse_position_results()
         )
         .await
         .unwrap();
+    crate::replica::positions::insert(
+        &inner.conn,
+        &frames[0].operation().unwrap().header,
+        0,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     let mut attempts = 0;
     transaction!(inner, |inner| {
         attempts += 1;

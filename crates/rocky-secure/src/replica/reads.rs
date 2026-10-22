@@ -249,7 +249,7 @@ impl<A: RowApplication> Inner<A> {
             let chunk = collect_rows(
                 self.conn
                     .query(
-                        "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                        "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT ?",
                         bindings(vec![
                             SqlValue::Blob(scope.clone()),
                             SqlValue::Blob(last.map(|row| row.to_vec()).unwrap_or_default()),
@@ -268,7 +268,7 @@ impl<A: RowApplication> Inner<A> {
                     .as_slice()
                     .try_into()
                     .map_err(|_| denied("corrupt row identity"))?;
-                let record: Materialized = decode(bytes)?;
+                let record = self.decode_record(bytes).await?;
                 if !record.deleted
                     && (record.identity.is_none()
                         || self

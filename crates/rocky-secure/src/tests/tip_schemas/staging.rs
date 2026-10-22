@@ -813,5 +813,5 @@ pub(super) fn payload(
         frame.body_bytes(),
     )
     .unwrap();
-    crate::wire::RowPayload::decode(&bytes).unwrap()
+    crate::wire::RowPayload::decode_test(&bytes, frame, &lineage.app(generation)).unwrap()
 }

@@ -107,7 +107,7 @@ pub(super) fn capture(
         ),
         (
             "row_keys",
-            "SELECT scope,row FROM secure_rows ORDER BY scope,row",
+            "SELECT scope,row FROM secure_row_records ORDER BY scope,row",
         ),
     ] {
         best_effort(&transaction, &mut output, name, sql);

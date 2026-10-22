@@ -1,12 +1,10 @@
 # features_10: sync at the speed of state
 
-Status: specified for implementation (2026-10-22). Every design question
-the [review](00-sync-performance-review.md) raised is settled below; the
+Status: phases 1, 2, 4 and 3 complete and qualified (2026-10-24).
+Every design question the [review](00-sync-performance-review.md) raised is settled below; the
 phase briefs are written to be handed to an agent as they stand. This
-roadmap is not yet the accepted one: `AGENTS.md` and the root README still
-name [features_09](../features_09/README.md), whose phase 20 is in
-progress. Phases here build on features_09's sealed forks and change none
-of their security contracts.
+roadmap is authorized for implementation. Existing sealed-fork security
+contracts remain unchanged. Source code and tests define current behavior.
 
 ## Destination
 
@@ -16,7 +14,7 @@ around the data. Nothing a device does per received page costs more than
 that page. Concretely, on the reference machine and the existing 100,000-row
 migration fixture (`rocky-sdk::migrations`):
 
-| Measure | Today | After phase 2 | After phase 4 |
+| Measure | Baseline (2026-10-19) | After phase 2 | After phase 4 |
 | --- | --- | --- | --- |
 | Member stage, 100,000 rows | 233 s | ≤ 120 s | ≤ 60 s |
 | Bytes moved for 5 MB of rows | 570 MB | 570 MB as frames, ~135 MB as a state | ≤ 50 MB |
@@ -65,23 +63,23 @@ each carrying a 32-byte node key, and a 230-byte signed creation proof.
   header already proves, and an ordinary birth's creation statement is
   derived from its frame instead of shipped as a second signed proof.
   Carried rows keep the signed proof. Names remain identities
-  ([0067](../decisions/0067-names-are-identities.md)).
+  (0067).
 - **One current version per format.** Each phase that changes a persisted
   or wire shape moves its version; nothing reads an earlier one
-  ([0039](../decisions/0039-single-current-formats.md)).
+  (0039).
 
 ## Phases
 
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
-| 1 | [Held positions as tables](01-held-positions-as-tables.md) | none | about a week | Seal readiness and tip frontiers cost rows, not headers; the audit proves them equal to the scan |
-| 2 | [States as the default catch-up](02-states-as-default-catch-up.md) | none | one to two weeks | A member joins a 100,000-row migration by importing the closing seal's checkpoint in ≤ 120 s |
-| 3 | [Incremental finalization](03-incremental-finalization.md) | 1 | two to three weeks | Finalizing a seal on a 100,000-row scope with ten excluded operations takes ≤ 1 s and equals the full rebuild |
-| 4 | [Compact row representation](04-compact-row-representation.md) | 1 | three to five weeks | A seven-field row costs ≤ 500 B on the wire and ≤ 300 B at rest; the member file of the 100k fixture is ≤ 200 MB |
+| 1 | [Held positions as tables](01-held-positions-as-tables.md) | none | complete | [All gates passed](01-held-positions-evidence.md): readiness and frontiers read ranges; the audit proves equality |
+| 2 | [States as the default catch-up](02-states-as-default-catch-up.md) | none | complete | [All gates passed](02-states-as-default-catch-up-evidence.md): 100k members import the closing checkpoint in 17.061/17.138 s, one sync |
+| 3 | [Incremental finalization](03-incremental-finalization.md) | 1 | complete | [All gates passed](03-incremental-finalization-evidence.md): 100k quiet finalization 18.631 ms; ten operations / 300 rows 392.077 ms; exact full-rebuild equality |
+| 4 | [Compact row representation](04-compact-row-representation.md) | 1 | complete | [All gates passed](04-compact-row-representation-evidence.md): 167.5 B/row wire, 181 B records; 100k member files 163.84/164.47 MB, catch-up including open 24.502/25.600 s |
 
 ```mermaid
 flowchart LR
-    P1["1 Held positions as tables (1 w)"] --> P3["3 Incremental finalization (2–3 w)"]
+    P1["1 Held positions as tables (1 w)"] --> P3["3 Incremental finalization (complete)"]
     P1 --> P4["4 Compact row representation (3–5 w)"]
     P2["2 States as the default catch-up (1–2 w)"]
 ```
@@ -93,16 +91,6 @@ which phase 2 makes them. Phases 1 and 2 are independent and may run in
 parallel lanes. Effort assumes one lane per phase with the full check suite
 as the gate; the two 100k end-to-end runs cost about fifteen minutes per
 iteration.
-
-## Decision records
-
-| Record | Phase | Topic |
-| --- | --- | --- |
-| 0076 | 2 | [States as the default catch-up and automatic compaction at final seals](../decisions/0076-states-as-default-catch-up.md) |
-| 0077 | 4 | [Compact row representation](../decisions/0077-compact-row-representation.md) |
-
-Phases 1 and 3 change storage internals under unchanged contracts and need
-no record; the lazy compaction guide gains their rationale.
 
 ## Open questions
 
@@ -118,19 +106,18 @@ one was).
 
 ## Agent execution contract
 
-Give an agent this README and one phase brief. Read root `AGENTS.md`,
-[development](../development.md), the [module map](../modules.md),
-[lazy compaction](../runtime/lazy-compaction.md),
-[encrypted checkpoints](../runtime/encrypted-checkpoints.md) and
-[admission evidence](../runtime/admission-evidence.md). Verify the brief's
-prerequisites against code before editing; if one fails, repair it within
-scope or report the exact blocking contract. Never weaken admission,
-durability or atomicity, and never report success for missing behavior.
+Give an agent this README and one phase brief. Infer architecture and
+ownership from source code, Cargo manifests, module declarations and tests.
+Keep modules focused and names clear so the implementation is easy to navigate.
+Verify prerequisites against code before editing; repair failures within scope
+or report the exact blocking contract. Never weaken admission, durability or
+atomicity, and never report success for missing behavior. Do not recreate removed
+documentation; keep phase status and evidence in this directory.
 
 Each phase keeps the 100k fixture's measurements in its evidence file with
 the stage times and the member file's `dbstat` table sizes, so the
-destination table above can be checked. Update the owning guides, the
-brief's status line and its evidence with each completed slice. Use `jj`,
+destination table above can be checked. Update the brief's status line
+and its evidence with each completed slice. Use `jj`,
 run `./scripts/lint` and `./scripts/check`, and for Kotlin changes
 `sdks/kotlin/gradlew -p sdks/kotlin check` and
 `./examples/shoppinglist-app/check`. Report what passed and what was not

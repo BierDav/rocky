@@ -380,6 +380,18 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<Option<ScopeSync>, Error> {
+        self.bootstrap_advised_scope(replica, scope, quota, None)
+            .await
+    }
+
+    /// Imports only the exact advised offer; a replaced offer is retried later.
+    pub async fn bootstrap_advised_scope<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+        quota: usize,
+        advice: Option<&crate::StateAdvice>,
+    ) -> Result<Option<ScopeSync>, Error> {
         if self.low(MAX_SECURE_FRAME) {
             return Ok(Some(ScopeSync {
                 rebootstrap: None,
@@ -393,6 +405,14 @@ impl NativeSession {
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };
+        if let Some(advice) = advice
+            && (signed.id()? != advice.checkpoint
+                || signed.signer() != advice.signer
+                || signed.statement.seal != Some(advice.seal)
+                || signed.statement.rows.count != advice.rows)
+        {
+            return Err(denied("checkpoint superseded since state advice"));
+        }
         if signed.statement.seal.is_none() && replica.owns_checkpoint_signer(&signed).await {
             return Ok(None);
         }

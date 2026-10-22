@@ -26,7 +26,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         .unwrap();
     drop(replica);
     let source = template.path().join("base.sqlite");
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -71,7 +71,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     }
     for version in [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31, 33,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 36,
     ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -111,6 +111,41 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+    for damaged in [
+        "DROP INDEX secure_rows_dead",
+        "DROP INDEX secure_rows_shape",
+        "DROP TABLE secure_record_shapes",
+        "DROP TABLE secure_scope_shapes",
+        "DROP TRIGGER secure_shapes_update",
+        "DROP TABLE secure_row_positions",
+        "DROP TABLE secure_birth_positions",
+        "DROP TRIGGER secure_row_positions_delete",
+        "DROP INDEX secure_row_position_operations",
+    ] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("replica.sqlite");
+        std::fs::copy(&source, &path).unwrap();
+        let replica =
+            EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
+                .await
+                .unwrap();
+        {
+            let mut inner = replica.inner.lock().await;
+            inner.conn.execute(damaged, ()).await.unwrap();
+            inner.flush().unwrap();
+        }
+        drop(replica);
+        let before = std::fs::read(&path).unwrap();
+        let error = EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("secure") || error.to_string().contains("incremental"),
+            "{damaged}: {error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{damaged}");
+    }
 }
 
 #[tokio::test]
@@ -142,7 +177,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
@@ -211,6 +246,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         ),
         author_sequence: 0,
         row_format: crate::wire::ROW_FORMAT,
+        births: Vec::new(),
         partition: None,
         existence: 0,
     };
@@ -222,7 +258,8 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         (1, 2, "unsupported bundle version"),
         (1, 3, "unsupported bundle version"),
         (1, 4, "unsupported bundle version"),
-        (1, 6, "unsupported bundle version"),
+        (1, 5, "unsupported bundle version"),
+        (1, 7, "unsupported bundle version"),
     ] {
         let plaintext = encode(&Envelope {
             version: envelope_version,

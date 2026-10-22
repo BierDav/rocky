@@ -102,6 +102,12 @@ async fn conflicting_existence_counts_take_the_maximum_before_finalization() {
             )
             .await
             .unwrap();
+        crate::replica::positions::insert(&inner.conn, &conflicting, 1, false, true)
+            .await
+            .unwrap();
+        crate::replica::positions::insert(&inner.conn, &repeated, 1, false, true)
+            .await
+            .unwrap();
         let mut orders = Vec::new();
         for reverse in [false, true] {
             inner

@@ -292,6 +292,7 @@ pub(crate) struct Node {
     import_sources: std::sync::Mutex<
         BTreeMap<ResourceScope, (Option<rocky_core::Commitment>, tokio::time::Instant)>,
     >,
+    state_failures: std::sync::Mutex<BTreeMap<(ResourceScope, rocky_core::Commitment), u8>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
     /// Signals that the discovery topics may have changed.
     topics: watch::Sender<u64>,
@@ -378,6 +379,7 @@ impl Node {
             learned: AtomicBool::new(false),
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),
+            state_failures: Default::default(),
             choices: std::sync::Mutex::new(BTreeMap::new()),
             topics: watch::channel(0).0,
             announcing: AtomicBool::new(false),
@@ -431,13 +433,20 @@ impl Node {
         settings: &Settings,
     ) -> Result<Option<crate::MigrationStatus>, Failure> {
         let (mut bundles, mut published) = (0, 0);
+        let mut pending = false;
         for publication in self.replica.publications().await? {
-            if publication.published < publication.bundles {
+            if publication.published < publication.bundles
+                || !self
+                    .replica
+                    .migration_checkpoint_listed(publication.id)
+                    .await?
+            {
+                pending = true;
                 bundles += publication.bundles;
                 published += publication.published;
             }
         }
-        if bundles > 0 {
+        if pending {
             return Ok(Some(crate::MigrationStatus::Publishing {
                 bundles,
                 published,
@@ -2157,6 +2166,7 @@ impl Node {
         self.sync_state.send_replace("syncing");
         // Finality records reach peers in this pass's graph exchange.
         self.finalize_seals().await;
+        self.close_migrations().await?;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         let saved = self.settings.lock().await.clone();
         if !automatic && self.dialed(&saved).is_empty() && !saved.unresolved_contacts().is_empty() {
@@ -2447,6 +2457,8 @@ impl Node {
         }
         let catalog_changed = self.acquire_schemas(transport).await?;
         let schema_changed = self.follow_schema().await?;
+        self.finalize_seals().await;
+        self.close_migrations().await?;
         let (mut connected, mut first, mut retry) = (0, None, catalog_changed || schema_changed);
         for (peer, _, generation, result) in results {
             {
@@ -2873,6 +2885,7 @@ impl Node {
                 false => None,
             },
             keep: Some(&keep),
+            state_failures: &self.state_failures,
         };
         let reconcile = upstream.link.begin_reconcile().await?;
         // Envelopes first, on the exchange's first session: a list a

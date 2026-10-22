@@ -8,14 +8,22 @@ use crate::tests::stored_frames;
 /// Whether any stored record of `table` holds the id `field`.
 async fn holds(replica: &EncryptedReplica<TypedRows>, table: &str, field: Commitment) -> bool {
     let inner = replica.inner.lock().await;
-    rows(&inner.conn, &format!("SELECT fields FROM {table}"))
+    for row in rows(&inner.conn, &format!("SELECT fields FROM {table}"))
         .await
         .unwrap()
-        .iter()
-        .any(|row| match row.as_slice() {
-            [SqlValue::Blob(bytes)] => bytes.windows(32).any(|window| window == field),
-            _ => false,
-        })
+    {
+        if let [SqlValue::Blob(bytes)] = row.as_slice() {
+            let record = inner.decode_record(bytes).await.unwrap();
+            if encode(&record)
+                .unwrap()
+                .windows(32)
+                .any(|window| window == field)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 /// Every frame `source` authored, for a test to deliver late.
 pub(super) async fn authored(
@@ -494,7 +502,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     .await
     .unwrap();
     sync(&lineage, &alice, &carol, &carol_key).await;
-    assert!(holds(&alice, "secure_rows", note).await);
+    assert!(holds(&alice, "secure_row_records", note).await);
 
     assert!(
         lineage
@@ -516,7 +524,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
         expected
     );
     // No stored row keeps the removed field or table.
-    assert!(!holds(&alice, "secure_rows", note).await);
+    assert!(!holds(&alice, "secure_row_records", note).await);
     let stored = |scope: ResourceScope| {
         let alice = &alice;
         async move {
@@ -525,7 +533,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
                 inner
                     .conn
                     .query(
-                        "SELECT count(*) FROM secure_rows WHERE scope=?",
+                        "SELECT count(*) FROM secure_row_records WHERE scope=?",
                         [crate::encode(&scope).unwrap()],
                     )
                     .await
@@ -557,7 +565,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
         select(&alice, "SELECT title FROM items WHERE key='0001'").await,
         vec![vec![text("uno")]]
     );
-    assert!(!holds(&alice, "secure_rows", note).await);
+    assert!(!holds(&alice, "secure_row_records", note).await);
     assert_eq!(stored(tags).await, vec![vec![SqlValue::Integer(0)]]);
     alice.audit(items).await.unwrap();
     // The removal survives reopening and dropping schemas nothing needs.
@@ -579,7 +587,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     for frame in authored(&carol, &carol_key).await {
         let _ = alice.receive(frame).await;
     }
-    assert!(!holds(&alice, "secure_rows", note).await);
+    assert!(!holds(&alice, "secure_row_records", note).await);
 }
 
 #[tokio::test]
@@ -620,6 +628,19 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     for (target, key) in [(bob, bob_key), (dave, dave_key)] {
         sync(&lineage, alice, target, key).await;
     }
+    let name_id = |replica: &EncryptedReplica<TypedRows>| {
+        let replica = replica.clone();
+        async move {
+            rows(
+                &replica.inner.lock().await.conn,
+                "SELECT id FROM secure_field_names WHERE name='items.note'",
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let original_name_id = name_id(alice).await;
+    assert_eq!(original_name_id.len(), 1);
     // Dave, offline at A, writes the field late, beyond every seal.
     write(dave, "UPDATE items SET note='late at A' WHERE key='0002'").await;
     // A -> B (no `note`) -> C (`note` again). Alice walks each step.
@@ -632,10 +653,11 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
             .await
             .unwrap()
     );
-    assert!(!holds(alice, "secure_rows", lineage.note()).await);
+    assert!(!holds(alice, "secure_row_records", lineage.note()).await);
     crate::tests::check_frontier_cache(alice, items).await;
     alice.compact(lineage.domain, 0).await.unwrap();
     crate::tests::check_frontier_cache(alice, items).await;
+    assert_eq!(name_id(alice).await, original_name_id);
     let readded = lineage.publish(alice, 5).await.unwrap();
     assert!(
         lineage
@@ -643,6 +665,7 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
             .await
             .unwrap()
     );
+    assert_eq!(name_id(alice).await, original_name_id);
     // Bob follows A -> C at once: B's schema is needed for the path.
     assert!(
         lineage

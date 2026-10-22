@@ -184,8 +184,8 @@ impl<A: RowApplication> Inner<A> {
             let finalized = self.seal_finalized(scope).await?;
             let ceiling = Stamp {
                 clock: operation.header.timestamp,
-                author: operation.header.public_key.into(),
-                sequence: operation.header.seq_num,
+                author: operation.header.extensions.author.unwrap_or(0),
+                sequence: operation.header.extensions.author_sequence,
             };
             for (ordinal, write) in &current {
                 let change = &write.change;
@@ -204,7 +204,7 @@ impl<A: RowApplication> Inner<A> {
                         return Err(denied("forged row author or reused identity sequence"));
                     }
                     let signer = match carried {
-                        Some(carried) => carried.proof.stamp().author.key()?,
+                        Some(carried) => carried.proof.signer()?,
                         None => operation.header.public_key,
                     };
                     let provenance = match carried {
@@ -502,6 +502,18 @@ impl<A: RowApplication> Inner<A> {
         };
         let scope = operation.header.extensions.scope;
         let id = self.scope_id(scope).await?;
+        if let Some(author) = operation.header.extensions.author {
+            self.keep_stamp_author(scope.domain, author, operation.header.public_key)
+                .await?;
+        }
+        for write in payload.writes() {
+            if let Some(carried) = payload.carried(&write.change.row) {
+                for (author, signer) in &carried.authors {
+                    self.keep_stamp_author(scope.domain, *author, *signer)
+                        .await?;
+                }
+            }
+        }
         // Consumed births reserve identities even when their row is
         // definitely dropped; the frame is replay-eligible here, so the
         // ledger folds them too.
@@ -562,7 +574,7 @@ impl<A: RowApplication> Inner<A> {
             let mut old = self
                 .conn
                 .query(
-                    "SELECT fields FROM secure_rows WHERE scope=? AND row=?",
+                    "SELECT fields FROM secure_row_records WHERE scope=? AND row=?",
                     [encode(&change.scope)?, row.to_vec()],
                 )
                 .await?;
@@ -579,12 +591,18 @@ impl<A: RowApplication> Inner<A> {
             {
                 self.keep_bindings(proof).await?;
             }
-            let new = encode(&record)?;
-            sets.replace(&row, old.as_deref(), &new)?;
-            self.conn.execute("INSERT INTO secure_rows VALUES(?,?,?,?) ON CONFLICT(scope,row) DO UPDATE SET fields=excluded.fields,stamp=excluded.stamp", [encode(&change.scope)?, row.to_vec(), new, frame.id()?.as_bytes().to_vec()]).await?;
+            let new = self.encode_record(&record).await?;
+            sets.replace_stored(self, &row, old.as_deref(), &new)
+                .await?;
+            self.conn
+                .execute(
+                    "INSERT INTO secure_row_records VALUES(?,?,?)",
+                    [encode(&change.scope)?, row.to_vec(), new],
+                )
+                .await?;
             self.index_row_key(&encode(&change.scope)?, &row, &record)
                 .await?;
-            let old: Option<Materialized> = old.as_deref().map(decode).transpose()?;
+            let old: Option<Materialized> = self.optional_record(old.as_deref()).await?;
             projections.push((change.scope, old, record));
         }
         for (scope, old, record) in projections {
@@ -597,6 +615,7 @@ impl<A: RowApplication> Inner<A> {
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied + 1)
             .await?;
         self.note_applied(id, operation).await?;
+        self.note_row_positions(id, frame, payload).await?;
         if let Some(held) = payload.reauthors() {
             if payload.membership().is_none() {
                 return Err(denied("held re-authoring requires a transaction bundle"));
@@ -660,14 +679,15 @@ pub(super) fn merge_row(
         moved_from: None,
         fields: BTreeMap::new(),
         stamps: BTreeMap::new(),
+        authors: BTreeMap::new(),
         deleted: false,
         creation: operation.hash,
         identity: None,
         key: Some(change.row),
         created: Some(Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.public_key.into(),
-            sequence: operation.header.seq_num,
+            author: operation.header.extensions.author.unwrap_or(0),
+            sequence: operation.header.extensions.author_sequence,
         }),
     });
     if current.is_some() && change.before.is_none() {
@@ -687,8 +707,8 @@ pub(super) fn merge_row(
     } else if !record.deleted {
         let stamp = Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.public_key.into(),
-            sequence: operation.header.seq_num,
+            author: operation.header.extensions.author.unwrap_or(0),
+            sequence: operation.header.extensions.author_sequence,
         };
         let after = change
             .after
@@ -715,6 +735,28 @@ pub(super) fn merge_row(
         record.created = Some(carried.proof.stamp().clone());
         record.moved_from = carried.moved_from.clone();
     }
+    let author = operation.header.extensions.author.unwrap_or(0);
+    if let Some(old) = record.authors.insert(author, operation.header.public_key)
+        && old != operation.header.public_key
+    {
+        return Err(denied("a row stamp author names another signer"));
+    }
+    if let Some(carried) = carried {
+        for (author, signer) in &carried.authors {
+            if let Some(old) = record.authors.insert(*author, *signer)
+                && old != *signer
+            {
+                return Err(denied("a carried stamp author names another signer"));
+            }
+        }
+        let signer = carried.proof.signer()?;
+        if let Some(old) = record.authors.insert(carried.proof.stamp().author, signer)
+            && old != signer
+        {
+            return Err(denied("creation stamp signer differs from its proof"));
+        }
+    }
+    record.trim_authors()?;
     let actual = RowChange {
         scope: change.scope,
         row: change.row,

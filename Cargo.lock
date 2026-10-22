@@ -6063,6 +6063,7 @@ version = "0.1.0"
 dependencies = [
  "data-encoding",
  "futures-util",
+ "p2panda-core",
  "rand 0.8.8",
  "rocky-coordinator",
  "rocky-core",

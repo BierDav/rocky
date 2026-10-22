@@ -341,14 +341,20 @@ const FILLED_COUNT: &str =
 /// `docs/features_09/07-migrations-at-any-size.md`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Failure> {
-    converges_on_every_member(LARGE).await
+    converges_on_every_member(LARGE, 0).await
 }
 
 /// The member needs the first migration's frames, signed under the
 /// generation before the one both devices open, to apply the second's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure> {
-    converges_on_every_member(8).await
+    converges_on_every_member(8, 0).await
+}
+
+/// A returning member skips the covered history at the newest listed base.
+#[tokio::test(flavor = "multi_thread")]
+async fn newest_state_skips_50000_rows_and_100_seals() -> Result<(), Failure> {
+    converges_on_every_member(50_000, 98).await
 }
 
 /// The row changes SQLite counts in the in-place switch that adds `tag`
@@ -375,10 +381,18 @@ async fn additive_switch_changes(root: &Path, rows: usize) -> Result<i64, Failur
     Ok(changes)
 }
 
-async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
+async fn converges_on_every_member(large: usize, history: usize) -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
-    let small = additive_switch_changes(root.path(), 8).await?;
-    assert!(small >= 0, "the additive switch was not in place");
+    // The history gate needs one 50k-row state; the other gates exercise
+    // the additive switch and second migration as well.
+    let multi_step = history == 0;
+    let small = if multi_step {
+        let changes = additive_switch_changes(root.path(), 8).await?;
+        assert!(changes >= 0, "the additive switch was not in place");
+        Some(changes)
+    } else {
+        None
+    };
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
@@ -391,16 +405,36 @@ async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
     )?;
     introduce(&a, &b).await;
     sync(&b).await;
+    let history_clock = std::time::Instant::now();
+    for index in 0..history {
+        a.ok(json!({"type":"tips", "action":"seal"})).await;
+        if index == 0 {
+            a.ok(json!({"type":"tips", "action":"compact"})).await;
+        }
+    }
+    if history > 1 {
+        // Finish the empty historical states before authoring the migration.
+        // Their seals and listed records remain on the returning member's path.
+        a.ok(json!({"type":"tips", "action":"compact"})).await;
+    }
+    let history_time = history_clock.elapsed();
+    eprintln!("STAGE rows={large} history={history_time:?}");
     a.close().await;
 
     let size =
         |directory: &Path| std::fs::metadata(directory.join("rocky.sqlite")).map(|m| m.len());
+    b.close().await;
+    // One publication peer durably acknowledges the migration bundles before
+    // the measured returning member takes the issuer's closing base.
+    let c_dir = root.path().join("publication-peer");
     let before = size(&a_dir)?;
     let clock = std::time::Instant::now();
-    let (seed, fill) = (
-        SEEDED.replace("100000", &large.to_string()),
-        FILLED.replace("100000", &large.to_string()),
-    );
+    let seed = SEEDED.replace("100000", &large.to_string());
+    let fill = if multi_step {
+        FILLED.replace("100000", &large.to_string())
+    } else {
+        seed.clone()
+    };
     let a = Device::new(Database::open(open(&a_dir, &seed, None))?)?;
     let seeded = clock.elapsed();
     eprintln!("STAGE rows={large} seed_open={seeded:?}");
@@ -424,75 +458,170 @@ async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
     let data = used(&a_dir)?;
     // A nullable field is added in place: no stored or projected row is
     // rewritten, so the data barely grows whatever the row count.
-    let tagged_schema = TAGGED.replace("100000", &large.to_string());
-    let clock = std::time::Instant::now();
-    let a = Device::new(Database::open(open(&a_dir, &tagged_schema, None))?)?;
-    let tagged = clock.elapsed();
-    eprintln!("STAGE rows={large} additive_open={tagged:?}");
-    // The switch writes no row: SQLite counts the same changes as for 8.
-    let switch_changes = rocky_secure::last_in_place_switch_changes();
-    assert_eq!(
-        switch_changes, small,
-        "an additive switch of {large} rows rewrote rows"
-    );
-    assert_eq!(generation(&a).await["current"]["schema"], 3);
-    a.close().await;
-    let after_tag = size(&a_dir)?;
-    let tagged_data = used(&a_dir)?;
-    assert!(
-        tagged_data.saturating_sub(data) < 1 << 20,
-        "an additive switch rewrote rows: {data} -> {tagged_data} bytes of data"
-    );
+    let additive_measurement = if let Some(small) = small {
+        let tagged_schema = TAGGED.replace("100000", &large.to_string());
+        let clock = std::time::Instant::now();
+        let a = Device::new(Database::open(open(&a_dir, &tagged_schema, None))?)?;
+        let tagged = clock.elapsed();
+        eprintln!("STAGE rows={large} additive_open={tagged:?}");
+        // The switch writes no row: SQLite counts the same changes as for 8.
+        let switch_changes = rocky_secure::last_in_place_switch_changes();
+        assert_eq!(
+            switch_changes, small,
+            "an additive switch of {large} rows rewrote rows"
+        );
+        assert_eq!(generation(&a).await["current"]["schema"], 3);
+        a.close().await;
+        let after_tag = size(&a_dir)?;
+        let tagged_data = used(&a_dir)?;
+        assert!(
+            tagged_data.saturating_sub(data) < 1 << 20,
+            "an additive switch rewrote rows: {data} -> {tagged_data} bytes of data"
+        );
+        format!(
+            "additive_open={tagged:?} file_tagged={after_tag} data_tagged={tagged_data} switch_changes={switch_changes}"
+        )
+    } else {
+        String::new()
+    };
     let clock = std::time::Instant::now();
     let a = Device::new(Database::open(open(&a_dir, &fill, network("a")))?)?;
     let filled = clock.elapsed();
-    eprintln!("STAGE rows={large} fill_open={filled:?}");
+    let open_stage = if multi_step {
+        "fill_open"
+    } else {
+        "publisher_open"
+    };
+    eprintln!("STAGE rows={large} {open_stage}={filled:?}");
     let status = generation(&a).await;
-    assert_eq!(status["current"]["schema"], 4, "{status}");
+    assert_eq!(
+        status["current"]["schema"],
+        if multi_step { 4 } else { 2 },
+        "{status}"
+    );
     let bundles = large.div_ceil(rocky_secure::MAX_BUNDLE_ROWS) as u64;
+    let migrations = if multi_step { 2 } else { 1 };
     assert_eq!(
         status["migration"],
-        json!({"state": "publishing", "bundles": 2 * bundles, "published": 0})
+        json!({"state": "publishing", "bundles": migrations * bundles, "published": 0})
     );
-    let count = |n: usize| json!([[{"type": "integer", "value": n.to_string()}, {"type": "integer", "value": n.to_string()}]]);
-    assert_eq!(rows(&a, FILLED_COUNT).await, count(large));
+    {
+        let db = rusqlite::Connection::open_with_flags(
+            a_dir.join("rocky.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let (frames, bytes, maximum): (i64, i64, i64) = db.query_row(
+            "SELECT count(*),coalesce(sum(length(body)),0),coalesce(max(length(body)),0) FROM secure_operations", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let average = bytes.checked_div(frames).unwrap_or(0);
+        eprintln!(
+            "FRAMES rows={large} stage={open_stage} count={frames} body_bytes={bytes} body_average={average} body_maximum={maximum}"
+        );
+        if large == LARGE {
+            assert!(frames > 0);
+            assert!(average <= 16_000, "average frame body is {average} bytes");
+        }
+    }
+    let (ready_query, ready_rows) = if multi_step {
+        (
+            FILLED_COUNT,
+            json!([[{"type": "integer", "value": large.to_string()}, {"type": "integer", "value": large.to_string()}]]),
+        )
+    } else {
+        (
+            "SELECT count(*) FROM items",
+            json!([[{"type": "integer", "value": large.to_string()}]]),
+        )
+    };
+    assert_eq!(rows(&a, ready_query).await, ready_rows);
 
-    // The member opens with its own schema and follows `main` through the
-    // seed, the tag and the fill, then pulls every retained row.
-    b.close().await;
+    let network_bytes = hub.written();
+    let publication_wire_start = *network_bytes.borrow();
+    let clock = std::time::Instant::now();
+    let c = Device::new(Database::join(
+        open(&c_dir, &fill, network("publication-peer")),
+        &a.invite().await,
+    )?)?;
+    sync(&c).await;
+    let published = clock.elapsed();
+    eprintln!("STAGE rows={large} publication={published:?}");
+    let closing_wire_start = *network_bytes.borrow();
+    eprintln!(
+        "WIRE rows={large} publication_bytes={}",
+        closing_wire_start - publication_wire_start
+    );
+    let clock = std::time::Instant::now();
+    sync(&a).await;
+    let closed = clock.elapsed();
+    eprintln!("STAGE rows={large} closing_compaction={closed:?}");
+    eprintln!(
+        "WIRE rows={large} closing_compaction_bytes={}",
+        *network_bytes.borrow() - closing_wire_start
+    );
+    assert_eq!(generation(&a).await["migration"], Value::Null);
+    if history > 0 {
+        let inspection = a.ok(json!({"type":"tips", "action":"inspect"})).await;
+        let seals = inspection["seals"].as_array().ok_or("missing seals")?;
+        assert!(seals.len() >= 100, "only {} seals", seals.len());
+        assert!(
+            seals
+                .iter()
+                .filter(|seal| seal["checkpoints"]
+                    .as_array()
+                    .is_some_and(|records| !records.is_empty()))
+                .count()
+                >= 2,
+            "the newest base must compete with an older listed base"
+        );
+    }
+    c.close().await;
+
+    // The returning member takes the listed closing checkpoint and the tail.
+    let member_wire_start = *network_bytes.borrow();
+    let clock = std::time::Instant::now();
     let b = Device::new(Database::open(open(&b_dir, &fill, network("b")))?)?;
+    let member_open = clock.elapsed();
+    eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
     let mut syncs = 0;
+    let mut transfers = Vec::new();
     // A table whose frames are still arriving reads as unavailable.
     while b
-        .call(json!({"type": "read", "query": {"sql": "SELECT count(*) FROM items", "values": [], "max_rows": 1}}))
+        .call(json!({"type": "read", "query": {"sql": ready_query, "values": [], "max_rows": 1}}))
         .await
         .ok()
         .map(|page| page["rows"].clone())
-        != Some(json!([[{"type": "integer", "value": large.to_string()}]]))
-        || b.call(
-            json!({"type": "read", "query": {"sql": FILLED_COUNT, "values": [], "max_rows": 1}}),
-        )
-        .await
-        .ok()
-        .map(|page| page["rows"].clone())
-            != Some(count(large))
+        != Some(ready_rows.clone())
     {
         syncs += 1;
         assert!(syncs <= 64, "the member did not converge");
-        sync(&b).await;
+        let report = b.sync().await.map_err(|error| error.to_string())?;
+        transfers.extend(
+            report["peers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|peer| peer["transfers"].as_array().into_iter().flatten().cloned()),
+        );
     }
     let pulled = clock.elapsed();
     eprintln!("STAGE rows={large} member_pull={pulled:?}");
+    let member_wire_bytes = *network_bytes.borrow() - member_wire_start;
+    eprintln!("WIRE rows={large} member_open_and_pull_bytes={member_wire_bytes}");
     sync(&a).await;
     assert_eq!(generation(&a).await["migration"], Value::Null);
-    let fingerprint =
-        "SELECT count(*), min(position), max(position), sum(length(position)) FROM items";
+    let fingerprint = "SELECT count(*), min(title), max(title), sum(length(title)) FROM items";
     assert_eq!(rows(&a, fingerprint).await, rows(&b, fingerprint).await);
     // Every key/value is checked, including the seed range, rather than relying
-    // on extrema alone. The open migration has no checkpoint covering it.
+    // on extrema alone. Both files must hold the closing seal's base.
+    let filled_fields = if multi_step {
+        " OR position != title OR tag IS NOT NULL"
+    } else {
+        ""
+    };
     let exact = format!(
-        "SELECT count(*) FROM items WHERE key != printf('k%06d', CAST(substr(key,2) AS INTEGER)) OR CAST(substr(key,2) AS INTEGER) NOT BETWEEN 1 AND {large} OR title != printf('item %06d', CAST(substr(key,2) AS INTEGER)) OR position != title OR completed != 0 OR note IS NOT NULL OR tag IS NOT NULL"
+        "SELECT count(*) FROM items WHERE key != printf('k%06d', CAST(substr(key,2) AS INTEGER)) OR CAST(substr(key,2) AS INTEGER) NOT BETWEEN 1 AND {large} OR title != printf('item %06d', CAST(substr(key,2) AS INTEGER)) OR completed != 0 OR note IS NOT NULL{filled_fields}"
     );
     for device in [&a, &b] {
         assert_eq!(
@@ -500,6 +629,7 @@ async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
             json!([[{"type":"integer","value":"0"}]])
         );
     }
+    let mut closing = None;
     for directory in [&a_dir, &b_dir] {
         let db = rusqlite::Connection::open_with_flags(
             directory.join("rocky.sqlite"),
@@ -510,20 +640,40 @@ async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
             .checked_sub(migration)
             .ok_or("invalid migration accounting")?;
         assert!((0..=67_108_864).contains(&ordinary));
-        let open: Vec<u8> = db.query_row(
-            "SELECT tip FROM secure_followed_tip WHERE id=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let open: rocky_core::TipId = rocky_sdk::credentials::decode_bounded(&open, 256)?;
-        let mut query =
-            db.prepare("SELECT signed FROM secure_checkpoints WHERE signed IS NOT NULL")?;
-        for record in query.query_map([], |row| row.get::<_, Vec<u8>>(0))? {
-            assert_ne!(
-                rocky_secure::SignedCheckpoint::from_bytes(&record?)?
-                    .statement
-                    .tip,
-                open
+        if large >= 50_000 {
+            let mut query = db.prepare("SELECT signed FROM secure_checkpoints c WHERE sequence=(SELECT max(sequence) FROM secure_checkpoints WHERE scope=c.scope)")?;
+            let mut items_base = None;
+            for record in query.query_map([], |row| row.get::<_, Vec<u8>>(0))? {
+                let signed = rocky_secure::SignedCheckpoint::from_bytes(&record?)?;
+                if signed.statement.rows.count == large as u64 {
+                    assert!(signed.statement.seal.is_some());
+                    items_base = Some((signed.statement.seal, signed.id()?));
+                }
+            }
+            let (seal, checkpoint) = items_base.ok_or("missing closing items base")?;
+            let seal = seal.ok_or("closing items base has no seal")?;
+            let checkpoint = data_encoding::HEXLOWER.encode(&checkpoint);
+            assert!(
+            transfers
+                .iter()
+                .any(|transfer| transfer["checkpoint"] == checkpoint && transfer["pulled"] == 0),
+            "member transfer does not name {checkpoint}: {transfers:?}"
+        );
+            if directory == &a_dir {
+                closing = Some(seal);
+            } else {
+                assert_eq!(Some(seal), closing);
+            }
+            eprintln!(
+                "BASE rows={large} directory={} seal={} checkpoint={checkpoint}",
+                directory.display(),
+                data_encoding::HEXLOWER.encode(&seal)
+            );
+        } else {
+            assert!(
+                transfers
+                    .iter()
+                    .all(|transfer| transfer["checkpoint"].is_null())
             );
         }
         eprintln!(
@@ -531,13 +681,85 @@ async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
             directory.display()
         );
     }
+    let mut table_size_checks = Vec::new();
+    {
+        let db = rusqlite::Connection::open_with_flags(
+            b_dir.join("rocky.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut statement=db.prepare("SELECT name,sum(pgsize),sum(payload),count(*) FROM dbstat GROUP BY name ORDER BY sum(pgsize) DESC,name")?;
+        for row in statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })? {
+            let (name, bytes, payload, pages) = row?;
+            eprintln!(
+                "DBSTAT rows={large} member table={name} bytes={bytes} payload={payload} pages={pages}"
+            );
+            if large == LARGE {
+                let limit = match name.as_str() {
+                    "secure_rows" => Some(30_000_000),
+                    "secure_operations" => Some(100_000_000),
+                    _ => None,
+                };
+                if let Some(limit) = limit {
+                    table_size_checks.push((name, bytes, limit));
+                }
+            }
+        }
+    }
     eprintln!(
-        "MEASURED rows={large} seed_open={seeded:?} additive_open={tagged:?} fill_open={filled:?} file_before={before} file_seeded={between} file_tagged={after_tag} data_seeded={data} data_tagged={tagged_data} switch_changes={switch_changes} file_filled={} member_syncs={syncs} member_pull={pulled:?} member_file={}",
+        "MEASURED rows={large} history={history_time:?} seed_open={seeded:?} {additive_measurement} {open_stage}={filled:?} file_before={before} file_seeded={between} data_seeded={data} issuer_file={} publication={published:?} closing_compaction={closed:?} member_open={member_open:?} member_syncs={syncs} member_pull={pulled:?} member_file={}",
         size(&a_dir)?,
         size(&b_dir)?,
     );
+    eprintln!(
+        "MEMBER_FILE rows={large} main_bytes={} wal_bytes={}",
+        size(&b_dir)?,
+        std::fs::metadata(b_dir.join("rocky.sqlite-wal")).map_or(0, |metadata| metadata.len())
+    );
+    assert_eq!(syncs, 1);
+    if large == LARGE {
+        assert!(
+            member_wire_bytes <= 50_000_000,
+            "member transfer is {member_wire_bytes} bytes"
+        );
+        assert_eq!(table_size_checks.len(), 2);
+        for (name, bytes, limit) in table_size_checks {
+            assert!(bytes <= limit, "{name} is {bytes} bytes; limit is {limit}");
+        }
+        assert!(
+            member_open + pulled <= std::time::Duration::from_secs(60),
+            "member stage open={member_open:?} pull={pulled:?}"
+        );
+        assert!(
+            size(&b_dir)? <= 200_000_000,
+            "member main file is {} bytes",
+            size(&b_dir)?
+        );
+    }
     b.close().await;
     a.close().await;
+    if large == 8 {
+        let mut later: Value = serde_json::from_str(&fill)?;
+        later["version"] = json!(5);
+        later["tables"][0]["columns"]
+            .as_array_mut()
+            .ok_or("columns")?
+            .push(json!({"name":"later", "type":"text"}));
+        let later = later.to_string();
+        let a = Device::new(Database::open(open(&a_dir, &later, None))?)?;
+        assert_eq!(
+            generation(&a).await["migration"],
+            Value::Null,
+            "a completed migration reopened after a later schema switch"
+        );
+        a.close().await;
+    }
     Ok(())
 }
 

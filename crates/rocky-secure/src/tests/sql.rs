@@ -1,6 +1,7 @@
 //! SQL sessions on typed tables of an encrypted replica.
 use super::*;
 mod catch_up;
+mod compact;
 mod publication;
 use crate::sql::{AbortReason, SqlError, SqlOptions, SqlState};
 use crate::storage::collect_rows;
@@ -586,7 +587,7 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
         .await
         .unwrap();
     for refused in [
-        "SELECT * FROM secure_rows",
+        "SELECT * FROM secure_row_records",
         "SELECT * FROM sqlite_schema",
         "PRAGMA table_info(items)",
         "CREATE TABLE extra(a)",
@@ -1249,7 +1250,7 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
     );
     // Denied objects stay denied for cursors too.
     for denied in [
-        "SELECT * FROM secure_rows",
+        "SELECT * FROM secure_row_records",
         "SELECT name FROM sqlite_schema",
     ] {
         assert!(
@@ -1346,7 +1347,12 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
     let mut items = alice.observe_tables(Some(&["items"])).await.unwrap();
     let mut salaries = alice.observe_tables(Some(&["salaries"])).await.unwrap();
     let mut received = bob.observe_tables(Some(&["items"])).await.unwrap();
-    assert!(alice.observe_tables(Some(&["secure_rows"])).await.is_err());
+    assert!(
+        alice
+            .observe_tables(Some(&["secure_row_records"]))
+            .await
+            .is_err()
+    );
     let session = sql(&alice, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
@@ -1361,6 +1367,14 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
     assert_eq!(change.causes, [Cause::Local].into());
     let revision = *alice.observe_revision().borrow();
     assert_eq!(change.revisions.values().copied().max(), Some(revision));
+    assert_eq!(salaries.try_next().unwrap(), None);
+    // Audit's rolled-back typed rebuild must not leak into the next commit's events.
+    alice.audit(t.salaries).await.unwrap();
+    session
+        .run("UPDATE items SET title='pears' WHERE key='a'", vec![])
+        .await
+        .unwrap();
+    assert_eq!(items.next().await.unwrap().causes, [Cause::Local].into());
     assert_eq!(salaries.try_next().unwrap(), None);
     // A receipt wakes the receiver's observers.
     for frame in transfer(&alice, &bob, t.items).await.frames {
@@ -1590,7 +1604,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 11);
+    assert_eq!(operation.header.extensions.row_format, 12);
     assert_eq!(operation.header.extensions.chain, author_chain);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
@@ -1839,16 +1853,21 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
             operation.header.timestamp + 1,
         ),
         vec![],
-        &crate::wire::RowPayload::witness(
-            crate::wire::RowPayload::rows(&[change]).unwrap(),
-            vec![],
+        &crate::wire::RowPayload::compact(
+            &crate::wire::RowPayload::witness(
+                crate::wire::RowPayload::rows(&[change]).unwrap(),
+                vec![],
+            )
+            .unwrap(),
+            &app.manifest(),
+            fixture.items,
         )
         .unwrap(),
     )
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = compacted_base(&peer, &fixture.publisher, fixture.items).await;
-    assert_eq!(signed.statement.format, 16);
+    assert_eq!(signed.statement.format, 17);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 
@@ -2197,7 +2216,7 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
             "both incarnations share the business key"
         );
         let plan = collect_rows(inner.conn.query(
-            "EXPLAIN QUERY PLAN SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
+            "EXPLAIN QUERY PLAN SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
             [encode(&fixture.items).unwrap(), vec![0; 32], Vec::new()],
         ).await.unwrap()).await.unwrap();
         assert!(plan.iter().any(|row| row.iter().any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("secure_row_keys_key") && detail.contains("scope=? AND key=? AND row>?")))), "{plan:?}");
@@ -2237,7 +2256,7 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
     inner
         .conn
         .execute(
-            "DELETE FROM secure_rows WHERE scope=?",
+            "DELETE FROM secure_row_records WHERE scope=?",
             [encode(&fixture.items).unwrap()],
         )
         .await

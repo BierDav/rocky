@@ -88,7 +88,7 @@ async fn snapshot(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
         "secure_held",
         "secure_held_frames",
         "secure_held_resolved",
-        "secure_rows",
+        "secure_row_records",
         "secure_scope_state",
         "secure_metadata",
         "secure_identity_marks",

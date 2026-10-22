@@ -149,6 +149,18 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(credential)?,
             None => self.local_grants(time)?.to_vec(),
         };
+        if writes.iter().any(|write| {
+            write.change.scope != scope
+                || !write.permitted_by(&grants)
+                || write
+                    .published_fields()
+                    .iter()
+                    .any(|field| self.permission_fields.contains(field))
+        }) {
+            return Err(denied(
+                "row/field transition denied; permission fields never change by row writes",
+            ));
+        }
         if let Some(author) = signer {
             if identity_aware.iter().any(Option::is_some)
                 && identity_aware.iter().any(Option::is_none)
@@ -285,10 +297,13 @@ impl<A: RowApplication> Inner<A> {
             .checked_add(1)
             .ok_or_else(|| denied("logical clock exhausted"))?
             .max(micros()?);
+        let author_sequence = self
+            .reserve_author_sequence(signing_key.public_key())
+            .await?;
         let stamp = Stamp {
             clock,
-            author: signing_key.public_key().into(),
-            sequence,
+            author: signer.map_or(0, |author| author.number),
+            sequence: author_sequence,
         };
         let mut proofs = BTreeMap::new();
         for write in writes.iter().filter(|write| {
@@ -301,7 +316,7 @@ impl<A: RowApplication> Inner<A> {
             {
                 proofs.insert(
                     write.change.row,
-                    moves::CreationProof::sign(
+                    moves::CreationProof::statement(
                         self.manifest,
                         scope.table,
                         id,
@@ -329,10 +344,12 @@ impl<A: RowApplication> Inner<A> {
             Extensions {
                 existence: u32::try_from(existence).map_err(|_| denied("mutation quota"))?,
                 author: signer.map(|author| author.number),
-                author_sequence: self
-                    .reserve_author_sequence(signing_key.public_key())
-                    .await?,
+                author_sequence,
                 row_format: ROW_FORMAT,
+                births: proofs
+                    .values()
+                    .map(|proof| proof.provenance().map(Into::into))
+                    .collect::<Result<_, _>>()?,
                 partition,
                 tip: self.workspace.tip,
                 scope,
@@ -343,9 +360,13 @@ impl<A: RowApplication> Inner<A> {
             &key.key,
             (sequence, backlink, clock),
             previous.into_iter().collect(),
-            &RowPayload::witness(
-                RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
-                witnesses.into_iter().collect(),
+            &RowPayload::compact(
+                &RowPayload::witness(
+                    RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
+                    witnesses.into_iter().collect(),
+                )?,
+                &self.definition,
+                scope,
             )?,
         )?;
         self.verify_frame(&frame, time)?;

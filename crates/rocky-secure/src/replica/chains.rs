@@ -67,15 +67,22 @@ impl<A: RowApplication> Inner<A> {
         cached.insert(digest, chain.clone());
         Ok(chain)
     }
-    /// A retained operation with the chain its header names.
-    pub(crate) async fn stored_frame(
+    pub(super) async fn chained_frame(
         &self,
         header: Vec<u8>,
         body: Vec<u8>,
     ) -> Result<EncryptedFrame, Error> {
         let frame = EncryptedFrame::bare(header, body);
         let chain = self.stored_chain(frame.chain_digest()?).await?;
-        let mut frame = frame.with_chain(chain);
+        Ok(frame.with_chain(chain))
+    }
+    /// A retained operation with the chain its header names.
+    pub(crate) async fn stored_frame(
+        &self,
+        header: Vec<u8>,
+        body: Vec<u8>,
+    ) -> Result<EncryptedFrame, Error> {
+        let mut frame = self.chained_frame(header, body).await?;
         frame.migration = self.migration_membership(frame.id()?).await?;
         Ok(frame)
     }

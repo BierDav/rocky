@@ -438,6 +438,7 @@ impl<A: RowApplication> Inner<A> {
                 Err(error) if retryable(&error) => return Err(error),
                 Err(error) => {
                     self.conn.execute("ROLLBACK TO request", ()).await?;
+                    self.invalidate_context();
                     self.conn.execute("RELEASE request", ()).await?;
                     outcome.results.push(Err(error));
                 }

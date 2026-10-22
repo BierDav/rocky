@@ -14,7 +14,7 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
             .await
             .conn
             .query(
-                "SELECT * FROM secure_rows WHERE scope=?",
+                "SELECT * FROM secure_row_records WHERE scope=?",
                 [encode(&scopes[1]).unwrap()],
             )
             .await
@@ -28,13 +28,19 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
     )
     .await
     .unwrap();
+    let candidates = rows(
+        &f.replica.inner.lock().await.conn,
+        "SELECT * FROM secure_seal_candidates",
+    )
+    .await
+    .unwrap();
     f.replica
         .inner
         .lock()
         .await
         .conn
         .execute(
-            "DELETE FROM secure_rows WHERE scope=?",
+            "DELETE FROM secure_row_records WHERE scope=?",
             [encode(&scopes[1]).unwrap()],
         )
         .await
@@ -65,7 +71,10 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
             .lock()
             .await
             .conn
-            .execute("INSERT INTO secure_rows VALUES(?,?,?,?)", bindings(row))
+            .execute(
+                "INSERT INTO secure_row_records VALUES(?,?,?)",
+                bindings(row),
+            )
             .await
             .unwrap();
     }
@@ -84,6 +93,21 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
                     vec!["?"; key.len()].join(",")
                 ),
                 bindings(key),
+            )
+            .await
+            .unwrap();
+    }
+    inner
+        .conn
+        .execute("DELETE FROM secure_seal_candidates", ())
+        .await
+        .unwrap();
+    for candidate in candidates {
+        inner
+            .conn
+            .execute(
+                "INSERT INTO secure_seal_candidates VALUES(?,?)",
+                bindings(candidate),
             )
             .await
             .unwrap();

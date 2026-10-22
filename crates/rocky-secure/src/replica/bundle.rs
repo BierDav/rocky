@@ -1,6 +1,5 @@
 //! Transaction bundles: one local transaction over several resource scopes
 //! and frames, applied atomically by each reader of the partitions it holds.
-//! See `docs/decisions/0018-secure-transaction-bundles.md`.
 use super::incoming::Outcome;
 use super::*;
 
@@ -19,20 +18,25 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 /// What a sealed member entry reveals to a holder of its scope key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Opening {
     scope: ResourceScope,
     sequence: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     author: Option<PublicKey>,
 }
 
-fn member_aad(transaction: &Commitment, index: usize, count: usize) -> Result<Vec<u8>, Error> {
+fn member_aad(
+    transaction: &Commitment,
+    index: usize,
+    count: usize,
+    scope: ResourceScope,
+) -> Result<Vec<u8>, Error> {
     encode(&(
-        "rocky.secure-bundle.member.v1",
+        "rocky.secure-bundle.member.v2",
         transaction,
         index as u64,
         count as u64,
+        scope,
     ))
 }
 
@@ -272,8 +276,8 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| denied("author needs an authorized row key"))?;
             members.push(super::super::wire::encrypt(
                 &key.key,
-                &member_aad(&transaction, index, count)?,
-                &encode(opening)?,
+                &member_aad(&transaction, index, count, opening.scope)?,
+                &encode(&(opening.sequence, opening.author))?,
             )?);
         }
         let mut routed = self.route_dependencies(dependencies, &plan).await?;
@@ -419,23 +423,34 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Result<Vec<EncryptedFrame>, Hash>, Error> {
         let operation = first.operation_ref()?;
         let key = self.member_key(&operation.header.extensions)?;
-        let payload = RowPayload::decode(&decrypt(
-            &key.key,
-            &encode(&operation.header.extensions)?,
-            first.body_bytes(),
-        )?)?;
+        let payload = self.decode_row_payload(
+            first,
+            &decrypt(
+                &key.key,
+                &encode(&operation.header.extensions)?,
+                first.body_bytes(),
+            )?,
+        )?;
         let membership = payload
             .membership()
             .ok_or_else(|| Error::Corrupt("bundle handle names a batch".into()))?;
         let count = membership.members.len();
         let mut frames = Vec::with_capacity(count);
         for (index, sealed) in membership.members.iter().enumerate() {
-            let aad = member_aad(&membership.transaction, index, count)?;
-            let opening = self
-                .opening_keys()
-                .find_map(|key| decrypt(&key.key, &aad, sealed).ok())
-                .ok_or_else(|| denied("bundle member key unavailable"))?;
-            let opening: Opening = decode(&opening)?;
+            let mut opened = None;
+            for key in self.opening_keys() {
+                let aad = member_aad(&membership.transaction, index, count, key.scope)?;
+                if let Ok(bytes) = decrypt(&key.key, &aad, sealed) {
+                    let (sequence, author) = decode(&bytes)?;
+                    opened = Some(Opening {
+                        scope: key.scope,
+                        sequence,
+                        author,
+                    });
+                    break;
+                }
+            }
+            let opening = opened.ok_or_else(|| denied("bundle member key unavailable"))?;
             match self
                 .member(
                     opening.author.unwrap_or(operation.header.public_key),
@@ -590,6 +605,7 @@ impl<A: RowApplication> Inner<A> {
             }
             Err(error) => {
                 self.conn.execute("ROLLBACK TO bundle", ()).await?;
+                self.invalidate_context();
                 self.conn.execute("RELEASE bundle", ()).await?;
                 match error {
                     Error::Rejected(reason) if reason == identity::LEDGER_WAITS => {
@@ -680,15 +696,17 @@ impl<A: RowApplication> Inner<A> {
         });
         let mut required = Vec::new();
         for (index, sealed) in membership.members.iter().enumerate() {
-            let aad = member_aad(&membership.transaction, index, count)?;
             for key in &keys {
+                let aad = member_aad(&membership.transaction, index, count, key.scope)?;
                 let Ok(bytes) = decrypt(&key.key, &aad, sealed) else {
                     continue;
                 };
-                let opening: Opening = decode(&bytes)?;
-                if opening.scope != key.scope {
-                    return Err(denied("bundle member names another scope"));
-                }
+                let (sequence, author) = decode(&bytes)?;
+                let opening = Opening {
+                    scope: key.scope,
+                    sequence,
+                    author,
+                };
                 if self.can_read_key(key.scope, &grants) && self.holds(key.scope).await? {
                     required.push((index, opening));
                 }
@@ -768,11 +786,14 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<RowPayload, Error> {
         let operation = frame.operation_ref()?;
         let key = self.member_key(&operation.header.extensions)?;
-        let payload = RowPayload::decode(&decrypt(
-            &key.key,
-            &encode(&operation.header.extensions)?,
-            frame.body_bytes(),
-        )?)?;
+        let payload = self.decode_row_payload(
+            frame,
+            &decrypt(
+                &key.key,
+                &encode(&operation.header.extensions)?,
+                frame.body_bytes(),
+            )?,
+        )?;
         match payload.membership() {
             Some(membership)
                 if usize::from(membership.index) == index
@@ -814,7 +835,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| {
             let operation = frames[0].operation_ref()?;
-            let payload = inner.row_payload(&frames[0])?;
+            let payload = match inner.row_payload(&frames[0]) {
+                Ok(payload) => payload,
+                Err(error) if frames.len() == 1 => {
+                    return match inner.apply_frame(&frames[0], time).await? {
+                        Outcome::Rejected(reason) => Ok(reason),
+                        _ => Err(error),
+                    };
+                }
+                Err(error) => return Err(error),
+            };
             let membership = payload.membership().expect("bundle membership");
             let hashes = frames
                 .iter()
@@ -850,5 +880,53 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 },
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_openings_bind_scope_even_when_scopes_share_a_secret() {
+        let scope = ResourceScope {
+            domain: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+            encryption: [2; 32],
+            table: [3; 32],
+        };
+        let other = ResourceScope {
+            table: [4; 32],
+            ..scope
+        };
+        let transaction = [5; 32];
+        let key = [6; 32];
+        let plaintext = encode(&(17_u64, Some(PrivateKey::new().public_key()))).unwrap();
+        let sealed = super::super::super::wire::encrypt(
+            &key,
+            &member_aad(&transaction, 0, 64, scope).unwrap(),
+            &plaintext,
+        )
+        .unwrap();
+        assert_eq!(
+            decrypt(
+                &key,
+                &member_aad(&transaction, 0, 64, scope).unwrap(),
+                &sealed
+            )
+            .unwrap(),
+            plaintext
+        );
+        for aad in [
+            member_aad(&transaction, 0, 64, other).unwrap(),
+            member_aad(&transaction, 1, 64, scope).unwrap(),
+            member_aad(&transaction, 0, 63, scope).unwrap(),
+            member_aad(&[7; 32], 0, 64, scope).unwrap(),
+        ] {
+            assert!(decrypt(&key, &aad, &sealed).is_err());
+        }
     }
 }

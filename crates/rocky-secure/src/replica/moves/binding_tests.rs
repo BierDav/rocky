@@ -1,12 +1,28 @@
 use super::*;
 
 impl CreationProof {
+    fn resign_header_for_test(&mut self, signer: &PrivateKey) {
+        self.provenance = self.computed_provenance().unwrap();
+        let mut header: p2panda_core::Header<Extensions> = decode(&self.header).unwrap();
+        header.public_key = signer.public_key();
+        self.signer = signer.public_key().into();
+        header.timestamp = self.stamp.clock;
+        header.extensions.author = Some(self.stamp.author);
+        header.extensions.author_sequence = self.stamp.sequence;
+        header.extensions.scope.table = self.table;
+        header.extensions.births = vec![self.provenance().unwrap().into()];
+        header.sign(signer);
+        self.header = header.to_bytes();
+    }
+
     pub(crate) fn damage_signature_for_test(&mut self, signer: &PrivateKey) {
-        self.signature = signer.sign(b"wrong creation message");
+        let mut header: p2panda_core::Header<Extensions> = decode(&self.header).unwrap();
+        header.signature = Some(signer.sign(b"wrong creation message"));
+        self.header = header.to_bytes();
     }
     pub(crate) fn lower_stamp_for_test(&mut self, signer: &PrivateKey) {
         self.stamp.clock -= 1;
-        self.signature = signer.sign(&self.bytes().unwrap());
+        self.resign_header_for_test(signer);
     }
     pub(crate) fn check_binding_differentials_for_test(
         &self,
@@ -32,16 +48,18 @@ impl CreationProof {
         ));
         let mut proof = self.clone();
         proof.table = [223; 32];
-        proof.signature = node.sign(&proof.bytes().unwrap());
+        proof.resign_header_for_test(node);
         cases.push((proof, publisher, [223; 32], self.id, ceiling.clone()));
         let mut proof = self.clone();
         proof.id = rocky_core::RowIdentity::next(self.id.author() + 1, 0).unwrap();
-        proof.signature = node.sign(&proof.bytes().unwrap());
+        proof.stamp.author = proof.id.author();
+        proof.resign_header_for_test(node);
         let id = proof.id;
-        cases.push((proof, publisher, self.table, id, ceiling.clone()));
+        let changed_ceiling = proof.stamp.clone();
+        cases.push((proof, publisher, self.table, id, changed_ceiling));
         let mut proof = self.clone();
-        proof.stamp.author = other.public_key().into();
-        proof.signature = other.sign(&proof.bytes().unwrap());
+        proof.signer = other.public_key().into();
+        proof.resign_header_for_test(&other);
         let changed_ceiling = proof.stamp.clone();
         cases.push((proof, publisher, self.table, self.id, changed_ceiling));
         for field in ["version", "authors", "signature"] {
@@ -53,13 +71,13 @@ impl CreationProof {
                 _ => serde_json::to_value(other.sign(b"wrong binding message")).unwrap(),
             };
             proof.bindings[0] = serde_json::from_value(binding).unwrap();
-            proof.signature = node.sign(&proof.bytes().unwrap());
+            proof.resign_header_for_test(node);
             cases.push((proof, publisher, self.table, self.id, ceiling.clone()));
         }
         for count in [0, rocky_credentials::MAX_CREDENTIAL_DEPTH + 1] {
             let mut proof = self.clone();
             proof.bindings = vec![proof.bindings[0].clone(); count];
-            proof.signature = node.sign(&proof.bytes().unwrap());
+            proof.resign_header_for_test(node);
             cases.push((proof, publisher, self.table, self.id, ceiling.clone()));
         }
         let mut invalid = Vec::new();
@@ -81,13 +99,13 @@ impl CreationProof {
         }
         let mut early = self.clone();
         early.version = 0;
-        early.stamp.author = Author(
+        early.signer = AuthorKey(
             (0..=255)
                 .map(|byte| [byte; 32])
                 .find(|bytes| PublicKey::from_bytes(bytes).is_err())
                 .unwrap(),
         );
-        assert!(matches!(early.stamp.author.key(), Err(Error::Corrupt(_))));
+        assert!(matches!(early.signer.key(), Err(Error::Corrupt(_))));
         invalid.push((early, ceiling.clone()));
         let mut lower = self.clone();
         lower.lower_stamp_for_test(node);

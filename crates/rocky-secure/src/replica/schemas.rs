@@ -190,24 +190,6 @@ impl PathFields {
         kept.assigned.retain(|field| self.fields.contains(field));
         Some(kept)
     }
-    pub(in crate::replica) fn strip_record(
-        &self,
-        table: Commitment,
-        bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, Error> {
-        if !self.tables.contains(&table) {
-            return Ok(None);
-        }
-        if bytes.is_empty() {
-            return Ok(Some(Vec::new()));
-        }
-        let mut row: Materialized = decode(bytes)?;
-        if self.strip(table, &mut row) {
-            Ok(Some(encode(&row)?))
-        } else {
-            Ok(Some(bytes.to_vec()))
-        }
-    }
     pub fn strip(&self, table: Commitment, row: &mut Materialized) -> bool {
         let before = (row.fields.len(), row.stamps.len());
         row.fields
@@ -1069,17 +1051,20 @@ impl<A: RowApplication> Inner<A> {
         for (resource, id) in stored {
             let mut after = Vec::new();
             loop {
-                let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256", [encode(&resource)?, after.clone()]).await?).await?;
+                let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT 256", [encode(&resource)?, after.clone()]).await?).await?;
                 for row in &records {
                     let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = row.as_slice() else {
                         return Err(Error::Corrupt("schema switch row".into()));
                     };
                     after = key.clone();
-                    match fields.strip_record(resource.table, bytes)? {
+                    match self
+                        .strip_stored_record(fields, resource.table, bytes)
+                        .await?
+                    {
                         None => {
                             self.conn
                                 .execute(
-                                    "DELETE FROM secure_rows WHERE scope=? AND row=?",
+                                    "DELETE FROM secure_row_records WHERE scope=? AND row=?",
                                     [encode(&resource)?, key.clone()],
                                 )
                                 .await?;
@@ -1087,7 +1072,7 @@ impl<A: RowApplication> Inner<A> {
                         Some(stripped) if stripped != *bytes => {
                             self.conn
                                 .execute(
-                                    "UPDATE secure_rows SET fields=? WHERE scope=? AND row=?",
+                                    "UPDATE secure_row_records SET fields=? WHERE scope=? AND row=?",
                                     [stripped, encode(&resource)?, key.clone()],
                                 )
                                 .await?;

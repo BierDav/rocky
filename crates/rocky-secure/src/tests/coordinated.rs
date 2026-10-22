@@ -1123,15 +1123,21 @@ async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
                 .unwrap()
                 .key
         };
-        let payload = crate::wire::RowPayload::decode(
-            &crate::wire::decrypt(
-                &key,
-                &encode(&operation.header.extensions).unwrap(),
-                frame.body_bytes(),
+        let payload = bob
+            .1
+            .inner
+            .lock()
+            .await
+            .decode_row_payload(
+                frame,
+                &crate::wire::decrypt(
+                    &key,
+                    &encode(&operation.header.extensions).unwrap(),
+                    frame.body_bytes(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap();
+            .unwrap();
         assert_eq!(payload.membership().unwrap().entry, Some(1));
     }
     fixture.resolve(bob).await;

@@ -31,6 +31,7 @@ mod holdings;
 mod identity;
 #[cfg(test)]
 pub(crate) use identity::Raise;
+mod author_sets;
 mod incoming;
 mod keys;
 pub(crate) mod migrate;
@@ -38,6 +39,9 @@ pub(crate) mod moves;
 mod offload;
 mod partition;
 mod placements;
+pub(super) mod positions;
+mod records;
+mod stamp_authors;
 pub use placements::{MAX_PLACEMENTS, Placement, PlacementPage, PlacementRequest};
 pub(crate) mod publication;
 mod queries;
@@ -95,7 +99,7 @@ use rocky_core::{
 };
 pub use roles::{
     FrontierLog, Holding, PeerLag, RangePage, ReplicaRole, ReplicaStatus, RoleConfig,
-    ScopeFrontier, ScopeStatus,
+    ScopeFrontier, ScopeStatus, StateAdvice,
 };
 use serde::{Deserialize, Serialize};
 pub use session::{SecureSession, SecureTransaction, SessionStatus, UpdateMode};
@@ -195,61 +199,25 @@ pub struct CiphertextPage {
     /// Void records consuming the positions before the frames.
     pub voids: Vec<SignedVoid>,
 }
-/// A stamp: which write of which author last set a field. Stored as a
-/// tuple in every row record, so it carries no field names.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(from = "(u64, Author, u64)", into = "(u64, Author, u64)")]
-pub(crate) struct Stamp {
-    pub(crate) clock: u64,
-    pub(crate) author: Author,
-    pub(crate) sequence: u64,
-}
-impl From<(u64, Author, u64)> for Stamp {
-    fn from((clock, author, sequence): (u64, Author, u64)) -> Self {
-        Self {
-            clock,
-            author,
-            sequence,
-        }
-    }
-}
-impl From<Stamp> for (u64, Author, u64) {
-    fn from(stamp: Stamp) -> Self {
-        (stamp.clock, stamp.author, stamp.sequence)
-    }
-}
-/// An author's public key as its bytes, in the byte order keys sort by.
-/// Decoding a row record does not decompress it; `key` does, to verify.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) use rocky_core::SecureStamp as Stamp;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct Author(#[serde(with = "serde_bytes")] [u8; 32]);
-impl Author {
-    pub(crate) fn key(&self) -> Result<PublicKey, Error> {
+pub(crate) struct AuthorKey(#[serde(with = "serde_bytes")] [u8; 32]);
+impl AuthorKey {
+    fn key(&self) -> Result<PublicKey, Error> {
         PublicKey::from_bytes(&self.0).map_err(|_| Error::Corrupt("author key".into()))
     }
 }
-impl From<PublicKey> for Author {
+impl From<PublicKey> for AuthorKey {
     fn from(key: PublicKey) -> Self {
         Self(*key.as_bytes())
     }
 }
-impl PartialEq<PublicKey> for Author {
-    fn eq(&self, key: &PublicKey) -> bool {
-        self.0 == *key.as_bytes()
-    }
-}
-impl std::fmt::Debug for Author {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+
 /// Decoded signed checkpoints by scope number and kind, with their bytes.
 type DecodedCheckpoints = HashMap<(i64, bool), (Vec<u8>, SignedCheckpoint)>;
-/// A stored row record. Identifiers and values are CBOR byte strings: the
-/// record is stored, digested and transferred with every row.
+/// Canonical row state. Local records and page legends expand to these identities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Materialized {
     proof: Option<moves::StoredProof>,
@@ -259,6 +227,7 @@ pub(super) struct Materialized {
     fields: RowFields,
     #[serde(with = "byte_keys")]
     stamps: BTreeMap<Commitment, Stamp>,
+    authors: stamp_authors::Authors,
     deleted: bool,
     creation: Hash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,13 +301,24 @@ pub(super) struct Inner<A> {
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
     /// Frontiers of committed history; invalidated before ordinary write attempts.
     tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
+    stamp_authors: stamp_authors::Cache,
+    author_sets: std::sync::Mutex<author_sets::Cache>,
+    record_dictionary: std::sync::Mutex<records::Dictionary>,
     /// Parsed stored-header fields, bound to their complete live bytes.
     frontier_headers: std::sync::Mutex<tips::StoredHeaders>,
     migration_syntax: std::sync::Mutex<bulk::syntax::StoredDescriptorSyntax>,
     #[cfg(test)]
-    frontier_scans: AtomicU64,
+    frontier_queries: AtomicU64,
     #[cfg(test)]
     frontier_decodes: AtomicU64,
+    #[cfg(test)]
+    position_oracles: positions::OracleStats,
+    #[cfg(test)]
+    pub(crate) compare_finalization: bool,
+    #[cfg(test)]
+    pub(crate) finalization_oracle_time: std::time::Duration,
+    #[cfg(test)]
+    pub(crate) finalization_time: std::time::Duration,
     node_author: Option<identity::NodeAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
@@ -348,6 +328,7 @@ pub(super) struct Inner<A> {
     pub(super) graphs: BTreeMap<rocky_core::Scope, rocky_credentials::TipGraph>,
     catalog: BTreeMap<Commitment, rocky_core::ApplicationManifest>,
     path_fields: std::sync::Mutex<BTreeMap<(TipId, TipId), schemas::PathFields>>,
+    graph_cache: std::sync::Mutex<tips::GraphCache>,
     /// Positions of a domain's nodes only a partition's custody can place.
     custody_required: std::sync::Mutex<BTreeSet<(rocky_core::Scope, u32, u64)>>,
     /// The live tables, the tip they hold and their observers.
@@ -600,7 +581,7 @@ impl<A> EncryptedReplica<A> {
         self.domain_log.stored.subscribe()
     }
 }
-fn protocol_schema() -> impl Iterator<Item = &'static str> {
+fn protocol_schema() -> impl Iterator<Item = String> {
     [
         schemas::SCHEMA,
         staging::SCHEMA,
@@ -621,6 +602,10 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         typed::SCHEMA,
         identity::SCHEMA,
         moves::SCHEMA,
+        records::SCHEMA,
+        records::SHAPE_SCHEMA,
+        stamp_authors::SCHEMA,
+        author_sets::SCHEMA,
         partition::SCHEMA,
         checkpoint::SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
@@ -634,9 +619,11 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         chains::SCHEMA,
         publication::SCHEMA,
         bulk::SCHEMA,
+        positions::SCHEMA,
     ]
     .into_iter()
-    .flat_map(|schema| schema.iter().copied())
+    .flat_map(|schema| schema.iter().map(|sql| (*sql).to_owned()))
+    .chain(positions::triggers())
 }
 
 /// Refuse another persisted format before opening a writer or changing SDK settings.
@@ -704,7 +691,11 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
             }
         }
     }
-    let schema: Vec<_> = SCHEMA.iter().copied().chain(protocol_schema()).collect();
+    let schema: Vec<_> = SCHEMA
+        .iter()
+        .map(|sql| (*sql).to_owned())
+        .chain(protocol_schema())
+        .collect();
     for (table, _) in rocky_storage::scoped_connection::tables(&schema) {
         if !tables.contains(&vec![SqlValue::Text(table.clone())]) {
             return Err(Error::Corrupt(format!(
@@ -712,6 +703,8 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
             )));
         }
     }
+    positions::check_schema(&conn).await?;
+    compaction::check_incremental_schema(&conn).await?;
     // Admission evidence is never an empty journal by absence.
     if rows(&conn, "SELECT 1 FROM secure_admission_context WHERE id=1")
         .await?
@@ -841,12 +834,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chains: Default::default(),
             decoded_checkpoints: Default::default(),
             tip_frontiers: Default::default(),
+            record_dictionary: Default::default(),
+            stamp_authors: Default::default(),
+            author_sets: Default::default(),
             frontier_headers: Default::default(),
             migration_syntax: Default::default(),
             #[cfg(test)]
-            frontier_scans: AtomicU64::new(0),
+            frontier_queries: AtomicU64::new(0),
             #[cfg(test)]
             frontier_decodes: AtomicU64::new(0),
+            #[cfg(test)]
+            position_oracles: Default::default(),
+            #[cfg(test)]
+            compare_finalization: true,
+            #[cfg(test)]
+            finalization_oracle_time: Default::default(),
+            #[cfg(test)]
+            finalization_time: Default::default(),
             node_author: Some(identity::NodeAuthor::new(&config)?),
             config,
             credential_signer: None,
@@ -857,6 +861,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             graphs: BTreeMap::new(),
             catalog: BTreeMap::new(),
             path_fields: Default::default(),
+            graph_cache: Default::default(),
             custody_required: Default::default(),
             line_nodes: BTreeMap::new(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
@@ -1814,15 +1819,14 @@ impl<A: RowApplication> Inner<A> {
         let mut result = self
             .conn
             .query(
-                "SELECT fields FROM secure_rows WHERE scope=? AND row=?",
+                "SELECT fields FROM secure_row_records WHERE scope=? AND row=?",
                 [encode(&scope)?, row.to_vec()],
             )
             .await?;
-        result
-            .next()
-            .await?
-            .map(|row| decode(&row.get::<Vec<u8>>(0)?))
-            .transpose()
+        match result.next().await? {
+            Some(row) => Ok(Some(self.decode_record(&row.get::<Vec<u8>>(0)?).await?)),
+            None => Ok(None),
+        }
     }
     async fn frame(&self, id: Hash) -> Result<Option<EncryptedFrame>, Error> {
         let store = TransactionStore(self.conn.clone());

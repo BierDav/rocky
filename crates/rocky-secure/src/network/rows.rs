@@ -37,7 +37,7 @@ pub(super) enum RowMessage {
         quota: usize,
     },
     RangeFrames {
-        page: RangePage,
+        page: Box<RangePage>,
     },
     /// The puller's frontier after a page, as acknowledgment.
     Held {
@@ -83,6 +83,8 @@ pub struct Pulled {
 /// What one catch-up pass of a scope did.
 #[derive(Clone, Debug, Default)]
 pub struct CatchUp {
+    /// Optional base advice, returned before applying the accompanying frames.
+    pub state: Option<crate::StateAdvice>,
     /// Frames received, including duplicates.
     pub frames: usize,
     pub pages: usize,
@@ -275,6 +277,18 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<CatchUp, Error> {
+        self.catch_up_with_state(replica, scope, quota, false).await
+    }
+
+    /// Stops before receiving a page with advice when `take_state` is set.
+    /// The caller may import it or resume with advice disabled.
+    pub async fn catch_up_with_state<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+        quota: usize,
+        take_state: bool,
+    ) -> Result<CatchUp, Error> {
         self.ensure_holding(replica, &[scope]).await?;
         self.acquire_required_migrations(replica).await?;
         let mut report = CatchUp::default();
@@ -321,6 +335,11 @@ impl NativeSession {
             report.pages += 1;
             if page.behind {
                 report.behind = true;
+                return Ok(report);
+            }
+            if take_state && let Some(state) = page.state {
+                self.complete_frames(page.frames)?;
+                report.state = Some(state);
                 return Ok(report);
             }
             report.frames += page.frames.len();
@@ -539,7 +558,10 @@ impl NativeSession {
                     self.served_frames.insert(frame.id()?, frame.scope()?);
                 }
                 self.carry_chains(&mut page.frames).await?;
-                self.send(RowMessage::RangeFrames { page }).await
+                self.send(RowMessage::RangeFrames {
+                    page: Box::new(page),
+                })
+                .await
             }
             RowMessage::Held { frontier } => {
                 replica

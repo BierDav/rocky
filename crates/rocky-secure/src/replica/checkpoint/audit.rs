@@ -26,6 +26,23 @@ impl<A: RowApplication> Inner<A> {
         scope: SqlValue,
         stubs: Option<i64>,
     ) -> Result<Sets, Error> {
+        let resource: ResourceScope = match &scope {
+            SqlValue::Blob(bytes) => decode(bytes)?,
+            SqlValue::Integer(id) => {
+                let mut rows = self
+                    .conn
+                    .query("SELECT scope FROM secure_scope_state WHERE id=?", [*id])
+                    .await?;
+                let bytes: Vec<u8> = rows
+                    .next()
+                    .await?
+                    .ok_or_else(|| Error::Corrupt("row set scope missing".into()))?
+                    .get(0)?;
+                decode(&bytes)?
+            }
+            _ => return Err(Error::Corrupt("row set scope".into())),
+        };
+        let mut witnessed = BTreeSet::new();
         let mut sets = Sets::new();
         let mut cursor = Vec::new();
         loop {
@@ -47,9 +64,23 @@ impl<A: RowApplication> Inner<A> {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                     return Err(Error::Corrupt("stored row".into()));
                 };
-                sets.replace(&row_of(row)?, None, fields)?;
+                let record = self.decode_record(fields).await?;
+                if let Some(proof) = &record.proof
+                    && witnessed.insert((proof.header(), proof.bindings()))
+                {
+                    self.stored_creation_header(proof.header()).await?;
+                    self.stored_bindings(proof.bindings()).await?;
+                }
+                for (author, signer) in &record.authors {
+                    if self.stamp_author(resource.domain, *author).await? != *signer {
+                        return Err(Error::Corrupt(
+                            "stamp author differs from its committed signer".into(),
+                        ));
+                    }
+                }
+                sets.replace(&row_of(row)?, None, &encode(&record)?)?;
                 if let Some(id) = stubs {
-                    let creation = decode::<Materialized>(fields)?.creation;
+                    let creation = record.creation;
                     if !self.retains(creation).await?
                         && self.stub(creation).await?.is_none_or(|stub| stub.0 != id)
                     {
@@ -69,6 +100,17 @@ impl<A: RowApplication> Inner<A> {
     /// a verified checkpoint covers is left to `audit`; the key records are
     /// checked by `adopt_keys` before.
     pub(in crate::replica) async fn verify_open(&mut self) -> Result<(), Error> {
+        if !rows(&self.conn, "SELECT 1 FROM secure_row_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope UNION ALL SELECT 1 FROM secure_birth_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope LIMIT 1").await?.is_empty() {
+            return Err(Error::Corrupt("orphaned row or birth position".into()));
+        }
+        let shapes = "SELECT scope,shape,records FROM secure_scope_shapes ORDER BY scope,shape";
+        let actual = "SELECT scope,shape,count(*) FROM secure_rows GROUP BY scope,shape ORDER BY scope,shape";
+        if rows(&self.conn, shapes).await? != rows(&self.conn, actual).await? {
+            return Err(Error::Corrupt(
+                "scope shape counts differ from stored rows".into(),
+            ));
+        }
+        self.audit_positions().await?;
         self.audit_migration_accounts().await?;
         self.verify_admission_head().await?;
         self.verify_identity_ledgers().await?;
@@ -157,7 +199,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("switch audit row".into()));
                 };
                 after = row.clone();
-                match fields.strip_record(scope.table, bytes)? {
+                match self.strip_stored_record(fields, scope.table, bytes).await? {
                     None => {
                         self.conn
                             .execute(
@@ -251,7 +293,7 @@ impl<A: RowApplication> Inner<A> {
         let differing = collect_rows(
             self.conn
                 .query(
-                    format!("SELECT 1 FROM secure_checkpoint_scratch s LEFT JOIN secure_rows r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND (s.fields=X'' AND r.fields IS NOT NULL OR s.fields<>X'' AND (r.fields IS NULL OR r.fields<>s.fields)) UNION ALL SELECT 1 FROM secure_rows r LEFT JOIN secure_checkpoint_scratch s ON s.scope=?2 AND s.row=r.row LEFT JOIN secure_checkpoint_rows b ON b.scope=?2 AND b.row=r.row WHERE r.scope=?1 AND s.row IS NULL{unchanged} LIMIT 1"),
+                    format!("SELECT 1 FROM secure_checkpoint_scratch s LEFT JOIN secure_row_records r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND (s.fields=X'' AND r.fields IS NOT NULL OR s.fields<>X'' AND (r.fields IS NULL OR r.fields<>s.fields)) UNION ALL SELECT 1 FROM secure_row_records r LEFT JOIN secure_checkpoint_scratch s ON s.scope=?2 AND s.row=r.row LEFT JOIN secure_checkpoint_rows b ON b.scope=?2 AND b.row=r.row WHERE r.scope=?1 AND s.row IS NULL{unchanged} LIMIT 1"),
                     bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(id)]),
                 )
                 .await?,
@@ -321,6 +363,48 @@ impl<A: RowApplication> Inner<A> {
                 }
                 if *positioned == 1 {
                     applied += 1;
+                    if self.has_scope_key(scope) {
+                        let payload = self.row_payload(&frame)?;
+                        let (expected, births) = self.frame_positions(&frame, &payload)?;
+                        let actual = collect_rows(self.conn.query("SELECT p.row FROM secure_row_positions p JOIN secure_applied a ON a.position=p.position WHERE a.hash=? ORDER BY p.row", [operation.hash.as_bytes().to_vec()]).await?).await?;
+                        let actual = actual
+                            .into_iter()
+                            .map(|row| match row.as_slice() {
+                                [SqlValue::Blob(row)] => row_of(row),
+                                _ => Err(Error::Corrupt("row position".into())),
+                            })
+                            .collect::<Result<BTreeSet<_>, _>>()?;
+                        let mut expected_births = BTreeMap::new();
+                        for birth in births {
+                            expected_births
+                                .entry(birth.author)
+                                .and_modify(|mark: &mut IdentityMark| {
+                                    mark.sequence = mark.sequence.max(birth.sequence)
+                                })
+                                .or_insert(birth);
+                        }
+                        let actual_births = collect_rows(self.conn.query("SELECT b.author,b.signer,b.sequence FROM secure_birth_positions b JOIN secure_applied a ON a.position=b.position WHERE a.hash=? ORDER BY b.author", [operation.hash.as_bytes().to_vec()]).await?).await?;
+                        let expected_births = expected_births
+                            .into_values()
+                            .map(|birth| {
+                                vec![
+                                    SqlValue::Integer(i64::from(birth.author)),
+                                    SqlValue::Blob(birth.signer.as_bytes().to_vec()),
+                                    SqlValue::Integer(i64::from(birth.sequence)),
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                        if actual_births != expected_births {
+                            return Err(Error::Corrupt(
+                                "birth positions differ from applied writes".into(),
+                            ));
+                        }
+                        if actual != expected {
+                            return Err(Error::Corrupt(
+                                "row positions differ from applied writes".into(),
+                            ));
+                        }
+                    }
                 }
                 if status == "applied" && !self.dependencies_ready(&frame, &BTreeSet::new()).await?
                 {
@@ -354,6 +438,17 @@ impl<A: RowApplication> Inner<A> {
         {
             self.audit_global_passes += 1;
         }
+        if !rows(&self.conn, "SELECT 1 FROM secure_row_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope UNION ALL SELECT 1 FROM secure_birth_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope LIMIT 1").await?.is_empty() {
+            return Err(Error::Corrupt("orphaned row or birth position".into()));
+        }
+        let shapes = "SELECT scope,shape,records FROM secure_scope_shapes ORDER BY scope,shape";
+        let actual = "SELECT scope,shape,count(*) FROM secure_rows GROUP BY scope,shape ORDER BY scope,shape";
+        if rows(&self.conn, shapes).await? != rows(&self.conn, actual).await? {
+            return Err(Error::Corrupt(
+                "scope shape counts differ from stored rows".into(),
+            ));
+        }
+        self.audit_positions().await?;
         self.audit_migration_accounts().await
     }
     async fn audit_history(
@@ -371,7 +466,39 @@ impl<A: RowApplication> Inner<A> {
             },
         ))
     }
+    async fn audit_witnesses(&self) -> Result<(), Error> {
+        for (table, column, is_header) in [
+            ("secure_creation_headers", "header", true),
+            ("secure_author_bindings", "bindings", false),
+        ] {
+            let mut after = Vec::new();
+            loop {
+                let records = collect_rows(self.conn.query(format!("SELECT digest,{column} FROM {table} WHERE digest>? ORDER BY digest LIMIT ?"), bindings(vec![SqlValue::Blob(after.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?).await?;
+                for record in &records {
+                    let [SqlValue::Blob(digest), SqlValue::Blob(bytes)] = record.as_slice() else {
+                        return Err(Error::Corrupt("stored witness".into()));
+                    };
+                    let actual = if is_header {
+                        crate::wire::verified_header(bytes)?;
+                        moves::header_digest(bytes)
+                    } else {
+                        decode::<Vec<rocky_credentials::AuthorBinding>>(bytes)?;
+                        moves::bindings_digest(bytes)
+                    };
+                    if actual.as_slice() != digest {
+                        return Err(Error::Corrupt("stored witness digest mismatch".into()));
+                    }
+                    after = digest.clone();
+                }
+                if records.len() < STEP_ROWS {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     async fn audit_global_remaining(&self) -> Result<(), Error> {
+        self.audit_witnesses().await?;
         let counters = rows(
             &self.conn,
             "SELECT (SELECT COUNT(*) FROM secure_operations)=records AND (SELECT COALESCE(SUM(LENGTH(header)+LENGTH(body)),0) FROM secure_operations)=bytes AND (SELECT COUNT(*) FROM secure_handles)=handles FROM secure_retained",
@@ -431,7 +558,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let live = self
             .row_sets(
-                "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT ?",
                 SqlValue::Blob(encode(&scope)?),
                 Some(id),
             )
@@ -472,6 +599,7 @@ impl<A: RowApplication> Inner<A> {
         let (signed, replayed) = self.verify_tail(scope).await?;
         report.checkpoint = signed.map(|signed| signed.id()).transpose()?;
         report.replayed = replayed;
+        self.audit_rebuilt_projection(scope).await?;
         Ok(report)
     }
 }
@@ -481,6 +609,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// plus keyed rows, base and suffix replay. Holds the replica lock throughout.
     pub async fn audit(&self, scope: ResourceScope) -> Result<AuditReport, Error> {
         let mut inner = self.inner.lock().await;
+        inner.invalidate_records();
         inner.audit_global_start().await?;
         let (id, report) = inner.audit_history(scope).await?;
         inner.audit_global_remaining().await?;
@@ -508,6 +637,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("audit scopes must be unique"));
         }
         let mut inner = self.inner.lock().await;
+        inner.invalidate_records();
         inner.audit_global_start().await?;
         let (id, report) = inner.audit_history(*first).await?;
         inner.audit_global_remaining().await?;
@@ -517,6 +647,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let (id, report) = inner.audit_history(*scope).await?;
             reports.push((*scope, inner.audit_projection(*scope, id, report).await?));
         }
+        inner.invalidate_records();
         inner.audit_global_start().await?;
         inner.audit_global_remaining().await?;
         Ok(reports)

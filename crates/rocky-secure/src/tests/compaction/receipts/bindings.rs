@@ -1,5 +1,4 @@
 use super::*;
-use crate::wire::RowPayload;
 
 async fn two_births(replica: &Replica) -> EncryptedFrame {
     let sql = session(replica).await;
@@ -162,25 +161,33 @@ async fn damaged_frame(
     .unwrap();
     let envelope: Envelope = crate::decode(&plaintext).unwrap();
     assert_eq!(envelope.version, 1);
-    let payload = RowPayload::decode(&plaintext).unwrap();
+    let payload = source
+        .inner
+        .lock()
+        .await
+        .decode_row_payload(frame, &plaintext)
+        .unwrap();
     assert_eq!(payload.writes().len(), 2);
-    let mut proofs = std::collections::BTreeMap::new();
-    for (index, write) in payload.writes().iter().enumerate() {
-        assert!(payload.carried(&write.change.row).is_none());
-        let mut proof = payload.proof(&write.change.row).unwrap().clone();
-        if index == 1 {
-            if lower {
-                proof.lower_stamp_for_test(node);
-            } else {
-                proof.damage_signature_for_test(node);
-            }
-        }
-        proofs.insert(write.change.row, proof);
+    let mut extension = operation.header.extensions.clone();
+    let target = &payload.writes()[1];
+    let mut proof = payload.proof(&target.change.row).unwrap().clone();
+    let original = proof.provenance().unwrap();
+    let index = extension
+        .births
+        .iter()
+        .position(|birth| birth.as_ref() == &original)
+        .unwrap();
+    if lower {
+        proof.lower_stamp_for_test(node);
+        extension.births[index] = proof.provenance().unwrap().into();
+    } else {
+        // An ordinary birth cannot carry a second, damaged signature; tamper
+        // its signed statement commitment instead.
+        extension.births[index] = [99; 32].into();
     }
-    let body = RowPayload::stamp_body(&envelope.body, proofs, Default::default()).unwrap();
     crate::wire::author(
         node,
-        operation.header.extensions.clone(),
+        extension,
         frame.chain().unwrap().clone(),
         &key.key,
         (
@@ -189,7 +196,7 @@ async fn damaged_frame(
             operation.header.timestamp,
         ),
         operation.header.previous.clone(),
-        &RowPayload::witness(body, envelope.creations).unwrap(),
+        &plaintext,
     )
     .unwrap()
 }
@@ -221,13 +228,9 @@ async fn refused_second_proof(lower: bool) {
         .unwrap();
     assert_eq!(
         reason,
-        if lower {
-            "replication data rejected: birth proof must name its creating frame stamp"
-        } else {
-            "replication data rejected: invalid signed row creation proof"
-        }
+        "replication data rejected: frame creation statements differ from its births"
     );
-    assert_eq!(trace(), vec![(2, 1, usize::from(lower))]);
+    assert!(trace().is_empty());
     assert_eq!(crate::tests::bundles::payload::state(&reader).await, before);
     assert_eq!(
         reader.receipt_status(damaged.id().unwrap()).await.unwrap(),
@@ -258,15 +261,20 @@ async fn binding_memo_requests_and_per_proof_errors_match_the_uncached_verifier(
         .iter()
         .find(|key| key.scope == operation.header.extensions.scope)
         .unwrap();
-    let payload = RowPayload::decode(
-        &crate::wire::decrypt(
-            &key.key,
-            &encode(&operation.header.extensions).unwrap(),
-            frame.body_bytes(),
+    let payload = source
+        .inner
+        .lock()
+        .await
+        .decode_row_payload(
+            &frame,
+            &crate::wire::decrypt(
+                &key.key,
+                &encode(&operation.header.extensions).unwrap(),
+                frame.body_bytes(),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap();
     payload
         .proof(&payload.writes()[0].change.row)
         .unwrap()

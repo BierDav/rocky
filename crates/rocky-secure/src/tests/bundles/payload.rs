@@ -15,14 +15,17 @@ pub(in crate::tests) async fn state<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     let inner = replica.inner.lock().await;
+    // Rejection changes status buckets; each snapshot still proves every index exact.
+    inner.audit_positions_for_test().await.unwrap();
     let mut snapshot = Vec::new();
-    for row in rows(&inner.conn, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'secure_operations' ORDER BY name").await.unwrap() {
+    for row in rows(&inner.conn, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('secure_operations','secure_position_sources','secure_position_ranges','secure_log_ranges','secure_existence_counts') ORDER BY name").await.unwrap() {
         let [SqlValue::Text(table)] = row.as_slice() else {
             panic!("table name");
         };
         snapshot.push((table.clone(), rows(&inner.conn, &format!("SELECT * FROM \"{table}\"" )).await.unwrap()));
     }
     snapshot.push(("operations except status".into(), rows(&inner.conn, "SELECT hash,author,scope,sequence,header,body,chain FROM secure_operations ORDER BY hash").await.unwrap()));
+    snapshot.push(("position sources except status".into(),rows(&inner.conn,"SELECT hash,kind,scope,author,sequence,signer,tip,log_sequence,existence FROM secure_position_sources ORDER BY hash,kind").await.unwrap()));
     snapshot
 }
 
@@ -59,10 +62,30 @@ async fn final_member_payloads_must_agree_on_held_resolution_before_any_material
     let envelope: Envelope = crate::decode(&plaintext).unwrap();
     assert_eq!(envelope.version, 1);
     let changed = RowPayload::witness(
-        RowPayload::reauthor_body(envelope.body, Some([9; 32])).unwrap(),
+        RowPayload::reauthor_body(
+            source
+                .inner
+                .lock()
+                .await
+                .decode_row_payload(&frames[1], &plaintext)
+                .unwrap()
+                .staging_body_for_test()
+                .unwrap(),
+            Some([9; 32]),
+        )
+        .unwrap(),
         envelope.creations,
     )
     .unwrap();
+    let source_payload = source
+        .inner
+        .lock()
+        .await
+        .decode_row_payload(&frames[1], &plaintext)
+        .unwrap();
+    let changed = source_payload
+        .compact_test(&changed, operation.header.extensions.scope)
+        .unwrap();
     let final_member = crate::wire::author(
         &node,
         operation.header.extensions.clone(),

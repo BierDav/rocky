@@ -26,30 +26,37 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
     )
     .await;
     let source_operation = frames[0].operation_ref().unwrap();
-    let changes = {
+    let payload = {
         let operation = frames[0].operation_ref().unwrap();
         let key = source_config
             .keys
             .iter()
             .find(|key| key.scope == scope)
             .unwrap();
-        RowPayload::decode(
-            &crate::wire::decrypt(
-                &key.key,
-                &encode(&operation.header.extensions).unwrap(),
-                frames[0].body_bytes(),
+        replica
+            .inner
+            .lock()
+            .await
+            .decode_row_payload(
+                &frames[0],
+                &crate::wire::decrypt(
+                    &key.key,
+                    &encode(&operation.header.extensions).unwrap(),
+                    frames[0].body_bytes(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap()
+            .unwrap()
+    };
+    let changes = payload
+        .clone()
         .into_writes()
         .into_iter()
         .map(|write| {
             assert!(write.change.before.is_some());
             write.change
         })
-        .collect::<Vec<_>>()
-    };
+        .collect::<Vec<_>>();
     assert_eq!(changes.len(), 2);
     let signer = PrivateKey::from_bytes(&[241; 32]);
     let config = lineage.config(3, &signer);
@@ -72,6 +79,7 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
                 author: Some(config.credentials.author_number().unwrap()),
                 author_sequence: 0,
                 row_format: crate::wire::ROW_FORMAT,
+                births: Vec::new(),
                 partition: None,
                 existence: 0,
             },
@@ -89,7 +97,12 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
             } else {
                 Vec::new()
             },
-            &RowPayload::witness(RowPayload::rows(changes).unwrap(), Vec::new()).unwrap(),
+            &payload
+                .compact_test(
+                    &RowPayload::witness(RowPayload::rows(changes).unwrap(), Vec::new()).unwrap(),
+                    header_scope,
+                )
+                .unwrap(),
         )
         .unwrap()
     };
@@ -99,8 +112,13 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
             .replay_injected_frame_for_test(scope, &frame, None)
             .await
             .unwrap_err();
+        let expected = if changes.is_empty() {
+            "replay scope mismatch"
+        } else {
+            "frame ordinal is outside its source table schema"
+        };
         assert!(
-            matches!(error, Error::Rejected(ref reason) if reason == "replay scope mismatch"),
+            matches!(error, Error::Rejected(ref reason) if reason == expected),
             "{error}"
         );
     }
@@ -120,7 +138,7 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Rejected(ref reason) if reason == "replay scope mismatch"),
+            matches!(error, Error::Rejected(ref reason) if reason == "frame ordinal is outside its source table schema"),
             "{error}"
         );
     }

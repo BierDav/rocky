@@ -264,7 +264,7 @@ async fn scalar(replica: &Replica, sql: &str) -> i64 {
 async fn raw_rows(replica: &Replica) -> Vec<Vec<rocky_core::SqlValue>> {
     rows(
         &replica.inner.lock().await.conn,
-        "SELECT scope,row,fields,stamp FROM secure_rows ORDER BY scope,row",
+        "SELECT scope,row,fields FROM secure_row_records ORDER BY scope,row",
     )
     .await
     .unwrap()
@@ -283,11 +283,11 @@ async fn adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or
         // Clone valid stored row materialization, excluding row capture and
         // encryption cost from this graph-metadata scaling assertion.
         replica.inner.lock().await.conn.execute(
-            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_rows SELECT scope,CAST(printf('%032d',i) AS BLOB),fields,stamp FROM secure_rows,n",
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_row_records SELECT scope,CAST(printf('%032d',i) AS BLOB),fields FROM secure_row_records,n",
             [count - 1],
         ).await.unwrap();
         assert_eq!(
-            scalar(&replica, "SELECT count(*) FROM secure_rows").await,
+            scalar(&replica, "SELECT count(*) FROM secure_row_records").await,
             count
         );
         let before = raw_rows(&replica).await;

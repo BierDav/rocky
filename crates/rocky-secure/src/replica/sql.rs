@@ -1111,14 +1111,14 @@ impl<A: RowApplication> SecureSql<A> {
                     .map_err(capture_error)?
                     .ok_or_else(|| capture_error("missing visible incarnation identity".into()))?;
                 let held = collect_rows(inner.conn.query(
-                    "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
+                    "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
                     [encode(&scope)?, row.to_vec()],
                 ).await?).await?;
                 for held in held {
                     let [SqlValue::Blob(stored), SqlValue::Blob(bytes)] = held.as_slice() else {
                         return Err(Error::Corrupt("SQL deleted incarnation".into()));
                     };
-                    let record: Materialized = decode(bytes)?;
+                    let record = inner.decode_record(bytes).await?;
                     if record.deleted {
                         continue;
                     }

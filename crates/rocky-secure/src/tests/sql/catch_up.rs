@@ -9,10 +9,6 @@ use std::time::{Duration, Instant};
 /// The default `transaction_timeout`: from BEGIN to the return of COMMIT.
 const WRITE_LIMIT: Duration = Duration::from_secs(5);
 
-/// The `items` author key a node signs its rows with.
-fn author(node: &PrivateKey) -> PublicKey {
-    node.public_key()
-}
 fn number(node: &PrivateKey) -> u32 {
     crate::tests::node_number(node.public_key())
 }
@@ -180,7 +176,7 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
         let (creator, updater) = (PrivateKey::new(), PrivateKey::new());
-        if author(&updater) < author(&creator) {
+        if updater.public_key() < creator.public_key() {
             break (creator, updater);
         }
     };
@@ -356,7 +352,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
         let (creator, updater) = (PrivateKey::new(), PrivateKey::new());
-        if author(&updater) < author(&creator) {
+        if updater.public_key() < creator.public_key() {
             break (creator, updater);
         }
     };

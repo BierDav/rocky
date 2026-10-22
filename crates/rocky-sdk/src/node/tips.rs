@@ -436,7 +436,7 @@ impl Node {
     /// grant and an issuer through its issuer links.
     /// Signs this device's own existence folds when it may sign tip
     /// statements, so devices holding part of the data can fetch them.
-    async fn sign_existence_bases(&self, scope: Scope) -> Result<(), Failure> {
+    pub(super) async fn sign_existence_bases(&self, scope: Scope) -> Result<(), Failure> {
         let unsigned = self.replica.unsigned_existence_bases(scope).await?;
         if unsigned.is_empty() {
             return Ok(());
@@ -458,7 +458,7 @@ impl Node {
     /// Lists this device's checkpoints at seals in the graph when it may
     /// sign tip statements, so devices whose compacted seal lost can
     /// rebootstrap from them.
-    async fn list_checkpoints(&self, scope: Scope) -> Result<(), Failure> {
+    pub(super) async fn list_checkpoints(&self, scope: Scope) -> Result<(), Failure> {
         let unlisted = self.replica.unlisted_checkpoints(scope).await?;
         if unlisted.is_empty() {
             return Ok(());
@@ -608,7 +608,7 @@ impl Node {
 
     /// `continue` seals the followed tip and moves its bookmark on, in one
     /// batch; `close` ends it and leaves the bookmark read-only.
-    async fn seal_followed(&self, scope: Scope, close: bool) -> Result<(), Failure> {
+    pub(super) async fn seal_followed(&self, scope: Scope, close: bool) -> Result<(), Failure> {
         let (followed, name) = self
             .replica
             .followed_bookmark()
@@ -745,45 +745,74 @@ impl Node {
     /// its line and publishes the finality records they reach. A failure
     /// leaves the seals to the next call.
     pub(super) async fn finalize_seals(&self) {
-        if self.replica.domain_log().is_none() {
-            return;
-        }
-        if let Err(error) = self.prepare_terminal_credentials().await {
-            self.activity.record(
-                "terminal_credentials_failed",
-                json!({"error":error.to_string()}),
-            );
-        }
-        let before = self.replica.followed_tip().await;
-        match self
-            .replica
-            .settle_tip_statements(&super::coordinated::LinkPeers(self))
-            .await
-        {
-            Ok(0) => {}
-            Ok(_) => {
-                self.followed_tip_changed(before).await;
-                if let Err(error) = self.ensure_tip_node().await {
-                    self.activity
-                        .record("line_node_failed", json!({"error": error.to_string()}));
-                }
-                self.observations.touch();
-            }
-            Err(error) => {
+        if self.replica.domain_log().is_some() {
+            if let Err(error) = self.prepare_terminal_credentials().await {
                 self.activity.record(
-                    "seal_settlement_failed",
-                    json!({"error": error.to_string()}),
+                    "terminal_credentials_failed",
+                    json!({"error":error.to_string()}),
                 );
             }
-        }
-        match self.replica.finalize_seals(self.domain().scope).await {
-            Ok(0) => {}
-            Ok(_) => self.observations.touch(),
-            Err(error) => {
-                self.activity
-                    .record("finality_failed", json!({"error": error.to_string()}));
+            let before = self.replica.followed_tip().await;
+            match self
+                .replica
+                .settle_tip_statements(&super::coordinated::LinkPeers(self))
+                .await
+            {
+                Ok(0) => {}
+                Ok(_) => {
+                    self.followed_tip_changed(before).await;
+                    if let Err(error) = self.ensure_tip_node().await {
+                        self.activity
+                            .record("line_node_failed", json!({"error": error.to_string()}));
+                    }
+                    self.observations.touch();
+                }
+                Err(error) => {
+                    self.activity.record(
+                        "seal_settlement_failed",
+                        json!({"error": error.to_string()}),
+                    );
+                }
+            }
+            match self.replica.finalize_seals(self.domain().scope).await {
+                Ok(0) => {}
+                Ok(_) => self.observations.touch(),
+                Err(error) => {
+                    self.activity
+                        .record("finality_failed", json!({"error": error.to_string()}));
+                }
             }
         }
+        if let Err(error) = self.compact_final_seal().await {
+            self.activity.record(
+                "final_compaction_failed",
+                json!({"error": error.to_string()}),
+            );
+        }
+    }
+
+    /// Finality permits automatic compaction; nonfinal seals still require
+    /// the application's compact call (or migration completion).
+    async fn compact_final_seal(&self) -> Result<(), Failure> {
+        let scope = self.domain().scope;
+        let graph = self.replica.tip_graph(scope).await?;
+        if graph.finalities.is_empty() {
+            return Ok(());
+        }
+        self.replica.finalize_path(scope).await?;
+        let status = self.replica.compaction_status(scope).await?;
+        let Some(seal) = status.finalized else {
+            return Ok(());
+        };
+        if !graph.is_final(seal)? {
+            return Ok(());
+        }
+        if self.replica.needs_base_at(scope, seal).await? {
+            self.replica.compact(scope, 0).await?;
+        }
+        self.sign_existence_bases(scope).await?;
+        self.list_checkpoints(scope).await?;
+        Ok(())
     }
 
     /// Opens a tip on `seal`; only the owner and trusted identities may.

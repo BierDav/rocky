@@ -20,6 +20,43 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(crate) fn decode_row_payload(
+        &self,
+        frame: &EncryptedFrame,
+        bytes: &[u8],
+    ) -> Result<RowPayload, Error> {
+        let extension = &frame.operation_ref()?.header.extensions;
+        let manifest = self.manifest_of_tip(extension.tip)?;
+        let definition = self
+            .catalog
+            .get(&manifest)
+            .or_else(|| (self.manifest == manifest).then_some(&self.definition))
+            .ok_or_else(|| denied("source tip schema is not installed"))?;
+        let mut payload = RowPayload::decode_source(bytes, definition, extension.scope)?;
+        if !extension.births.is_empty()
+            || payload.writes().iter().any(|write| {
+                write.change.before.is_none() && payload.carried(&write.change.row).is_none()
+            })
+        {
+            let owned;
+            let application: &dyn RowApplication = if manifest == self.manifest {
+                self.app.as_ref()
+            } else {
+                owned = self
+                    .app
+                    .source_application(definition)
+                    .map_err(Error::Incompatible)?;
+                if owned.manifest().hash() != manifest {
+                    return Err(Error::Incompatible(
+                        "source validator has a different manifest".into(),
+                    ));
+                }
+                owned.as_ref()
+            };
+            payload.derive_births(frame, manifest, application)?;
+        }
+        Ok(payload)
+    }
     pub(super) fn row_payload(&self, frame: &EncryptedFrame) -> Result<RowPayload, Error> {
         let operation = frame.operation_ref()?;
         #[cfg(test)]
@@ -39,8 +76,10 @@ impl<A: RowApplication> Inner<A> {
         let key = self
             .opening_key(extension.scope, extension.generation)
             .ok_or_else(|| denied("row payload key unavailable"))?;
-        let payload =
-            RowPayload::decode(&decrypt(&key.key, &encode(extension)?, frame.body_bytes())?)?;
+        let payload = self.decode_row_payload(
+            frame,
+            &decrypt(&key.key, &encode(extension)?, frame.body_bytes())?,
+        )?;
         Ok(payload)
     }
 
@@ -187,7 +226,7 @@ impl<A: RowApplication> Inner<A> {
         let Ok(plaintext) = plaintext else {
             return Ok(Outcome::Waiting);
         };
-        let payload = RowPayload::decode(&plaintext);
+        let payload = self.decode_row_payload(frame, &plaintext);
         if let Ok(payload) = &payload
             && let Some(membership) = payload.membership()
         {
@@ -213,10 +252,12 @@ impl<A: RowApplication> Inner<A> {
             }
             Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;
+                self.invalidate_context();
                 Ok(Outcome::Waiting)
             }
             Err(error) if identity::receipts::semantic_refusal(&error) => {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;
+                self.invalidate_context();
                 self.reject(operation.hash)
                     .await
                     .map(|()| Outcome::Rejected(error.to_string()))
@@ -225,6 +266,7 @@ impl<A: RowApplication> Inner<A> {
         };
         if result.is_err() {
             self.conn.execute("ROLLBACK TO pending", ()).await?;
+            self.invalidate_context();
         }
         self.conn.execute("RELEASE pending", ()).await?;
         result
@@ -284,7 +326,7 @@ impl<A: RowApplication> Inner<A> {
                 &encode(&operation.header.extensions)?,
                 frame.body_bytes(),
             )
-            && let Ok(payload) = RowPayload::decode(&plaintext)
+            && let Ok(payload) = self.decode_row_payload(frame, &plaintext)
         {
             // The live schema names rows through the path's fields.
             let fields = self.path_fields(

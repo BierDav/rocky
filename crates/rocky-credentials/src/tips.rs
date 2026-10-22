@@ -628,6 +628,18 @@ impl TipGraph {
         self.schema_inner(tip, false)
     }
     fn schema_inner(&self, tip: TipId, active: bool) -> Result<Commitment, Error> {
+        if tip == self.genesis() {
+            return Ok(self.genesis_schema);
+        }
+        // Each ancestor lookup otherwise rehashes every earlier signed seal.
+        let mut continuations = std::collections::BTreeMap::new();
+        for seal in &self.seals {
+            if seal.statement.scope == self.scope
+                && let Ok(Some(successor)) = seal.successor()
+            {
+                continuations.entry(successor).or_insert(seal);
+            }
+        }
         let mut cursor = tip;
         let mut requested = None;
         let mut visited = std::collections::BTreeSet::new();
@@ -638,13 +650,8 @@ impl TipGraph {
             if cursor == self.genesis() {
                 return Ok(requested.unwrap_or(self.genesis_schema));
             }
-            if let Some(seal) = self.seals.iter().find(|seal| {
-                seal.statement.scope == self.scope
-                    && seal.successor().is_ok_and(|id| id == Some(cursor))
-            }) {
-                let canonical = self
-                    .seal(seal.statement.tip)?
-                    .is_some_and(|winner| winner == seal);
+            if let Some(&seal) = continuations.get(&cursor) {
+                let canonical = self.seal(seal.statement.tip)? == Some(seal);
                 if active && !canonical {
                     return Err(denied("tip belongs to a losing seal"));
                 }
@@ -790,6 +797,10 @@ impl TipGraph {
     }
     /// A losing forward continuation resolves to the winner's continuation.
     pub fn canonical_tip(&self, tip: TipId) -> Result<TipId, Error> {
+        // Active ancestry also proves structural ancestry; valid tips need one walk.
+        if self.schema(tip).is_ok() {
+            return Ok(tip);
+        }
         self.schema_any(tip)?;
         let mut path = Vec::new();
         let mut cursor = tip;
@@ -897,25 +908,22 @@ impl TipGraph {
             candidates.sort_by_key(|candidate| candidate.0);
             let mut winner = None;
             for (_, movement) in candidates {
-                let eligible = match movement.statement.to {
-                    Some(tip) => self
-                        .canonical_tip(tip)
-                        .is_ok_and(|resolved| Some(resolved) != cursor),
-                    None => true,
-                };
-                if eligible && winner.is_none() {
-                    winner = Some(movement);
+                let target = movement
+                    .statement
+                    .to
+                    .map(|tip| self.canonical_tip(tip))
+                    .transpose();
+                if let Ok(target) = target
+                    && (target.is_none() || target != cursor)
+                    && winner.is_none()
+                {
+                    winner = Some(target);
                 } else {
                     losers.push(movement);
                 }
             }
             match winner {
-                Some(movement) => {
-                    let target = movement
-                        .statement
-                        .to
-                        .map(|tip| self.canonical_tip(tip))
-                        .transpose()?;
+                Some(target) => {
                     if let (Some(from), Some(to)) = (cursor, target) {
                         path.push((from, to));
                     }

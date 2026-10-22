@@ -1,13 +1,12 @@
-//! Byte fixtures captured on the software backend; provenance is in the fixture README.
+//! Current-format byte fixtures captured on the software backend.
 use super::*;
 use rocky_core::{AppId, DomainId, MeshId, ResourceGrant, Scope};
 use rocky_credentials::{AuthorRange, Authority, device_chain};
 
 fn materialized(deleted: bool) -> Materialized {
-    let node = PrivateKey::from_bytes(&[42; 32]);
     let stamp = Stamp {
         clock: 7,
-        author: node.public_key().into(),
+        author: 7,
         sequence: 3,
     };
     Materialized {
@@ -19,6 +18,7 @@ fn materialized(deleted: bool) -> Materialized {
             [([5; 32], vec![0, 255, 7])].into()
         },
         stamps: [([5; 32], stamp.clone())].into(),
+        authors: [(7, PrivateKey::from_bytes(&[42; 32]).public_key())].into(),
         deleted,
         creation: Hash::from_bytes([6; 32]),
         identity: None,

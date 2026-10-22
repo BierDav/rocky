@@ -129,6 +129,10 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     let second = ok(&a, "seal", json!({})).await["tip"].clone();
     assert!(message(tips(&a, "compact", json!({"keep": -1})).await.unwrap_err()).contains("keep"));
 
+    assert_eq!(
+        ok(&a, "compaction", json!({})).await["compacted"],
+        Value::Null
+    );
     let kept = ok(&a, "compact", json!({"keep": 1})).await;
     assert_eq!(kept["finalized"], second);
     assert_eq!(kept["compacted"], first);
@@ -517,6 +521,65 @@ mod coordinated {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_final_seal_compacts_on_trusted_and_member_devices_in_one_pass() -> Result<(), Failure>
+    {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let a = Device::create(
+            &root.path().join("a"),
+            Some(Network::Owned(hub.connector("a"))),
+        )?;
+        main(&a).await;
+        ok(&a, "genesis_minimum", json!({"minimum_in_sync":1})).await;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        a.add(1, "base").await;
+        let b = Device::join(
+            &root.path().join("b"),
+            &a.invite().await,
+            Network::Owned(hub.connector("b")),
+        )?;
+        let c = Device::join(
+            &root.path().join("c"),
+            &a.invite().await,
+            Network::Owned(hub.connector("c")),
+        )?;
+        let identity = b.ok(json!({"type":"session"})).await["principal"].clone();
+        let grant = ok(&a, "trust", json!({"identity":identity})).await;
+        ok(&b, "install_trust", json!({"grant":grant["grant"]})).await;
+        b.database
+            .coordinate(Some(Arc::new(log.client(node_key(&b).await))))
+            .await?;
+        for peer in [&b, &c] {
+            introduce(&a, peer).await;
+            peer.sync().await.map_err(|error| error.to_string())?;
+            ok(peer, "follow", json!({"name":"main"})).await;
+            assert_eq!(
+                ok(peer, "compaction", json!({})).await["compacted"],
+                Value::Null
+            );
+        }
+        let sealed = ok(&a, "seal", json!({})).await["tip"].clone();
+        b.sync().await.map_err(|error| error.to_string())?;
+        assert_eq!(ok(&b, "compaction", json!({})).await["compacted"], sealed);
+        // The trusted acknowledgment creates finality; the next peer pass
+        // carries it to the owner and the member.
+        a.sync().await.map_err(|error| error.to_string())?;
+        c.sync().await.map_err(|error| error.to_string())?;
+        for peer in [&a, &b, &c] {
+            assert_eq!(ok(peer, "compaction", json!({})).await["compacted"], sealed);
+            assert_eq!(peer.titles().await, ["base"]);
+        }
+        for peer in [&a, &b, &c] {
+            peer.close().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_seal_ends_its_tips_coordinated_log() -> Result<(), Failure> {
         let root = tempfile::tempdir()?;
         let a = Device::create(root.path(), None)?;
@@ -538,6 +601,7 @@ mod coordinated {
             .ok_or("log not ended")?;
         assert_eq!(hex(&terminal.digest), seal["id"]);
         assert_eq!(terminal.continuation, Some(tip(&sealed["tip"])));
+
         // Writes continue on the continuation, whose own log is open.
         a.add(2, "eggs").await;
         assert_eq!(a.titles().await, ["eggs", "milk"]);

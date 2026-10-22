@@ -6,7 +6,7 @@ async fn evidence(replica: &Replica) -> Vec<Vec<SqlValue>> {
     rows(&replica.inner.lock().await.conn,"SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap()
 }
 async fn direct_state(replica: &Replica) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn,"SELECT 'r',scope,row,fields FROM secure_rows UNION ALL SELECT 'c',scope,row,fields FROM secure_checkpoint_rows UNION ALL SELECT 's',scope,signed,cursor FROM secure_rebootstrap UNION ALL SELECT 'l',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'h',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'v',revision,0,0 FROM secure_metadata").await.unwrap()
+    rows(&replica.inner.lock().await.conn,"SELECT 'r',scope,row,fields FROM secure_row_records UNION ALL SELECT 'c',scope,row,fields FROM secure_checkpoint_rows UNION ALL SELECT 's',scope,signed,cursor FROM secure_rebootstrap UNION ALL SELECT 'l',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'h',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'v',revision,0,0 FROM secure_metadata").await.unwrap()
 }
 
 #[tokio::test]
@@ -87,7 +87,10 @@ async fn a_direct_checkpoint_page_cannot_replace_a_known_evicted_origin() {
     );
     assert_eq!(direct_state(&target).await, before);
     assert_eq!(evidence(&target).await, permanent);
-    assert_eq!(scalar(&target, "SELECT count(*) FROM secure_rows").await, 0);
+    assert_eq!(
+        scalar(&target, "SELECT count(*) FROM secure_row_records").await,
+        0
+    );
     assert_eq!(
         scalar(&target, "SELECT count(*) FROM secure_stubs").await,
         0

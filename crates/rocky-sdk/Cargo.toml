@@ -32,6 +32,7 @@ rocky-iroh = { workspace = true, optional = true }
 rocky-coordinator = { workspace = true, optional = true }
 
 [dev-dependencies]
+p2panda-core = "=0.5.2"
 rocky-iroh = { workspace = true, features = ["test-utils"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 tokio = { version = "1", features = ["test-util"] }

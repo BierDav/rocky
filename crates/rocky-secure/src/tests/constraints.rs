@@ -979,3 +979,5 @@ async fn case_insensitive_schema_references_install_capture_and_resolve() {
     assert!(rows(&sa, ITEMS).await.is_empty());
     assert!(rows(&sb, ITEMS).await.is_empty());
 }
+
+mod finalization;

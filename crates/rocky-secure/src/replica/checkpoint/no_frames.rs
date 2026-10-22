@@ -80,7 +80,7 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Integer(id),
             ),
             (
-                "SELECT 1 FROM secure_rows WHERE scope=? LIMIT 1",
+                "SELECT 1 FROM secure_row_records WHERE scope=? LIMIT 1",
                 SqlValue::Blob(blob.clone()),
             ),
             (

@@ -57,7 +57,7 @@ async fn a_staged_switch_audits_stripped_rows_and_removed_tables_on_source_reope
                 .await
                 .conn
                 .query(
-                    "SELECT row,fields FROM secure_rows WHERE scope=?",
+                    "SELECT row,fields FROM secure_row_records WHERE scope=?",
                     [encode(&lineage.scope("tags")).unwrap()],
                 )
                 .await
@@ -86,7 +86,7 @@ async fn a_staged_switch_audits_stripped_rows_and_removed_tables_on_source_reope
                 inner
                     .conn
                     .execute(
-                        "INSERT INTO secure_rows(scope,row,fields,stamp) VALUES(?,?,?,X'')",
+                        "INSERT INTO secure_row_records(scope,row,fields) VALUES(?,?,?)",
                         [
                             encode(&lineage.scope("tags")).unwrap(),
                             row.clone(),
@@ -99,7 +99,7 @@ async fn a_staged_switch_audits_stripped_rows_and_removed_tables_on_source_reope
                 inner
                     .conn
                     .execute(
-                        "DELETE FROM secure_rows WHERE scope=?",
+                        "DELETE FROM secure_row_records WHERE scope=?",
                         [encode(&lineage.scope("items")).unwrap()],
                     )
                     .await

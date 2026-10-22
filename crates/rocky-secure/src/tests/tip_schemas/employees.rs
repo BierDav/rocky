@@ -58,7 +58,7 @@ async fn employees_held_originals_keep_callbacks_and_the_current_acl_guard() {
         original.body_bytes(),
     )
     .unwrap();
-    let payload = crate::wire::RowPayload::decode(&bytes).unwrap();
+    let payload = crate::wire::RowPayload::decode_test(&bytes, &original, &f.app()).unwrap();
     let mut writes = payload.writes().to_vec();
     writes[0]
         .change

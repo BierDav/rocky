@@ -27,8 +27,8 @@ pub use replica::{
     SchemaStage, ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit,
     SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
     SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, Slot,
-    StagedCloseStatus, TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode,
-    entry_hash, installed_tip_schema,
+    StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement,
+    UpdateMode, entry_hash, installed_tip_schema,
 };
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;

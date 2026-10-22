@@ -139,6 +139,21 @@ pub struct LineNode {
     pub credentials: CredentialChain,
 }
 
+/// Resolved graph facts are valid only until context invalidation. Credentials
+/// and workspace-base readiness are still checked for every authored frame.
+#[derive(Default)]
+pub(super) struct GraphCache {
+    writable: Option<WritableContext>,
+    manifests: HashMap<TipId, Commitment>,
+    pub(super) paths: HashMap<(Scope, TipId), Vec<SignedSeal>>,
+}
+
+struct WritableContext {
+    scope: Scope,
+    tip: TipId,
+    followed: Option<(Scope, String)>,
+}
+
 impl<A: RowApplication> Inner<A> {
     pub(crate) fn graph_for(&self, scope: Scope) -> Result<&TipGraph, Error> {
         self.graphs
@@ -146,8 +161,16 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("unknown tip graph"))
     }
     pub(crate) fn manifest_of_tip(&self, tip: TipId) -> Result<Commitment, Error> {
+        let mut cache = self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(schema) = cache.manifests.get(&tip) {
+            return Ok(*schema);
+        }
         for graph in self.graphs.values() {
             if let Ok(schema) = graph.schema_any(tip) {
+                cache.manifests.insert(tip, schema);
                 return Ok(schema);
             }
         }
@@ -445,6 +468,19 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     pub(super) fn ensure_tip_writable(&self, scope: Scope) -> Result<(), Error> {
+        let mut cached = self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.node_author.is_some()
+            && cached.writable.as_ref().is_some_and(|known| {
+                known.scope == scope
+                    && known.tip == self.workspace.tip
+                    && known.followed == self.workspace.followed
+            })
+        {
+            return Ok(());
+        }
         if let Some((followed, name)) = &self.workspace.followed
             && *followed == scope
             && self.graph_for(scope)?.bookmark(name).map_err(credential)?
@@ -465,6 +501,11 @@ impl<A: RowApplication> Inner<A> {
         if self.node_author.is_none() {
             return Err(denied("this line needs an enrolled node of the identity"));
         }
+        cached.writable = Some(WritableContext {
+            scope,
+            tip: self.workspace.tip,
+            followed: self.workspace.followed.clone(),
+        });
         Ok(())
     }
     pub(super) async fn tip_frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
@@ -478,12 +519,11 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frontier)
     }
-    pub(crate) async fn compute_tip_frontier(
+    #[cfg(test)]
+    pub(super) async fn scan_tip_frontier(
         &self,
         scope: ResourceScope,
     ) -> Result<ScopeFrontier, Error> {
-        #[cfg(test)]
-        self.frontier_scans.fetch_add(1, Ordering::Relaxed);
         let mut positions = BTreeMap::<PublicKey, BTreeMap<u64, bool>>::new();
         let records=collect_rows(self.conn.query("SELECT hash,header,status FROM secure_operations WHERE scope=?1 UNION ALL SELECT hash,header,'applied' FROM secure_voids WHERE scope=?1",[encode(&scope)?]).await?).await?;
         let graph = self.graph_for(scope.domain)?;
@@ -502,7 +542,7 @@ impl<A: RowApplication> Inner<A> {
                     .try_into()
                     .map_err(|_| Error::Corrupt("frontier hash".into()))?,
             );
-            let header = self.stored_header(bytes)?;
+            let header = self.oracle_header(bytes)?;
             if header.hash != hash {
                 return Err(Error::Corrupt("frontier header hash".into()));
             }
@@ -1143,6 +1183,8 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
+            self.note_row_positions(scope, &frame, &self.row_payload(&frame)?)
+                .await?;
         }
         Ok(())
     }
@@ -1604,13 +1646,16 @@ const MAX_STORED_HEADER_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StoredHeader {
     hash: Hash,
+    #[cfg(test)]
     public_key: PublicKey,
+    #[cfg(test)]
     seq_num: u64,
     pub(super) tip: TipId,
     pub(super) scope: ResourceScope,
     pub(super) timestamp: u64,
     pub(super) author: Option<u32>,
     pub(super) author_sequence: u64,
+    #[cfg(test)]
     pub(super) existence: u32,
 }
 
@@ -1645,6 +1690,13 @@ impl StoredHeaders {
 }
 impl<A: RowApplication> Inner<A> {
     pub(super) fn stored_header(&self, bytes: &[u8]) -> Result<StoredHeader, Error> {
+        self.parse_stored_header(bytes, false)
+    }
+    #[cfg(test)]
+    pub(super) fn oracle_header(&self, bytes: &[u8]) -> Result<StoredHeader, Error> {
+        self.parse_stored_header(bytes, true)
+    }
+    fn parse_stored_header(&self, bytes: &[u8], _oracle: bool) -> Result<StoredHeader, Error> {
         let hash = Hash::new(bytes);
         {
             let memo = self
@@ -1658,18 +1710,27 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         #[cfg(test)]
-        self.frontier_decodes.fetch_add(1, Ordering::Relaxed);
+        if _oracle {
+            self.position_oracles
+                .decodes
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.frontier_decodes.fetch_add(1, Ordering::Relaxed);
+        }
         let header: p2panda_core::Header<Extensions> = decode(bytes)?;
         let e = &header.extensions;
         let fields = StoredHeader {
             hash,
+            #[cfg(test)]
             public_key: header.public_key,
+            #[cfg(test)]
             seq_num: header.seq_num,
             tip: e.tip,
             scope: e.scope,
             timestamp: header.timestamp,
             author: e.author,
             author_sequence: e.author_sequence,
+            #[cfg(test)]
             existence: e.existence,
         };
         self.frontier_headers

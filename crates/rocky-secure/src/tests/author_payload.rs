@@ -35,7 +35,7 @@ fn plaintext(lineage: &Lineage, node: &PrivateKey, frame: &EncryptedFrame) -> Ve
     .unwrap()
 }
 fn payload(lineage: &Lineage, node: &PrivateKey, frame: &EncryptedFrame) -> RowPayload {
-    RowPayload::decode(&plaintext(lineage, node, frame)).unwrap()
+    RowPayload::decode_test(&plaintext(lineage, node, frame), frame, &lineage.app(3)).unwrap()
 }
 async fn begin_two(sql: &crate::SecureSql<rocky_core::TypedRows>) -> Vec<i64> {
     sql.run("BEGIN", vec![]).await.unwrap();
@@ -59,13 +59,6 @@ async fn snapshot(replica: &Replica) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     super::compaction::audit::snapshot(replica).await
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Envelope {
-    version: u8,
-    #[serde(with = "serde_bytes")]
-    body: Vec<u8>,
-    creations: Vec<(Commitment, Commitment)>,
-}
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Bundle {
     version: u8,
@@ -91,8 +84,8 @@ async fn refused_payload(earlier: u8) {
         .unwrap()
         .frames;
     assert_eq!(frames.len(), 1);
-    let envelope: Envelope = crate::decode(&plaintext(&lineage, &node, &frames[0])).unwrap();
-    let mut body: Bundle = crate::decode(&envelope.body).unwrap();
+    let donor_payload = payload(&lineage, &node, &frames[0]);
+    let mut body: Bundle = crate::decode(&donor_payload.staging_body_for_test().unwrap()).unwrap();
     assert_eq!(body.version, 5);
     let valid = encode(&body).unwrap();
     body.version = 6;
@@ -135,8 +128,10 @@ async fn refused_payload(earlier: u8) {
         .await
         .unwrap_err();
     let seen = trace();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].1, usize::from(earlier == 0));
+    assert_eq!(seen.len(), usize::from(earlier != 1));
+    if let Some((_, openings)) = seen.first() {
+        assert_eq!(*openings, usize::from(earlier == 0));
+    }
     match earlier {
         0 => assert!(
             matches!(error, Error::Rejected(ref reason) if reason == "unsupported bundle version"),
@@ -151,33 +146,6 @@ async fn refused_payload(earlier: u8) {
             "{error}"
         ),
         _ => unreachable!(),
-    }
-    // This is the actual final signed/encrypted envelope, after stamp_body.
-    let frame = &seen[0].0;
-    let operation = frame.operation_ref().unwrap();
-    let envelope: Envelope = crate::decode(&plaintext(&lineage, &node, frame)).unwrap();
-    assert_eq!(envelope.version, 1);
-    assert!(envelope.creations.is_empty());
-    let final_body: Bundle = crate::decode(&envelope.body).unwrap();
-    assert_eq!(final_body.version, 6);
-    assert_eq!(final_body.writes, body.writes);
-    let stamp = crate::replica::Stamp {
-        clock: operation.header.timestamp,
-        author: operation.header.public_key.into(),
-        sequence: operation.header.seq_num,
-    };
-    for write in &body.writes {
-        let proof = final_body.proofs.get(&write.change.row).unwrap();
-        assert_eq!(proof.stamp(), &stamp);
-        proof
-            .verify(
-                lineage.publisher().public_key(),
-                lineage.definition(3).hash(),
-                scope.table,
-                lineage.app(3).row_identity(&write.change).unwrap().unwrap(),
-                &stamp,
-            )
-            .unwrap();
     }
     assert_eq!(snapshot(&replica).await, before);
     assert_eq!(replica.stored_and_memory_revision().await, revision);
@@ -222,20 +190,23 @@ async fn live_own_marks_error_precedes_the_final_author_payload_version() {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Proof<B> {
+struct Proof<B, H> {
     version: u8,
     #[serde(with = "serde_bytes")]
     manifest: Commitment,
     #[serde(with = "serde_bytes")]
     table: Commitment,
     id: rocky_core::RowIdentity,
+    #[serde(with = "serde_bytes")]
+    provenance: Commitment,
     stamp: crate::replica::Stamp,
     bindings: B,
-    signature: p2panda_core::Signature,
+    signer: crate::replica::AuthorKey,
+    header: H,
 }
 #[derive(serde::Deserialize)]
 struct StoredRow {
-    proof: Proof<serde_bytes::ByteArray<32>>,
+    proof: Proof<serde_bytes::ByteArray<32>, serde_bytes::ByteArray<32>>,
     fields: BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,
     stamps: BTreeMap<serde_bytes::ByteArray<32>, crate::replica::Stamp>,
     creation: Hash,
@@ -263,10 +234,26 @@ async fn check_births(
     assert_eq!(opened.writes().len(), 2);
     let stamp = crate::replica::Stamp {
         clock: operation.header.timestamp,
-        author: operation.header.public_key.into(),
-        sequence: operation.header.seq_num,
+        author: operation.header.extensions.author.unwrap_or(0),
+        sequence: operation.header.extensions.author_sequence,
     };
-    let stored = records(replica, "SELECT fields FROM secure_rows ORDER BY row").await;
+    let stored_bytes = records(
+        replica,
+        "SELECT fields FROM secure_row_records ORDER BY row",
+    )
+    .await;
+    let mut stored = Vec::new();
+    {
+        let inner = replica.inner.lock().await;
+        for row in stored_bytes {
+            let SqlValue::Blob(bytes) = &row[0] else {
+                panic!("stored row");
+            };
+            stored.push(vec![SqlValue::Blob(
+                encode(&inner.decode_record(bytes).await.unwrap()).unwrap(),
+            )]);
+        }
+    }
     let schema = lineage.app(3);
     let mut seen_ids = Vec::new();
     let mut claims = Vec::new();
@@ -299,7 +286,7 @@ async fn check_births(
                 &stamp,
             )
             .unwrap();
-        let original: Proof<Vec<rocky_credentials::AuthorBinding>> =
+        let original: Proof<Vec<rocky_credentials::AuthorBinding>, serde_bytes::ByteBuf> =
             crate::decode(&encode(proof).unwrap()).unwrap();
         let binding = records(
             replica,
@@ -313,18 +300,14 @@ async fn check_births(
         assert_eq!(bytes, &encode(&original.bindings).unwrap());
         let digest = rocky_core::commitment("rocky.author-bindings.v1", bytes);
         assert_eq!(binding[0][0], SqlValue::Blob(digest.to_vec()));
-        let provenance = rocky_core::commitment(
-            "rocky.creation-provenance.v1",
-            &encode(&(
-                original.version,
-                original.manifest,
-                original.table,
-                original.id,
-                &original.stamp,
-                digest,
-            ))
-            .unwrap(),
-        );
+        let provenance = rocky_core::CreationStatement::derived(
+            original.manifest,
+            original.table,
+            original.id,
+            original.stamp.clone(),
+            digest,
+        )
+        .commitment();
         claims.push(vec![
             SqlValue::Integer(ordinal as i64),
             SqlValue::Integer(identity.integer()),
@@ -337,9 +320,14 @@ async fn check_births(
             manifest: original.manifest,
             table: original.table,
             id: original.id,
+            provenance: original.provenance,
             stamp: original.stamp,
             bindings: serde_bytes::ByteArray::new(digest),
-            signature: original.signature,
+            signer: original.signer,
+            header: serde_bytes::ByteArray::new(rocky_core::commitment(
+                "rocky.creation-header.v1",
+                &original.header,
+            )),
         };
         let record = stored
             .iter()

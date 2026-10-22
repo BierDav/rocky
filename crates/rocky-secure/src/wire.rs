@@ -1,3 +1,4 @@
+mod ordinals;
 use super::*;
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -5,9 +6,9 @@ use chacha20poly1305::{
 };
 use p2panda_core::{Body, Header, Operation, validate_operation};
 use rand::{RngCore, rngs::OsRng};
-use rocky_core::{Commitment, ResourceScope, RowChange, RowWrite};
+use rocky_core::{Commitment, ResourceScope, RowChange, RowFields, RowWrite};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 /// Frames decoded recently, by a digest of their bytes. A frame is decoded
@@ -37,6 +38,7 @@ pub(crate) struct Extensions {
     /// Domain-wide position of this node, independent of its per-scope log.
     pub author_sequence: u64,
     pub row_format: u8,
+    pub births: Vec<serde_bytes::ByteArray<32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<rocky_core::PartitionTuple>,
     /// Existence records the commit signed in this scope's log: a seal's
@@ -44,8 +46,8 @@ pub(crate) struct Extensions {
     pub existence: u32,
 }
 
-/// The current row frame format: the header counts its existence records.
-pub(crate) const ROW_FORMAT: u8 = 11;
+/// Source-schema ordinals and frame-bound birth statements.
+pub(crate) const ROW_FORMAT: u8 = 12;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
@@ -279,7 +281,8 @@ fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
         {
             return Err(denied("invalid authenticated partition scope or author"));
         }
-        if header.previous.len() > 64
+        if header.extensions.births.len() > 32
+            || header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
             || header.extensions.author_sequence > i64::MAX as u64
             || !header.extensions.generation.valid()
@@ -360,11 +363,37 @@ pub(crate) fn author(
 pub(crate) struct Membership {
     pub transaction: Commitment,
     pub index: u16,
+    #[serde(with = "member_bytes")]
     pub members: Vec<Vec<u8>>,
     /// The coordinated log position of a coordinated write's bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<u64>,
 }
+// Ciphertexts are byte strings, not arrays of encoded integer values.
+mod member_bytes {
+    use serde::{Deserialize, Serialize};
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        members: &[Vec<u8>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        members
+            .iter()
+            .map(|member| serde_bytes::Bytes::new(member))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        Ok(Vec::<serde_bytes::ByteBuf>::deserialize(deserializer)?
+            .into_iter()
+            .map(serde_bytes::ByteBuf::into_vec)
+            .collect())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct BundleBody {
     version: u8,
@@ -384,6 +413,8 @@ struct WitnessBody {
 /// A current row payload, always protected by a creation witness envelope.
 #[derive(Clone)]
 pub(crate) struct RowPayload {
+    #[cfg(test)]
+    source: Option<rocky_core::ApplicationManifest>,
     proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
     carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
@@ -392,6 +423,96 @@ pub(crate) struct RowPayload {
     creations: Vec<(Commitment, Commitment)>,
 }
 impl RowPayload {
+    #[cfg(test)]
+    pub(crate) fn decode_test(
+        bytes: &[u8],
+        frame: &EncryptedFrame,
+        application: &dyn rocky_core::RowApplication,
+    ) -> Result<Self, Error> {
+        let definition = application.manifest();
+        let mut payload = Self::decode_source(bytes, &definition, frame.scope()?)?;
+        payload.derive_births(frame, definition.hash(), application)?;
+        Ok(payload)
+    }
+    #[cfg(test)]
+    pub(crate) fn staging_body_for_test(&self) -> Result<Vec<u8>, Error> {
+        encode(&BundleBody {
+            version: 5,
+            proofs: self.proofs.clone(),
+            carried: self.carried.clone(),
+            membership: self.membership.clone(),
+            reauthors: self.reauthors,
+            writes: self.writes.clone(),
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn rebound_births_for_test(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<serde_bytes::ByteArray<32>>, Error> {
+        self.proofs
+            .values()
+            .map(|proof| proof.rebound_provenance_for_test(chain).map(Into::into))
+            .collect()
+    }
+    #[cfg(test)]
+    pub(crate) fn compact_test(
+        &self,
+        bytes: &[u8],
+        scope: ResourceScope,
+    ) -> Result<Vec<u8>, Error> {
+        ordinals::compact_test(
+            bytes,
+            self.source
+                .as_ref()
+                .ok_or_else(|| denied("test payload lacks source schema"))?,
+            scope,
+        )
+    }
+    pub(crate) fn derive_births(
+        &mut self,
+        frame: &EncryptedFrame,
+        manifest: Commitment,
+        application: &dyn rocky_core::RowApplication,
+    ) -> Result<(), Error> {
+        for write in &self.writes {
+            if write.change.before.is_none()
+                && !self.carried.contains_key(&write.change.row)
+                && let Some(identity) = application
+                    .row_identity(&write.change)
+                    .map_err(|error| denied(&error))?
+            {
+                let proof =
+                    crate::replica::moves::CreationProof::derived(manifest, identity, frame)?;
+                if self.proofs.insert(write.change.row, proof).is_some() {
+                    return Err(denied("repeated birth in a frame"));
+                }
+            }
+        }
+        let expected: Vec<serde_bytes::ByteArray<32>> = self
+            .proofs
+            .values()
+            .map(|proof| proof.provenance().map(Into::into))
+            .collect::<Result<_, _>>()?;
+        if expected != frame.operation_ref()?.header.extensions.births {
+            return Err(denied("frame creation statements differ from its births"));
+        }
+        Ok(())
+    }
+    pub(crate) fn compact(
+        bytes: &[u8],
+        definition: &rocky_core::ApplicationManifest,
+        scope: ResourceScope,
+    ) -> Result<Vec<u8>, Error> {
+        ordinals::compact(bytes, definition, scope)
+    }
+    pub(crate) fn decode_source(
+        bytes: &[u8],
+        definition: &rocky_core::ApplicationManifest,
+        scope: ResourceScope,
+    ) -> Result<Self, Error> {
+        ordinals::expand(bytes, definition, scope)
+    }
     pub(crate) fn check_formats(plaintext: &[u8]) -> Result<(), Error> {
         #[derive(Deserialize)]
         struct Envelope {
@@ -410,49 +531,10 @@ impl RowPayload {
         }
         let body: Version = p2panda_core::cbor::decode_cbor(envelope.body.as_slice())
             .map_err(|_| denied("unsupported bundle version"))?;
-        if body.version != 5 {
+        if body.version != 6 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(())
-    }
-    pub(crate) fn decode(plaintext: &[u8]) -> Result<Self, Error> {
-        // A payload that does not decode is refused naming its format.
-        let envelope: WitnessBody = match decode(plaintext) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                Self::check_formats(plaintext)?;
-                return Err(error);
-            }
-        };
-        if envelope.version != 1 {
-            return Err(denied("unsupported creation witness format"));
-        }
-        if envelope.creations.len() > 32
-            || envelope
-                .creations
-                .windows(2)
-                .any(|pair| pair[0].0 >= pair[1].0)
-        {
-            return Err(denied("invalid creation witness envelope"));
-        }
-        let body: BundleBody = match decode(&envelope.body) {
-            Ok(body) => body,
-            Err(error) => {
-                Self::check_formats(plaintext)?;
-                return Err(error);
-            }
-        };
-        if body.version != 5 {
-            return Err(denied("unsupported bundle version"));
-        }
-        Ok(Self {
-            proofs: body.proofs,
-            carried: body.carried,
-            membership: body.membership,
-            reauthors: body.reauthors,
-            writes: body.writes,
-            creations: envelope.creations,
-        })
     }
     pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {

@@ -458,7 +458,7 @@ impl<A: RowApplication> Inner<A> {
                     .and_then(|constraints| constraints.node(table.scope))
                     .is_none()
                 {
-                    typed::reproject(&inner.conn, &projected, table).await?;
+                    typed::reproject(inner, &projected, table).await?;
                 }
             }
             Box::pin(inner.rebuild_constraints(None, None)).await?;
@@ -493,7 +493,7 @@ impl<A: RowApplication> Inner<A> {
         let chunk = collect_rows(
             self.conn
                 .query(
-                    "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                    "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT ?",
                     bindings(vec![
                         SqlValue::Blob(encode(&table.scope)?),
                         SqlValue::Blob(cursor.to_vec()),
@@ -509,7 +509,7 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("stored row".into()));
             };
             last = row.clone();
-            let record: Materialized = decode(bytes)?;
+            let record = self.decode_record(bytes).await?;
             if record.deleted
                 || (record.identity.is_some()
                     && self
@@ -677,7 +677,7 @@ impl<A: RowApplication> Inner<A> {
             let chunk = collect_rows(
                 self.conn
                     .query(
-                        "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                        "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT ?",
                         bindings(vec![
                             SqlValue::Blob(encode(&table.scope)?),
                             SqlValue::Blob(after.clone()),
@@ -692,7 +692,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("stored row".into()));
                 };
                 after = row.clone();
-                let record: Materialized = decode(bytes)?;
+                let record = self.decode_record(bytes).await?;
                 if record.deleted
                     || (record.identity.is_some()
                         && self

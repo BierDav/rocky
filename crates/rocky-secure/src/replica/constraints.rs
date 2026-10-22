@@ -1013,6 +1013,8 @@ impl<A: RowApplication> Inner<A> {
         for ((node, scope, row), (key, image)) in desired {
             let spec = &constraints.nodes[node];
             let table = &typed.tables[spec.table];
+            self.index_seal_slot(&typed, scope, row, image.as_deref())
+                .await?;
             let stored = rows_with(&self.conn, &table.select, key.clone())
                 .await?
                 .pop();
@@ -1410,7 +1412,7 @@ impl<A: RowApplication> Inner<A> {
             if Some(scope) == without || !self.holds(scope).await? {
                 continue;
             }
-            for record in typed::winners(&self.conn, scope).await? {
+            for record in typed::winners(self, scope).await? {
                 let mut params = typed
                     .rows
                     .values(&table.table, &record.fields)
@@ -1437,7 +1439,14 @@ impl<A: RowApplication> Inner<A> {
                 let id = candidate
                     .id(spec)
                     .ok_or_else(|| corrupt("candidate identity"))?;
-                if let Some(image) = pass.image(node, id).await? {
+                let image = pass.image(node, id).await?;
+                let row = typed
+                    .rows
+                    .row_id(typed.domain.domain, &table.table, &candidate.values)
+                    .map_err(Error::Corrupt)?;
+                self.index_seal_slot(&typed, scope, row, image.as_deref())
+                    .await?;
+                if let Some(image) = image {
                     self.conn
                         .execute(table.upsert.clone(), bindings(image))
                         .await?;

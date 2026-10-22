@@ -66,36 +66,55 @@ async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
         .await;
 }
 /// The id of `items.<field>` in the domain at `directory`.
-fn field_id(directory: &Path, field: &str) -> Result<[u8; 32], Failure> {
-    let identity: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
-    let hex = identity["publisher"].as_str().ok_or("publisher")?;
-    let publisher: [u8; 32] = data_encoding::HEXLOWER
-        .decode(hex.as_bytes())?
-        .try_into()
-        .map_err(|_| "publisher length")?;
-    let app = rocky_core::ApplicationManifest::app_id(publisher, "shopping");
-    Ok(rocky_core::definition_item_id(
-        publisher,
-        app,
-        "field",
-        &format!("items.{field}"),
-    ))
-}
-/// Whether a stored or checkpoint row of the file at `directory` holds `id`.
-fn holds(directory: &Path, id: [u8; 32]) -> Result<bool, Failure> {
+/// Whether a stored or checkpoint row references the file's interned field id.
+fn holds(directory: &Path, field: &str) -> Result<bool, Failure> {
+    use serde::de::IgnoredAny;
+    type StoredRecord = (
+        IgnoredAny,
+        IgnoredAny,
+        Vec<(i64, IgnoredAny, IgnoredAny)>,
+        IgnoredAny,
+        IgnoredAny,
+        IgnoredAny,
+        IgnoredAny,
+        IgnoredAny,
+        IgnoredAny,
+        IgnoredAny,
+    );
     let file = rusqlite::Connection::open_with_flags(
         directory.join("rocky.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let mut found = false;
+    let mut names = file.prepare("SELECT id FROM secure_field_names WHERE name=?")?;
+    let mut names = names.query([format!("items.{field}")])?;
+    let Some(name) = names.next()? else {
+        return Ok(false);
+    };
+    let id: i64 = name.get(0)?;
     for table in ["secure_rows", "secure_checkpoint_rows"] {
         let mut statement = file.prepare(&format!("SELECT fields FROM {table}"))?;
         let blobs = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
         for blob in blobs {
-            found |= blob?.windows(32).any(|window| window == id);
+            let blob = blob?;
+            // Replica 35 prefixes local records with liveness and a shape id.
+            let shape_bytes = match blob.get(1) {
+                Some(0..=23) => 1,
+                Some(24) => 2,
+                Some(25) => 3,
+                Some(26) => 5,
+                Some(27) => 9,
+                _ => return Err("invalid local shape id".into()),
+            };
+            let record: StoredRecord = p2panda_core::cbor::decode_cbor(
+                blob.get(1 + shape_bytes..)
+                    .ok_or("truncated local record")?,
+            )?;
+            if record.2.iter().any(|field| field.0 == id) {
+                return Ok(true);
+            }
         }
     }
-    Ok(found)
+    Ok(false)
 }
 /// The application tables, indexes and `items` columns of the file.
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
@@ -207,9 +226,9 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
             "{columns:?}"
         );
         for field in ["category", "shelf"] {
-            assert!(!holds(directory, field_id(directory, field)?)?, "{field}");
+            assert!(!holds(directory, field)?, "{field}");
         }
-        assert!(holds(directory, field_id(directory, "title")?)?);
+        assert!(holds(directory, "title")?);
     }
     Ok(())
 }

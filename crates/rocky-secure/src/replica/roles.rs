@@ -165,9 +165,19 @@ pub(crate) fn validate_frontiers(frontiers: &[ScopeFrontier]) -> Result<(), Erro
     Ok(())
 }
 
+/// A transferable replay base at a seal of the followed path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateAdvice {
+    pub seal: Commitment,
+    pub checkpoint: Commitment,
+    pub signer: PublicKey,
+    pub rows: u64,
+}
+
 /// Frames a peer lacks, in author and sequence order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangePage {
+    pub state: Option<StateAdvice>,
     pub scope: ResourceScope,
     pub frames: Vec<EncryptedFrame>,
     /// Continue after this log position; `None` ends the pass.
@@ -626,9 +636,29 @@ impl<A: RowApplication> Inner<A> {
         after: Option<(PublicKey, u64)>,
         byte_quota: usize,
     ) -> Result<RangePage, Error> {
-        let page = self
+        let mut page = self
             .range_frames(peer, credentials, request, after, byte_quota)
             .await?;
+        if !page.behind
+            && let Some(signed) = self
+                .offered_checkpoint(peer, credentials, request.scope)
+                .await?
+        {
+            let base = &signed.statement;
+            if let Some(seal) = base.seal
+                && self.path_index(request.scope.domain, seal)?.is_some()
+                && signed.signer() != peer
+                && base_covers(request, &base.frontier)
+                && self.lacking_base_frames(request, &base.frontier).await? >= 64
+            {
+                page.state = Some(StateAdvice {
+                    seal,
+                    checkpoint: signed.id()?,
+                    signer: signed.signer(),
+                    rows: base.rows.count,
+                });
+            }
+        }
         // Frames leave the device: they count as offered from here on.
         let hashes = page
             .frames
@@ -638,6 +668,29 @@ impl<A: RowApplication> Inner<A> {
         self.offer(&hashes).await?;
         Ok(page)
     }
+    async fn lacking_base_frames(
+        &self,
+        request: &ScopeFrontier,
+        base: &[super::checkpoint::LogPosition],
+    ) -> Result<u64, Error> {
+        let mut missing = 0u64;
+        for log in base {
+            let records = collect_rows(self.conn.query(
+                "SELECT count(*) FROM (SELECT 1 FROM secure_operations WHERE scope=? AND author=? AND sequence>=? AND sequence<=? LIMIT 64)",
+                bindings(vec![SqlValue::Blob(encode(&request.scope)?), SqlValue::Blob(log.author.as_bytes().to_vec()),
+                    SqlValue::Integer(request.held(log.author) as i64), SqlValue::Integer(log.sequence as i64)]),
+            ).await?).await?;
+            let [SqlValue::Integer(count)] = records[0].as_slice() else {
+                return Err(Error::Corrupt("covered frames".into()));
+            };
+            missing += *count as u64;
+            if missing >= 64 {
+                break;
+            }
+        }
+        Ok(missing)
+    }
+
     async fn range_frames(
         &mut self,
         peer: PublicKey,
@@ -658,6 +711,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let own = self.frontier(scope).await?;
         let mut page = RangePage {
+            state: None,
             scope,
             frames: vec![],
             next: None,
@@ -1227,4 +1281,13 @@ pub(super) fn peer_id(bytes: &[u8]) -> Result<PeerId, Error> {
         .try_into()
         .map(PeerId::from_bytes)
         .map_err(|_| Error::Corrupt("peer reference".into()))
+}
+
+/// A base must cover every named log, including a log whose held prefix is zero.
+fn base_covers(request: &ScopeFrontier, base: &[super::checkpoint::LogPosition]) -> bool {
+    request.logs.iter().all(|log| {
+        base.iter().any(|covered| {
+            covered.author == log.author && log.held <= covered.sequence.saturating_add(1)
+        })
+    })
 }

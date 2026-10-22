@@ -24,7 +24,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_node_authors(node BLOB PRIMARY KEY,number INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_row_keys(scope BLOB NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_row_keys_key ON secure_row_keys(scope,key,row)",
-    "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=OLD.scope AND row=OLD.row; END",
+    "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=OLD.scope) AND row=OLD.row; END",
 ];
 
 #[derive(Clone)]
@@ -214,7 +214,7 @@ impl<A: RowApplication> Inner<A> {
         let mut winner: Option<Materialized> = None;
         loop {
             let chunk = collect_rows(self.conn.query(
-                "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
+                "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
                 [encode(&scope)?, key.to_vec(), cursor.clone()],
             ).await?).await?;
             for row in &chunk {
@@ -222,7 +222,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("incarnation row".into()));
                 };
                 cursor = id.clone();
-                let record: Materialized = decode(bytes)?;
+                let record = self.decode_record(bytes).await?;
                 if !record.deleted
                     && record.key == Some(key)
                     && winner.as_ref().is_none_or(|held| {
@@ -276,7 +276,7 @@ impl<A: RowApplication> Inner<A> {
         let mut after = (Vec::new(), Vec::new());
         loop {
             let chunk = collect_rows(self.conn.query(
-                "SELECT r.scope,r.row,r.fields FROM secure_rows r LEFT JOIN secure_row_keys k ON k.scope=r.scope AND k.row=r.row WHERE k.row IS NULL AND (r.scope,r.row)>(?,?) ORDER BY r.scope,r.row LIMIT 256",
+                "SELECT r.scope,r.row,r.fields FROM secure_row_records r LEFT JOIN secure_row_keys k ON k.scope=r.scope AND k.row=r.row WHERE k.row IS NULL AND (r.scope,r.row)>(?,?) ORDER BY r.scope,r.row LIMIT 256",
                 bindings(vec![SqlValue::Blob(after.0.clone()), SqlValue::Blob(after.1.clone())]),
             ).await?).await?;
             for row in &chunk {
@@ -288,7 +288,8 @@ impl<A: RowApplication> Inner<A> {
                 else {
                     return Err(Error::Corrupt("incarnation index row".into()));
                 };
-                self.index_row_key(scope, row, &decode(bytes)?).await?;
+                self.index_row_key(scope, row, &self.decode_record(bytes).await?)
+                    .await?;
                 after = (scope.clone(), row.clone());
             }
             if chunk.len() < 256 {
@@ -602,7 +603,7 @@ impl<A: RowApplication> Inner<A> {
                     ));
                 };
                 after = *position;
-                let frame = EncryptedFrame::bare(header.clone(), body.clone());
+                let frame = self.chained_frame(header.clone(), body.clone()).await?;
                 if self.replay_eligible(status, frame.operation_ref()?, true)? {
                     for birth in self.birth_marks(&frame)? {
                         if !birth.carried {
@@ -815,7 +816,7 @@ impl<A: RowApplication> Inner<A> {
                     mark: checkpoint::IdentityMark {
                         author: identity.author(),
                         signer: match payload.carried(&write.change.row) {
-                            Some(carried) => carried.proof.stamp().author.key()?,
+                            Some(carried) => carried.proof.signer()?,
                             None => operation.header.public_key,
                         },
                         sequence: identity.sequence(),
@@ -869,7 +870,7 @@ impl<A: RowApplication> Inner<A> {
                 {
                     continue;
                 }
-                let frame = self.stored_frame(header.clone(), body.clone()).await?;
+                let frame = self.chained_frame(header.clone(), body.clone()).await?;
                 let Ok(births) = self.birth_marks(&frame) else {
                     return Ok(None);
                 };
@@ -950,7 +951,7 @@ impl<A: RowApplication> Inner<A> {
                     _ => return Err(Error::Corrupt("covered operation".into())),
                 };
                 after = position;
-                let frame = self.stored_frame(header.clone(), body.clone()).await?;
+                let frame = self.chained_frame(header.clone(), body.clone()).await?;
                 if !self.replay_eligible(status, frame.operation_ref()?, true)? {
                     continue;
                 }
@@ -989,7 +990,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("checkpoint row".into()));
                 };
                 after = row.clone();
-                let record = decode::<Materialized>(fields)?;
+                let record = self.decode_record(fields).await?;
                 if let Some(identity) = record.identity {
                     let identity = rocky_core::RowIdentity::from_integer(identity)
                         .map_err(|error| Error::Corrupt(error.to_string()))?;

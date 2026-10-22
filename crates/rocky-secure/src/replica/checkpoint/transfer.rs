@@ -70,23 +70,33 @@ struct PagePlain {
     after: Option<Commitment>,
     next: Option<Commitment>,
     rows: Vec<PageRow>,
+    legend: Vec<String>,
+    #[serde(with = "super::origin_legend")]
+    origins: Vec<serde_bytes::ByteBuf>,
+    creations: Vec<Hash>,
+    authors: stamp_authors::Authors,
     /// Each set of author bindings the rows' proofs name, once. The rows
     /// are signed and name them by digest, so the sets need no signature.
     bindings: Vec<serde_bytes::ByteBuf>,
+    headers: Vec<serde_bytes::ByteBuf>,
     /// The checkpoint signer's signature of `page_signing_bytes`: a peer
     /// relaying the checkpoint can neither alter nor move a page's rows.
     signature: Signature,
 }
 /// What the checkpoint signer signs of a page: its place and its rows.
-fn page_signing_bytes(
-    checkpoint: Commitment,
-    after: Option<Commitment>,
-    next: Option<Commitment>,
-    rows: &[PageRow],
-) -> Result<Vec<u8>, Error> {
+fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
     let rows = rocky_core::commitment(
         "rocky.checkpoint-page-rows.v1",
-        &encode(&(checkpoint, after, next, rows))?,
+        &encode(&(
+            plain.checkpoint,
+            plain.after,
+            plain.next,
+            &plain.legend,
+            &plain.origins,
+            &plain.creations,
+            &plain.authors,
+            &plain.rows,
+        ))?,
     );
     signing_bytes("rocky.checkpoint-page.v1", &rows)
 }
@@ -95,6 +105,8 @@ struct OpenedPage {
     rows: Vec<(Commitment, PageRow, Materialized)>,
     /// The encoded sets of author bindings the rows name, checked.
     bindings: Vec<Vec<u8>>,
+    headers: Vec<Vec<u8>>,
+    authors: stamp_authors::Authors,
     next: Option<Commitment>,
     signature: Signature,
     /// The page's rows as a set of their own.
@@ -108,6 +120,8 @@ fn open_page(
     key: [u8; 32],
     signed: &SignedCheckpoint,
     cursor: Option<Commitment>,
+    publisher: [u8; 32],
+    known_headers: BTreeMap<Commitment, Vec<u8>>,
 ) -> Result<OpenedPage, Error> {
     let plain: PagePlain = decode(&page.rows.open(&key)?)?;
     if plain.checkpoint != page.checkpoint
@@ -118,7 +132,56 @@ fn open_page(
     {
         return Err(denied("checkpoint page binding mismatch"));
     }
-    let signing = page_signing_bytes(plain.checkpoint, plain.after, plain.next, &plain.rows)?;
+    if plain.legend.iter().any(String::is_empty)
+        || plain.legend.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(denied("checkpoint field legend is not strictly ordered"));
+    }
+    if plain.origins.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(denied("checkpoint origin legend is not strictly ordered"));
+    }
+    let names: BTreeMap<_, _> = plain
+        .legend
+        .iter()
+        .enumerate()
+        .map(|(id, name)| {
+            (
+                id as i64,
+                rocky_core::definition_item_id(
+                    publisher,
+                    signed.statement.scope.domain.app,
+                    "field",
+                    name,
+                ),
+            )
+        })
+        .collect();
+    let mut available_headers: BTreeMap<_, _> = known_headers
+        .iter()
+        .map(|(digest, bytes)| (*digest, bytes.as_slice()))
+        .collect();
+    for header in &plain.headers {
+        available_headers.insert(moves::header_digest(header), header.as_ref());
+    }
+    let origins: Vec<moves::Origin> = plain
+        .origins
+        .iter()
+        .map(|origin| {
+            let digest = moves::Origin::checkpoint_header(origin)?;
+            let header = available_headers
+                .get(&digest)
+                .ok_or_else(|| denied("checkpoint page lacks a creation header"))?;
+            moves::Origin::from_checkpoint(origin, header)
+        })
+        .collect::<Result<_, Error>>()?;
+    if plain.creations.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(denied("checkpoint creation legend is not strictly ordered"));
+    }
+    let mut used_creations = BTreeSet::new();
+    let mut used_names = BTreeSet::new();
+    let mut used_origins = BTreeSet::new();
+    let mut used_authors = BTreeSet::new();
+    let signing = page_signing_bytes(&plain)?;
     if !signed.signer().verify(&signing, &plain.signature) {
         return Err(denied("checkpoint page signature mismatch"));
     }
@@ -130,6 +193,16 @@ fn open_page(
             return Err(denied("checkpoint page repeats author bindings"));
         }
     }
+    let mut headers = BTreeMap::new();
+    for header in &plain.headers {
+        crate::wire::verified_header(header)?;
+        if headers
+            .insert(moves::header_digest(header), false)
+            .is_some()
+        {
+            return Err(denied("checkpoint page repeats a creation header"));
+        }
+    }
     let mut delta = Sets::new();
     let mut last = cursor;
     let mut rows = Vec::with_capacity(plain.rows.len());
@@ -139,9 +212,55 @@ fn open_page(
             return Err(denied("checkpoint rows out of order"));
         }
         last = Some(id);
-        delta.replace(&id, None, &row.fields)?;
-        let record = decode::<Materialized>(&row.fields)?;
+        let packed: records::Record = decode(&row.fields)?;
+        used_names.extend(packed.field_ids());
+        let origin = match packed.origin_id() {
+            Some(id) => {
+                used_origins.insert(id);
+                Some(
+                    origins
+                        .get(
+                            usize::try_from(id)
+                                .map_err(|_| denied("invalid checkpoint origin index"))?,
+                        )
+                        .cloned()
+                        .ok_or_else(|| denied("checkpoint page lacks a row origin"))?,
+                )
+            }
+            None => None,
+        };
+        if packed.author_set_id() != 0 {
+            return Err(denied("checkpoint row names a local author set"));
+        }
+        let creation = packed.creation_index();
+        let packed_creation = *plain
+            .creations
+            .get(creation as usize)
+            .ok_or_else(|| denied("checkpoint page lacks a row creation"))?;
+        used_creations.insert(creation);
+        let record = packed.unpack(&names, origin, &plain.authors, packed_creation)?;
+        for stamp in record.stamps.values().chain(&record.created) {
+            if !plain.authors.contains_key(&stamp.author) {
+                return Err(denied("checkpoint page lacks a stamp author"));
+            }
+            used_authors.insert(stamp.author);
+        }
+        delta.replace(&id, None, &encode(&record)?)?;
         if let Some(proof) = &record.proof {
+            if let std::collections::btree_map::Entry::Vacant(entry) = headers.entry(proof.header())
+            {
+                let bytes = known_headers
+                    .get(&proof.header())
+                    .ok_or_else(|| denied("checkpoint page lacks a creation header"))?;
+                if moves::header_digest(bytes) != proof.header() {
+                    return Err(denied("checkpoint header digest mismatch"));
+                }
+                crate::wire::verified_header(bytes)?;
+                entry.insert(true);
+            }
+            *headers
+                .get_mut(&proof.header())
+                .ok_or_else(|| denied("checkpoint page lacks a creation header"))? = true;
             *sets
                 .get_mut(&proof.bindings())
                 .ok_or_else(|| denied("checkpoint page lacks a row's author bindings"))? = true;
@@ -151,11 +270,27 @@ fn open_page(
     if plain.next.is_some() && plain.next != last {
         return Err(denied("checkpoint page binding mismatch"));
     }
+    if used_creations.len() != plain.creations.len()
+        || used_names.len() != plain.legend.len()
+        || used_origins.len() != origins.len()
+        || used_authors.len() != plain.authors.len()
+    {
+        return Err(denied("checkpoint page carries unused legend entries"));
+    }
+    if headers.values().any(|named| !named) {
+        return Err(denied("checkpoint page carries unnamed creation headers"));
+    }
     if sets.values().any(|named| !named) {
         return Err(denied("checkpoint page carries unnamed author bindings"));
     }
     Ok(OpenedPage {
         rows,
+        authors: plain.authors,
+        headers: plain
+            .headers
+            .into_iter()
+            .map(|header| header.into_vec())
+            .collect(),
         bindings: plain
             .bindings
             .into_iter()
@@ -383,7 +518,7 @@ impl<A: RowApplication> Inner<A> {
             let mut held = self
                 .conn
                 .query(
-                    "SELECT 1 FROM secure_rows WHERE scope=? LIMIT 1",
+                    "SELECT 1 FROM secure_row_records WHERE scope=? LIMIT 1",
                     [encode(&scope)?],
                 )
                 .await?;
@@ -438,13 +573,21 @@ impl<A: RowApplication> Inner<A> {
                 self.check_record_provenance(allocation, record).await?;
             }
         }
+        for (author, signer) in &page.authors {
+            self.keep_stamp_author(scope.domain, *author, *signer)
+                .await?;
+        }
+        for header in &page.headers {
+            self.put_creation_header(header).await?;
+        }
         for set in &page.bindings {
             self.put_bindings(set).await?;
         }
         let mut sets = staging.sets.clone();
         sets.merge_rows(&page.delta);
         let blob = encode(&scope)?;
-        for (row, PageRow { fields, clock, .. }, record) in &page.rows {
+        for (row, PageRow { clock, .. }, record) in &page.rows {
+            let fields = self.encode_record(record).await?;
             // A row moved out leaves a tombstone without an image.
             if let Some(tuple) = &statement.partition
                 && !(record.deleted && record.fields.is_empty())
@@ -479,10 +622,14 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             if staging.direct {
-                let stored = self
-                    .conn
+                if self.row(scope, *row).await?.is_some() {
+                    return Err(Error::Corrupt(
+                        "a checkpoint row is already stored during its import".into(),
+                    ));
+                }
+                self.conn
                     .execute(
-                        "INSERT INTO secure_rows VALUES(?,?,?,X'') ON CONFLICT(scope,row) DO NOTHING",
+                        "INSERT INTO secure_row_records VALUES(?,?,?)",
                         bindings(vec![
                             SqlValue::Blob(blob.clone()),
                             SqlValue::Blob(row.to_vec()),
@@ -490,12 +637,6 @@ impl<A: RowApplication> Inner<A> {
                         ]),
                     )
                     .await?;
-                // A local write cannot name a row it never saw.
-                if stored == 0 {
-                    return Err(Error::Corrupt(
-                        "a checkpoint row is already stored during its import".into(),
-                    ));
-                }
                 self.index_row_key(&blob, row, record).await?;
                 // Every stored row's creation stays known, as after the switch.
                 self.put_stub(record.creation, id, *clock, true).await?;
@@ -623,7 +764,7 @@ impl<A: RowApplication> Inner<A> {
         let held = collect_rows(
             self.conn
                 .query(
-                    "SELECT EXISTS(SELECT 1 FROM secure_rows WHERE scope=?) OR EXISTS(SELECT 1 FROM secure_checkpoints WHERE scope=?2) OR EXISTS(SELECT 1 FROM secure_applied WHERE scope=?2)",
+                    "SELECT EXISTS(SELECT 1 FROM secure_row_records WHERE scope=?) OR EXISTS(SELECT 1 FROM secure_checkpoints WHERE scope=?2) OR EXISTS(SELECT 1 FROM secure_applied WHERE scope=?2)",
                     bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(id)]),
                 )
                 .await?,
@@ -647,7 +788,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         for sql in [
-            "DELETE FROM secure_rows WHERE scope=?",
+            "DELETE FROM secure_row_records WHERE scope=?",
             "DELETE FROM secure_move_rows WHERE scope=?",
         ] {
             self.conn.execute(sql, [blob.clone()]).await?;
@@ -740,6 +881,74 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(false),
         }
     }
+    pub(in crate::replica) async fn offered_checkpoint(
+        &mut self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scope: ResourceScope,
+    ) -> Result<Option<SignedCheckpoint>, Error> {
+        self.authorize_peer(peer, credentials, scope)?;
+        // A partitioned table's own scope holds no rows; each partition
+        // scope has its checkpoint.
+        if self.partitioned(scope) && !self.partitions.contains_key(&scope) {
+            return Ok(None);
+        }
+        // A scope still being imported has nothing whole to offer, nor
+        // has one its owner means to replace.
+        if self.importing.contains(&scope) || self.importing(scope).await? {
+            return Ok(None);
+        }
+        let time = now()?;
+        // A no-frames base is served as signed, by key holders and relays alike.
+        if self.no_frames_base(scope).await?.is_some() {
+            self.flush()?;
+            return Ok(self
+                .served_checkpoint(scope)
+                .await?
+                .map(|(_, signed)| signed)
+                .filter(|signed| signed.signer() != peer));
+        }
+        // A keyless holder serves only complete, verified sealed archives.
+        if !self.can_read_key(scope, &self.local_grants(time)?) {
+            return Ok(self
+                .archived_checkpoint(scope, true)
+                .await?
+                .filter(|signed| {
+                    signed.signer() != peer && signed.verify_authority(self, time).is_ok()
+                }));
+        }
+        let Ok((key_epoch, _)) = self.scope_key(scope) else {
+            return Ok(None);
+        };
+        let Some(id) = self.find_scope_id(scope).await? else {
+            return Ok(None);
+        };
+        let Some(signed) = self
+            .checkpoint_record(id, true)
+            .await?
+            .and_then(|record| record.signed)
+        else {
+            return Ok(None);
+        };
+        if signed.signer() == peer
+            || self
+                .manifest_of_tip(signed.statement.tip)
+                .and_then(|manifest| self.admits(manifest))
+                .is_err()
+            || signed.statement.key_epoch() != Some(key_epoch)
+            || signed.verify_authority(self, time).is_err()
+        {
+            return Ok(None);
+        }
+        // Keep a transferable cut stable across page/session retries.
+        self.flush()?;
+        Ok(self
+            .served_checkpoint(scope)
+            .await?
+            .filter(|(_, signed)| signed.signer() != peer)
+            .map(|(_, signed)| signed))
+    }
+
     /// The checkpoint this replica can serve: verified and signed under the
     /// current policy.
     pub(super) async fn served_checkpoint(
@@ -860,65 +1069,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<SignedCheckpoint>, Error> {
-        let mut inner = self.inner.lock().await;
-        inner.authorize_peer(peer, credentials, scope)?;
-        // A partitioned table's own scope holds no rows; each partition
-        // scope has its checkpoint.
-        if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
-            return Ok(None);
-        }
-        // A scope still being imported has nothing whole to offer, nor
-        // has one its owner means to replace.
-        if inner.importing.contains(&scope) || inner.importing(scope).await? {
-            return Ok(None);
-        }
-        let time = now()?;
-        // A no-frames base is served as signed, by key holders and relays alike.
-        if inner.no_frames_base(scope).await?.is_some() {
-            inner.flush()?;
-            return Ok(inner
-                .served_checkpoint(scope)
-                .await?
-                .map(|(_, signed)| signed)
-                .filter(|signed| signed.signer() != peer));
-        }
-        // A keyless holder serves only complete, verified sealed archives.
-        if !inner.can_read_key(scope, &inner.local_grants(time)?) {
-            return Ok(inner
-                .archived_checkpoint(scope, true)
-                .await?
-                .filter(|signed| {
-                    signed.signer() != peer && signed.verify_authority(&inner, time).is_ok()
-                }));
-        }
-        let (key_epoch, _) = inner.scope_key(scope)?;
-        let Some(id) = inner.find_scope_id(scope).await? else {
-            return Ok(None);
-        };
-        let Some(signed) = inner
-            .checkpoint_record(id, true)
-            .await?
-            .and_then(|record| record.signed)
-        else {
-            return Ok(None);
-        };
-        if signed.signer() == peer
-            || inner
-                .manifest_of_tip(signed.statement.tip)
-                .and_then(|manifest| inner.admits(manifest))
-                .is_err()
-            || signed.statement.key_epoch() != Some(key_epoch)
-            || signed.verify_authority(&inner, time).is_err()
-        {
-            return Ok(None);
-        }
-        // Keep a transferable cut stable across page/session retries.
-        inner.flush()?;
-        Ok(inner
-            .served_checkpoint(scope)
-            .await?
-            .filter(|(_, signed)| signed.signer() != peer)
-            .map(|(_, signed)| signed))
+        self.inner
+            .lock()
+            .await
+            .offered_checkpoint(peer, credentials, scope)
+            .await
     }
     /// Whether `signed` is the verified checkpoint this replica last switched to.
     pub(crate) async fn checkpoint_installed(
@@ -1033,16 +1188,26 @@ impl<A: RowApplication> EncryptedReplica<A> {
             after,
             next: None,
             rows: vec![],
+            legend: vec![],
+            origins: vec![],
+            creations: vec![],
+            authors: BTreeMap::new(),
             bindings: vec![],
+            headers: vec![],
             signature: Signature::from_bytes(&[0; 64]),
         };
         let mut named = BTreeSet::new();
+        let mut named_headers = BTreeSet::new();
+        let mut header_bytes = BTreeMap::new();
+        let mut legend_names = BTreeMap::new();
+        let mut legend_origins = BTreeSet::new();
+        let mut legend_creations = BTreeSet::new();
         let mut used = 0;
         for record in &records {
             let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                 return Err(Error::Corrupt("checkpoint row".into()));
             };
-            let record = decode::<Materialized>(fields)?;
+            let record = inner.decode_record(fields).await?;
             // A row's bindings weigh on the page that first names them.
             let set = match record.proof.as_ref().map(|proof| proof.bindings()) {
                 Some(digest) if !named.contains(&digest) => {
@@ -1050,8 +1215,75 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 _ => None,
             };
+            let header = match record.proof.as_ref().map(|proof| proof.header()) {
+                Some(digest) => {
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        header_bytes.entry(digest)
+                    {
+                        entry.insert(inner.stored_creation_header(digest).await?);
+                    }
+                    if !named_headers.contains(&digest)
+                        && inner.page_header_needed(id, &served, digest, after).await?
+                    {
+                        Some((digest, header_bytes[&digest].clone()))
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            let mut added_names = BTreeMap::new();
+            for field in record.fields.keys().chain(record.stamps.keys()) {
+                if !legend_names.contains_key(field) {
+                    added_names.insert(*field, inner.record_name(*field).await?);
+                }
+            }
+            let origin = record
+                .proof
+                .as_ref()
+                .map(|proof| {
+                    proof
+                        .origin()
+                        .checked_checkpoint_bytes(&header_bytes[&proof.header()])
+                })
+                .transpose()?;
+            let mut new_authors = BTreeMap::new();
+            for author in record
+                .stamps
+                .values()
+                .chain(&record.created)
+                .map(|stamp| stamp.author)
+                .collect::<BTreeSet<_>>()
+            {
+                if !plain.authors.contains_key(&author) {
+                    new_authors.insert(
+                        author,
+                        *record
+                            .authors
+                            .get(&author)
+                            .ok_or_else(|| denied("row stamp signer missing"))?,
+                    );
+                }
+            }
             let weight = ROW_OVERHEAD
-                + fields.len()
+                + if legend_creations.contains(&record.creation) {
+                    0
+                } else {
+                    36
+                }
+                + new_authors.len() * 48
+                + added_names
+                    .values()
+                    .map(|name| name.len() + 16)
+                    .sum::<usize>()
+                + origin
+                    .as_ref()
+                    .filter(|origin| !legend_origins.contains(*origin))
+                    .map_or(0, |origin| origin.len() + 16)
+                + records::Record::wire_weight(&record)?
+                + header
+                    .as_ref()
+                    .map_or(0, |(_, header)| ROW_OVERHEAD + header.len())
                 + set.as_ref().map_or(0, |(_, set)| ROW_OVERHEAD + set.len());
             if plain.rows.len() == STEP_ROWS || used + weight > budget {
                 if stored.is_some() {
@@ -1067,6 +1299,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 break;
             }
             used += weight;
+            plain.authors.extend(new_authors);
+            legend_creations.insert(record.creation);
+            legend_names.extend(added_names);
+            if let Some(origin) = origin {
+                legend_origins.insert(origin);
+            }
+            if let Some((digest, header)) = header {
+                named_headers.insert(digest);
+                plain.headers.push(header.into());
+            }
             if let Some((digest, set)) = set {
                 named.insert(digest);
                 plain.bindings.push(serde_bytes::ByteBuf::from(set));
@@ -1078,20 +1320,61 @@ impl<A: RowApplication> EncryptedReplica<A> {
             row_of(row)?;
             plain.rows.push(PageRow {
                 row: row.clone(),
-                fields: fields.clone(),
+                fields: encode(&record)?,
                 clock,
             });
         }
         if plain.rows.is_empty() && !records.is_empty() {
             return Err(denied("byte quota smaller than one checkpoint row"));
         }
+        plain.legend = legend_names
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        plain.origins = legend_origins.into_iter().map(Into::into).collect();
+        let field_ids: BTreeMap<_, _> = legend_names
+            .into_iter()
+            .map(|(field, name)| {
+                let id = plain
+                    .legend
+                    .binary_search(&name)
+                    .map_err(|_| Error::Corrupt("checkpoint field legend".into()))?;
+                Ok((field, id as i64))
+            })
+            .collect::<Result<_, Error>>()?;
+        plain.creations = legend_creations.into_iter().collect();
+        for row in &mut plain.rows {
+            let record: Materialized = decode(&row.fields)?;
+            let origin = record
+                .proof
+                .as_ref()
+                .map(|proof| {
+                    let bytes = serde_bytes::ByteBuf::from(proof.origin().checkpoint_bytes()?);
+                    plain
+                        .origins
+                        .binary_search(&bytes)
+                        .map(|id| id as i64)
+                        .map_err(|_| Error::Corrupt("checkpoint origin legend".into()))
+                })
+                .transpose()?;
+            row.fields = encode(&records::Record::pack(
+                &record,
+                &field_ids,
+                origin,
+                0,
+                u32::try_from(
+                    plain
+                        .creations
+                        .binary_search(&record.creation)
+                        .map_err(|_| Error::Corrupt("checkpoint creation legend".into()))?,
+                )
+                .map_err(|_| Error::Corrupt("checkpoint creation legend".into()))?,
+            )?)?;
+        }
         plain.signature = match (signer, stored) {
-            (Some(signer), _) => signer.sign(&page_signing_bytes(
-                checkpoint,
-                after,
-                plain.next,
-                &plain.rows,
-            )?),
+            (Some(signer), _) => signer.sign(&page_signing_bytes(&plain)?),
             (None, Some((next, signature))) => {
                 let last = plain
                     .rows
@@ -1126,6 +1409,39 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(page)
     }
+    /// Discards only this staged checkpoint before falling back to frames.
+    /// Direct imports undo their partial rows; retained local operations settle again.
+    pub async fn cancel_rebootstrap(
+        &self,
+        scope: ResourceScope,
+        checkpoint: Commitment,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        let Some(id) = inner.find_scope_id(scope).await? else {
+            return Ok(());
+        };
+        let Some(staging) = inner.staging(id).await? else {
+            return Ok(());
+        };
+        if staging.signed.id()? != checkpoint {
+            return Ok(());
+        }
+        transaction!(inner, |inner| {
+            if staging.direct {
+                inner.abort_direct(scope, id).await?;
+            } else {
+                inner.clear_staging(id).await?;
+            }
+            Ok(())
+        })?;
+        inner.load_direct().await?;
+        inner.flush()?;
+        inner.publish_revision().await?;
+        drop(inner);
+        self.settle().await?;
+        Ok(())
+    }
+
     /// Starts importing a peer's signed checkpoint for a scope this replica
     /// reads in whole. Nothing changes until `finish_rebootstrap`.
     pub async fn begin_rebootstrap(&self, signed: SignedCheckpoint) -> Result<(), Error> {
@@ -1237,14 +1553,35 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn stage_checkpoint_page(&self, page: CheckpointPage) -> Result<(), Error> {
         let scope = page.scope;
         let (checkpoint, after) = (page.checkpoint, page.after);
-        let (key, signed, cursor) = {
+        let (key, signed, cursor, publisher, known_headers) = {
             let inner = self.inner.lock().await;
             let (key, staging) = inner.expected_page(&page).await?;
-            (key, staging.signed, staging.cursor)
+            let plain: PagePlain = decode(&page.rows.open(&key)?)?;
+            let supplied: BTreeSet<_> = plain
+                .headers
+                .iter()
+                .map(|header| moves::header_digest(header))
+                .collect();
+            let mut known = BTreeMap::new();
+            for origin in &plain.origins {
+                let digest = moves::Origin::checkpoint_header(origin)?;
+                if !supplied.contains(&digest) && !known.contains_key(&digest) {
+                    known.insert(digest, inner.stored_creation_header(digest).await?);
+                }
+            }
+            (
+                key,
+                staging.signed,
+                staging.cursor,
+                *inner.config.publisher.as_bytes(),
+                known,
+            )
         };
-        let opened = tokio::task::spawn_blocking(move || open_page(page, key, &signed, cursor))
-            .await
-            .map_err(|_| Error::Closed)??;
+        let opened = tokio::task::spawn_blocking(move || {
+            open_page(page, key, &signed, cursor, publisher, known_headers)
+        })
+        .await
+        .map_err(|_| Error::Closed)??;
         let mut inner = self.inner.lock().await;
         let id = inner
             .find_scope_id(scope)
@@ -1471,14 +1808,14 @@ impl<A: RowApplication> Inner<A> {
         if rewrite {
             self.in_rows_bulk(scope, async {
                 self.conn
-                    .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                    .execute("DELETE FROM secure_row_records WHERE scope=?", [blob.clone()])
                     .await?;
                 self
                     .conn
                     .execute(
                         match direct {
-                            true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
-                            false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
+                            true => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_checkpoint_rows WHERE scope=?",
+                            false => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
                         },
                         bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                     )
@@ -1519,6 +1856,7 @@ impl<A: RowApplication> Inner<A> {
                 self.conn.execute(sql, [id]).await?;
             }
         }
+        self.index_page_headers(id, &served::Served::Base).await?;
         if rewrite {
             self.conn
                 .execute("DELETE FROM secure_stubs WHERE scope=?", [id])
@@ -1678,7 +2016,7 @@ impl<A: RowApplication> Inner<A> {
                 if fields.is_empty() {
                     continue;
                 }
-                self.check_record_provenance(allocation, &decode(fields)?)
+                self.check_record_provenance(allocation, &self.decode_record(fields).await?)
                     .await?;
             }
             if records.len() < 256 {
@@ -1861,4 +2199,30 @@ pub(crate) fn forge_page_bindings(
         &encode(&plain).unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn forge_page_legend(
+    page: &mut CheckpointPage,
+    key: &[u8; 32],
+    signer: &PrivateKey,
+    edit: impl FnOnce(&mut Vec<String>, &mut Vec<Hash>, &mut Vec<serde_bytes::ByteBuf>),
+) {
+    let mut plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
+    edit(&mut plain.legend, &mut plain.creations, &mut plain.origins);
+    plain.signature = signer.sign(&page_signing_bytes(&plain).unwrap());
+    page.rows = EncryptedPackage::seal(
+        page.rows.scope,
+        page.rows.generation,
+        PackageKind::Checkpoint,
+        key,
+        &encode(&plain).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn page_header_count(page: &CheckpointPage, key: &[u8; 32]) -> usize {
+    let plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
+    plain.headers.len()
 }

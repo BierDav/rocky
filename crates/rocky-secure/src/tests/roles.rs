@@ -162,7 +162,7 @@ async fn stored_rows(replica: &Replica, scope: ResourceScope) -> i64 {
     let mut result = inner
         .conn
         .query(
-            "SELECT COUNT(*) FROM secure_rows WHERE scope=?",
+            "SELECT COUNT(*) FROM secure_row_records WHERE scope=?",
             [encode(&scope).unwrap()],
         )
         .await
@@ -1201,7 +1201,7 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         .await
         .unwrap();
     assert_eq!(full.replica.prune(scope).await.unwrap().pruned, 500);
-    insert(&f, &full, scope, 500..1000, 1).await;
+    insert(&f, &full, scope, 500..2000, 1).await;
     let mut sessions = 0;
     let mut rebootstrapped = false;
     loop {
@@ -1213,6 +1213,7 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         drop(session);
         server.await.unwrap();
         sessions += 1;
+        assert!(sessions <= 8, "bounded sync made insufficient progress");
         rebootstrapped |= synced.rebootstrap.is_some();
         if !synced.catch_up.exhausted {
             break;

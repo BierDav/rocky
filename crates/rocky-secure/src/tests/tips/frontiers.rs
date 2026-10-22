@@ -9,6 +9,7 @@ async fn checked(replica: &Replica, scope: ResourceScope, count: u64) {
         count
     );
     let inner = replica.inner.lock().await;
+    inner.checked_seal_path(scope.domain).unwrap();
     assert_eq!(cached, inner.compute_tip_frontier(scope).await.unwrap());
     assert_eq!(inner.frontier(scope).await.unwrap(), cached);
 }
@@ -111,6 +112,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
     // The workspace stays at the same source; the winner changes in memory.
     let mut inner = replica.inner.lock().await;
     let original = inner.frontier(f.public).await.unwrap();
+    inner.checked_seal_path(f.public.domain).unwrap();
     let writes: i64 = match rows(&inner.conn, "SELECT total_changes()").await.unwrap()[0][0] {
         rocky_core::SqlValue::Integer(value) => value,
         _ => panic!("integer"),
@@ -123,6 +125,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
         let graph = &inner.graphs[&f.public.domain];
         assert_eq!(graph.revoked.len(), 1);
         assert_eq!(graph.seal(source).unwrap(), Some(&seals[1 - index]));
+        inner.checked_seal_path(f.public.domain).unwrap();
         assert_eq!(inner.frontier(f.public).await.unwrap(), original);
         assert_eq!(
             inner.compute_tip_frontier(f.public).await.unwrap(),
@@ -133,7 +136,19 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
         rows(&inner.conn, "SELECT total_changes()").await.unwrap()[0][0],
         rocky_core::SqlValue::Integer(writes)
     );
+    drop(inner);
+    main(&f, &replica).await;
+    let mut inner = replica.inner.lock().await;
+    inner.checked_seal_path(f.public.domain).unwrap();
+    for (index, policy) in policies.iter().enumerate() {
+        inner.refresh_frontier_revocations(policy).await.unwrap();
+        assert_eq!(
+            inner.checked_seal_path(f.public.domain).unwrap(),
+            vec![seals[1 - index].clone()]
+        );
+    }
     inner.reload_frontier_graphs().await.unwrap();
+    inner.checked_seal_path(f.public.domain).unwrap();
     assert_eq!(inner.frontier_cache_stats().1, 0);
     assert_eq!(inner.frontier(f.public).await.unwrap(), original);
 }
@@ -321,7 +336,7 @@ async fn a_failed_commit_discards_the_transactional_frontier() {
 }
 
 #[tokio::test]
-async fn offering_pages_and_recording_acknowledgments_preserve_one_scan() {
+async fn offering_pages_and_recording_acknowledgments_compute_once_without_header_decodes() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let replica = open(&f, &dir.path().join("pages.db"), &PrivateKey::new()).await;
@@ -397,7 +412,7 @@ async fn offering_pages_and_recording_acknowledgments_preserve_one_scan() {
     assert_eq!(count, 66);
     let warmed = replica.inner.lock().await.frontier_cache_stats();
     assert_eq!(warmed.2 - before.2, 1);
-    assert_eq!(warmed.3 - before.3, 66);
+    assert_eq!(warmed.3 - before.3, 0);
     // A hit never bypasses authorization or the current peer tip.
     let denied = f.credentials(&peer, vec![]);
     assert!(
@@ -432,4 +447,51 @@ async fn offering_pages_and_recording_acknowledgments_preserve_one_scan() {
         replica.inner.lock().await.frontier_cache_stats().2,
         refreshed.2
     );
+}
+
+#[tokio::test]
+async fn interleaved_scope_coordinates_clip_inside_an_ancestor_log_run() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        dir.path().join("interleaved.db"),
+        f.app(),
+        f.config(&node, f.full(), &[f.public, f.private]),
+    )
+    .await
+    .unwrap();
+    main(&f, &replica).await;
+    insert(&f, &replica, 1, "first").await;
+    replica
+        .author(
+            [9; 32],
+            vec![change(f.private, 9, None, Some(f.app().salary("100")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let cut = insert(&f, &replica, 2, "included")
+        .await
+        .operation()
+        .unwrap()
+        .header
+        .extensions
+        .author_sequence;
+    insert(&f, &replica, 3, "excluded").await;
+    assert_eq!(replica.frontier(f.public).await.unwrap().logs[0].held, 3);
+    let mut statement = seal(&f, &replica).await.statement;
+    statement.frontier[0].sequence = cut;
+    let signed = SignedSeal::sign(statement, &f.publisher).unwrap();
+    let (_, mut records) = branch(&f, &signed);
+    records.push(TipStatement::Seal(signed));
+    replica.receive_tip_statements(&records).await.unwrap();
+    replica
+        .follow_bookmark(f.public.domain, "dev")
+        .await
+        .unwrap();
+    checked(&replica, f.public, 2).await;
+    checked(&replica, f.private, 1).await;
+    replica.audit(f.public).await.unwrap();
+    replica.audit(f.private).await.unwrap();
 }

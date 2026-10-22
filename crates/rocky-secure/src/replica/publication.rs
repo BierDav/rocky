@@ -285,6 +285,59 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Whether this publisher listed its closing base. Graph records remain
+    /// the completion journal after bases advance or new scopes are held.
+    pub async fn migration_checkpoint_listed(
+        &self,
+        publication: Commitment,
+    ) -> Result<bool, Error> {
+        let inner = self.inner.lock().await;
+        let Some((migration, _, _)) = inner.migration_record(publication).await? else {
+            return Ok(true);
+        };
+        let path = inner.path_seals(migration.scope)?;
+        let Some(start) = path
+            .iter()
+            .position(|seal| seal.statement.tip == migration.tip)
+        else {
+            // A losing branch is retained, but is not this workspace's to close.
+            return Ok(inner.workspace.tip != migration.tip);
+        };
+        let graph = inner.graph_for(migration.scope)?;
+        for seal in &path[start..] {
+            if seal.statement.action
+                != (rocky_credentials::SealAction::Continue {
+                    schema: graph.schema(seal.statement.tip).map_err(credential)?,
+                })
+            {
+                continue;
+            }
+            let seal = seal.id().map_err(credential)?;
+            for record in graph.checkpoints_at(seal).map_err(credential)? {
+                let signer = record.statement.signer;
+                let owned = signer == inner.config.node.public_key()
+                    || inner
+                        .credential_signer
+                        .as_ref()
+                        .is_some_and(|key| key.public_key() == signer)
+                    || inner
+                        .node_author
+                        .as_ref()
+                        .is_some_and(|author| author.key.public_key() == signer)
+                    || inner
+                        .line_nodes
+                        .values()
+                        .any(|author| author.key.public_key() == signer);
+                // Compaction moves all held bases atomically; listing publishes
+                // their records together. A retained own record proves completion.
+                if owned {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Every staged publication this replica committed, with how many of
     /// its leading bundles a peer reported holding.
     pub async fn publications(&self) -> Result<Vec<Publication>, Error> {

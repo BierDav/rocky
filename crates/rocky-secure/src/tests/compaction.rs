@@ -143,7 +143,7 @@ pub(super) async fn scalar(replica: &Replica, sql: &str) -> i64 {
 /// Stored row records and how many are tombstones.
 async fn stored(replica: &Replica) -> (i64, i64) {
     (
-        scalar(replica, "SELECT count(*) FROM secure_rows").await,
+        scalar(replica, "SELECT count(*) FROM secure_row_records").await,
         scalar(
             replica,
             "SELECT COALESCE(SUM(tombstones),0) FROM secure_scope_state",
@@ -571,7 +571,18 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     // A compacts its seal at once; B receives the frames and then a rival
     // seal that wins, compacts there and lists its checkpoint.
     insert(&a, "y", "late").await;
-    let sealed = rivalled_seal(&lineage, &a).await;
+    // Keep the last frame a birth: the rival must exclude a newer identity,
+    // rather than only the delete at the end of the helper's churn.
+    let sealed = loop {
+        let tip = a.followed_tip().await;
+        let frontier = a.seal_frontier(lineage.domain, false).await.unwrap();
+        let signed = sign_seal(&lineage, tip, frontier);
+        if lower_rival(&lineage, &signed).is_some() {
+            break publish_seal(&lineage, &a, signed).await;
+        }
+        delete(&a, "y").await;
+        insert(&a, "y", "late").await;
+    };
     a.compact(lineage.domain, 0).await.unwrap();
     sync(&lineage, &a, &b, &keys[1]).await;
     let (winner, statements) = rival(&lineage, &sealed);
@@ -937,3 +948,7 @@ mod returning;
 mod staged_switches;
 
 mod restoration;
+
+mod state_advice;
+
+mod incremental;

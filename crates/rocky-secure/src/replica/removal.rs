@@ -9,7 +9,7 @@ pub async fn local_row_counts(path: &Path) -> Result<BTreeMap<Commitment, u64>, 
     let file = crate::sqlite::Connection::open_read_only(path)?;
     let mut counts = BTreeMap::<Commitment, u64>::new();
     for row in file.rows(
-        "SELECT s.scope,count(r.fields) FROM secure_scope_state s LEFT JOIN secure_rows r ON r.scope=s.scope GROUP BY s.id,s.scope",
+        "SELECT s.scope,count(r.fields) FROM secure_scope_state s LEFT JOIN secure_row_records r ON r.scope=s.scope GROUP BY s.id,s.scope",
         (),
     )? {
         let [crate::sqlite::Value::Blob(scope), crate::sqlite::Value::Integer(count)] = row.as_slice() else {
@@ -39,17 +39,17 @@ impl<A: RowApplication> Inner<A> {
         let mut after = Vec::new();
         let mut changed = false;
         loop {
-            let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256", [encode(&scope)?, after.clone()]).await?).await?;
+            let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT 256", [encode(&scope)?, after.clone()]).await?).await?;
             for record in &records {
                 let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = record.as_slice() else {
                     return Err(Error::Corrupt("stored row".into()));
                 };
                 after = key.clone();
-                let mut row: Materialized = decode(bytes)?;
+                let mut row = self.decode_record(bytes).await?;
                 if !fields.tables.contains(&scope.table) {
                     self.conn
                         .execute(
-                            "DELETE FROM secure_rows WHERE scope=? AND row=?",
+                            "DELETE FROM secure_row_records WHERE scope=? AND row=?",
                             [encode(&scope)?, key.clone()],
                         )
                         .await?;
@@ -57,8 +57,12 @@ impl<A: RowApplication> Inner<A> {
                 } else if fields.strip(scope.table, &mut row) {
                     self.conn
                         .execute(
-                            "UPDATE secure_rows SET fields=? WHERE scope=? AND row=?",
-                            [encode(&row)?, encode(&scope)?, key.clone()],
+                            "UPDATE secure_row_records SET fields=? WHERE scope=? AND row=?",
+                            [
+                                self.encode_record(&row).await?,
+                                encode(&scope)?,
+                                key.clone(),
+                            ],
                         )
                         .await?;
                     changed = true;
@@ -85,7 +89,7 @@ impl<A: RowApplication> Inner<A> {
             let page = collect_rows(
                 self.conn
                     .query(
-                        "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256",
+                        "SELECT row,fields FROM secure_row_records WHERE scope=? AND row>? ORDER BY row LIMIT 256",
                         bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Blob(after.clone())]),
                     )
                     .await?,
@@ -96,7 +100,8 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("stored row".into()));
                 };
                 after = row.clone();
-                sets.replace(&checkpoint::row_of(row)?, None, bytes)?;
+                sets.replace_stored(self, &checkpoint::row_of(row)?, None, bytes)
+                    .await?;
             }
             if page.len() < 256 {
                 break;

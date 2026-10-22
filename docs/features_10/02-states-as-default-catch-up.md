@@ -1,20 +1,16 @@
 # 2. States as the default catch-up
 
-Status: specified, not started. Owner: `rocky-secure` range serving and
+Status: complete (2026-10-23); [all gates passed](02-states-as-default-catch-up-evidence.md). Owner: `rocky-secure` range serving and
 link messages; `rocky-sdk` migration completion, finality maintenance and
 catch-up. Depends on nothing; benefits from
 [phase 3](03-incremental-finalization.md) once seals are frequent. Effort:
 one to two weeks. Follow the [execution contract](README.md#agent-execution-contract).
-Decision record [0076](../decisions/0076-states-as-default-catch-up.md).
+
 
 ## Inputs and objective
 
-Read [encrypted checkpoints](../runtime/encrypted-checkpoints.md),
-[checkpoint import](../runtime/checkpoint-import.md),
-[lazy compaction](../runtime/lazy-compaction.md#checkpoints-at-seals),
-[final seals](../runtime/seal-finality.md),
-[SDK catch-up](../runtime/sdk-bootstrapping.md#catch-up) and
-[review finding 1](00-sync-performance-review.md#findings).
+Inspect the owning modules and their tests for current behavior, and the
+[performance review](00-sync-performance-review.md) for the measured baseline.
 
 After this phase a device far behind imports a base at a seal of its path
 and replays only the tail, a finished migration leaves a checkpoint that
@@ -73,9 +69,7 @@ seal without being asked.
 3. Automatic compaction at final seals in `finalize_seals`; the Kotlin
    `compact` documentation notes when it is no longer needed.
 4. The 100k fixture's new assertions and measurements; evidence.
-5. Guides: encrypted checkpoints' rebootstrap section, lazy compaction's
-   compacting section, SDK catch-up, tips and bookmarks' "called by the
-   developer" paragraph.
+5. Update phase status and evidence in this directory.
 
 ## Completion gate
 

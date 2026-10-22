@@ -350,3 +350,125 @@ async fn a_holder_waits_for_every_record_its_frames_count() {
         0
     );
 }
+
+#[tokio::test]
+async fn an_excluded_parent_delete_replays_the_same_children_puppets_and_virtual_rows() {
+    let erp = Erp::new();
+    let dir = TempDir::new().unwrap();
+    let device = erp
+        .open(
+            &dir.path().join("parent.db"),
+            &PrivateKey::new(),
+            51,
+            &TABLES,
+        )
+        .await;
+    let tip = device.replica.followed_tip().await;
+    follow(&erp, &device, &[bookmark(&erp, None, tip)]).await;
+    let sql = erp.sql(&device).await;
+    let (region, _) = commit(
+        &sql,
+        &[("INSERT INTO regions(name,id) VALUES('west',?id)", vec![])],
+    )
+    .await;
+    let (customer, _) = commit(
+        &sql,
+        &[(
+            "INSERT INTO customers(name,region,score,photo,id) VALUES('customer',?,1.0,x'01',?id)",
+            vec![integer(region[0])],
+        )],
+    )
+    .await;
+    commit(
+        &sql,
+        &[(
+            "INSERT INTO orders(customer,label,id) VALUES(?,'order',?id)",
+            vec![integer(customer[0])],
+        )],
+    )
+    .await;
+    let frontier = device
+        .replica
+        .seal_frontier(erp.domain, false)
+        .await
+        .unwrap();
+    let regions = erp.scope("regions");
+    let (row, before) = device
+        .replica
+        .snapshot(regions)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .next()
+        .unwrap();
+    device
+        .replica
+        .author(
+            [204; 32],
+            vec![RowChange {
+                scope: regions,
+                row,
+                before: Some(before),
+                after: None,
+            }],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let children = stored(&device, "SELECT * FROM orders ORDER BY id").await;
+    let puppets = stored(&device, "SELECT * FROM customers ORDER BY id").await;
+    let virtual_rows = stored(&device, "SELECT * FROM regions ORDER BY id").await;
+    assert_eq!(
+        count(&device, "SELECT count(*) FROM customers WHERE row_kind=1").await,
+        1
+    );
+    assert_eq!(
+        count(&device, "SELECT count(*) FROM regions WHERE row_kind=2").await,
+        1
+    );
+    let schema = device
+        .replica
+        .tip_graph(erp.domain)
+        .await
+        .unwrap()
+        .schema(tip)
+        .unwrap();
+    let signed = SignedSeal::sign(
+        SealStatement {
+            format: SEAL_FORMAT,
+            scope: erp.domain,
+            tip,
+            frontier,
+            action: SealAction::Continue { schema },
+            recovery: None,
+        },
+        &erp.publisher,
+    )
+    .unwrap();
+    device
+        .replica
+        .publish_tip_statements(&[
+            TipStatement::Seal(signed.clone()),
+            bookmark(&erp, Some(tip), signed.successor().unwrap().unwrap()),
+        ])
+        .await
+        .unwrap();
+    device.replica.finalize_path(erp.domain).await.unwrap();
+    assert!(device.replica.inner.lock().await.finalization_oracle_time > std::time::Duration::ZERO);
+    assert_eq!(
+        stored(&device, "SELECT * FROM orders ORDER BY id").await,
+        children
+    );
+    assert_eq!(
+        stored(&device, "SELECT * FROM customers ORDER BY id").await,
+        puppets
+    );
+    assert_eq!(
+        stored(&device, "SELECT * FROM regions ORDER BY id").await,
+        virtual_rows
+    );
+    for table in ["regions", "customers", "orders"] {
+        device.replica.audit(erp.scope(table)).await.unwrap();
+    }
+}

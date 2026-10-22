@@ -121,6 +121,7 @@ impl Node {
                 )
                 .await?;
             self.follow_schema().await?;
+            self.finalize_seals().await;
             return Ok(());
         }
         let mut parents = BTreeSet::new();
@@ -168,6 +169,77 @@ impl Node {
             .await?;
         self.follow_schema().await?;
         self.run_staged_migration().await
+    }
+
+    /// Finish publication only after the closing base is signed and listed.
+    /// Persisted graph statements and bases are the retry journal.
+    pub(super) async fn close_migrations(&self) -> Result<(), Failure> {
+        let publications = self.replica.publications().await?;
+        if publications.is_empty()
+            || publications
+                .iter()
+                .any(|publication| publication.published < publication.bundles)
+        {
+            return Ok(());
+        }
+        let scope = self.domain().scope;
+        let graph = self.replica.tip_graph(scope).await?;
+        let followed = self.replica.followed_tip().await;
+        let mut pending = false;
+        let mut needs_seal = false;
+        for publication in publications {
+            if self
+                .replica
+                .migration_checkpoint_listed(publication.id)
+                .await?
+            {
+                continue;
+            }
+            let Some(migration) = self.replica.migration_publication(publication.id).await? else {
+                continue;
+            };
+            pending = true;
+            let mut covered = false;
+            for seal in &graph.seals {
+                if seal.successor()? != Some(followed) {
+                    continue;
+                }
+                if graph.schema(seal.statement.tip).is_err() {
+                    continue;
+                }
+                if seal.statement.action
+                    != (SealAction::Continue {
+                        schema: graph.schema(seal.statement.tip)?,
+                    })
+                {
+                    continue;
+                }
+                if graph
+                    .seal(seal.statement.tip)?
+                    .is_some_and(|winner| winner.id().ok() == seal.id().ok())
+                    && (migration.statement.tip == seal.statement.tip
+                        || graph.succeeds(migration.statement.tip, seal.statement.tip)?)
+                    && (seal.statement.tip == followed
+                        || graph.succeeds(seal.statement.tip, followed)?)
+                {
+                    covered = true;
+                    break;
+                }
+            }
+            needs_seal |= !covered;
+        }
+        if !pending {
+            return Ok(());
+        }
+        if needs_seal {
+            self.seal_followed(scope, false).await?;
+        }
+        self.replica.finalize_path(scope).await?;
+        self.replica.compact(scope, 0).await?;
+        self.sign_existence_bases(scope).await?;
+        self.list_checkpoints(scope).await?;
+        self.observations.touch();
+        Ok(())
     }
 
     async fn run_staged_migration(&self) -> Result<(), Failure> {
@@ -251,6 +323,7 @@ impl Node {
             self.replica
                 .release_uncoordinated_schema(stage.publication)
                 .await?;
+            self.finalize_seals().await;
         }
         Ok(())
     }

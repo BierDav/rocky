@@ -821,6 +821,12 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
     assert_eq!(graph.seal(tip).unwrap(), Some(&committed));
     assert_eq!(
         graph
+            .canonical_tip(committed.successor().unwrap().unwrap())
+            .unwrap(),
+        committed.successor().unwrap().unwrap()
+    );
+    assert_eq!(
+        graph
             .canonical_tip(owner_seal.successor().unwrap().unwrap())
             .unwrap(),
         committed.successor().unwrap().unwrap()
@@ -836,6 +842,14 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
     );
     assert!(!graph.is_final(committed.id().unwrap()).unwrap());
     assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+    for seal in [&committed, &owner_seal] {
+        assert_eq!(
+            graph
+                .canonical_tip(seal.successor().unwrap().unwrap())
+                .unwrap(),
+            owner_seal.successor().unwrap().unwrap()
+        );
+    }
 }
 
 #[test]

@@ -1,20 +1,16 @@
 # 4. Compact row representation
 
-Status: specified, not started. Owner: `rocky-core` row and stamp types,
+Status: complete and qualified (2026-10-23). See [implementation evidence](04-compact-row-representation-evidence.md). Owner: `rocky-core` row and stamp types,
 `rocky-secure` frames, stored records, creation proofs and checkpoint pages,
 `rocky-sdk` and `sdks/kotlin` typed rows. Depends on
 [phase 1](01-held-positions-as-tables.md). Effort: three to five weeks, run
 as its own phase with evidence. Follow the
-[execution contract](README.md#agent-execution-contract). Decision record
-[0077](../decisions/0077-compact-row-representation.md).
+[execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
 
-Read [logical schemas](../runtime/logical-schema.md),
-[row moves](../runtime/row-moves.md),
-[admission evidence](../runtime/admission-evidence.md),
-[checkpoint import](../runtime/checkpoint-import.md#signed-pages) and the
-[review's measurements](00-sync-performance-review.md#measurements).
+Inspect the owning modules and their tests for current behavior, and the
+[performance review](00-sync-performance-review.md) for the measured baseline.
 
 After this phase a seven-field row of 50 bytes costs at most 500 bytes in
 its frame and 300 bytes at rest. Field names stay the identities of fields;
@@ -52,7 +48,7 @@ authority, admission evidence and merge order decide exactly as before.
   and derived statement fields; the page signature covers them. The
   importer maps legend names to local ids. Imported rows were already
   trusted on the signer's authority, so no verification is lost that a
-  claim could use ([admission evidence](../runtime/admission-evidence.md#checkpoint-comparisons)).
+  claim could use (admission evidence).
 - **Before and after images are unchanged**: a write still publishes only
   the values that differ, and a delete its before image.
 - **Formats.** Row frame 11 → 12, encrypted checkpoint 16 → 17, replica
@@ -76,8 +72,7 @@ authority, admission evidence and merge order decide exactly as before.
 4. Checkpoint pages with legends; format 17; import, offer and serving.
 5. `rocky-sdk` and Kotlin: typed rows, remote reads, the link version; the
    ABI check.
-6. Evidence on the 100k fixture: stage times and `dbstat`; guides for
-   logical schemas, row moves, encrypted checkpoints and permissions.
+6. Evidence on the 100k fixture: stage times and `dbstat`.
 
 ## Completion gate
 

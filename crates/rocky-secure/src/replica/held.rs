@@ -506,6 +506,7 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
+            positions::insert(&self.conn, &frame.header, 1, false, true).await?;
             self.delete_voided(frame.hash).await?;
         }
         // A node registered after open signs its logs' voids then.
@@ -981,6 +982,7 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
+            positions::insert(&self.conn, &header, 1, false, true).await?;
             self.settle_placement(&header).await?;
         }
         Ok(ReceiveStatus::Applied)
@@ -1096,7 +1098,7 @@ impl<A: RowApplication> Inner<A> {
                                             Some(CurrentValue {
                                                 value: current.fields.get(&field).cloned(),
                                                 time: stamp.clock,
-                                                author: stamp.author.key().ok()?,
+                                                author: *current.authors.get(&stamp.author)?,
                                             })
                                         })
                                     })
@@ -1208,6 +1210,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     let result = inner.admit_void(record, time).await;
                     if result.is_err() {
                         inner.conn.execute("ROLLBACK TO void", ()).await?;
+                        inner.invalidate_context();
                     }
                     inner.conn.execute("RELEASE void", ()).await?;
                     results.push(result);

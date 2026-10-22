@@ -26,7 +26,8 @@ impl<A: RowApplication> Inner<A> {
         }
     }
     /// Per author and author position, the records of `scope`'s logs held.
-    pub(in crate::replica) async fn existence_positions(
+    #[cfg(test)]
+    async fn scan_existence_positions(
         &self,
         scope: ResourceScope,
     ) -> Result<BTreeMap<u32, BTreeMap<u64, u64>>, Error> {
@@ -49,6 +50,38 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(positions);
             }
         }
+    }
+    pub(in crate::replica) async fn existence_count(
+        &self,
+        scope: ResourceScope,
+        author: u32,
+        from: u64,
+        to: u64,
+    ) -> Result<u64, Error> {
+        if from > i64::MAX as u64 {
+            return Ok(0);
+        }
+        let result=collect_rows(self.conn.query("SELECT count(*) FROM secure_existence_log WHERE scope=? AND author=? AND position>=? AND position<=?",bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Integer(i64::from(author)),SqlValue::Integer(i64::try_from(from).unwrap_or(i64::MAX)),SqlValue::Integer(i64::try_from(to).unwrap_or(i64::MAX))])).await?).await?;
+        let Some([SqlValue::Integer(count)]) = result.first().map(Vec::as_slice) else {
+            return Err(corrupt());
+        };
+        #[cfg(test)]
+        {
+            let _oracle = self.position_oracles.start();
+            let scan = self.scan_existence_positions(scope).await?;
+            let expected = scan.get(&author).map_or(0, |counts| {
+                counts
+                    .range(from..=to)
+                    .map(|(_, count)| *count)
+                    .sum::<u64>()
+            });
+            if *count as u64 != expected {
+                return Err(Error::Corrupt(
+                    "existence record count differs from scan".into(),
+                ));
+            }
+        }
+        Ok(*count as u64)
     }
     /// Inside the caller's transaction, folds every record of `scope`'s logs
     /// that `seal`'s frontier includes into a local base at the seal: rows

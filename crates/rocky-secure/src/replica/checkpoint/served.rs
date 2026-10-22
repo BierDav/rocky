@@ -9,7 +9,7 @@ pub(crate) const SCHEMA: &[&str] = &[
 ];
 
 /// Where a served checkpoint's rows are.
-pub(super) enum Served {
+pub(in crate::replica) enum Served {
     /// The scope's replay base.
     Base,
     /// A kept seal's rows, signed on request.
@@ -220,8 +220,9 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("served row".into()));
                 };
                 after = row.clone();
-                sets.replace(&row_of(row)?, None, fields)?;
-                creations.insert(decode::<Materialized>(fields)?.creation);
+                sets.replace_stored(self, &row_of(row)?, None, fields)
+                    .await?;
+                creations.insert(self.decode_record(fields).await?.creation);
             }
             if records.len() < STEP_ROWS {
                 break;
@@ -343,6 +344,7 @@ impl<A: RowApplication> Inner<A> {
             custody: self.custody_summary(id, through).await?,
         };
         let signed = self.sign_checkpoint(statement)?;
+        self.index_page_headers(id, &Served::Kept).await?;
         self.conn
             .execute(
                 "INSERT INTO secure_served VALUES(?,?,?)",

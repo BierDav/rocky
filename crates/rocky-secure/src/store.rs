@@ -63,6 +63,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
             return Err(denied("author log fork"));
         }
         self.0.execute("INSERT INTO secure_operations(hash,author,scope,sequence,header,body,status,chain) VALUES(?,?,?,?,?,?, 'pending',?)", bindings(vec![SqlValue::Blob(hash.as_bytes().to_vec()), SqlValue::Blob(header.public_key.as_bytes().to_vec()), SqlValue::Blob(encode(log)?), SqlValue::Integer(header.seq_num as i64), SqlValue::Blob(header_bytes.to_vec()), SqlValue::Blob(body.to_bytes()), SqlValue::Blob(chain)])).await?;
+        crate::replica::positions::insert(&self.0, header, 0, true, false).await?;
         self.0
             .execute(
                 "UPDATE secure_retained SET records=records+1,bytes=bytes+?",
@@ -107,7 +108,8 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,revocations BLOB NOT NULL,revision INTEGER NOT NULL)",
     "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,chain BLOB NOT NULL,UNIQUE(author,scope,sequence))",
-    "CREATE TABLE secure_rows(scope BLOB NOT NULL,row BLOB NOT NULL,fields BLOB,stamp BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    "CREATE TABLE secure_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,live INTEGER GENERATED ALWAYS AS (substr(fields,1,1)=X'01') VIRTUAL,shape BLOB GENERATED ALWAYS AS (substr(fields,2,CASE hex(substr(fields,2,1)) WHEN '18' THEN 2 WHEN '19' THEN 3 WHEN '1A' THEN 5 WHEN '1B' THEN 9 ELSE 1 END)) VIRTUAL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE INDEX secure_rows_dead ON secure_rows(scope,row) WHERE live=0",
     "CREATE TABLE secure_outbox(hash BLOB PRIMARY KEY)",
     "CREATE TABLE secure_handles(handle BLOB PRIMARY KEY,input BLOB NOT NULL,hash BLOB NOT NULL)",
     "CREATE TABLE secure_keys(scope BLOB PRIMARY KEY,generation BLOB NOT NULL,key_hash BLOB NOT NULL)",

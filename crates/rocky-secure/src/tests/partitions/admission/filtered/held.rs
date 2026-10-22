@@ -30,7 +30,12 @@ async fn a_signed_header_for_a_refuses_a_complete_source_image_for_b() {
         valid.body_bytes(),
     )
     .unwrap();
-    let payload = crate::wire::RowPayload::decode(&plaintext).unwrap();
+    let payload = writer
+        .inner
+        .lock()
+        .await
+        .decode_row_payload(&valid, &plaintext)
+        .unwrap();
     let mut writes = payload.writes().to_vec();
     writes[0].change.after = f.titled("B", 1, 1, "source").change.after;
     let bad = crate::tests::tip_schemas::source_validation::reseal(

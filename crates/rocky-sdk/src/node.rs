@@ -2899,64 +2899,63 @@ impl Node {
                 return Err(error);
             }
         };
+        // Recovery during ordinary sync shares the same staged checkpoint state as bootstrap.
+        let _bootstrap = self.bootstrap.lock().await;
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
-            let _bootstrap = self.bootstrap.lock().await;
-            if marker.exists() {
-                self.sync_state.send_replace("bootstrapping");
-                let expected = std::fs::read(&marker)?;
-                let pending = self
-                    .bootstrap_pending(&serde_json::from_slice(&expected)?)
-                    .await?;
-                self.replica
-                    .set_importing(pending.iter().copied().collect())
-                    .await;
-                self.activity.record_changed(
-                    "bootstrap_started",
-                    json!({"peer": peer.to_hex(), "scopes": pending.len()}),
-                );
-                // `None`: this peer offers no checkpoint; intent stays for another.
-                let completed = sync::bootstrap(
-                    &self.replica,
-                    &upstream,
-                    &pending,
-                    &marker,
-                    expected,
-                    &mut bootstrapped,
-                    first.take(),
-                )
+            self.sync_state.send_replace("bootstrapping");
+            let expected = std::fs::read(&marker)?;
+            let pending = self
+                .bootstrap_pending(&serde_json::from_slice(&expected)?)
+                .await?;
+            self.replica
+                .set_importing(pending.iter().copied().collect())
                 .await;
-                self.observations
-                    .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
-                let completed = match completed {
-                    Err(error) => {
-                        let _ = reconcile.close().await;
-                        let _ = upstream.link.drain().await;
-                        return Err(error);
-                    }
-                    Ok(completed) => completed,
-                };
-                if let Some(completed) = completed {
-                    self.replica.flush().await?;
-                    if std::fs::read(&marker)? != completed {
-                        return Err("bootstrap authority changed; retry with the new intent".into());
-                    }
-                    self.replica
-                        .set_importing(std::collections::BTreeSet::new())
-                        .await;
-                    if let Some(waiting) = self.awaits_inviter(peer, &completed).await? {
-                        rocky_credentials::write_private(&marker, &waiting)?;
-                    } else {
-                        std::fs::remove_file(&marker)?;
-                        #[cfg(unix)]
-                        std::fs::File::open(
-                            marker.parent().ok_or("bootstrap marker has no directory")?,
-                        )?
-                        .sync_all()?;
-                        self.activity
-                            .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
-                    }
+            self.activity.record_changed(
+                "bootstrap_started",
+                json!({"peer": peer.to_hex(), "scopes": pending.len()}),
+            );
+            // `None`: this peer offers no checkpoint; intent stays for another.
+            let completed = sync::bootstrap(
+                &self.replica,
+                &upstream,
+                &pending,
+                &marker,
+                expected,
+                &mut bootstrapped,
+                first.take(),
+            )
+            .await;
+            self.observations
+                .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
+            let completed = match completed {
+                Err(error) => {
+                    let _ = reconcile.close().await;
+                    let _ = upstream.link.drain().await;
+                    return Err(error);
+                }
+                Ok(completed) => completed,
+            };
+            if let Some(completed) = completed {
+                self.replica.flush().await?;
+                if std::fs::read(&marker)? != completed {
+                    return Err("bootstrap authority changed; retry with the new intent".into());
+                }
+                self.replica
+                    .set_importing(std::collections::BTreeSet::new())
+                    .await;
+                if let Some(waiting) = self.awaits_inviter(peer, &completed).await? {
+                    rocky_credentials::write_private(&marker, &waiting)?;
+                } else {
+                    std::fs::remove_file(&marker)?;
+                    #[cfg(unix)]
+                    std::fs::File::open(
+                        marker.parent().ok_or("bootstrap marker has no directory")?,
+                    )?
+                    .sync_all()?;
+                    self.activity
+                        .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
                 }
             }
         }

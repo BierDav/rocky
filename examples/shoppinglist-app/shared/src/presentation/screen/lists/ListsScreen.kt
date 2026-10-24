@@ -89,19 +89,27 @@ fun ListsScreen(model: ListsViewModel = metroViewModel()) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 760.dp).fillMaxSize()) {
             val list = state.selected
-            if (list == null) {
+            if (state.loading) {
+                ListLoading("Loading your lists…", Modifier.fillMaxSize())
+            } else if (list == null) {
                 ListTabs(state, onSelect = {
                     dismissKeyboard()
                     model.select(it)
                 }, onNew = { naming = Naming.NewList })
                 Empty(
-                    if (state.trusted) "Your next shop starts here" else "Waiting for your first list",
-                    if (state.trusted) {
+                    if (state.canCreateLists) "Your next shop starts here" else "Waiting for your first list",
+                    if (state.canCreateLists) {
                         "Create a list, add what you need, and keep it in sync across your devices."
                     } else {
                         "A trusted device can share a list from the Devices tab. It will appear here automatically."
                     },
                 )
+            } else if (state.contentLoading) {
+                ListTabs(state, onSelect = {
+                    dismissKeyboard()
+                    model.select(it)
+                }, onNew = { naming = Naming.NewList })
+                ListLoading("Loading ${list.title}…", Modifier.weight(1f).fillMaxWidth())
             } else {
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
@@ -175,6 +183,15 @@ fun ListsScreen(model: ListsViewModel = metroViewModel()) {
                 Naming.NewCategory -> model.addCategory(name)
             }
         }
+    }
+}
+
+@Composable
+private fun ListLoading(message: String, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        CircularProgressIndicator()
+        Spacer(Modifier.height(16.dp))
+        Text(message)
     }
 }
 

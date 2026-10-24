@@ -1,6 +1,8 @@
 package org.example.examples.shopping
 
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.example.examples.shopping.data.ShoppingRepository
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.ShoppingSchema
@@ -95,6 +97,78 @@ class IssuerRecoveryTest {
             assertEquals(listOf("Eggs", "Milk"), c.titles())
         } finally {
             opened.forEach { close(it) }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a full member bootstraps from a second trusted device with both peers online`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-two-trusted-bootstrap").toFile()
+        val opened = mutableListOf<RockyDatabase>()
+        try {
+            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false).withRoom(File(root, "a")).also(opened::add)
+            a.tips.createBookmark("main")
+            a.tips.follow("main")
+            a.tips.setGenesisMinimum(1u)
+            list = a.repository.createList("Groceries")
+            a.add("Milk")
+            val b = join(File(root, "b"), a.pairDevice()).withRoom(File(root, "b")).also(opened::add).joined()
+            a.share(b)
+            b.joined()
+            assertTrue(a.isIssuer && b.isIssuer)
+            assertEquals(a.titles(), b.titles())
+            val member = join(File(root, "member"), b.pairing(writer)).withRoom(File(root, "member")).also(opened::add)
+            member.partitions.role(NodeKind.Full.role)
+            b.share(member)
+            member.addPeer(a.contact().uri)
+            member.joined()
+            val status = member.status()
+            assertFalse(status.data.bootstrapPending)
+            assertTrue(status.data.revision > 0uL)
+            assertEquals(listOf("Milk"), member.titles())
+            assertFalse(member.isIssuer)
+            assertEquals(writer, member.session().profile)
+            // Edits remain authorized and converge after enrollment; no role escalation or re-pairing.
+            member.add("Eggs")
+            member.joined()
+            a.joined()
+            b.joined()
+            assertEquals(listOf("Eggs", "Milk"), a.titles())
+            assertEquals(a.titles(), b.titles())
+            assertEquals(a.titles(), member.titles())
+        } finally {
+            opened.asReversed().forEach { close(it) }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a scoped grant adds list creation to an enrolled member without changing its identity`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-member-grant").toFile()
+        val opened = mutableListOf<RockyDatabase>()
+        try {
+            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false).withRoom(File(root, "a")).also(opened::add)
+            val member = join(File(root, "member"), a.pairing(NodeKind.Partial.profile)).withRoom(File(root, "member")).also(opened::add).joined()
+            val before = member.session()
+            assertFailsWith<RockyException> { member.repository.createList("Before grant") }
+            val supplied = a.grant(
+                buildJsonObject {
+                    put("user", before.principal)
+                    put("node", before.node)
+                },
+                NodeKind.Full.profile,
+            )
+            member.install(supplied)
+            val after = member.session()
+            assertEquals(before.node, after.node)
+            assertEquals(before.principal, after.principal)
+            assertFalse(after.isIssuer)
+            list = member.repository.createList("After grant")
+            member.add("Milk")
+            member.share(a)
+            member.joined()
+            assertEquals(listOf("Milk"), a.titles())
+            assertEquals(a.titles(), member.titles())
+        } finally {
+            opened.asReversed().forEach { close(it) }
             root.deleteRecursively()
         }
     }

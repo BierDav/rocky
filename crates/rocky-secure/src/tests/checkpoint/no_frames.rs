@@ -29,6 +29,68 @@ async fn open_keyed(f: &Fixture, path: &Path, node: &PrivateKey) -> (Replica, Cr
         credentials,
     )
 }
+
+#[tokio::test]
+async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
+    a.author(handle(1), insert(&f, 1, "base"), vec![])
+        .await
+        .unwrap();
+    compacted(&f, &a).await;
+    list(&f, &a).await;
+    let (c, c_credentials) = open(&f, &dir.path().join("c.db"), &keys[1]).await;
+    let config = f.config(
+        &keys[2],
+        f.full()
+            .into_iter()
+            .filter(|g| g.scope == f.public)
+            .collect(),
+        &[f.public],
+    );
+    let r_credentials = config.credentials.clone();
+    let r = EncryptedReplica::open(dir.path().join("r.db"), f.app(), config)
+        .await
+        .unwrap();
+    share_graph(&f, &a, (&r, &keys[2], &r_credentials)).await;
+    let (mut client, server) = network::link::testing::sessions(
+        (&c, keys[1].clone(), c_credentials.clone()),
+        (&a, keys[0].clone(), a_credentials.clone()),
+    )
+    .await
+    .unwrap();
+    tokio::join!(
+        async {
+            client.sync_tip_graph(&c).await.unwrap();
+            c.follow_bookmark(f.public.domain, "main").await.unwrap();
+            client.sync_tip_graph(&c).await.unwrap();
+            client.rebootstrap(&c, f.public, 8192).await.unwrap();
+            client.close().await.unwrap();
+        },
+        serve(server, &a)
+    );
+    let before = c.seal_rebootstraps(f.public.domain).await.unwrap();
+    assert!(before.iter().any(|need| need.scope == f.private));
+    let (mut client, server) = network::link::testing::sessions(
+        (&c, keys[1].clone(), c_credentials),
+        (&r, keys[2].clone(), r_credentials),
+    )
+    .await
+    .unwrap();
+    tokio::join!(
+        async {
+            client.sync_tip_graph(&c).await.unwrap();
+            // No recovery request may disclose the missing scope to this peer.
+            client = client.with_budget(0);
+            assert!(client.rebootstrap_at_seals(&c).await.unwrap());
+            client.close().await.unwrap();
+        },
+        serve(server, &r)
+    );
+    assert_eq!(c.seal_rebootstraps(f.public.domain).await.unwrap(), before);
+}
 /// A private row `writer` authors on the tip it follows.
 async fn private_row(f: &Fixture, writer: &Replica, row: u8) -> EncryptedFrame {
     writer

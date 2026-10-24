@@ -379,15 +379,28 @@ impl<A: RowApplication> Inner<A> {
         scopes: &[(ResourceScope, Option<i64>)],
         allow_staged: bool,
     ) -> Result<Option<String>, Error> {
-        let at = self.path_index(domain, seal.id().map_err(credential)?)?;
-        let mut open = Vec::new();
-        for (scope, id) in scopes {
+        for (scope, _) in scopes {
             if self.direct.contains(scope) || self.importing(*scope).await? {
                 return Ok(Some("a scope is being imported".into()));
             }
             if !allow_staged && self.staged_in(*scope).await? {
                 return Ok(Some("a coordinated entry is undecided".into()));
             }
+        }
+        self.seal_coverage_waits(domain, seal, previous, scopes)
+            .await
+    }
+    /// Checks retained history independently of an owner's future import intent.
+    pub(in crate::replica) async fn seal_coverage_waits(
+        &self,
+        domain: Scope,
+        seal: &SignedSeal,
+        previous: Option<&SignedSeal>,
+        scopes: &[(ResourceScope, Option<i64>)],
+    ) -> Result<Option<String>, Error> {
+        let at = self.path_index(domain, seal.id().map_err(credential)?)?;
+        let mut open = Vec::new();
+        for (scope, id) in scopes {
             if let Some(id) = id {
                 // Only an installed base stands in for live coverage.
                 let state = self.base_seal(*id).await?;

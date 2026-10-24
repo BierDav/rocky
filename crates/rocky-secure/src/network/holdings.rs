@@ -156,7 +156,10 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
     ) -> Result<(), Error> {
-        self.ensure_scoped_holding(replica, scopes, false).await
+        if !self.try_scoped_holding(replica, scopes, false).await? {
+            return Err(denied(HOLDING_DENIED));
+        }
+        Ok(())
     }
 
     pub(super) async fn ensure_held_holding<A: RowApplication>(
@@ -164,15 +167,19 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        self.ensure_scoped_holding(replica, &[scope], true).await
+        if !self.try_scoped_holding(replica, &[scope], true).await? {
+            return Err(denied(HOLDING_DENIED));
+        }
+        Ok(())
     }
 
-    async fn ensure_scoped_holding<A: RowApplication>(
+    /// A peer without a partition's key can refuse its proof without ending recovery of other scopes.
+    pub(super) async fn try_scoped_holding<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
         held: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let mut missing = Vec::new();
         for scope in scopes {
             if !self.offered.contains(scope) && replica.holding_required(*scope).await {
@@ -211,12 +218,18 @@ impl NativeSession {
             else {
                 return Err(denied(HOLDING_DENIED));
             };
-            if accepted != batch {
+            if accepted.iter().any(|scope| !batch.contains(scope))
+                || accepted.iter().collect::<BTreeSet<_>>().len() != accepted.len()
+            {
                 return Err(denied(HOLDING_DENIED));
             }
+            let complete = accepted.len() == batch.len();
             self.offered.extend(accepted);
+            if !complete {
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(super) async fn answer_holdings<A: RowApplication>(
@@ -237,10 +250,14 @@ impl NativeSession {
         let mut accepted = Vec::new();
         for scope in scopes {
             if self.require_holding(replica, scope).await.is_ok()
-                && replica
+                && (replica
                     .authorize_scope_peer(self.peer, &self.credentials, scope)
                     .await
                     .is_ok()
+                    || replica
+                        .authorize_held_reader(self.peer, &self.credentials, scope)
+                        .await
+                        .is_ok())
             {
                 accepted.push(scope);
             }

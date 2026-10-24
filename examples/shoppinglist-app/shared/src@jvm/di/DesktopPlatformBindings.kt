@@ -19,6 +19,7 @@ object DesktopPlatformBindings {
     fun platform(context: PlatformContext): ShoppingPlatform = ShoppingPlatform(
         context.directory.absolutePath,
         context.deviceName,
+        diagnostic = context.diagnostic,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
         coordinator = { publicCoordination(context.directory.absolutePath) },
     )

@@ -417,7 +417,8 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
             logged: false,
         }]
     );
-    replica.replay_at_seals(scope, false).await.unwrap();
+    // A reset must replay retained frames without waiting for another incoming frame.
+    replica.replay_at_seals(scope, true).await.unwrap();
     let status = replica.compaction_status(lineage.domain).await.unwrap();
     assert_eq!((status.rebootstrap, status.compacted), (None, None));
     let expected = vec![

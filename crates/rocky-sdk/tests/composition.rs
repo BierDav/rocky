@@ -103,6 +103,31 @@ fn memory(hub: &Arc<Hub>, name: &'static str) -> Arc<Memory> {
 }
 
 #[tokio::test]
+async fn status_observation_does_not_block_commits_or_shutdown() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let Opened { database, .. } = Database::create(open(root.path(), None), None)?;
+    let writer = Client::new(&database)?;
+    let observer = Client::new(&database)?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let writes = async {
+            for id in 1..=4 {
+                writer.add(id, "Milk").await;
+            }
+        };
+        let observations = async {
+            for _ in 0..8 {
+                observer.ok(json!({"type": "status"})).await;
+            }
+        };
+        tokio::join!(writes, observations);
+        assert_eq!(writer.titles().await.len(), 4);
+        database.close().await
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let directory = root.path().join("a");

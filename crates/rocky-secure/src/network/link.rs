@@ -571,14 +571,18 @@ impl Writer {
         if frame.len() > FRAME_BYTES {
             return Err(denied("link frame quota"));
         }
-        timeout(TIMEOUT, async {
-            self.stream.write_u32(frame.len() as u32).await?;
-            self.stream.write_all(&frame).await?;
-            self.stream.flush().await
-        })
-        .await
-        .map_err(|_| timed_out("link write timeout"))?
-        .map_err(Error::Io)?;
+        let expired = || timed_out("link write timeout");
+        write_progress(
+            &mut self.stream,
+            &(frame.len() as u32).to_be_bytes(),
+            expired,
+        )
+        .await?;
+        write_progress(&mut self.stream, &frame, expired).await?;
+        timeout(TIMEOUT, self.stream.flush())
+            .await
+            .map_err(|_| expired())?
+            .map_err(Error::Io)?;
         self.sequence = self
             .sequence
             .checked_add(1)
@@ -594,7 +598,7 @@ pub(super) fn closed_by_peer() -> std::io::Error {
     )
 }
 impl Reader {
-    /// Idle reads have no deadline. Once a header starts, the frame has ten seconds.
+    /// Idle reads have no deadline; started frames must keep making chunk progress.
     pub async fn receive(&mut self) -> Result<Frame, Error> {
         let first = self.stream.read_u8().await.map_err(|error| {
             Error::Io(match error.kind() {
@@ -602,40 +606,31 @@ impl Reader {
                 _ => error,
             })
         })?;
-        timeout(TIMEOUT, async {
-            let mut header = [first, 0, 0, 0];
-            self.stream
-                .read_exact(&mut header[1..])
-                .await
-                .map_err(Error::Io)?;
-            let length = u32::from_be_bytes(header) as usize;
-            if length == 0 || length > FRAME_BYTES {
-                return Err(denied("link frame quota"));
-            }
-            let mut bytes = vec![0; length];
-            self.stream
-                .read_exact(&mut bytes)
-                .await
-                .map_err(Error::Io)?;
-            let signed: SignedMessage = decode(&bytes)?;
-            if signed.sequence != self.sequence
-                || !self.peer.verify(
-                    &frame_signing_bytes(&self.signing, signed.sequence, &signed.bytes)?,
-                    &signed.signature,
-                )
-            {
-                return Err(denied("link signature/sequence"));
-            }
-            let frame: Frame = decode(&signed.bytes)?;
-            frame.validate()?;
-            self.sequence = self
-                .sequence
-                .checked_add(1)
-                .ok_or_else(|| denied("link sequence exhausted"))?;
-            Ok(frame)
-        })
-        .await
-        .map_err(|_| timed_out("link read timeout"))?
+        let expired = || timed_out("link read timeout");
+        let mut header = [first, 0, 0, 0];
+        read_progress(&mut self.stream, &mut header[1..], expired).await?;
+        let length = u32::from_be_bytes(header) as usize;
+        if length == 0 || length > FRAME_BYTES {
+            return Err(denied("link frame quota"));
+        }
+        let mut bytes = vec![0; length];
+        read_progress(&mut self.stream, &mut bytes, expired).await?;
+        let signed: SignedMessage = decode(&bytes)?;
+        if signed.sequence != self.sequence
+            || !self.peer.verify(
+                &frame_signing_bytes(&self.signing, signed.sequence, &signed.bytes)?,
+                &signed.signature,
+            )
+        {
+            return Err(denied("link signature/sequence"));
+        }
+        let frame: Frame = decode(&signed.bytes)?;
+        frame.validate()?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| denied("link sequence exhausted"))?;
+        Ok(frame)
     }
 }
 #[cfg(test)]
@@ -758,6 +753,49 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signed_link_frame_can_arrive_across_multiple_read_deadlines() {
+        let signer = PrivateKey::from_bytes(&[7; 32]);
+        let binding = [3; 32];
+        let frame = Frame {
+            channel: 2,
+            direction: false,
+            message: Message::Channel(channels::Packet::Data {
+                generation: 0,
+                bytes: vec![1; IO_CHUNK],
+                last: true,
+            }),
+        };
+        let body = encode(&frame).unwrap();
+        let bytes = encode(&SignedMessage {
+            sequence: 0,
+            signature: signer.sign(&frame_signing_bytes(&binding, 0, &body).unwrap()),
+            bytes: body,
+        })
+        .unwrap();
+        assert!(bytes.len() > IO_CHUNK);
+        let (near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
+        let (stream, _) = tokio::io::split(Box::new(near) as Box<dyn SessionStream>);
+        let mut reader = Reader {
+            stream,
+            peer: signer.public_key(),
+            signing: binding,
+            sequence: 0,
+        };
+        let deliver = async {
+            far.write_u32(bytes.len() as u32).await.unwrap();
+            for chunk in bytes.chunks(IO_CHUNK) {
+                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                far.write_all(chunk).await.unwrap();
+            }
+        };
+        let (received, ()) = tokio::join!(reader.receive(), deliver);
+        assert!(
+            matches!(received.unwrap().message, Message::Channel(channels::Packet::Data { bytes, last: true, .. }) if bytes == vec![1; IO_CHUNK])
+        );
+        assert_eq!(reader.sequence, 1);
+    }
     #[tokio::test(start_paused = true)]
     async fn oversized_and_empty_headers_are_refused_before_body_read() {
         for length in [0, FRAME_BYTES as u32 + 1] {

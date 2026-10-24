@@ -213,6 +213,8 @@ impl Node {
             || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let profile = serde_json::to_value(&settings.profile)?;
+        // Drop the watch read guard before any replica calls can publish a commit.
+        let revision = *self.replica.observe_revision().borrow();
         let mut status = DatabaseStatus {
             token: String::new(),
             observed_at_epoch_millis: epoch_millis(),
@@ -255,7 +257,7 @@ impl Node {
                 renewal_routes,
             },
             data: DataStatus {
-                revision: *self.replica.observe_revision().borrow(),
+                revision,
                 generation: crate::GenerationStatus {
                     manifest: HEXLOWER.encode(&generation.manifest),
                     current: crate::Generation {

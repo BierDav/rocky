@@ -17,7 +17,7 @@ import kotlin.uuid.Uuid
 
 /**
  * Lists, categories and items as plain DAO reads and writes on Rocky's file: each write is one commit and one signed
- * bundle. Only a trusted device creates, renames or deletes lists; any device edits the lists it holds.
+ * bundle. Trusted and full devices create lists; trusted devices rename or delete them. Any device edits the lists it holds.
  */
 class ShoppingRepository(private val database: ShoppingDatabase, private val rocky: RockyDatabase) {
     fun lists(): Flow<List<ShoppingList>> = database.lists().observeAll().settledOnRocky()

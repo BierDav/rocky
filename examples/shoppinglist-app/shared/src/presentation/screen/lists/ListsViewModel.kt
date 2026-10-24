@@ -12,6 +12,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import org.example.examples.shopping.data.db.entity.Category
+import org.example.examples.shopping.data.db.entity.ItemCategory
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.session.ShoppingNode
 import org.example.examples.shopping.data.session.ShoppingSession
@@ -31,18 +32,16 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
         combine(repository.lists(), selection) { lists, selected -> lists to (lists.firstOrNull { it.id == selected } ?: lists.firstOrNull()) }
             .flatMapLatest { (lists, list) ->
                 if (list == null) {
-                    flowOf(ListsState(lists, trusted = node.isTrusted))
+                    flowOf(ListsState(lists, trusted = node.isTrusted, canCreateLists = node.canCreateLists))
                 } else {
-                    combine(
+                    ListsState(lists, list, trusted = node.isTrusted, canCreateLists = node.canCreateLists).observeDetails(
                         repository.categories(list.id),
                         repository.observe(list.id),
                         repository.itemCategories(list.id),
-                    ) { categories, items, links ->
-                        ListsState(lists, list, categories, items, node.isTrusted, links)
-                    }
+                    )
                 }
             }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ListsState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ListsState(loading = true))
 
     val recipients: StateFlow<List<ShareRecipient>> = node.flatMapLatest { node ->
         if (node.isTrusted) {
@@ -111,3 +110,12 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
         write { action(list) }
     }
 }
+
+/** List tabs remain usable while one selected partition is recovering. */
+internal fun ListsState.observeDetails(
+    categories: Flow<List<Category>>,
+    items: Flow<List<ShoppingItem>>,
+    links: Flow<List<ItemCategory>>,
+): Flow<ListsState> = combine(categories, items, links) { categories, items, links ->
+    copy(categories = categories, items = items, links = links, contentLoading = false)
+}.onStart { emit(copy(contentLoading = true)) }

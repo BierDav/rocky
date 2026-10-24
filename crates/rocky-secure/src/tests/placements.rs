@@ -8,6 +8,80 @@ use crate::{PlacementPage, PlacementRequest};
 use std::collections::BTreeSet;
 mod conflicts;
 
+#[tokio::test]
+async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let alice_key = PrivateKey::new();
+    let bob_key = PrivateKey::new();
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &alice_key, 3, None)
+        .await
+        .unwrap();
+    let bob = lineage
+        .open_scoped(&dir.path().join("bob.db"), &bob_key, false, &["items"])
+        .await
+        .unwrap();
+    follow_main(&lineage, &alice).await;
+    let template = lineage.credentials(3, &alice_key);
+    let user = PrivateKey::from_bytes(&rocky_core::commitment(
+        "lineage.user",
+        alice_key.public_key().as_bytes(),
+    ));
+    for index in 0..64 {
+        let mut root = template.0[0].capability.clone();
+        let mut node = template.0[1].capability.clone();
+        root.expires -= index;
+        node.expires -= index;
+        alice
+            .renew_credentials(CredentialChain(vec![
+                SignedCapability::sign(root, lineage.publisher()).unwrap(),
+                SignedCapability::sign(node, &user).unwrap(),
+            ]))
+            .await
+            .unwrap();
+        identity_insert(
+            &session(&alice).await,
+            &format!("INSERT INTO tags(key,label) VALUES('t{index}','tag')"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    seal(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
+    let credentials = chain(&bob).await;
+    let mut pages = 0;
+    let mut stored = 0;
+    while let Some(request) = bob.wanted_placements().await.unwrap().first().copied() {
+        assert!(pages < 64, "placement pagination stopped making progress");
+        let page = alice
+            .placement_page(
+                bob_key.public_key(),
+                &credentials,
+                &BTreeSet::new(),
+                request,
+            )
+            .await
+            .unwrap();
+        assert!(crate::encode(&page).unwrap().len() < MAX_SECURE_FRAME - 512);
+        let count = bob.receive_placements(request, page).await.unwrap();
+        assert!(count > 0, "the page repeated positions already received");
+        stored += count;
+        pages += 1;
+    }
+    assert_eq!(stored, 64);
+    assert!(pages > 1, "renewed chains must span native messages");
+    bob.finalize_path(lineage.domain).await.unwrap();
+    assert!(
+        bob.compaction_status(lineage.domain)
+            .await
+            .unwrap()
+            .finalized
+            .is_some()
+    );
+}
+
 struct Pair {
     lineage: Lineage,
     _dir: TempDir,

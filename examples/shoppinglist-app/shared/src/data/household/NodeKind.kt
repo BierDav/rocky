@@ -15,18 +15,21 @@ enum class NodeKind(val label: String, val summary: String) {
     Trusted("Trusted", "Creates lists, adds devices and holds every list"),
 
     /** Holds and edits every list, receiving each list's key automatically. */
-    Full("Full", "Holds and edits every list"),
+    Full("Full", "Creates lists and holds and edits every list"),
 
     /** Holds only the lists a trusted device shares with it. */
     Partial("Partial", "Holds only the lists shared with it"),
     ;
 
-    /** Members read lists and approvals, edit list contents and write requests; management stays trusted-only. */
+    /** Full devices also create lists; household management remains trusted-only. */
     val profile: GrantProfile get() = when (this) {
         Trusted -> GrantProfile.Issuer
 
         Full, Partial -> GrantProfile.Grants(
-            listOf("lists", "decisions").map { Grant(it, setOf(Right.Read)) } +
+            listOf(
+                Grant("lists", if (this == Full) setOf(Right.Read, Right.Insert) else setOf(Right.Read)),
+                Grant("decisions", setOf(Right.Read)),
+            ) +
                 listOf("categories", "items").map { Grant(it, setOf(Right.Read, Right.Insert, Right.Update, Right.Delete)) } +
                 Grant("requests", setOf(Right.Read, Right.Insert)),
         )

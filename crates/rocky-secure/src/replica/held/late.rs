@@ -216,8 +216,8 @@ impl<A: RowApplication> Inner<A> {
 
     /// Closed-source classification is lazy; learning a seal remains metadata only.
     pub(in crate::replica) async fn refresh_closed_held(&self, time: u64) -> Result<(), Error> {
-        // Without a recovery seal a frame's reach follows from its header
-        // alone: only frames it holds load their body.
+        // Ordinary reach uses the transactional position index. Loading every
+        // signed header here makes an empty held page scale with history size.
         let recovery = self.graphs.values().any(|graph| {
             graph
                 .seals
@@ -225,30 +225,45 @@ impl<A: RowApplication> Inner<A> {
                 .any(|seal| seal.statement.recovery.is_some())
         });
         let mut context = tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
-        let records = rows(&self.conn, "SELECT hash,header FROM secure_operations WHERE status IN ('applied','pending') ORDER BY scope,author,sequence").await?;
+        let records = rows(&self.conn, "SELECT o.hash,p.scope,p.tip,p.author,p.sequence FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.status IN ('applied','pending') ORDER BY p.scope,p.signer,p.log_sequence").await?;
         for record in records {
-            let [SqlValue::Blob(hash), SqlValue::Blob(header)] = record.as_slice() else {
+            let [
+                SqlValue::Blob(hash),
+                SqlValue::Blob(scope),
+                SqlValue::Blob(tip),
+                SqlValue::Integer(author),
+                SqlValue::Integer(sequence),
+            ] = record.as_slice()
+            else {
                 return Err(Error::Corrupt("closed source frame".into()));
             };
             if !recovery {
-                let e = self.stored_header(header)?;
+                let scope: ResourceScope = decode(scope)?;
+                let tip = TipId(
+                    tip.as_slice()
+                        .try_into()
+                        .map_err(|_| Error::Corrupt("closed source tip".into()))?,
+                );
+                let author = u32::try_from(*author)
+                    .map_err(|_| Error::Corrupt("closed source author".into()))?;
+                let sequence = u64::try_from(*sequence)
+                    .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
                 let reach = self.frame_reach_at_using(
-                    e.scope.domain,
-                    e.tip,
-                    e.author
-                        .ok_or_else(|| denied("node author number missing"))?,
-                    e.author_sequence,
-                    e.timestamp,
+                    scope.domain,
+                    tip,
+                    author,
+                    sequence,
+                    0,
                     Some(&mut context),
                 )?;
                 if reach != tips::FrameReach::Held {
                     continue;
                 }
             }
-            let body = match collect_rows(
+            let (header, body) = match collect_rows(
                 self.conn
                     .query(
-                        "SELECT body FROM secure_operations WHERE hash=?",
+                        "SELECT header,body FROM secure_operations WHERE hash=?",
                         [hash.clone()],
                     )
                     .await?,
@@ -257,10 +272,12 @@ impl<A: RowApplication> Inner<A> {
             .pop()
             .as_deref()
             {
-                Some([SqlValue::Blob(body)]) => body.clone(),
+                Some([SqlValue::Blob(header), SqlValue::Blob(body)]) => {
+                    (header.clone(), body.clone())
+                }
                 _ => return Err(Error::Corrupt("closed source frame".into())),
             };
-            let frame = self.stored_frame(header.clone(), body).await?;
+            let frame = self.stored_frame(header, body).await?;
             let operation = frame.operation_ref()?;
             let extension = &operation.header.extensions;
             if self.stored_status(operation.hash).await?.as_deref() == Some("held") {

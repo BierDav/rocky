@@ -30,10 +30,11 @@ class SyncViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 rocky.list(list.id).status().tables.map { it.partition to list.title }
             }.toMap()
             partitions to lists.associate { it.id to it.title }
-        }.settledOnRocky()
+        }.settledOnRocky().onStart { emit(emptyMap<String, String>() to emptyMap<Long, String>()) }
         val log = merge(events.map { Entry.Event(it) }, node.household.deliveries.map { Entry.Note(it, kotlin.time.Clock.System.now().toEpochMilliseconds()) })
             .runningFold(emptyList<Entry>()) { kept, entry -> (listOf(entry) + kept).take(KEPT) }
-        combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), lists) { entries, devices, (partitions, titles) ->
+        val devices = if (node.isTrusted) node.household.devices().onStart { emit(emptyList()) } else flowOf(emptyList())
+        combine(log, devices, lists) { entries, devices, (partitions, titles) ->
             val names = devices.associate { it.node to it.name }
             entries.map { entry ->
                 when (entry) {

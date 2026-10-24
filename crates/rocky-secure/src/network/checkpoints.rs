@@ -72,9 +72,20 @@ impl NativeSession {
         let Some((domain, _)) = replica.followed_bookmark().await else {
             return Err(denied("follow a bookmark before pulling a seal"));
         };
+        let scopes = replica.seal_pull_scopes(domain, seal).await?;
+        let shared = replica
+            .peer_holds(self.peer, &self.credentials, &scopes)
+            .await?;
         let mut missing = false;
-        for scope in replica.seal_pull_scopes(domain, seal).await? {
-            self.ensure_holding(replica, &[scope]).await?;
+        for scope in scopes {
+            if !shared.contains(&scope) {
+                missing = true;
+                continue;
+            }
+            if !self.try_scoped_holding(replica, &[scope], false).await? {
+                missing = true;
+                continue;
+            }
             self.send(CheckpointMessage::SealOffer { scope, seal })
                 .await?;
             let Some(signed) = self.offered(scope).await? else {
@@ -181,27 +192,36 @@ impl NativeSession {
         {
             return Ok(true);
         }
+        // A peer on another tip or outside a scope leaves its recovery to another peer.
+        let shared = replica
+            .peer_holds(
+                self.peer,
+                &self.credentials,
+                &needs.iter().map(|need| need.scope).collect::<Vec<_>>(),
+            )
+            .await?;
         for need in needs {
             let scope = need.scope;
-            if !need.listed.is_empty() {
-                self.ensure_holding(replica, &[scope]).await?;
-                if let Some(signed) = self.checkpoint_offer(scope).await?
-                    && need.listed.contains(&signed.id()?)
+            let shared = shared.contains(&scope)
+                && self.try_scoped_holding(replica, &[scope], false).await?;
+            if !need.listed.is_empty()
+                && shared
+                && let Some(signed) = self.checkpoint_offer(scope).await?
+                && need.listed.contains(&signed.id()?)
+            {
+                if self
+                    .import_within(replica, signed, CHECKPOINT_PAGE)
+                    .await?
+                    .is_none()
+                    || (need.logged && !self.pull_existence_base(replica, scope, None).await?)
                 {
-                    if self
-                        .import_within(replica, signed, CHECKPOINT_PAGE)
-                        .await?
-                        .is_none()
-                        || (need.logged && !self.pull_existence_base(replica, scope, None).await?)
-                    {
-                        return Ok(false);
-                    }
-                    continue;
+                    return Ok(false);
                 }
+                continue;
             }
             match need.replay {
                 FrameReplay::Local => replica.replay_at_seals(scope, false).await?,
-                FrameReplay::Peers if self.retains_history(replica, scope).await? => {
+                FrameReplay::Peers if shared && self.retains_history(replica, scope).await? => {
                     replica.replay_at_seals(scope, true).await?
                 }
                 FrameReplay::Peers | FrameReplay::Unavailable => {}

@@ -193,13 +193,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.register_partition_address(scope, tuple, Some(frame))
             .await
     }
-    /// The prospective own-id partition. It is a log-derived candidate, not a reservation;
-    /// the write transaction still allocates and verifies the identity.
+    /// Prepares the next own-id partition before its key can leave this node.
+    /// The write transaction still allocates and verifies the identity.
     pub async fn next_partition_identity(
         &self,
         name: &str,
     ) -> Result<rocky_core::RowIdentity, Error> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let typed = inner
             .workspace
             .typed
@@ -253,6 +253,87 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .any(|grant| grant.rights.contains(&Right::Insert))
         {
             return Err(denied("own-id partition requires an insert grant"));
+        }
+        if let Some(seal) = inner.path_seals(scope.domain)?.last() {
+            let frontier = encode(&seal.statement.frontier)?;
+            let logical = typed.rows.schema();
+            let address = logical
+                .group_address(typed.domain, name, &[SqlValue::Integer(identity.integer())])
+                .map_err(|error| denied(&error.to_string()))?;
+            let group = logical
+                .partition_groups()
+                .map_err(|error| denied(&error.to_string()))?
+                .into_iter()
+                .find(|group| group.name == address.group)
+                .ok_or_else(|| denied("unknown partition group"))?;
+            let mut empty = BTreeSet::from([name]);
+            loop {
+                let before = empty.len();
+                for table in &group.tables {
+                    if table.foreign_keys.iter().any(|key| {
+                        empty.contains(key.table.as_str())
+                            && logical.table(&key.table).is_some_and(|parent| {
+                                key.columns.iter().zip(&key.references).any(
+                                    |(child, referenced)| {
+                                        table.partition_by.first() == Some(child)
+                                            && parent.partition_by.first() == Some(referenced)
+                                    },
+                                )
+                            })
+                    }) {
+                        empty.insert(table.sql_name.as_str());
+                    }
+                }
+                if before == empty.len() {
+                    break;
+                }
+            }
+            let scopes = group
+                .tables
+                .iter()
+                .filter(|table| empty.contains(table.sql_name.as_str()))
+                .map(|table| {
+                    let tuple = PartitionTuple::new(
+                        table
+                            .partition_by
+                            .iter()
+                            .zip(&address.values)
+                            .map(|(name, value)| {
+                                let column = table
+                                    .column(name)
+                                    .ok_or_else(|| denied("unknown partition column"))?;
+                                Ok((logical.field_id(table, column), value.clone()))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?,
+                    )
+                    .map_err(|error| denied(&error.to_string()))?;
+                    tuple
+                        .scope(typed.domain, logical.table_id(table))
+                        .map_err(|error| denied(&error.to_string()))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            transaction!(inner, |inner| {
+                for scope in scopes.iter().copied() {
+                    // The unused own identity and rows referencing it did not exist at an earlier seal.
+                    // A repeated preparation must preserve any state already materialized.
+                    if inner.find_scope_id(scope).await?.is_none() {
+                        let id = inner.scope_id(scope).await?;
+                        inner
+                            .conn
+                            .execute(
+                                "INSERT INTO secure_seal_anchors VALUES(?,?)",
+                                bindings(vec![
+                                    SqlValue::Integer(id),
+                                    SqlValue::Blob(frontier.clone()),
+                                ]),
+                            )
+                            .await?;
+                    }
+                }
+                inner.require_workspace_base(scope.domain).await
+            })?;
+            inner.flush()?;
+            inner.publish_revision().await?;
         }
         Ok(identity)
     }
@@ -377,7 +458,6 @@ impl<A: RowApplication> Inner<A> {
         let Some(typed) = &self.workspace.typed else {
             return Ok(sql.into());
         };
-        let mut rules = BTreeMap::new();
         let support: Vec<&str> = typed
             .rows
             .schema()
@@ -385,7 +465,21 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .map(|table| table.sql_name.as_str())
             .collect();
+        if typed.rows.schema().views.is_empty()
+            && typed.rows.schema().tables.iter().all(|table| {
+                table.partition_by.is_empty() && !support.contains(&table.sql_name.as_str())
+            })
+        {
+            return Ok(sql.into());
+        }
+        let referenced =
+            rocky_storage::partition_sql::referenced_tables(sql, &typed.rows.schema().views)
+                .map_err(|error| Error::Sql(error.into()))?;
+        let mut rules = BTreeMap::new();
         for projected in &typed.tables {
+            if !referenced.contains(&projected.table.sql_name.to_ascii_lowercase()) {
+                continue;
+            }
             let logical = typed
                 .rows
                 .schema()

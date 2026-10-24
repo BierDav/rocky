@@ -104,7 +104,7 @@ class HouseholdTest {
         val room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
         var member: RockyDatabase? = null
         try {
-            assertEquals(NodeKind.Full.profile, NodeKind.Partial.profile)
+            assertNotEquals(NodeKind.Full.profile, NodeKind.Partial.profile)
             member = RockyDatabase.join(File(root, "member"), ShoppingSchema, issuer.pairing(NodeKind.Partial.profile).uri, transport(), automaticSync = false)
             val node = member.session().node
             val household = Household(room.room, issuer, issuer.session().node)
@@ -392,6 +392,40 @@ class HouseholdTest {
             assertEquals(listOf(weekly.toString()), (activity as RockyEvent.PartitionChanged).values)
         } finally {
             withContext(NonCancellable) { opened.forEach { it.close() } }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a full member creates a list offline and shares it through both trusted devices`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-full-list-creation").toFile()
+        val opened = mutableListOf<ShoppingNode>()
+        try {
+            val a = ShoppingNode.create(platform(root, "a")).also(opened::add)
+            val b = ShoppingNode.join(platform(root, "b"), a.household.invite(NodeKind.Trusted, "B")).also(opened::add)
+            a.awaitEnrollment(b, "B", NodeKind.Trusted)
+            val full = ShoppingNode.join(platform(root, "full"), b.household.invite(NodeKind.Full, "Full")).also(opened::add)
+            b.awaitEnrollment(full, "Full", NodeKind.Full)
+            assertFalse(full.isTrusted)
+            assertTrue(full.canCreateLists)
+            full.setOnline(false)
+            val list = full.repository.createList("From full")
+            full.repository.add(list, "Bread")
+            assertEquals(listOf("Bread"), full.titles(list))
+            assertFailsWith<rocky.RockyException> { full.rocky.pairDevice() }
+            full.setOnline(true)
+            a.awaitTitles(list, "Bread", issuer = full)
+            b.awaitTitles(list, "Bread", issuer = full)
+            withTimeout(60_000) {
+                full.rocky.observeStatus().first { !it.data.bootstrapPending }
+            }
+            // The additional creation right does not permit list renaming or deletion.
+            assertFails { full.repository.renameList(list, "Renamed") }
+            assertFails { full.repository.deleteList(list) }
+            val partial = ShoppingNode.join(platform(root, "partial"), a.household.invite(NodeKind.Partial, "Partial")).also(opened::add)
+            assertFalse(partial.canCreateLists)
+            assertFailsWith<rocky.RockyException> { partial.repository.createList("Denied") }
+        } finally {
+            withContext(NonCancellable) { opened.asReversed().forEach { it.close() } }
             root.deleteRecursively()
         }
     }

@@ -175,6 +175,10 @@ pub(crate) async fn bootstrap(
     // A checkpoint exists only after a compaction; a scope the peer offers
     // none of joins by frames.
     planning.sync_tip_graph(replica).await?;
+    if !planning.follows_same_tip(replica).await {
+        planning.close().await?;
+        return Ok(None);
+    }
     let mut offered = planning.offered_rows(replica, scopes).await?;
     first = Some(planning);
     for (scope, offer) in scopes.iter().zip(offered.iter_mut()) {

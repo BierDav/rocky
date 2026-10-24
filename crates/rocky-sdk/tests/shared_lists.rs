@@ -118,6 +118,215 @@ fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> O
     }
 }
 
+async fn checkpoint_writer(
+    root: &Path,
+    hub: &Arc<Hub>,
+    schema: &str,
+) -> Result<(Peer, Peer), Failure> {
+    let issuer_path = root.join("issuer");
+    let mut options = open(&issuer_path, hub, "issuer");
+    options.schema = schema;
+    let issuer = Peer::new(Database::create(options, None)?.database)?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let base = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Base list')",
+        )
+        .await?;
+    issuer.call(json!({"type":"tips","action":"seal"})).await?;
+    issuer
+        .call(json!({"type":"tips","action":"compact"}))
+        .await?;
+    let invite = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .await?;
+    let writer_path = root.join("writer");
+    let mut options = open(&writer_path, hub, "writer");
+    options.schema = schema;
+    let writer =
+        Peer::new(Database::join(options, invite["uri"].as_str().ok_or("uri")?)?.database)?;
+    let writer_node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    issuer.call(json!({"type":"partition_share","group":"list","values":values(&base),"recipients":[writer_node]})).await?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        writer
+            .column("SELECT title FROM lists WHERE row_kind=0")
+            .await?,
+        [json!("Base list")]
+    );
+    writer
+        .call(json!({"type":"sql","sql":"BEGIN"}))
+        .await
+        .map_err(|error| format!("before preparing a new partition: {error}"))?;
+    writer.call(json!({"type":"sql","sql":"ROLLBACK"})).await?;
+    Ok((issuer, writer))
+}
+
+#[tokio::test]
+async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer = Peer::new(
+        Database::create(
+            at(&root.path().join("issuer"), &hub, "issuer", ORDERED),
+            None,
+        )?
+        .database,
+    )?;
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await?;
+    }
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let base = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Base list')",
+        )
+        .await?;
+    let invite = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .await?;
+    let writer = Peer::new(
+        Database::join(
+            at(&root.path().join("writer"), &hub, "writer", ORDERED),
+            invite["uri"].as_str().ok_or("uri")?,
+        )?
+        .database,
+    )?;
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    issuer.call(json!({"type":"partition_share","group":"list","values":values(&base),"recipients":[node]})).await?;
+    writer.call(json!({"type":"sync"})).await?;
+    let prepared = writer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    issuer.call(json!({"type":"tips","action":"seal"})).await?;
+    issuer
+        .call(json!({"type":"tips","action":"compact"}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    let again = writer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    assert_eq!(again["id"], prepared["id"]);
+    let list = writer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Prepared before seal')",
+        )
+        .await?;
+    assert_eq!(again["id"], list.as_str());
+    writer.database.close().await?;
+    issuer.database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let mut schema: Value = serde_json::from_str(SCHEMA)?;
+    schema["tables"][2]["foreign_keys"] = json!([]);
+    let (issuer, writer) = checkpoint_writer(root.path(), &hub, &schema.to_string()).await?;
+    writer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let error = writer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Refused')",
+        )
+        .await
+        .expect_err("the unrelated member still needs a verified state");
+    assert!(
+        error.to_string().contains("verified seal rebootstrap"),
+        "{error}"
+    );
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (issuer, writer) = checkpoint_writer(root.path(), &hub, ORDERED).await?;
+    assert!(
+        writer
+            .call(json!({"type":"partition_create","group":"list","values":values("123")}))
+            .await
+            .is_err()
+    );
+    let prepared = writer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    // Preparation survives a restart before the first row commits.
+    let Peer {
+        database, session, ..
+    } = writer;
+    drop(session);
+    database.close().await?;
+    let writer =
+        Peer::new(Database::open(open(&root.path().join("writer"), &hub, "writer"))?.database)?;
+    let list = writer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Member list')",
+        )
+        .await?;
+    assert_eq!(prepared["id"], list.as_str());
+    let issuer_node = issuer.call(json!({"type":"session"})).await?["node"].clone();
+    writer.call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[issuer_node]})).await?;
+    writer.call(json!({"type":"sync"})).await?;
+    issuer.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer
+            .column("SELECT title FROM lists WHERE row_kind=0 ORDER BY title")
+            .await?,
+        [json!("Base list"), json!("Member list")]
+    );
+    let read_invite = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"reader","scopes":TABLES}}))
+        .await?;
+    let reader = Peer::new(
+        Database::join(
+            open(&root.path().join("reader"), &hub, "reader"),
+            read_invite["uri"].as_str().ok_or("uri")?,
+        )?
+        .database,
+    )?;
+    assert!(
+        reader
+            .call(json!({"type":"partition_next","table":"lists"}))
+            .await
+            .is_err()
+    );
+    for peer in [reader, writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

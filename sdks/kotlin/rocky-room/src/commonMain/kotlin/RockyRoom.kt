@@ -86,4 +86,4 @@ fun <T> Flow<T>.settledOnRocky(): Flow<T> = retryWhen { cause, attempt ->
 }
 
 // A list's row may arrive before its other tables are held, while its key installs.
-private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held", "SQL session: transaction was rolled back: Timeout")
+private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held", "the workspace waits for a verified seal rebootstrap", "SQL session: transaction was rolled back: Timeout")

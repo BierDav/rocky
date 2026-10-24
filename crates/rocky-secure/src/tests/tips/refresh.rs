@@ -3,6 +3,75 @@ use super::*;
 use rocky_core::SqlValue;
 use rocky_credentials::TipGraph;
 
+#[tokio::test]
+async fn held_refresh_does_not_decode_live_or_continued_history() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    main(&f, &a).await;
+    for id in 1..=8 {
+        insert(&f, &a, id, "history").await;
+    }
+    for continued in [false, true] {
+        if continued {
+            advance(&f, &a).await;
+            insert(&f, &a, 9, "current").await;
+        }
+        let before = {
+            let inner = a.inner.lock().await;
+            inner.stored_header_memo_limits(0, 0);
+            inner.stored_header_memo_stats().2
+        };
+        assert!(page(&a, f.public).await.unwrap().is_empty());
+        assert_eq!(
+            a.inner.lock().await.stored_header_memo_stats().2,
+            before,
+            "held lookup decoded unrelated signed history (continued={continued})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn abandoned_history_walks_bookmarks_once_per_source_and_refresh() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
+    main(&f, &a).await;
+    let genesis = a.followed_tip().await;
+    advance(&f, &a).await;
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    b.follow_bookmark(f.public.domain, "main").await.unwrap();
+    let first = insert(&f, &b, 1, "first").await;
+    let second = insert(&f, &b, 2, "second").await;
+    let from = a.followed_tip().await;
+    let continued = seal(&f, &a).await;
+    a.receive_tip_statements(&[
+        TipStatement::Seal(continued),
+        bookmark(&f, "main", Some(from), Some(genesis)),
+    ])
+    .await
+    .unwrap();
+    let inputs: Vec<_> = [&first, &second]
+        .into_iter()
+        .map(|frame| {
+            let e = &frame.operation_ref().unwrap().header.extensions;
+            (f.public.domain, e.tip, e.author.unwrap(), e.author_sequence)
+        })
+        .collect();
+    let inner = a.inner.lock().await;
+    let (direct, shared, stats) = inner.refresh_reach_for_test(&inputs, false);
+    assert_eq!(direct, vec![Ok("Held".into()), Ok("Held".into())]);
+    assert_eq!(shared, direct);
+    assert_eq!(stats.4, 1);
+    let fallback = inner.refresh_reach_for_test(&inputs, true);
+    assert_eq!(fallback.1, direct);
+    assert_eq!(fallback.2.4, inputs.len());
+    assert_eq!(inner.refresh_reach_for_test(&inputs, false).2.4, 1);
+}
+
 async fn fixture() -> (
     Fixture,
     TempDir,
@@ -84,6 +153,7 @@ async fn snapshot(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
     let mut result = Vec::new();
     for table in [
         "secure_operations",
+        "secure_position_sources",
         "secure_outbox",
         "secure_held",
         "secure_held_frames",
@@ -287,44 +357,109 @@ async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
 }
 
 #[tokio::test]
-async fn refresh_keeps_lazy_header_graph_and_body_errors() {
-    let (f, _dir, a, frames, _) = fixture().await;
+async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
+    let (f, _dir, a, frames, statement) = fixture().await;
     assert!(page(&a, f.public).await.unwrap().is_empty());
-    let selected = frames
-        .iter()
-        .max_by_key(|frame| {
-            let op = frame.operation_ref().unwrap();
-            (op.header.public_key, op.header.seq_num)
-        })
-        .unwrap();
+    let selected = &frames[2];
     let hash = selected.id().unwrap().as_bytes().to_vec();
-    let original = selected.operation_ref().unwrap().header.clone();
-    let mut absent_author = original.clone();
-    absent_author.extensions.author = None;
-    let mut unknown_domain = original.clone();
-    unknown_domain.extensions.scope.domain.app.0[0] ^= 1;
-    for (header, expected) in [
-        (absent_author, "node author number missing"),
-        (unknown_domain, "unknown tip graph"),
+    let mut unknown_domain = f.public;
+    unknown_domain.domain.app.0[0] ^= 1;
+    for (column, value, original) in [
+        (
+            "author",
+            SqlValue::Integer(-1),
+            SqlValue::Integer(i64::from(
+                selected
+                    .operation_ref()
+                    .unwrap()
+                    .header
+                    .extensions
+                    .author
+                    .unwrap(),
+            )),
+        ),
+        (
+            "scope",
+            SqlValue::Blob(crate::encode(&unknown_domain).unwrap()),
+            SqlValue::Blob(crate::encode(&f.public).unwrap()),
+        ),
     ] {
+        let sql = format!("UPDATE secure_position_sources SET {column}=? WHERE hash=? AND kind=0");
         a.inner
             .lock()
             .await
             .conn
             .execute(
-                "UPDATE secure_operations SET header=? WHERE hash=?",
-                [crate::encode(&header).unwrap(), hash.clone()],
+                &sql,
+                crate::storage::bindings(vec![value, SqlValue::Blob(hash.clone())]),
             )
             .await
             .unwrap();
         let before = snapshot(&a).await;
-        assert!(
-            matches!(page(&a, f.public).await, Err(Error::Rejected(message)) if message == expected)
-        );
+        let error = page(&a, f.public).await.unwrap_err();
+        if column == "author" {
+            assert!(matches!(error, Error::Corrupt(message) if message == "closed source author"));
+        } else {
+            assert!(matches!(error, Error::Rejected(message) if message == "unknown tip graph"));
+        }
         assert_eq!(snapshot(&a).await, before);
+        a.inner
+            .lock()
+            .await
+            .conn
+            .execute(
+                &sql,
+                crate::storage::bindings(vec![original, SqlValue::Blob(hash.clone())]),
+            )
+            .await
+            .unwrap();
     }
-    let mut unknown_tip = original.clone();
-    unknown_tip.extensions.tip = TipId([209; 32]);
+    a.inner
+        .lock()
+        .await
+        .conn
+        .execute(
+            "UPDATE secure_operations SET body=? WHERE hash=?",
+            [vec![0xff], hash.clone()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        page(&a, f.public).await.unwrap().is_empty(),
+        "live indexed positions must not open unrelated corrupt bodies"
+    );
+    a.inner
+        .lock()
+        .await
+        .conn
+        .execute(
+            "UPDATE secure_operations SET body=? WHERE hash=?",
+            [selected.body_bytes().to_vec(), hash.clone()],
+        )
+        .await
+        .unwrap();
+    a.audit(f.public).await.unwrap();
+    a.receive_tip_statements(&[TipStatement::Seal(
+        SignedSeal::sign(statement, &f.publisher).unwrap(),
+    )])
+    .await
+    .unwrap();
+    a.inner
+        .lock()
+        .await
+        .conn
+        .execute(
+            "UPDATE secure_operations SET body=? WHERE hash=?",
+            [vec![0xff], hash.clone()],
+        )
+        .await
+        .unwrap();
+    let before = snapshot(&a).await;
+    assert!(
+        page(&a, f.public).await.is_err(),
+        "held candidates must open and verify original frames"
+    );
+    assert_eq!(snapshot(&a).await, before);
     a.inner
         .lock()
         .await
@@ -332,39 +467,16 @@ async fn refresh_keeps_lazy_header_graph_and_body_errors() {
         .execute(
             "UPDATE secure_operations SET header=?,body=? WHERE hash=?",
             crate::storage::bindings(vec![
-                SqlValue::Blob(crate::encode(&unknown_tip).unwrap()),
                 SqlValue::Blob(vec![0xff]),
+                SqlValue::Blob(selected.body_bytes().to_vec()),
                 SqlValue::Blob(hash.clone()),
             ]),
         )
         .await
         .unwrap();
-    let inputs = [(
-        f.public.domain,
-        unknown_tip.extensions.tip,
-        original.extensions.author.unwrap(),
-        original.extensions.author_sequence,
-    )];
-    let checks = a.inner.lock().await.refresh_reach_for_test(&inputs, false);
-    assert_eq!(checks.0, vec![Ok("Unfollowed".into())]);
-    assert_eq!(checks.1, checks.0);
     assert!(
-        page(&a, f.public).await.unwrap().is_empty(),
-        "non-Held header must not open the corrupt body"
-    );
-    a.inner
-        .lock()
-        .await
-        .conn
-        .execute(
-            "UPDATE secure_operations SET header=? WHERE hash=?",
-            [selected.header_bytes().to_vec(), hash.clone()],
-        )
-        .await
-        .unwrap();
-    assert!(
-        page(&a, f.public).await.unwrap().is_empty(),
-        "valid live header must also skip its corrupt body"
+        page(&a, f.public).await.is_err(),
+        "candidate headers remain verified"
     );
     a.inner
         .lock()
@@ -380,7 +492,10 @@ async fn refresh_keeps_lazy_header_graph_and_body_errors() {
         )
         .await
         .unwrap();
-    a.audit(f.public).await.unwrap();
+    assert_eq!(
+        encoded(&page(&a, f.public).await.unwrap()),
+        encoded(&frames[2..])
+    );
 }
 
 #[tokio::test]

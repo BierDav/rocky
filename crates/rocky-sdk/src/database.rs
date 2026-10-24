@@ -1273,6 +1273,7 @@ async fn run(
     );
     node.coordinate(log);
     if let Err(error) = async {
+        node.restore_line_signers().await?;
         node.complete_revocation().await?;
         node.refresh_importing().await?;
         node.try_ensure_tip_node().await;

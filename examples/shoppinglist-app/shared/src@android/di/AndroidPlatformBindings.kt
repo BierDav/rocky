@@ -30,6 +30,7 @@ object AndroidPlatformBindings {
         return ShoppingPlatform(
             directory = File(application.filesDir, "shopping").absolutePath,
             deviceName = Build.MODEL,
+            diagnostic = context.diagnostic,
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(application, path) },
             secrets = { secrets },
             coordinator = { publicCoordination(File(application.filesDir, "shopping").absolutePath) },

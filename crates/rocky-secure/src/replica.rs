@@ -304,7 +304,8 @@ pub(super) struct Inner<A> {
     stamp_authors: stamp_authors::Cache,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
-    /// Parsed stored-header fields, bound to their complete live bytes.
+    /// Parsed headers for the scan oracle.
+    #[cfg(test)]
     frontier_headers: std::sync::Mutex<tips::StoredHeaders>,
     migration_syntax: std::sync::Mutex<bulk::syntax::StoredDescriptorSyntax>,
     #[cfg(test)]
@@ -837,6 +838,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             record_dictionary: Default::default(),
             stamp_authors: Default::default(),
             author_sets: Default::default(),
+            #[cfg(test)]
             frontier_headers: Default::default(),
             migration_syntax: Default::default(),
             #[cfg(test)]

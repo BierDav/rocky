@@ -181,7 +181,7 @@ impl NativeSession {
         handler: Option<&dyn ContactHandler>,
     ) -> Result<(), Error> {
         loop {
-            let message = match self.answered().await {
+            let message = match self.answered_request().await {
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Ok(());
                 }

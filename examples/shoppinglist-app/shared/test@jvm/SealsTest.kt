@@ -2,6 +2,7 @@ package org.example.examples.shopping
 
 import androidx.room.Room
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.household.NodeKind
@@ -115,6 +116,49 @@ class SealsTest {
         desk.tips.leave("dev", delete = true)
         await("the desk to return to main", desk, phone) { desk.titles(list) == listOf("Milk", "Phone on main") }
         await("dev's deletion to reach the laptop", laptop, desk) { laptop.tips.refresh().bookmarks.map { it.name } == listOf(MAIN) }
+    }
+
+    @Test fun `a full member keeps observing main while two trusted nodes seal and one opens a branch`() = household { root, opened ->
+        val a = ShoppingNode.create(platform(root, "a")).also(opened::add)
+        val b = ShoppingNode.join(platform(root, "b"), a.household.invite(NodeKind.Trusted, "B")).also(opened::add)
+        val full = ShoppingNode.join(platform(root, "full"), b.household.invite(NodeKind.Full, "Full")).also(opened::add)
+        val list = a.repository.createList("Weekly")
+        a.repository.add(list, "Before")
+        await("the trusted peer and full member to bootstrap", b, full) { b.titles(list) == listOf("Before") && full.titles(list) == listOf("Before") }
+        val observed = mutableListOf<List<String>>()
+        val observer = launch { full.repository.observe(list).collect { rows -> observed += rows.map { it.title }.sorted() } }
+        try {
+            full.setOnline(false)
+            a.tips.seal()
+            a.repository.add(list, "On main")
+            a.tips.seal()
+            await("B to hold main's seals", a, b) { b.titles(list) == listOf("Before", "On main") }
+            a.tips.branch("dev")
+            a.repository.add(list, "Only dev")
+            full.setOnline(true)
+            await("the member to recover main through B", b, full) {
+                full.titles(list) == listOf("Before", "On main") && !full.rocky.status().data.bootstrapPending
+            }
+            assertEquals(MAIN, full.rocky.tips.status().bookmark)
+            assertEquals(MAIN, b.rocky.tips.status().bookmark)
+            assertEquals("dev", a.rocky.tips.status().bookmark)
+            assertFalse(full.failure.isCompleted)
+            assertTrue(observer.isActive)
+            await("the live observer to publish main's rows", b, full) { observed.lastOrNull() == listOf("Before", "On main") }
+            val created = full.repository.createList("From full on main")
+            full.repository.add(created, "New on main")
+            await("the member's new list to reach the trusted main follower", b, full) {
+                b.titles(created) == listOf("New on main")
+            }
+            val devLists = withTimeout(60_000) { a.repository.lists().first() }
+            assertTrue(devLists.none { it.id == created }, "the dev follower received main's new list")
+            a.tips.follow(MAIN)
+            await("the new list to bootstrap after returning to main", a, b, full) {
+                a.titles(created) == listOf("New on main")
+            }
+        } finally {
+            observer.cancelAndJoin()
+        }
     }
 
     @Test fun `a device switched offline reopens without a network and publishes on switching back`() = household { root, opened ->

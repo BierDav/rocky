@@ -106,17 +106,26 @@ impl<A: RowApplication> Inner<A> {
             for (_, id) in self.domain_scopes(domain).await? {
                 if self.unsealed_import(id).await? {
                     return Err(denied(
-                        "the workspace waits for a verified seal rebootstrap",
+                        "the workspace waits for a verified seal rebootstrap: unsealed import",
                     ));
                 }
             }
         }
-        if self.compaction_lost(domain).await?.is_some()
-            || !self.seal_rebootstraps(domain).await?.is_empty()
-        {
+        if self.compaction_lost(domain).await?.is_some() {
             return Err(denied(
-                "the workspace waits for a verified seal rebootstrap",
+                "the workspace waits for a verified seal rebootstrap: lost compaction",
             ));
+        }
+        let needs = self.seal_rebootstraps(domain).await?;
+        if let Some(need) = needs.first() {
+            return Err(denied(&format!(
+                "the workspace waits for a verified seal rebootstrap: {} scopes; first table={:02x?} encryption={:02x?} replay={:?} listed={}",
+                needs.len(),
+                &need.scope.table[..4],
+                &need.scope.encryption[..4],
+                need.replay,
+                need.listed.len(),
+            )));
         }
         Ok(())
     }
@@ -149,7 +158,7 @@ impl<A: RowApplication> Inner<A> {
                 match (id, self.path_seals(domain)?.last()) {
                     (Some(id), Some(seal)) => self.replay_has_gaps(scope, id, seal).await?,
                     (None, Some(seal)) => self
-                        .seal_waits(domain, seal, None, &[(scope, id)], true)
+                        .seal_coverage_waits(domain, seal, None, &[(scope, id)])
                         .await?
                         .is_some(),
                     (_, None) => false,
@@ -367,7 +376,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.verified_at.remove(&id);
         inner.flush()?;
-        inner.publish_revision().await
+        inner.publish_revision().await?;
+        drop(inner);
+        // Replay retained frames even when the peer has nothing new to send.
+        self.settle().await?;
+        self.restored(scope).await?;
+        self.finish_seal_rebootstrap(scope.domain).await?;
+        Ok(())
     }
     /// Ends a seal rebootstrap of `domain` once no held scope waits: a
     /// compacted seal that lost is forgotten and the rows are rebuilt at

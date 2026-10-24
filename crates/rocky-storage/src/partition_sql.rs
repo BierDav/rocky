@@ -1,7 +1,10 @@
 //! Completeness proofs for each resolved SQL table reference.
 use rocky_core::{KeyColumn, PartitionValue, SqlValue};
 use sqlparser::{ast::*, dialect::SQLiteDialect, parser::Parser};
-use std::{collections::BTreeMap, ops::ControlFlow};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
+};
 
 #[derive(Clone)]
 pub struct PartitionColumn {
@@ -726,6 +729,31 @@ pub fn check_with_views(
     tables: &BTreeMap<String, TablePartitions>,
     views: &[rocky_core::LogicalView],
 ) -> Result<String, Refusal> {
+    check(&expand_views(sql, views)?.to_string(), params, tables)
+}
+
+/// Conservative table references, after expanding views, for loading only the
+/// readiness proofs a statement can use. CTE names may also be returned.
+pub fn referenced_tables(
+    sql: &str,
+    views: &[rocky_core::LogicalView],
+) -> Result<BTreeSet<String>, Refusal> {
+    struct References(BTreeSet<String>);
+    impl Visitor for References {
+        type Break = ();
+        fn pre_visit_relation(&mut self, name: &ObjectName) -> ControlFlow<()> {
+            if let Some(ObjectNamePart::Identifier(name)) = name.0.last() {
+                self.0.insert(name.value.to_ascii_lowercase());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut references = References(BTreeSet::new());
+    let _ = expand_views(sql, views)?.visit(&mut references);
+    Ok(references.0)
+}
+
+fn expand_views(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Statement, Refusal> {
     struct Expand<'a> {
         views: &'a [rocky_core::LogicalView],
         changed: bool,
@@ -778,7 +806,7 @@ pub fn check_with_views(
             return Err(error.into());
         }
         if !expand.changed {
-            return check(&statement.to_string(), params, tables);
+            return Ok(statement);
         }
     }
     Err("view expansion cycle or depth quota".into())
@@ -787,6 +815,37 @@ pub fn check_with_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readiness_references_include_nested_views_subqueries_and_write_targets() {
+        let views = vec![
+            rocky_core::LogicalView {
+                name: "inner_items".into(),
+                create_sql: "CREATE VIEW inner_items AS SELECT * FROM main.items".into(),
+            },
+            rocky_core::LogicalView {
+                name: "outer_items".into(),
+                create_sql: "CREATE VIEW outer_items AS SELECT * FROM inner_items".into(),
+            },
+        ];
+        for sql in [
+            "SELECT * FROM metadata WHERE EXISTS(SELECT 1 FROM outer_items)",
+            "UPDATE metadata SET value=(SELECT count(*) FROM outer_items)",
+            "INSERT INTO metadata SELECT * FROM outer_items",
+            "DELETE FROM metadata WHERE EXISTS(SELECT 1 FROM outer_items)",
+        ] {
+            assert_eq!(
+                referenced_tables(sql, &views).unwrap(),
+                ["items".into(), "metadata".into()].into(),
+                "{sql}"
+            );
+        }
+        assert!(referenced_tables("SELECT 1", &views).unwrap().is_empty());
+        assert_eq!(
+            referenced_tables("SELECT * FROM metadata", &views).unwrap(),
+            ["metadata".into()].into()
+        );
+    }
+
     fn rules() -> BTreeMap<String, TablePartitions> {
         [(
             "items".into(),

@@ -11,12 +11,15 @@ pub(in crate::replica) struct RefreshGraphContext<'a> {
     structural: BTreeMap<(Scope, TipId), bool>,
     winners: BTreeMap<(Scope, TipId), Option<&'a SignedSeal>>,
     paths: BTreeMap<(Scope, TipId, TipId), FramePath>,
+    abandoned: BTreeMap<(Scope, TipId), Vec<Vec<rocky_credentials::AuthorMark>>>,
     entries: usize,
     bytes: usize,
     #[cfg(test)]
     hits: usize,
     #[cfg(test)]
     misses: usize,
+    #[cfg(test)]
+    abandoned_queries: usize,
 }
 impl<'a> RefreshGraphContext<'a> {
     pub(in crate::replica) fn new(graphs: &'a BTreeMap<Scope, TipGraph>, target: TipId) -> Self {
@@ -27,12 +30,15 @@ impl<'a> RefreshGraphContext<'a> {
             structural: BTreeMap::new(),
             winners: BTreeMap::new(),
             paths: BTreeMap::new(),
+            abandoned: BTreeMap::new(),
             entries: 0,
             bytes: 0,
             #[cfg(test)]
             hits: 0,
             #[cfg(test)]
             misses: 0,
+            #[cfg(test)]
+            abandoned_queries: 0,
         }
     }
     fn graph(&self, scope: Scope) -> Result<&'a TipGraph, Error> {
@@ -148,9 +154,60 @@ impl<'a> RefreshGraphContext<'a> {
         }
         result
     }
+    pub(super) fn abandoned<A: RowApplication>(
+        &mut self,
+        inner: &Inner<A>,
+        scope: Scope,
+        source: TipId,
+        author: u32,
+        sequence: u64,
+    ) -> Result<bool, Error> {
+        let key = (scope, source);
+        let beyond = |bounds: &[Vec<rocky_credentials::AuthorMark>]| {
+            bounds.iter().any(|common| {
+                !common
+                    .iter()
+                    .any(|mark| mark.author == author && sequence <= mark.sequence)
+            })
+        };
+        if let Some(bounds) = self.abandoned.get(&key) {
+            #[cfg(test)]
+            {
+                self.hits += 1;
+            }
+            return Ok(beyond(bounds));
+        }
+        #[cfg(test)]
+        {
+            self.misses += 1;
+            self.abandoned_queries += 1;
+        }
+        let bounds = inner.abandoned_bounds(scope, self.graph(scope)?, source)?;
+        let result = beyond(&bounds);
+        let bytes =
+            std::mem::size_of::<((Scope, TipId), Vec<Vec<rocky_credentials::AuthorMark>>)>()
+                + 48
+                + bounds.capacity() * std::mem::size_of::<Vec<rocky_credentials::AuthorMark>>()
+                + bounds
+                    .iter()
+                    .map(|bound| {
+                        bound.capacity() * std::mem::size_of::<rocky_credentials::AuthorMark>()
+                    })
+                    .sum::<usize>();
+        if self.retain(bytes) {
+            self.abandoned.insert(key, bounds);
+        }
+        Ok(result)
+    }
     #[cfg(test)]
-    pub(in crate::replica) fn stats(&self) -> (usize, usize, usize, usize) {
-        (self.hits, self.misses, self.entries, self.bytes)
+    pub(in crate::replica) fn stats(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.hits,
+            self.misses,
+            self.entries,
+            self.bytes,
+            self.abandoned_queries,
+        )
     }
 }
 
@@ -163,7 +220,11 @@ impl<A: RowApplication> Inner<A> {
         &self,
         inputs: &[(Scope, TipId, u32, u64)],
         fallback: bool,
-    ) -> (ReachChecks, ReachChecks, (usize, usize, usize, usize)) {
+    ) -> (
+        ReachChecks,
+        ReachChecks,
+        (usize, usize, usize, usize, usize),
+    ) {
         let mut context = RefreshGraphContext::new(&self.graphs, self.workspace.tip);
         if fallback {
             context.entries = MAX_QUERIES;

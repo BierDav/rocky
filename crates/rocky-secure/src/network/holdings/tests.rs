@@ -33,6 +33,94 @@ async fn open(f: &Fixture, dir: &std::path::Path, name: &str, rights: &[Right]) 
     .await
 }
 
+#[tokio::test]
+async fn an_unshared_partition_does_not_end_held_recovery_of_other_scopes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(1);
+    let client = open(&f, root.path(), "client.db", &[Right::Read]).await;
+    let server = open(&f, root.path(), "server.db", &[Right::Read]).await;
+    let private = f.scope("customers", 1);
+    let shared = f.scope("customers", 2);
+    for value in [1, 2] {
+        for replica in [&client, &server] {
+            replica
+                .register_partition(f.scope("customers", value), f.tuple("customers", value))
+                .await
+                .unwrap();
+        }
+        client.install_key(f.key("customers", value)).await.unwrap();
+    }
+    server.install_key(f.key("customers", 2)).await.unwrap();
+    let (mut c, mut s) = pair(&client, &server).await;
+    let ((), served) = tokio::join!(
+        async {
+            assert!(!c.sync_held_changes(&client, private, 8192).await.unwrap());
+            assert!(!c.offered.contains(&private));
+            assert!(!c.sync_held_changes(&client, shared, 8192).await.unwrap());
+            assert!(c.offered.contains(&shared));
+            c.close().await.unwrap();
+        },
+        s.serve_to_end(&server)
+    );
+    served.unwrap();
+}
+
+#[tokio::test]
+async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(1);
+    let client = open(&f, root.path(), "client.db", &[Right::Read]).await;
+    let server = open(&f, root.path(), "server.db", &[Right::Read]).await;
+    let scope = f.scope("customers", 1);
+    for replica in [&client, &server] {
+        replica
+            .register_partition(scope, f.tuple("customers", 1))
+            .await
+            .unwrap();
+        replica.install_key(f.key("customers", 1)).await.unwrap();
+    }
+    let (mut c, mut s) = pair(&client, &server).await;
+    assert!(c.follows_same_tip(&client).await);
+    let (node, credentials) = {
+        let inner = client.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    // A link's reported tip may differ while its metadata is being reconciled.
+    server
+        .admit_peer(node, &credentials, rocky_core::TipId([71; 32]))
+        .await
+        .unwrap();
+    let (node, credentials) = {
+        let inner = server.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    client
+        .admit_peer(node, &credentials, rocky_core::TipId([71; 32]))
+        .await
+        .unwrap();
+    assert!(!c.follows_same_tip(&client).await);
+    let ((), served) = tokio::join!(
+        async {
+            assert!(!c.sync_held_changes(&client, scope, 8192).await.unwrap());
+            assert!(c.pull_page(&client, vec![scope], None, 8192).await.is_err());
+            c.close().await.unwrap();
+        },
+        s.serve_to_end(&server)
+    );
+    assert!(
+        served
+            .unwrap_err()
+            .to_string()
+            .contains("peer follows another tip")
+    );
+}
+
 async fn refusal(client: &Replica, server: &Replica, message: Message) -> (String, u64, u64) {
     let (mut c, mut s) = pair(client, server).await;
     c.send(message).await.unwrap();

@@ -41,6 +41,31 @@ impl Settings {
 }
 
 impl Node {
+    pub(crate) async fn restore_line_signers(&self) -> Result<(), Failure> {
+        let Some(bytes) = self.vault.load_bytes(ROLE)? else {
+            return Ok(());
+        };
+        let saved: SavedNodes = serde_json::from_slice(&bytes)?;
+        if saved.format != FORMAT {
+            return Err("unsupported line node format".into());
+        }
+        for node in saved.nodes {
+            // Expired or superseded authors remain unusable; restoring a signer
+            // never selects it for writes or changes its persisted line.
+            match self
+                .replica
+                .restore_line_node(rocky_secure::LineNode {
+                    key: PrivateKey::from_bytes(&node.key),
+                    credentials: node.credentials,
+                })
+                .await
+            {
+                Ok(()) | Err(Error::Rejected(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
     /// Registers a node for the followed line when writes need one: a
     /// saved node of the line, else a newly certified one. Readers hold no
     /// author range and write nothing.

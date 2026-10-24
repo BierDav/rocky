@@ -747,6 +747,7 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .chain(self.credential_signer.as_ref())
             .chain([&self.config.node])
+            .chain(self.line_nodes.values().map(|author| &author.key))
             .find(|key| key.public_key() == signer)
             .cloned()
     }
@@ -1095,16 +1096,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     pub(crate) async fn owns_checkpoint_signer(&self, signed: &SignedCheckpoint) -> bool {
         let inner = self.inner.lock().await;
-        let signer = signed.signer();
-        signer == inner.config.node.public_key()
-            || inner
-                .credential_signer
-                .as_ref()
-                .is_some_and(|key| key.public_key() == signer)
-            || inner
-                .node_author
-                .as_ref()
-                .is_some_and(|author| author.key.public_key() == signer)
+        inner.checkpoint_key(signed).is_some()
     }
     /// One page of the checkpoint's rows after `after`, sealed with the scope
     /// key, within `byte_quota` encoded bytes. A checkpoint that was replaced

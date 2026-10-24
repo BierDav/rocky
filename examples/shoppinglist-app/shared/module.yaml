@@ -60,4 +60,5 @@ settings:
         room.schemaLocation: ./schemas
 
 aliases:
+  - java: [jvm, android]
   - mobile: [android, iosArm64, iosSimulatorArm64]

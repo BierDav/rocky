@@ -35,6 +35,9 @@ impl NativeSession {
         {
             return Ok(false);
         }
+        if !self.try_scoped_holding(replica, &[scope], true).await? {
+            return Ok(false);
+        }
         let mut after = None;
         loop {
             if self.low(MAX_SECURE_FRAME) {

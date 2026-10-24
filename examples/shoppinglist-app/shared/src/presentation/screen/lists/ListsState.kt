@@ -15,6 +15,9 @@ data class ListsState(
     val items: List<ShoppingItem> = emptyList(),
     val trusted: Boolean = false,
     val links: List<ItemCategory> = emptyList(),
+    val canCreateLists: Boolean = trusted,
+    val loading: Boolean = false,
+    val contentLoading: Boolean = false,
 ) {
     private val linked: Map<Long, Set<Long>> = links.groupBy({ it.item }, { it.category }).mapValues { it.value.toSet() }
 

@@ -247,6 +247,157 @@ fn all() -> Vec<Right> {
 }
 
 #[tokio::test]
+async fn a_future_import_does_not_make_verified_empty_partition_history_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new();
+    let replica = f
+        .open(
+            &root.path().join("writer.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    replica
+        .set_role(crate::RoleConfig {
+            role: crate::ReplicaRole::Full,
+            full_nodes: Default::default(),
+            custody: 0,
+        })
+        .await
+        .unwrap();
+    f.key(&replica, "A", [1; 32]).await;
+    let frame = replica
+        .author_bundle([1; 32], vec![f.write("A", 1, 10)], vec![])
+        .await
+        .unwrap()
+        .remove(0);
+    seal_main(&replica, &f.publisher, f.domain).await;
+    replica.finalize_path(f.domain).await.unwrap();
+    assert!(
+        replica
+            .compaction_status(f.domain)
+            .await
+            .unwrap()
+            .finalized
+            .is_some()
+    );
+    f.key(&replica, "B", [2; 32]).await;
+    replica.set_importing([f.scope("B")].into()).await;
+    assert!(
+        replica
+            .seal_rebootstraps(f.domain)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let session = replica
+        .session([f.scope("A"), f.scope("B")].into())
+        .await
+        .unwrap();
+    let sql = session.sql(Default::default()).await.unwrap();
+    assert_eq!(
+        sql.run("SELECT count(*) FROM items WHERE row_kind=0", vec![])
+            .await
+            .unwrap()
+            .rows[0][0],
+        SqlValue::Integer(1)
+    );
+    let missing = f
+        .open(
+            &root.path().join("missing.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            None,
+        )
+        .await;
+    missing
+        .set_role(crate::RoleConfig {
+            role: crate::ReplicaRole::Full,
+            full_nodes: Default::default(),
+            custody: 0,
+        })
+        .await
+        .unwrap();
+    f.key(&missing, "A", [1; 32]).await;
+    missing.receive(frame).await.unwrap();
+    exchange_graphs(&replica, &missing, f.domain).await;
+    missing.finalize_path(f.domain).await.unwrap();
+    assert!(
+        missing
+            .compaction_status(f.domain)
+            .await
+            .unwrap()
+            .finalized
+            .is_some()
+    );
+    f.key(&replica, "C", [3; 32]).await;
+    replica
+        .author_bundle([2; 32], vec![f.write("C", 2, 20)], vec![])
+        .await
+        .unwrap();
+    seal_main(&replica, &f.publisher, f.domain).await;
+    exchange_graphs(&replica, &missing, f.domain).await;
+    f.key(&missing, "B", [2; 32]).await;
+    missing.set_importing([f.scope("B")].into()).await;
+    assert!(
+        missing
+            .seal_rebootstraps(f.domain)
+            .await
+            .unwrap()
+            .iter()
+            .any(|need| need.scope == f.scope("B")),
+        "missing author history cannot establish an empty partition"
+    );
+}
+
+#[tokio::test]
+async fn unrelated_partition_recovery_does_not_block_constant_queries() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new();
+    let replica = f
+        .open(
+            &root.path().join("waiting.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            None,
+        )
+        .await;
+    f.key(&replica, "A", [1; 32]).await;
+    replica
+        .set_role(crate::RoleConfig {
+            role: crate::ReplicaRole::Full,
+            full_nodes: Default::default(),
+            custody: 0,
+        })
+        .await
+        .unwrap();
+    let session = replica.session([f.scope("A")].into()).await.unwrap();
+    let sql = session.sql(Default::default()).await.unwrap();
+    {
+        let inner = replica.inner.lock().await;
+        inner
+            .conn
+            .execute(
+                "INSERT INTO secure_compaction_lost VALUES(?,?)",
+                [crate::encode(&f.domain).unwrap(), vec![7; 32]],
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sql.run("SELECT 42", vec![]).await.unwrap().rows[0][0],
+        SqlValue::Integer(42)
+    );
+    for query in [
+        "SELECT * FROM items WHERE row_kind=0",
+        "SELECT * FROM nested_items",
+    ] {
+        assert!(sql.run(query, vec![]).await.is_err(), "{query}");
+    }
+}
+
+#[tokio::test]
 async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new();

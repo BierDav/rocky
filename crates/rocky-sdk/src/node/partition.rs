@@ -164,15 +164,10 @@ impl Node {
         };
         Ok(json!({"supplied":supplied}))
     }
-    /// Prepares the group secret on an issuer: the current epoch of a known
+    /// Prepares the group secret after issuer or own-id insert authorization: the current epoch of a known
     /// partition, otherwise the first.
     async fn create_group(&self, partition: GroupPartition) -> Result<Value, Failure> {
         let mut settings = self.settings.lock().await;
-        if !settings.issuer() {
-            return Err(refused(
-                "partition creation requires an issuer; a reader receives the envelope by sync",
-            ));
-        }
         self.reads_group(&settings, &partition)?;
         let key = record_key(&partition.record.address);
         let mut record = settings
@@ -543,7 +538,12 @@ impl Node {
             omit => serde_json::from_value(omit.clone())?,
         };
         let result = match kind {
-            "partition_create" => self.create_group(partition).await?,
+            "partition_create" => {
+                if !self.settings.lock().await.issuer() {
+                    return Err(refused("explicit partition creation requires an issuer"));
+                }
+                self.create_group(partition).await?
+            }
             "partition_install" => {
                 let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
                 let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;

@@ -1289,3 +1289,48 @@ async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(
     a.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reopening_main_restores_the_branch_signer_of_its_shared_checkpoint() -> Result<(), Failure>
+{
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let a_dir = root.path().join("a");
+    let a = Device::create(&a_dir, network("a"))?;
+    a.follow_main_migrating().await;
+    a.add(1, "common").await;
+    let seal = a.ok(json!({"type":"tips", "action":"seal"})).await["tip"].clone();
+    let dev = a
+        .ok(json!({"type":"tips", "action":"open", "seal":seal, "minimum_in_sync":1}))
+        .await["tip"]
+        .clone();
+    a.ok(json!({"type":"tips", "action":"create", "name":"dev", "tip":dev}))
+        .await;
+    a.ok(json!({"type":"tips", "action":"follow", "name":"dev"}))
+        .await;
+    a.ok(json!({"type":"tips", "action":"compact"})).await;
+    a.ok(json!({"type":"tips", "action":"follow", "name":"main"}))
+        .await;
+    let main = tip(&a).await;
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, SCHEMA, network("a")))?)?;
+    assert_eq!(tip(&a).await, main);
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    b.sync()
+        .await
+        .expect("checkpoint transfer after issuer restart");
+    assert_eq!(b.titles().await, ["common"]);
+    b.add(2, "incremental").await;
+    b.sync().await.expect("incremental sync after checkpoint");
+    assert_eq!(a.titles().await, ["common", "incremental"]);
+    assert_eq!(tip(&a).await, main);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}

@@ -624,6 +624,97 @@ async fn identity_replica(
 }
 
 #[tokio::test]
+async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_node() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let identity = PrivateKey::new();
+    let original = PrivateKey::new();
+    let (replica, identity_chain) = identity_replica(
+        &f,
+        &dir.path().join("checkpoint-lines.db"),
+        &identity,
+        &original,
+    )
+    .await;
+    main(&f, &replica).await;
+    insert(&f, &replica, 1, "Base").await;
+    let continued = advance(&f, &replica).await;
+    let TipStatement::Seal(seal) = &continued[0] else {
+        panic!("seal")
+    };
+    let (_, records) = branch(&f, seal);
+    replica.receive_tip_statements(&records).await.unwrap();
+    replica
+        .follow_bookmark(f.public.domain, "dev")
+        .await
+        .unwrap();
+    let branch_node = PrivateKey::new();
+    let line = LineNode {
+        credentials: identity_chain
+            .clone()
+            .complete(&identity, branch_node.public_key(), 2)
+            .unwrap(),
+        key: branch_node.clone(),
+    };
+    replica.register_line_node(line.clone()).await.unwrap();
+    replica.compact(f.public.domain, 0).await.unwrap();
+    let signed = replica.checkpoint(f.public).await.unwrap();
+    assert_eq!(signed.signer(), branch_node.public_key());
+    replica
+        .follow_bookmark(f.public.domain, "main")
+        .await
+        .unwrap();
+    let mut config = f.config(&original, f.full(), &[f.public]);
+    config.credentials = identity_chain
+        .complete(&identity, original.public_key(), 1)
+        .unwrap();
+    drop(replica);
+    let replica = EncryptedReplica::open(&dir.path().join("checkpoint-lines.db"), f.app(), config)
+        .await
+        .unwrap();
+    replica.restore_line_node(line).await.unwrap();
+    assert_eq!(
+        insert(&f, &replica, 2, "Main after restore")
+            .await
+            .operation()
+            .unwrap()
+            .header
+            .public_key,
+        original.public_key()
+    );
+    let peer = PrivateKey::new();
+    let target = open(&f, &dir.path().join("checkpoint-joiner.db"), &peer).await;
+    exchange_graphs(&replica, &target, f.public.domain).await;
+    let credentials = target.inner.lock().await.config.credentials.clone();
+    replica
+        .admit_peer(peer.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = replica
+        .checkpoint_offer(peer.public_key(), &credentials, f.public)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offered.id().unwrap(), signed.id().unwrap());
+    target.begin_rebootstrap(offered).await.unwrap();
+    let page = replica
+        .checkpoint_page(
+            peer.public_key(),
+            &credentials,
+            f.public,
+            signed.id().unwrap(),
+            None,
+            MAX_SECURE_FRAME,
+        )
+        .await
+        .unwrap();
+    target.stage_checkpoint_page(page).await.unwrap();
+    target.finish_rebootstrap(f.public).await.unwrap();
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 1);
+    assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 2);
+}
+
+#[tokio::test]
 async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();

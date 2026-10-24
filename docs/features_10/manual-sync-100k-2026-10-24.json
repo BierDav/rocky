@@ -1,0 +1,360 @@
+{
+  "latest_cold_reopen_run": {
+    "run": "load100k-reopen25-20261025T074740Z",
+    "build": "held-index25",
+    "dataset_source": "load100k-three-20261024T223838Z",
+    "requested_rows": 100000,
+    "fixture": "Copies of closed isolated 100k SDK replicas, reopened in the current format",
+    "stages": {
+      "open_desktop_a": {
+        "wall_ms": 2055,
+        "result": 2052
+      },
+      "open_desktop_b": {
+        "wall_ms": 1630,
+        "result": 1627
+      },
+      "open_phone": {
+        "wall_ms": 772,
+        "result": 765
+      },
+      "phone_author": {
+        "wall_ms": 89,
+        "result": null
+      },
+      "phone_to_desktop_a": {
+        "wall_ms": 9079,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      },
+      "phone_to_desktop_b": {
+        "wall_ms": 78,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      },
+      "desktop_b_author": {
+        "wall_ms": 8,
+        "result": null
+      },
+      "desktop_b_to_desktop_a": {
+        "wall_ms": 174,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      },
+      "desktop_b_to_phone": {
+        "wall_ms": 3631,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      },
+      "desktop_a_author": {
+        "wall_ms": 10,
+        "result": null
+      },
+      "desktop_a_to_desktop_b": {
+        "wall_ms": 97,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      },
+      "desktop_a_to_phone": {
+        "wall_ms": 3145,
+        "result": {
+          "passes": 1,
+          "exact_value": true
+        }
+      }
+    },
+    "roles": {
+      "desktop_a": {
+        "issuer": true,
+        "rows": 100000,
+        "distinct_keys": 100000
+      },
+      "desktop_b": {
+        "issuer": true,
+        "rows": 100000,
+        "distinct_keys": 100000
+      },
+      "phone": {
+        "issuer": false,
+        "rows": 100000,
+        "distinct_keys": 100000
+      }
+    },
+    "final_rows": {
+      "desktop_a": 100000,
+      "desktop_b": 100000,
+      "phone": 100000
+    },
+    "success": true
+  },
+  "preceding_cold_reopen_failure": {
+    "run": "load100k-reopen24-20261025T072518Z",
+    "build": "import-slot24",
+    "dataset_source": "load100k-three-20261024T223838Z",
+    "requested_rows": 100000,
+    "fixture": "Copies of closed isolated 100k SDK replicas, reopened in the current format",
+    "stages": {
+      "open_desktop_a": {
+        "wall_ms": 2035,
+        "result": 2032
+      },
+      "open_desktop_b": {
+        "wall_ms": 1506,
+        "result": 1503
+      },
+      "open_phone": {
+        "wall_ms": 2318,
+        "result": 2307
+      },
+      "phone_author": {
+        "wall_ms": 136,
+        "result": null
+      }
+    },
+    "roles": {
+      "desktop_a": {
+        "issuer": true,
+        "rows": 100000,
+        "distinct_keys": 100000
+      },
+      "desktop_b": {
+        "issuer": true,
+        "rows": 100000,
+        "distinct_keys": 100000
+      },
+      "phone": {
+        "issuer": false,
+        "rows": 100000,
+        "distinct_keys": 100000
+      }
+    },
+    "success": false,
+    "error": "incremental edit did not converge"
+  },
+  "latest_three_node_run": {
+    "run": "load100k-three-20261024T223838Z",
+    "build": "frame-progress20",
+    "requested_rows": 100000,
+    "fixture": "SDK migration synthetic items",
+    "success": true,
+    "roles": {
+      "desktop_a": {
+        "issuer": true,
+        "readable": 1,
+        "writable": 1
+      },
+      "desktop_b": {
+        "issuer": true,
+        "readable": 1,
+        "writable": 1
+      },
+      "phone": {
+        "issuer": false,
+        "readable": 1,
+        "writable": 1
+      }
+    },
+    "final_rows": {
+      "desktop_a": 100000,
+      "desktop_b": 100000,
+      "phone": 100000
+    },
+    "phone_uid_traffic_delta_bytes": {
+      "rx": 50676748,
+      "tx": 2518461
+    },
+    "phone_control_bytes": {
+      "sent": 4239,
+      "received": 4459
+    },
+    "concurrent_validation": "Kotlin SDK and shopping app checks overlapped this qualification run",
+    "topology": "Isolated packaged SDK fixture: two Trusted JVM replicas and a Full replica on the real Android phone; Shopping household excluded.",
+    "validation": {
+      "desktop_a": {
+        "rows": 100000,
+        "distinct_keys": 100000,
+        "invalid_values": 0
+      },
+      "desktop_b": {
+        "rows": 100000,
+        "distinct_keys": 100000,
+        "invalid_values": 0
+      },
+      "phone": {
+        "rows": 100000,
+        "distinct_keys": 100000,
+        "invalid_values": 0
+      }
+    },
+    "timing_ms": {
+      "create_desktop_a": 4929,
+      "author_and_publish_100000": 96717,
+      "validate_desktop_a": 28,
+      "seal": 1519,
+      "checkpoint": 11491,
+      "desktop_b_join": 4530,
+      "desktop_b_bootstrap": 24820,
+      "validate_desktop_b": 29,
+      "phone_join": 4275,
+      "phone_bootstrap": 215272,
+      "validate_phone": 231,
+      "phone_incremental_author": 294,
+      "phone_to_desktop_a": 3156,
+      "phone_to_desktop_b": 775,
+      "desktop_b_incremental_author": 5,
+      "desktop_b_to_desktop_a": 2709,
+      "desktop_b_to_phone": 8755,
+      "desktop_a_incremental_author": 13,
+      "desktop_a_to_desktop_b": 2578,
+      "desktop_a_to_phone": 2310
+    },
+    "incremental": {
+      "phone_to_desktop_a": {
+        "passes": 1,
+        "exact_value": true
+      },
+      "phone_to_desktop_b": {
+        "passes": 1,
+        "exact_value": true
+      },
+      "desktop_b_to_desktop_a": {
+        "passes": 1,
+        "exact_value": true
+      },
+      "desktop_b_to_phone": {
+        "passes": 1,
+        "exact_value": true
+      },
+      "desktop_a_to_desktop_b": {
+        "passes": 1,
+        "exact_value": true
+      },
+      "desktop_a_to_phone": {
+        "passes": 1,
+        "exact_value": true
+      }
+    },
+    "storage_after_close": {
+      "desktop_a": {
+        "total_bytes": 412724810,
+        "sqlite_bytes": 412700672
+      },
+      "desktop_b": {
+        "total_bytes": 161774889,
+        "sqlite_bytes": 161751040
+      },
+      "phone": {
+        "total_bytes": 161745642,
+        "sqlite_bytes": 161722368
+      }
+    },
+    "limits": [
+      "Functional qualification, with other validation running concurrently; not a controlled benchmark.",
+      "UID counters include control traffic and transport overhead; they do not measure all physical network overhead.",
+      "Checkpoint formed a replay base but retained sole-copy history; zero frames were pruned.",
+      "This validates table synchronization through packaged SDKs; it does not render 100,000 rows in Shopping UI."
+    ]
+  },
+  "earlier_two_node_run": {
+    "run": "load100k-20261024T185105Z",
+    "date": "2026-10-24",
+    "topology": "isolated JVM SDK host and real Android phone; household excluded",
+    "fixture": "SDK migration synthetic items",
+    "requested_rows": 100000,
+    "validation": {
+      "host": {
+        "rows": 100000,
+        "distinct_keys": 100000,
+        "invalid_values": 0
+      },
+      "phone": {
+        "rows": 100000,
+        "distinct_keys": 100000,
+        "invalid_values": 0
+      }
+    },
+    "timing_ms": {
+      "create_host": 1350,
+      "author_and_publish_100000": 94380,
+      "validate_host": 30,
+      "seal": 1562,
+      "checkpoint": 11563,
+      "phone_join": 4812,
+      "validate_phone": 239,
+      "phone_incremental_author": 301,
+      "host_incremental_catch_up": 7560,
+      "host_incremental_author": 10,
+      "phone_incremental_catch_up": 9045
+    },
+    "phone_bootstrap": {
+      "elapsed_ms": 323519,
+      "passes": 1
+    },
+    "incremental": {
+      "phone_to_host": {
+        "passes": 1,
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "phone incremental"
+            },
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "host_to_phone": {
+        "passes": 1,
+        "rows": [
+          [
+            {
+              "type": "text",
+              "value": "host incremental"
+            },
+            {
+              "type": "integer",
+              "value": "1"
+            }
+          ]
+        ]
+      },
+      "final_rows_per_replica": 100000
+    },
+    "phone_uid_traffic_delta_bytes": {
+      "rx": 51530358,
+      "tx": 3256848
+    },
+    "phone_control_bytes": {
+      "sent": 4271,
+      "received": 3535
+    },
+    "storage_after_close": {
+      "host": {
+        "total_bytes": 412671001,
+        "sqlite_bytes": 412647424
+      },
+      "phone": {
+        "total_bytes": 161696063,
+        "sqlite_bytes": 161673216
+      }
+    },
+    "limits": [
+      "UID counters include control traffic and transport overhead; they do not measure all physical network overhead.",
+      "Host formed a replay base but retained sole-copy history; zero frames were pruned.",
+      "This run validates two SDK replicas, not three-replica scale or rendering 100,000 shopping UI rows."
+    ]
+  }
+}

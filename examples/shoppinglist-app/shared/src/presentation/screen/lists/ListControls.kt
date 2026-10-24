@@ -26,7 +26,7 @@ internal fun ListTabs(state: ListsState, onSelect: (Long) -> Unit, onNew: () -> 
                 leadingIcon = { if (list.id == state.selected?.id) Icon(Icons.Filled.ShoppingBasket, null, Modifier.size(18.dp)) },
             )
         }
-        if (state.trusted) item { AssistChip(onNew, label = { Text("New list") }, leadingIcon = { Icon(Icons.Filled.Add, null, Modifier.size(18.dp)) }) }
+        if (state.canCreateLists) item { AssistChip(onNew, label = { Text("New list") }, leadingIcon = { Icon(Icons.Filled.Add, null, Modifier.size(18.dp)) }) }
     }
 }
 

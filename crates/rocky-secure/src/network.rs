@@ -13,7 +13,7 @@ use rocky_core::{Commitment, ResourceScope, RowApplication};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::timeout,
 };
 
@@ -55,6 +55,7 @@ use tips::TipMessage;
 pub use rocky_core::net::SessionStream;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const IO_CHUNK: usize = 8 * 1024;
 /// The refusal of a peer the merged revocation set revokes.
 pub const PEER_REVOKED: &str = "the peer is revoked";
 /// The refusal of a side the merged revocation set revokes: it ends the
@@ -456,7 +457,8 @@ impl NativeSession {
         }
     }
     async fn send(&mut self, message: impl Into<Message>) -> Result<(), Error> {
-        let bytes = encode(&message.into())?;
+        let message = message.into();
+        let bytes = encode(&message)?;
         let signature = self
             .local
             .sign(&frame_signing_bytes(&self.signing, self.sent, &bytes)?);
@@ -465,6 +467,29 @@ impl NativeSession {
             bytes,
             signature,
         })?;
+        if frame.len() > MAX_SECURE_FRAME {
+            let family = match message {
+                Message::Acknowledged => "acknowledgment",
+                Message::Rows(_) => "rows",
+                Message::Checkpoints(_) => "checkpoints",
+                Message::Frontiers(_) => "frontiers",
+                Message::Existence(_) => "existence",
+                Message::Revocations(_) => "revocations",
+                Message::Holdings(_) => "holdings",
+                Message::Contacts(_) => "contacts",
+                Message::Delivery(_) => "delivery",
+                Message::Chains(_) => "chains",
+                Message::LinkState(_) => "link state",
+                Message::Entries(_) => "entries",
+                Message::HeldChanges(_) => "held changes",
+                Message::Tips(_) => "tips",
+                Message::Placements(_) => "placements",
+            };
+            return Err(denied(&format!(
+                "native {family} frame quota: {} exceeds {MAX_SECURE_FRAME} bytes",
+                frame.len()
+            )));
+        }
         self.spend(frame.len())?;
         match &mut self.stream {
             SessionIo::Channel(channel) => channel.send(frame).await?,
@@ -477,9 +502,13 @@ impl NativeSession {
         Ok(())
     }
     async fn receive(&mut self) -> Result<Message, Error> {
+        self.receive_with_idle(false).await
+    }
+    async fn receive_with_idle(&mut self, idle: bool) -> Result<Message, Error> {
         let bytes = match &mut self.stream {
+            SessionIo::Channel(channel) if idle => channel.receive_with_idle(true).await?,
             SessionIo::Channel(channel) => channel.receive().await?,
-            SessionIo::Native(stream) => read_frame(stream).await?,
+            SessionIo::Native(stream) => read_frame_with_idle(stream, idle).await?,
         };
         self.spend(bytes.len())?;
         let message: SignedMessage = decode(&bytes)?;
@@ -499,8 +528,15 @@ impl NativeSession {
     }
     /// The peer's answer; the chains it carries first join the table.
     async fn answered(&mut self) -> Result<Message, Error> {
+        self.answered_with_idle(false).await
+    }
+    // The requester may be applying its previous answer before asking again.
+    async fn answered_request(&mut self) -> Result<Message, Error> {
+        self.answered_with_idle(true).await
+    }
+    async fn answered_with_idle(&mut self, idle: bool) -> Result<Message, Error> {
         loop {
-            match self.receive().await? {
+            match self.receive_with_idle(idle).await? {
                 Message::Chains(message) => self.learn_chains(message),
                 message => return Ok(message),
             }
@@ -550,7 +586,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
         // Chains a push carries first are not a request of their own.
-        let message = self.answered().await?;
+        let message = self.answered_request().await?;
         self.answer(replica, message).await
     }
     async fn answer<A: RowApplication>(
@@ -574,36 +610,161 @@ impl NativeSession {
         }
     }
 }
+// A full chunk earns another deadline; single-byte trickles cannot hold a frame open.
+async fn read_progress(
+    stream: &mut (impl AsyncRead + Unpin),
+    bytes: &mut [u8],
+    expired: fn() -> Error,
+) -> Result<(), Error> {
+    for chunk in bytes.chunks_mut(IO_CHUNK) {
+        timeout(TIMEOUT, stream.read_exact(chunk))
+            .await
+            .map_err(|_| expired())?
+            .map_err(Error::Io)?;
+    }
+    Ok(())
+}
+async fn write_progress(
+    stream: &mut (impl AsyncWrite + Unpin),
+    bytes: &[u8],
+    expired: fn() -> Error,
+) -> Result<(), Error> {
+    for chunk in bytes.chunks(IO_CHUNK) {
+        timeout(TIMEOUT, stream.write_all(chunk))
+            .await
+            .map_err(|_| expired())?
+            .map_err(Error::Io)?;
+    }
+    Ok(())
+}
 async fn write_frame(stream: &mut impl SessionStream, bytes: &[u8]) -> Result<(), Error> {
     if bytes.len() > MAX_SECURE_FRAME {
         return Err(denied("native frame quota"));
     }
-    timeout(TIMEOUT, async {
-        stream.write_u32(bytes.len() as u32).await?;
-        stream.write_all(bytes).await?;
-        stream.flush().await
-    })
-    .await
-    .map_err(|_| denied("native write timeout"))?
-    .map_err(Error::Io)
+    let expired = || denied("native write timeout");
+    write_progress(stream, &(bytes.len() as u32).to_be_bytes(), expired).await?;
+    write_progress(stream, bytes, expired).await?;
+    timeout(TIMEOUT, stream.flush())
+        .await
+        .map_err(|_| expired())?
+        .map_err(Error::Io)
 }
 async fn read_frame(stream: &mut impl SessionStream) -> Result<Vec<u8>, Error> {
-    timeout(TIMEOUT, async {
-        let length = stream.read_u32().await.map_err(Error::Io)? as usize;
-        if length == 0 || length > MAX_SECURE_FRAME {
-            return Err(denied("native frame quota"));
-        }
-        let mut bytes = vec![0; length];
-        stream.read_exact(&mut bytes).await.map_err(Error::Io)?;
-        Ok(bytes)
-    })
-    .await
-    .map_err(|_| denied("native read timeout"))?
+    read_frame_with_idle(stream, false).await
+}
+async fn read_frame_with_idle(
+    stream: &mut impl SessionStream,
+    idle: bool,
+) -> Result<Vec<u8>, Error> {
+    let expired = || denied("native read timeout");
+    let mut header = [0; 4];
+    if idle {
+        stream
+            .read_exact(&mut header[..1])
+            .await
+            .map_err(Error::Io)?;
+        read_progress(stream, &mut header[1..], expired).await?;
+    } else {
+        read_progress(stream, &mut header, expired).await?;
+    }
+    let length = u32::from_be_bytes(header) as usize;
+    if length == 0 || length > MAX_SECURE_FRAME {
+        return Err(denied("native frame quota"));
+    }
+    let mut bytes = vec![0; length];
+    read_progress(stream, &mut bytes, expired).await?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn native_requests_wait_while_the_peer_applies_its_answer() {
+        let (mut near, mut far) = tokio::io::duplex(64);
+        let deliver = async {
+            tokio::time::sleep(TIMEOUT * 2).await;
+            write_frame(&mut far, &[7]).await.unwrap();
+        };
+        let (received, ()) = tokio::join!(read_frame_with_idle(&mut near, true), deliver);
+        assert_eq!(received.unwrap(), vec![7]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_requests_bound_a_started_header_after_idle() {
+        let (mut near, mut far) = tokio::io::duplex(64);
+        let start = tokio::time::Instant::now();
+        let deliver = async {
+            tokio::time::sleep(TIMEOUT * 2).await;
+            far.write_all(&[0]).await.unwrap();
+            std::future::pending::<()>().await;
+        };
+        tokio::pin!(deliver);
+        let received = tokio::select! {
+            received = read_frame_with_idle(&mut near, true) => received,
+            () = &mut deliver => unreachable!(),
+        };
+        assert!(
+            received
+                .unwrap_err()
+                .to_string()
+                .contains("native read timeout")
+        );
+        assert_eq!(start.elapsed(), TIMEOUT * 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_frame_reads_follow_bounded_chunk_progress() {
+        let (mut near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
+        let deliver = async {
+            far.write_u32((IO_CHUNK * 3) as u32).await.unwrap();
+            for value in 0..3 {
+                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                far.write_all(&vec![value; IO_CHUNK]).await.unwrap();
+            }
+        };
+        let (received, ()) = tokio::join!(read_frame(&mut near), deliver);
+        let expected: Vec<_> = (0..3).flat_map(|value| vec![value; IO_CHUNK]).collect();
+        assert_eq!(received.unwrap(), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_frame_writes_follow_a_slow_reader() {
+        let (mut near, mut far) = tokio::io::duplex(IO_CHUNK);
+        let send = async move { write_frame(&mut near, &vec![7; IO_CHUNK * 3]).await };
+        let receive = async {
+            assert_eq!(far.read_u32().await.unwrap() as usize, IO_CHUNK * 3);
+            let mut bytes = vec![0; IO_CHUNK * 3];
+            for chunk in bytes.chunks_mut(IO_CHUNK) {
+                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                far.read_exact(chunk).await.unwrap();
+            }
+            bytes
+        };
+        let (sent, received) = tokio::join!(send, receive);
+        sent.unwrap();
+        assert_eq!(received, vec![7; IO_CHUNK * 3]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_frame_trickles_still_time_out() {
+        let (mut near, mut far) = tokio::io::duplex(IO_CHUNK);
+        let deliver = async {
+            far.write_u32(IO_CHUNK as u32).await.unwrap();
+            for _ in 0..4 {
+                tokio::time::sleep(TIMEOUT * 3 / 10).await;
+                far.write_all(&[1]).await.unwrap();
+            }
+        };
+        let (received, ()) = tokio::join!(read_frame(&mut near), deliver);
+        assert!(
+            received
+                .unwrap_err()
+                .to_string()
+                .contains("native read timeout")
+        );
+    }
 
     #[test]
     fn a_message_signature_binds_session_sequence_and_body_and_the_body_travels_as_bytes() {

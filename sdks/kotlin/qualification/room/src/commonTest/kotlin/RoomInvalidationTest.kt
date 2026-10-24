@@ -5,6 +5,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import rocky.*
 import rocky.room.followRocky
@@ -24,6 +25,18 @@ class RoomInvalidationTest {
     )
     private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
     private fun item(key: String, title: String) = ShopItem(key, "l1", title)
+
+    @Test fun sealRebootstrapKeepsTheObserverUntilVerifiedRowsReturn() = runTest {
+        var reads = 0
+        val observed = flow {
+            reads++
+            if (reads == 1) emit(listOf("before seal"))
+            if (reads < 3) throw IllegalStateException("SQL error: the workspace waits for a verified seal rebootstrap")
+            emit(listOf("verified seal"))
+        }.settledOnRocky().toList()
+        assertEquals(listOf(listOf("before seal"), listOf("verified seal")), observed)
+        assertEquals(3, reads)
+    }
 
     @Test fun readTimeoutRetriesCommittedRowsAndPermanentErrorsStillFail() = runTest {
         var reads = 0

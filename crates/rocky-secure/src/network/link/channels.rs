@@ -6,7 +6,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-const FRAGMENT: usize = 8 * 1024;
+const FRAGMENT: usize = IO_CHUNK;
 const QUEUE: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +191,7 @@ impl Channels {
                     return Err(denied("link channel message quota"));
                 }
                 slot.bytes.extend(bytes);
+                self.handle.events.send_replace(());
                 if last {
                     slot.receive
                         .as_ref()
@@ -575,10 +576,47 @@ impl Io {
         Ok(())
     }
     pub async fn receive(&mut self) -> Result<Vec<u8>, Error> {
-        timeout(TIMEOUT, self.receive.recv())
-            .await
-            .map_err(|_| timed_out("link channel read timeout"))?
-            .ok_or_else(|| Error::Io(super::closed_by_peer()))
+        self.receive_with_idle(false).await
+    }
+    pub(crate) async fn receive_with_idle(&mut self, idle: bool) -> Result<Vec<u8>, Error> {
+        let mut events = self.handle.events.subscribe();
+        let received = || {
+            self.handle
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .slots
+                .get(&self.key)
+                .filter(|slot| slot.generation == self.generation)
+                .map_or((0, false), |slot| (slot.total, !slot.bytes.is_empty()))
+        };
+        let (mut covered, started) = received();
+        let mut deadline = (!idle || started).then(|| tokio::time::Instant::now() + TIMEOUT);
+        loop {
+            tokio::select! {
+                biased;
+                bytes = self.receive.recv() => {
+                    return bytes.ok_or_else(|| Error::Io(super::closed_by_peer()));
+                }
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    return Err(timed_out("link channel read timeout"));
+                }
+                changed = events.changed() => {
+                    changed.map_err(|_| Error::Io(super::closed_by_peer()))?;
+                    let (total, _) = received();
+                    // A full fragment earns another deadline; trickles and other channels do not.
+                    if total > covered && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT) {
+                        covered = total;
+                        deadline = Some(tokio::time::Instant::now() + TIMEOUT);
+                    }
+                }
+            }
+        }
     }
     pub async fn close(&mut self) -> Result<(), Error> {
         if !self.closed {
@@ -764,6 +802,212 @@ mod tests {
                 .is_err()
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn a_requester_can_apply_an_answer_before_asking_again() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel")
+        };
+        let deliver = async {
+            tokio::time::sleep(TIMEOUT * 2).await;
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![7],
+                        last: true,
+                    },
+                ))
+                .unwrap();
+        };
+        let (received, ()) = tokio::join!(io.receive_with_idle(true), deliver);
+        assert_eq!(received.unwrap(), vec![7]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_partial_request_is_already_started() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![7],
+                    last: false,
+                },
+            ))
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel")
+        };
+        let start = tokio::time::Instant::now();
+        assert!(
+            io.receive_with_idle(true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("link channel read timeout")
+        );
+        assert_eq!(start.elapsed(), TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_started_request_cannot_stall_after_idle() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel")
+        };
+        let start = tokio::time::Instant::now();
+        let deliver = async {
+            tokio::time::sleep(TIMEOUT * 2).await;
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![7],
+                        last: false,
+                    },
+                ))
+                .unwrap();
+        };
+        let (received, ()) = tokio::join!(io.receive_with_idle(true), deliver);
+        assert!(
+            received
+                .unwrap_err()
+                .to_string()
+                .contains("link channel read timeout")
+        );
+        assert_eq!(start.elapsed(), TIMEOUT * 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progressing_reassembly_outlives_one_read_deadline() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel");
+        };
+        let deliver = async {
+            for index in 0..3 {
+                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                channels
+                    .accept(frame(
+                        2,
+                        Packet::Data {
+                            generation: 0,
+                            bytes: vec![index; FRAGMENT],
+                            last: index == 2,
+                        },
+                    ))
+                    .unwrap();
+            }
+        };
+        let (received, ()) = tokio::join!(io.receive(), deliver);
+        let expected: Vec<_> = (0..3).flat_map(|index| vec![index; FRAGMENT]).collect();
+        assert_eq!(received.unwrap(), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reassembly_still_times_out_after_progress_stops() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel");
+        };
+        let read = async {
+            let start = tokio::time::Instant::now();
+            assert!(
+                io.receive()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("link channel read timeout")
+            );
+            assert_eq!(start.elapsed(), TIMEOUT * 8 / 5);
+        };
+        let deliver = async {
+            tokio::time::sleep(TIMEOUT * 3 / 5).await;
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1; FRAGMENT],
+                        last: false,
+                    },
+                ))
+                .unwrap();
+        };
+        tokio::join!(read, deliver);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trickles_and_other_channels_do_not_extend_a_read_deadline() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let _other = channels
+            .accept(frame(3, Packet::Open { generation: 1 }))
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("request channel");
+        };
+        let read = async {
+            let start = tokio::time::Instant::now();
+            let error = io.receive().await.unwrap_err();
+            assert!(error.to_string().contains("link channel read timeout"));
+            assert_eq!(start.elapsed(), TIMEOUT);
+        };
+        let deliver = async {
+            for index in 0..4 {
+                tokio::time::sleep(TIMEOUT * 3 / 10).await;
+                channels
+                    .accept(frame(
+                        2,
+                        Packet::Data {
+                            generation: 0,
+                            bytes: vec![0],
+                            last: false,
+                        },
+                    ))
+                    .unwrap();
+                channels
+                    .accept(frame(
+                        3,
+                        Packet::Data {
+                            generation: 1,
+                            bytes: vec![index; FRAGMENT],
+                            last: false,
+                        },
+                    ))
+                    .unwrap();
+            }
+        };
+        tokio::join!(read, deliver);
+    }
+
     #[test]
     fn oversized_reassembly_and_slow_channel_queues_are_refused() {
         let channels = channels();

@@ -1,6 +1,75 @@
 use super::*;
 
 #[tokio::test]
+async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_marker()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            a.tips(&json!({"action":"create", "name":"main"})).await?;
+            a.tips(&json!({"action":"follow", "name":"main"})).await?;
+            for row in 1..=4 {
+                add(&a, row).await?;
+            }
+            let c = enrolled(
+                &root.path().join("c"),
+                &hub,
+                "c",
+                Some((
+                    &a,
+                    Profile::Writer {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            c.replica
+                .receive_tip_statements(&a.replica.tip_statements(None, 32).await?)
+                .await?;
+            c.replica.follow_bookmark(a.domain().scope, "main").await?;
+            assert!(!c.path.with_file_name("bootstrap.json").exists());
+            let key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let contact = c
+                .settings
+                .lock()
+                .await
+                .targets()
+                .into_iter()
+                .find(|(peer, _)| *peer == key)
+                .ok_or("contact")?
+                .1;
+            let transport = change_driven::transport(&c).await?;
+            let importing = c.bootstrap.lock().await;
+            let mut exchange = Box::pin(c.reconcile(&*transport, key, &contact));
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), exchange.as_mut())
+                    .await
+                    .is_err(),
+                "ordinary sync bypassed an active import"
+            );
+            drop(importing);
+            exchange.await?;
+            let scope = a.app_scopes()[0];
+            let rows = c
+                .replica
+                .session([scope].into())
+                .await?
+                .sql(Default::default())
+                .await?
+                .run("SELECT count(*) FROM items", vec![])
+                .await?;
+            assert_eq!(rows.rows, vec![vec![SqlValue::Integer(4)]]);
+            for node in [&a, &c] {
+                node.detach(None).await;
+            }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoint()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new()

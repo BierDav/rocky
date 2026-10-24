@@ -45,6 +45,7 @@ class ShoppingPlatform(
     val erase: suspend () -> Unit = {},
     /** Platform visibility cancels application upkeep alongside SDK sync. */
     val foreground: Flow<Boolean> = flowOf(true),
+    val diagnostic: (String) -> Unit = {},
 )
 
 /** One open installation: Rocky, Room on its file and the household's background work. Close it to release them. */
@@ -70,6 +71,7 @@ class ShoppingNode private constructor(
     val approvals = Approvals(room.room, rocky, household, self, coordinated)
     val tips = HouseholdTips(rocky, platform.room, platform.directory)
     val isTrusted: Boolean get() = rocky.isIssuer
+    val canCreateLists: Boolean get() = isTrusted || kind == NodeKind.Full
     private val mutableOnline = MutableStateFlow(online)
 
     /** The **Networking enabled** switch, kept across restarts: a device switched off reopens without a network. */
@@ -185,8 +187,10 @@ class ShoppingNode private constructor(
         }
 
         private suspend fun ShoppingNode.configure(block: suspend ShoppingNode.() -> Unit): ShoppingNode = try {
+            platform.diagnostic("opening stage=configure_start")
             block()
             tips.keepSeals()
+            platform.diagnostic("opening stage=configure_ready")
             this
         } catch (error: Throwable) {
             close()
@@ -202,10 +206,12 @@ class ShoppingNode private constructor(
             var opened: ShoppingNode? = null
             try {
                 return withContext(Dispatchers.IO) {
+                    platform.diagnostic("opening stage=runtime_start")
                     val configured = platform.coordinator()
                     val kindPath = "${platform.directory}/device-kind"
                     val kind = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
                     val rocky = open(configured.takeIf { trusted ?: (kind == null || kind == NodeKind.Trusted) })
+                    platform.diagnostic("opening stage=runtime_ready")
                     var room: RockyRoom<ShoppingDatabase>? = null
                     try {
                         // Before anything syncs: the persisted switch also holds for a device opened with its network.
@@ -217,6 +223,7 @@ class ShoppingNode private constructor(
                         val backgroundErrors = CoroutineExceptionHandler { _, error -> failure.complete(error) }
                         val openedRoom = platform.room("${platform.directory}/shopping").buildOnRocky(rocky, Dispatchers.IO + backgroundErrors)
                         room = openedRoom
+                        platform.diagnostic("opening stage=room_ready")
                         val online = readText(offlinePath(platform.directory)) == null
                         ShoppingNode(rocky, openedRoom, self, configured != null, platform.foreground, kindPath, kind, platform.closed, failure, backgroundErrors, platform, online).also { opened = it }
                     } catch (error: Throwable) {

@@ -249,7 +249,17 @@ impl<A: RowApplication> Inner<A> {
             return Ok(FrameReach::Held);
         }
         if !self.refresh_visible(graph, scope, tip, author, sequence, &mut context)?
-            && self.abandoned_frame(scope, graph, tip, author, sequence)?
+            && match context.as_mut() {
+                Some(context) => context.abandoned(self, scope, tip, author, sequence)?,
+                None => self
+                    .abandoned_bounds(scope, graph, tip)?
+                    .iter()
+                    .any(|common| {
+                        !common
+                            .iter()
+                            .any(|mark| mark.author == author && sequence <= mark.sequence)
+                    }),
+            }
         {
             return Ok(FrameReach::Held);
         }
@@ -326,17 +336,16 @@ impl<A: RowApplication> Inner<A> {
             None => self.visible_frame(graph, source, author, sequence, self.workspace.tip),
         }
     }
-    fn abandoned_frame(
+    fn abandoned_bounds(
         &self,
         scope: Scope,
         graph: &TipGraph,
         source: TipId,
-        author: u32,
-        sequence: u64,
-    ) -> Result<bool, Error> {
+    ) -> Result<Vec<Vec<rocky_credentials::AuthorMark>>, Error> {
         let Ok(source_line) = graph.line_root(source) else {
-            return Ok(false);
+            return Ok(Vec::new());
         };
+        let mut bounds = Vec::new();
         let names = graph
             .moves
             .iter()
@@ -347,17 +356,11 @@ impl<A: RowApplication> Inner<A> {
                 if !graph.continues_any(from, to).map_err(credential)?
                     && graph.line_root(from).is_ok_and(|line| line == source_line)
                 {
-                    let common = self.common_frontier(scope, from, to)?;
-                    if !common
-                        .iter()
-                        .any(|mark| mark.author == author && sequence <= mark.sequence)
-                    {
-                        return Ok(true);
-                    }
+                    bounds.push(self.common_frontier(scope, from, to)?);
                 }
             }
         }
-        Ok(false)
+        Ok(bounds)
     }
     /// A branch inherits only its opening seal's frontier. Continuations take late writes.
     pub(super) fn visible_frame(
@@ -1520,6 +1523,47 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(credential)?;
         Ok(LineNode { key, credentials })
     }
+    /// Restores a saved line's signer without selecting it for writes. Checkpoints
+    /// at a shared seal may still need its page signatures on another branch.
+    pub async fn restore_line_node(&self, node: LineNode) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        if node.credentials.principal() != inner.config.credentials.principal() {
+            return Err(denied("line node belongs to another identity"));
+        }
+        inner.verify_chain(&node.credentials, node.key.public_key(), now()?)?;
+        let records = collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT line FROM secure_line_nodes WHERE node=?",
+                    [node.key.public_key().as_bytes().to_vec()],
+                )
+                .await?,
+        )
+        .await?;
+        let line = match records.as_slice() {
+            [] => return Err(denied("line node was not registered")),
+            [record] => match record.as_slice() {
+                [SqlValue::Blob(line)] => line,
+                _ => return Err(Error::Corrupt("line node".into())),
+            },
+            _ => {
+                return Err(Error::Corrupt(
+                    "a node author log belongs to one line".into(),
+                ));
+            }
+        };
+        let root = decode(line)?;
+        let author = identity::NodeAuthor {
+            number: node.credentials.author_number().map_err(credential)?,
+            chain: Chain::new(node.credentials.clone())?,
+            credentials: node.credentials,
+            key: node.key,
+        };
+        inner.bind_node_author(&author.credentials).await?;
+        inner.line_nodes.insert(root, author);
+        Ok(())
+    }
     pub async fn register_line_node(&self, node: LineNode) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         let (scope, _) = inner
@@ -1639,41 +1683,38 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+#[cfg(test)]
 const MAX_FRONTIER_HEADERS: usize = 1 << 18;
+#[cfg(test)]
 const MAX_STORED_HEADER_BYTES: usize = 32 * 1024 * 1024;
 
 /// Syntax only: no live status, custody, graph or authority decisions.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StoredHeader {
     hash: Hash,
-    #[cfg(test)]
     public_key: PublicKey,
-    #[cfg(test)]
     seq_num: u64,
     pub(super) tip: TipId,
     pub(super) scope: ResourceScope,
-    pub(super) timestamp: u64,
     pub(super) author: Option<u32>,
     pub(super) author_sequence: u64,
-    #[cfg(test)]
     pub(super) existence: u32,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(super) struct StoredHeaders {
     entries: HashMap<Hash, (Vec<u8>, StoredHeader)>,
     bytes: usize,
-    #[cfg(test)]
     limits: Option<(usize, usize)>,
 }
+#[cfg(test)]
 impl StoredHeaders {
     fn insert(&mut self, bytes: &[u8], header: StoredHeader) {
-        #[cfg(test)]
         let (count_limit, byte_limit) = self
             .limits
             .unwrap_or((MAX_FRONTIER_HEADERS, MAX_STORED_HEADER_BYTES));
-        #[cfg(not(test))]
-        let (count_limit, byte_limit) = (MAX_FRONTIER_HEADERS, MAX_STORED_HEADER_BYTES);
         if let Some((old, _)) = self.entries.remove(&header.hash) {
             self.bytes -= old.len();
         }
@@ -1688,15 +1729,9 @@ impl StoredHeaders {
         }
     }
 }
+#[cfg(test)]
 impl<A: RowApplication> Inner<A> {
-    pub(super) fn stored_header(&self, bytes: &[u8]) -> Result<StoredHeader, Error> {
-        self.parse_stored_header(bytes, false)
-    }
-    #[cfg(test)]
     pub(super) fn oracle_header(&self, bytes: &[u8]) -> Result<StoredHeader, Error> {
-        self.parse_stored_header(bytes, true)
-    }
-    fn parse_stored_header(&self, bytes: &[u8], _oracle: bool) -> Result<StoredHeader, Error> {
         let hash = Hash::new(bytes);
         {
             let memo = self
@@ -1709,28 +1744,19 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(*header);
             }
         }
-        #[cfg(test)]
-        if _oracle {
-            self.position_oracles
-                .decodes
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.frontier_decodes.fetch_add(1, Ordering::Relaxed);
-        }
+        self.position_oracles
+            .decodes
+            .fetch_add(1, Ordering::Relaxed);
         let header: p2panda_core::Header<Extensions> = decode(bytes)?;
         let e = &header.extensions;
         let fields = StoredHeader {
             hash,
-            #[cfg(test)]
             public_key: header.public_key,
-            #[cfg(test)]
             seq_num: header.seq_num,
             tip: e.tip,
             scope: e.scope,
-            timestamp: header.timestamp,
             author: e.author,
             author_sequence: e.author_sequence,
-            #[cfg(test)]
             existence: e.existence,
         };
         self.frontier_headers
@@ -1739,7 +1765,6 @@ impl<A: RowApplication> Inner<A> {
             .insert(bytes, fields);
         Ok(fields)
     }
-    #[cfg(test)]
     pub(crate) fn stored_header_memo_limits(&self, count: usize, bytes: usize) {
         *self
             .frontier_headers
@@ -1749,7 +1774,6 @@ impl<A: RowApplication> Inner<A> {
             ..Default::default()
         };
     }
-    #[cfg(test)]
     pub(crate) fn stored_header_memo_stats(&self) -> (usize, usize, u64) {
         let memo = self
             .frontier_headers
@@ -1758,7 +1782,7 @@ impl<A: RowApplication> Inner<A> {
         (
             memo.entries.len(),
             memo.bytes,
-            self.frontier_decodes.load(Ordering::Relaxed),
+            self.position_oracles.decodes.load(Ordering::Relaxed),
         )
     }
 }

@@ -24,6 +24,16 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) openLink(intent)
     }
 
+    override fun onStart() {
+        super.onStart()
+        app.diagnosticLog.write("activity foreground")
+    }
+
+    override fun onStop() {
+        app.diagnosticLog.write("activity background")
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         openLink(intent)

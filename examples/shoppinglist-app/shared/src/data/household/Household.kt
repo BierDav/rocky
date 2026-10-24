@@ -20,6 +20,7 @@ import org.example.examples.shopping.data.db.TrustedRows
 import org.example.examples.shopping.data.db.list
 import rocky.Device
 import rocky.GrantProfile
+import rocky.Right
 import rocky.RockyDatabase
 import rocky.RockyEvent
 import rocky.room.settledOnRocky
@@ -169,6 +170,24 @@ class Household(
             launch { recordEnrollments() }
             launch { closeUsedInvitations() }
             launch { deliverEveryList() }
+        } else {
+            val profile = rocky.session().profile as? GrantProfile.Grants
+            if (profile?.grants?.any { it.table == "lists" && Right.Insert in it.rights } == true) deliverToIssuers()
+        }
+    }
+
+    /** A full member sends new list keys to its known issuers, which distribute them to the household. */
+    private suspend fun deliverToIssuers() {
+        combine(
+            database.lists().observeAll(),
+            rocky.observeStatus().map { status -> status.network.peers.filter { it.isIssuer }.map { it.node }.toSet() }.distinctUntilChanged(),
+        ) { lists, issuers -> lists to issuers }.settledOnRocky().collectLatest { (lists, issuers) ->
+            for (list in lists) {
+                val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
+                val current = status.current ?: continue
+                val stale = issuers.filter { issuer -> status.recipients.none { it.node == issuer && it.epoch == current } }
+                if (stale.isNotEmpty()) attempt("share ${list.title}") { rocky.list(list.id).share(stale) }
+            }
         }
     }
 
@@ -234,7 +253,7 @@ class Household(
         require(it.size <= 256) { "The device name and kind must fit a 256-byte label" }
     }
 
-    // Full and partial grants are identical; only an application description may enable every-list delivery.
+    // Only an application description enables every-list delivery.
     private fun kind(device: Device): NodeKind = if (device.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial
 
     private fun deviceLabel(bytes: ByteArray): DeviceRow? = runCatching {

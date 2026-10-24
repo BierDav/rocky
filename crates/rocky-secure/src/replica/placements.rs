@@ -12,6 +12,8 @@ pub(super) const SCHEMA: &[&str] = &[
 
 /// Headers a placement page carries at most.
 pub const MAX_PLACEMENTS: usize = 64;
+// Leave room for the native message and its signature.
+const PLACEMENT_BYTES: usize = MAX_SECURE_FRAME - 1024;
 /// Placement requests one pass sends at most.
 const MAX_REQUESTS: usize = 16;
 
@@ -179,6 +181,7 @@ impl<A: RowApplication> Inner<A> {
         let staged = self.staged().await?;
         let mut headers = BTreeSet::new();
         let mut chains = BTreeMap::new();
+        let mut candidates = Vec::new();
         for record in rows(
             &self.conn,
             "SELECT header,body FROM secure_operations UNION ALL SELECT header,X'' FROM secure_voids",
@@ -196,14 +199,30 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
+            candidates.push((decoded, header.clone(), !body.is_empty()));
+        }
+        // A short byte-bounded page must place the earliest missing positions first.
+        candidates.sort_by(|a, b| {
+            a.0.extensions
+                .author_sequence
+                .cmp(&b.0.extensions.author_sequence)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let mut bytes = 0usize;
+        for (decoded, header, has_body) in candidates {
+            let e = &decoded.extensions;
             if staged.contains(&decoded.hash()) {
                 continue;
             }
             // A migration frame leaves only with its released publication.
-            if !body.is_empty()
+            if has_body
                 && !matches!(
                     self.migration_membership(decoded.hash()).await,
-                    Ok(None | Some(MigrationMembership { descriptor: Some(_), .. }))
+                    Ok(None
+                        | Some(MigrationMembership {
+                            descriptor: Some(_),
+                            ..
+                        }))
                 )
             {
                 continue;
@@ -226,10 +245,28 @@ impl<A: RowApplication> Inner<A> {
             if headers.len() == MAX_PLACEMENTS {
                 break;
             }
+            let placement = Placement(header);
+            if headers.contains(&placement) {
+                continue;
+            }
+            let size = encode(&placement)?
+                .len()
+                .saturating_add(if chains.contains_key(&e.chain) {
+                    0
+                } else {
+                    encode(chain.credentials())?.len()
+                });
+            if bytes.saturating_add(size) > PLACEMENT_BYTES {
+                if headers.is_empty() {
+                    return Err(denied("one placement exceeds the native frame quota"));
+                }
+                break;
+            }
+            bytes += size;
             chains
                 .entry(e.chain)
                 .or_insert_with(|| chain.credentials().clone());
-            headers.insert(Placement(header.clone()));
+            headers.insert(placement);
         }
         Ok(PlacementPage::Headers {
             headers: headers.into_iter().collect(),

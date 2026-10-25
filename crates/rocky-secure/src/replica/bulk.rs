@@ -307,12 +307,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             && known == signed.statement
             && existing == signed
         {
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
             return Ok(());
         }
         inner.migration_required(&signed.statement).await?;
         let accepted = transaction!(inner, |inner| inner.store_migration_record(&signed).await)?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         if !accepted {
             return Err(denied("migration publication equivocated"));
         }
@@ -327,7 +327,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.private_schema().await? {
             return Ok(None);
         }
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         match inner.migration_record(publication).await? {
             Some((_, signed, false)) => Ok(signed),
             _ => Ok(None),
@@ -394,7 +394,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("schema publication requires terminal finality"));
         }
         inner.release_and_reload(&stage, None).await?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
     /// Storage charged to authenticated migration history, separate from ordinary history.

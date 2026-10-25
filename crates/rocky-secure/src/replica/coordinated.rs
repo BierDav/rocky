@@ -741,7 +741,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let sequence = {
                 let mut inner = self.inner.lock().await;
                 let sequence = transaction!(inner, |inner| inner.next_sequence(log).await)?;
-                inner.flush()?;
+                drop(flush_guard(inner, &self.inner).await?);
                 sequence
             };
             let epoch = coordinator
@@ -1042,7 +1042,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
     async fn commit_own(&self, log: TipLog, entry: &Entry, ids: &[Hash]) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
@@ -1052,7 +1052,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
                 .map(|_| ())
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
     /// Voids an own entry that never committed and rolls its effects back.
     async fn abort_own(&self, log: TipLog, entry: &Entry) -> Result<(), Error> {
@@ -1086,7 +1086,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         inner.rebuild_voided().await?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
     /// Stores another proposer's assigned entry durably and unapplied, then
@@ -1151,7 +1151,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Ok(())
             })?;
             // The acknowledgment promises durable storage.
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
         }
         self.domain_log.stored.send_modify(|count| *count += 1);
         let (log, hash) = (entry.log, entry.pending.hash);
@@ -1376,7 +1376,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
                 .map(|_| ())
         })?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
     /// Admits the carry record of an entry known committed into the graph,
@@ -1512,7 +1512,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .await
                         .map(|_| ())
                 })?;
-                inner.flush()?;
+                drop(flush_guard(inner, &self.inner).await?);
             }
         }
     }
@@ -1615,6 +1615,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .flat_map(|entry| entry.frames.iter().map(EncryptedFrame::id))
             .collect::<Result<Vec<_>, _>>()?;
         inner.offer(&hashes).await?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(entries)
     }
     /// This replica's progress on `log`.

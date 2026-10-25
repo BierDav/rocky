@@ -21,6 +21,26 @@ async fn link_sessions(
     ),
     Failure,
 > {
+    let (dialed, accepted) = opened_links(dialer, acceptor).await?;
+    let handle = dialed.channels.handle.clone();
+    let (served, mut incoming) = tokio::sync::mpsc::channel(1);
+    tokio::task::spawn_local(dialed.drive(tokio::sync::mpsc::channel(1).0));
+    tokio::task::spawn_local(accepted.drive(served));
+    let session = handle.open().await?;
+    let answering = incoming.recv().await.ok_or("link ended")?;
+    Ok((session, answering))
+}
+
+async fn opened_links(
+    dialer: &Node,
+    acceptor: &Node,
+) -> Result<
+    (
+        rocky_secure::network::link::Link,
+        rocky_secure::network::link::Link,
+    ),
+    Failure,
+> {
     use rocky_secure::network::link::Link;
     let (near, far) = tokio::io::duplex(64 * 1024);
     let accepting = PrivateKey::from_bytes(&acceptor.vault.get("node")?);
@@ -43,13 +63,7 @@ async fn link_sessions(
     let (near, far) = tokio::join!(dialed.ready(false), accepted.ready(false));
     near?;
     far?;
-    let handle = dialed.channels.handle.clone();
-    let (served, mut incoming) = tokio::sync::mpsc::channel(1);
-    tokio::task::spawn_local(dialed.drive(tokio::sync::mpsc::channel(1).0));
-    tokio::task::spawn_local(accepted.drive(served));
-    let session = handle.open().await?;
-    let answering = incoming.recv().await.ok_or("link ended")?;
-    Ok((session, answering))
+    Ok((dialed, accepted))
 }
 
 async fn node(

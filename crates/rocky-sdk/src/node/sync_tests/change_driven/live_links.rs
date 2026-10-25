@@ -915,8 +915,18 @@ async fn real_liveness_gate() -> Result<(), Failure> {
             let sa = a.current().ok_or("service")?;
             let sb = b.current().ok_or("service")?;
             until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
-            settled(&a).await;
-            settled(&b).await;
+            let waiting = std::time::Instant::now();
+            while *a.worker_running.borrow() || *b.worker_running.borrow() {
+                assert!(
+                    waiting.elapsed() < Duration::from_secs(5),
+                    "workers did not settle: a={} b={} activities: a={} b={}",
+                    *a.sync_status.borrow(),
+                    *b.sync_status.borrow(),
+                    a.activity.after(0),
+                    b.activity.after(0)
+                );
+                tokio::task::yield_now().await;
+            }
             let before = hub.counts();
             assert!(
                 a.retry_deadline().is_none(),
@@ -1681,5 +1691,29 @@ async fn pushes_over_the_handler_limit_reconcile_without_reopening_the_link() ->
             b.detach(None).await;
             Ok(())
         }))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_control_round_trip_runs_while_the_database_executor_is_blocked() -> Result<(), Failure>
+{
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let (near, far) = opened_links(&a, &b).await?;
+            let (answer, task) = crate::node::live_links::control_probe(near, far);
+            // Block this LocalSet's OS thread. Framing and routing must finish on
+            // the transport runtime without another database scheduler pass.
+            let result = answer.recv_timeout(Duration::from_millis(500));
+            task.abort();
+            result.map_err(
+                |_| "link heartbeat exceeded 500 ms while database executor was blocked",
+            )??;
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        })
         .await
 }

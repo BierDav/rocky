@@ -1180,7 +1180,10 @@ impl<A: RowApplication> Inner<A> {
         // Held custody has no applied-log tip. Index only the selected sealed
         // history, in causal clock order, without advancing any author log.
         for (_, (operation, frame)) in inherited {
-            if !self.dependencies_ready(&frame, &BTreeSet::new()).await? {
+            if !self
+                .dependencies_ready(&frame, &BTreeSet::new(), None)
+                .await?
+            {
                 return Err(denied("inherited held snapshot has missing dependencies"));
             }
             let scope = self.scope_id(operation.header.extensions.scope).await?;
@@ -1323,7 +1326,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 inner.prune_pending_tips().await
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
             return Ok(0);
         }
         // A finality record or a raised genesis minimum resolves again.
@@ -1456,7 +1459,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.bump_authority();
         }
         inner.publish_revision().await?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(new.len())
     }
     pub async fn tip_statements(
@@ -1471,7 +1474,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.private_schema().await? {
             return Err(denied("schema publication is private"));
         }
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         let records=collect_rows(inner.conn.query("SELECT statement FROM secure_tip_statements WHERE staged=0 AND digest>? ORDER BY digest LIMIT ?",bindings(vec![SqlValue::Blob(after.map(|v|v.to_vec()).unwrap_or_default()),SqlValue::Integer(limit as i64)])).await?).await?;
         records
             .into_iter()
@@ -1499,7 +1502,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             inner.bump_authority();
         }
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(target)
     }
     /// Enrolls through the identity, outside any database transaction.
@@ -1631,7 +1634,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.line_nodes.insert(root, selected.clone());
         inner.node_author = Some(selected);
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
     /// Admits this node's own statements. With a composed log, a seal or a
     /// move off an open tip first commits its digest as the tip's terminal

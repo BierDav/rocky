@@ -2433,3 +2433,39 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
             .contains("cannot change")
     );
 }
+
+#[tokio::test]
+async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
+    use crate::cursor::CursorLimits;
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &dir.path().join("read.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items, t.salaries],
+        )
+        .await;
+    let reader = sql(&replica, &[t.items, t.salaries]).await;
+    insert(
+        &reader,
+        "INSERT INTO items VALUES('a','committed',0)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let writer = replica.inner.lock().await;
+    let mut cursor = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        reader.cursor("SELECT title FROM items", vec![], CursorLimits::default()),
+    )
+    .await
+    .expect("read queued behind writer")
+    .unwrap();
+    assert_eq!(
+        cursor.next().await.unwrap().rows,
+        vec![vec![text("committed")]]
+    );
+    drop(writer);
+}

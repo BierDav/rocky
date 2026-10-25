@@ -880,7 +880,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let page = inner.existence_records(scope, known, after, limit).await?;
             (page, inner.commit, inner.flusher.clone())
         };
-        flusher.flush(commit)?;
+        flusher.run(commit).await?;
         Ok(page)
     }
     /// The highest position held of every signer's log of `scope`.

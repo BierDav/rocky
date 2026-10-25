@@ -244,7 +244,7 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok(())
         })?;
-        self.flush()
+        Ok(())
     }
     /// Marks this device's frames of `scope` up to each log position
     /// offered, as a served checkpoint covers them.
@@ -1182,7 +1182,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.held_changes().await
     }
     /// Drops a held change; fails when it is not held.

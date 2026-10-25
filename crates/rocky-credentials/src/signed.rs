@@ -100,8 +100,14 @@ impl Endorsement {
                 return Err(denied("tip statements require an identity"));
             }
             let trusted = self.chain.0.len() == 1 && leaf.extended()?.trusted == Some(scope);
-            if !trusted {
-                self.chain.issuer(publisher, current)?;
+            if !trusted
+                && self
+                    .chain
+                    .0
+                    .iter()
+                    .any(|link| !link.capability.extended().is_ok_and(|e| e.issues))
+            {
+                return Err(denied("the chain ends at no issuer"));
             }
             (leaf.subject, trusted)
         };
@@ -168,7 +174,10 @@ impl SignedManifest {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<ApplicationManifest, Error> {
-        let manifest = self.verify(trusted_publisher)?;
+        let manifest = ApplicationManifest::from_body(&self.body)?;
+        if manifest.publisher != *trusted_publisher.as_bytes() {
+            return Err(denied("invalid manifest signature"));
+        }
         self.endorsement.verify_current(
             trusted_publisher,
             MANIFEST,
@@ -271,7 +280,78 @@ impl SignedCapability {
 /// that holds the grants and the node certificate it signed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialChain(pub Vec<SignedCapability>);
+/// A chain checked under one revocation set. Callers must discard it when that
+/// set changes and check the validity window at every use.
+#[derive(Clone, Debug)]
+pub struct VerifiedChain {
+    pub(crate) leaf: Capability,
+    not_before: u64,
+    expires: u64,
+}
+impl VerifiedChain {
+    pub fn selectors(
+        &self,
+        subject: PublicKey,
+        time: u64,
+    ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
+        let leaf = &self.leaf;
+        let extension = leaf.extended()?;
+        if time < self.not_before
+            || time >= self.expires
+            || leaf.kind != PrincipalKind::Node
+            || leaf.subject != subject
+            || extension.node != Some(crate::PeerId::of(subject))
+            || leaf.delegations != 0
+        {
+            return Err(denied("invalid or expired node credential"));
+        }
+        Ok((leaf.grants.clone(), extension.partitions))
+    }
+    pub fn author(
+        &self,
+        subject: PublicKey,
+        author: u32,
+        table: Commitment,
+        time: u64,
+    ) -> Result<Vec<ResourceGrant>, Error> {
+        let (grants, partitions) = self.selectors(subject, time)?;
+        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author)
+            || partitions.iter().any(|grant| grant.table == table)
+        {
+            return Err(denied("author number mismatch or partition tuple required"));
+        }
+        let grants: Vec<_> = grants
+            .into_iter()
+            .filter(|grant| grant.scope.table == table)
+            .collect();
+        if grants.is_empty() {
+            return Err(denied("node has no grants for this table"));
+        }
+        Ok(grants)
+    }
+}
 impl CredentialChain {
+    /// Verifies signatures, attenuation and revocations once. The result is
+    /// reusable only under exactly this publisher and revocation set.
+    pub fn verified(
+        &self,
+        publisher: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<VerifiedChain, Error> {
+        let leaf = self.links(publisher, Some((revocations, time)))?.clone();
+        Ok(VerifiedChain {
+            leaf,
+            not_before: self
+                .0
+                .iter()
+                .map(|link| link.capability.not_before)
+                .max()
+                .unwrap_or(u64::MAX),
+            expires: self.expires(),
+        })
+    }
+
     /// Concrete grants of a node under `revocations` at `time`.
     /// Partition leaves require `verify_partition` with a concrete tuple.
     pub fn verify(

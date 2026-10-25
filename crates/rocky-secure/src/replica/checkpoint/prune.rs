@@ -8,6 +8,8 @@ pub enum PruneBlock {
     NoCheckpoint,
     /// No retention policy names the peers that must hold copies.
     NoPolicy,
+    /// The covering checkpoint still needs a flush before history may go.
+    Durability,
     /// A required peer has not acknowledged this operation.
     Unacknowledged {
         peer: rocky_credentials::PeerId,
@@ -54,7 +56,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             blocked: None,
         };
         loop {
-            let mut inner = self.inner.lock().await;
+            let mut inner = flush_guard(self.inner.lock().await, &self.inner).await?;
             let step = inner.prune_step(scope).await?;
             report.pruned += step.pruned;
             report.blocked = step.blocked;
@@ -128,7 +130,9 @@ impl<A: RowApplication> Inner<A> {
             .get(&id)
             .is_none_or(|commit| self.flusher.durable() < *commit)
         {
-            self.flush()?;
+            if self.flusher.durable() < self.commit {
+                return Ok(PruneStep::blocked(PruneBlock::Durability));
+            }
             self.verified_at.insert(id, self.flusher.durable());
         }
         let bound = collect_rows(

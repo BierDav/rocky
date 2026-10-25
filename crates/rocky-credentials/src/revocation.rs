@@ -163,6 +163,7 @@ impl SignedRevocation {
 pub struct RevocationSet {
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
+    references: BTreeSet<crate::PeerId>,
     capabilities: BTreeSet<Commitment>,
 }
 impl From<RevocationSet> for Vec<SignedRevocation> {
@@ -192,6 +193,8 @@ impl RevocationSet {
             return Ok(false);
         }
         self.subjects.extend(signed.statement.subjects().copied());
+        self.references
+            .extend(signed.statement.nodes.iter().copied());
         self.capabilities
             .extend(signed.statement.capabilities.iter().copied());
         self.statements.insert(id, signed);
@@ -284,8 +287,7 @@ impl RevocationSet {
     }
     /// Whether some statement revokes `key` as a credential subject.
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
-        self.statements()
-            .any(|signed| signed.statement.nodes.contains(node))
+        self.references.contains(node)
     }
     pub fn revokes(&self, key: &PublicKey) -> bool {
         self.subjects.contains(key) || self.revokes_reference(&crate::PeerId::of(*key))

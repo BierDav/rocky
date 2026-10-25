@@ -1844,8 +1844,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             waiting,
             ..CompactReport::default()
         };
+        inner = flush_guard(inner, &self.inner).await?;
         for (scope, _) in inner.domain_scopes(domain).await? {
             loop {
+                inner = flush_guard(inner, &self.inner).await?;
                 let step = inner.prune_step(scope).await?;
                 report.pruned += step.pruned;
                 if let Some(block) = step.blocked {
@@ -1866,7 +1868,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .rev()
             .find(|known| known.compacted)
             .map(|known| known.seal);
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         Ok(report)
     }
@@ -1876,7 +1878,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         inner.graph_for(domain)?;
         inner.finalize_ready(domain).await?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
     /// Whether any held scope still needs a replay base at `seal`.

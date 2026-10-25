@@ -61,7 +61,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // first without the replica so local statements do not wait for it.
         self.flush().await?;
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         inner.same_tip_peer(peer)?;
         if scopes.is_empty()
@@ -134,7 +134,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if frames.is_empty() {
                     return Err(denied("byte quota smaller than one frame"));
                 }
-                return inner.offered_page(frames, last, pruned).await;
+                let page = inner.offered_page(frames, last, pruned).await?;
+                drop(flush_guard(inner, &self.inner).await?);
+                return Ok(page);
             }
             used += weight;
             last = Some(id);
@@ -142,7 +144,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         // Skipped frames can leave a full query short of a full page.
         let next = if limited { last } else { None };
-        inner.offered_page(frames, next, pruned).await
+        let page = inner.offered_page(frames, next, pruned).await?;
+        drop(flush_guard(inner, &self.inner).await?);
+        Ok(page)
     }
     pub async fn acknowledge(
         &self,
@@ -172,7 +176,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         // The peer is told its acknowledgment is recorded.
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
 }
 

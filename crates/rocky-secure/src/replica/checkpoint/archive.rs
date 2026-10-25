@@ -43,7 +43,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.conn.execute("INSERT INTO secure_checkpoint_archive VALUES(?,?,NULL,0) ON CONFLICT(scope) DO UPDATE SET signed=excluded.signed,cursor=NULL,complete=0", [encode(&scope)?, signed.to_bytes()?]).await?;
             Ok(())
         })?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok((None, false))
     }
     pub(crate) async fn archive_checkpoint_page(
@@ -139,7 +139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
 }

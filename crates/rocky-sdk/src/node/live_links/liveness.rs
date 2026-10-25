@@ -1,8 +1,7 @@
 use super::*;
 use std::collections::VecDeque;
-use tokio::sync::mpsc;
 
-const CLOSE: Duration = Duration::from_millis(100);
+pub(super) const CLOSE: Duration = Duration::from_millis(100);
 enum Exit {
     Finished(Result<&'static str, Failure>),
     Close(CloseReason),
@@ -11,7 +10,7 @@ impl Node {
     pub(super) async fn run_link(
         &self,
         service: &Link,
-        mut opened: link::Link,
+        opened: link::Link,
         mut close: watch::Receiver<Option<CloseReason>>,
         changed: watch::Sender<Option<Vec<ResourceScope>>>,
         mut authority: watch::Receiver<u64>,
@@ -19,9 +18,19 @@ impl Node {
         let peer = opened.peer;
         let direction = opened.direction;
         let expires = opened.expires;
+        let offered = opened.offered.clone();
+        let handle = opened.channels.handle.clone();
+        let mut io = io::Io::start(
+            opened,
+            Some(io::Cancellation {
+                authority: authority.clone(),
+                stage: service.stage.subscribe(),
+                close: close.clone(),
+            }),
+        );
         let mut stage = service.stage.subscribe();
         let mut changes = changed.subscribe();
-        let mut outgoing = std::mem::replace(&mut opened.channels.outgoing, mpsc::channel(1).1);
+        let writer = io.writer();
         let exit = {
             let receive = async {
                 let mut requests = futures_util::stream::FuturesUnordered::<
@@ -30,7 +39,7 @@ impl Node {
                 let mut seen = VecDeque::new();
                 loop {
                     let frame = {
-                        let receive = opened.reader.receive();
+                        let receive = io.receive();
                         tokio::pin!(receive);
                         loop {
                             tokio::select! {
@@ -44,8 +53,8 @@ impl Node {
                     if expires <= now()? {
                         return Err("link credentials expired".into());
                     }
-                    if matches!(frame.message, Message::Channel(_)) {
-                        if let Some(mut session) = opened.channels.accept(frame)? {
+                    let frame = match frame {
+                        io::Incoming::Request(mut session) => {
                             requests.push(Box::pin(async move {
                                 let result = session
                                     .serve_all(
@@ -65,16 +74,11 @@ impl Node {
                                 session.close().await?;
                                 Ok(())
                             }));
+                            continue;
                         }
-                        continue;
-                    }
+                        io::Incoming::Signal(frame) => frame,
+                    };
                     match frame.message {
-                        Message::Reconcile {
-                            generation,
-                            started,
-                        } => opened
-                            .channels
-                            .reconcile(frame.direction, generation, started)?,
                         Message::Push {
                             scope,
                             frames,
@@ -86,7 +90,8 @@ impl Node {
                                 self.link_pending(peer);
                                 continue;
                             }
-                            let handle = opened.channels.handle.clone();
+                            let handle = handle.clone();
+                            let receiving = service.live.receiving(peer);
                             #[cfg(test)]
                             let gate = service
                                 .live
@@ -104,6 +109,7 @@ impl Node {
                                     .receive_push(&self.replica, scope, frames, voids)
                                     .await?;
                                 self.received_push(service, peer, scope, received).await?;
+                                drop(receiving);
                                 if !complete {
                                     self.link_pending(peer);
                                 }
@@ -111,7 +117,7 @@ impl Node {
                             }));
                         }
                         Message::Changed { scopes, token } if frame.direction != direction => {
-                            if scopes.iter().any(|scope| !opened.offered.contains(scope)) {
+                            if scopes.iter().any(|scope| !offered.contains(scope)) {
                                 return Err("unproved link signal scope".into());
                             }
                             if !seen.contains(&token) {
@@ -152,21 +158,16 @@ impl Node {
                     }
                     tokio::select! {
                         biased;
-                        Some(frame) = outgoing.recv() => {
-                            let finished = if let Message::Reconcile { generation, started: false } = frame.message { Some(generation) } else { None };
-                            opened.writer.send(frame).await?;
-                            if let Some(generation) = finished { opened.channels.handle.flushed_reconcile(generation); }
-                        }
                         _ = changes.changed() => {
                             changes.borrow_and_update();
                             let pending = take_signal(&changed);
                             if let Some(scopes) = pending {
-                                opened.writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
+                                writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
                             }
                         }
                         _ = std::future::ready(()), if initial.is_some() => {
                             let scopes = initial.take().ok_or("initial link signal")?;
-                            opened.writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
+                            writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
                         }
                     }
                 }
@@ -188,11 +189,9 @@ impl Node {
                 service.live.closing.fetch_add(1, Ordering::SeqCst);
                 // Cancellation also interrupts a blocked channel write.
                 let _ = tokio::time::timeout(CLOSE, async {
-                    opened
-                        .writer
-                        .send(Frame::new(direction, Message::Close { reason }))
+                    io.send(Frame::new(direction, Message::Close { reason }))
                         .await?;
-                    opened.writer.finish().await
+                    io.finish().await
                 })
                 .await;
                 if reason == CloseReason::Authority {

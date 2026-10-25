@@ -77,6 +77,7 @@ type Reserved = BTreeMap<ResourceScope, (u32, u32)>;
 /// session's authority; the commit admits every changed row and field.
 pub struct SecureSql<A: RowApplication> {
     pub(super) session: SecureSession<A>,
+    pub(super) reads: Arc<queries::ReadAccess>,
     pub(super) plan: Arc<Plan>,
     /// Plan tables a statement may change.
     pub(super) writable: BTreeSet<usize>,
@@ -190,6 +191,7 @@ impl<A: RowApplication> SecureSession<A> {
             .collect();
         let plan = Arc::new(plan);
         Ok(SecureSql {
+            reads: inner.register_reader(&self.status, self.authority).await?,
             session: self.clone(),
             plan: plan.clone(),
             writable: writable.clone(),
@@ -973,7 +975,10 @@ impl<A: RowApplication> SecureSql<A> {
             || matches!(commit, Kind::Coordinated(_))
         {
             // The frames may leave the device.
-            inner.flush()?;
+            let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
+            drop(held);
+            flusher.run(committed_at).await?;
+            let mut inner = self.session.replica.inner.lock().await;
             inner.maintain(&scopes).await;
             inner.checkpoint_if_due().await;
         } else {

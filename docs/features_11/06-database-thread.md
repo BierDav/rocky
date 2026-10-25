@@ -1,6 +1,7 @@
 # 6. A database thread that never blocks the link
 
-Status: proposed. Owner: `rocky-sdk` database start-up and live links;
+Status: implemented; performance and device qualification pending. See
+[evidence](06-database-thread-evidence.md). Owner: `rocky-sdk` database start-up and live links;
 `rocky-secure` group commit, flushing, receive and apply; `rocky-credentials`
 chain verification; `rocky-storage` cursors. Depends on
 [phase 3](03-links-that-outlive-a-request.md). Effort: two to three weeks.

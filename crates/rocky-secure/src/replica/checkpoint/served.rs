@@ -36,7 +36,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         seal: Commitment,
     ) -> Result<Option<SignedCheckpoint>, Error> {
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         // A no-frames base needs no key: its original statement is served.
         if !inner.importing.contains(&scope)
@@ -64,7 +64,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(Some(signed).filter(|signed| signed.signer() != peer));
         }
         let signed = transaction!(inner, |inner| inner.sign_kept(scope, id, seal).await)?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(signed)
     }
 }

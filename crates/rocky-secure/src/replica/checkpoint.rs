@@ -1282,7 +1282,9 @@ impl<A: RowApplication> Inner<A> {
                 .manifest_of_tip(operation.header.extensions.tip)
                 .and_then(|manifest| self.known(manifest))
                 .is_err()
-                || !self.dependencies_ready(&frame, &BTreeSet::new()).await?
+                || !self
+                    .dependencies_ready(&frame, &BTreeSet::new(), None)
+                    .await?
             {
                 return Err(denied("applied encrypted dependency missing"));
             }

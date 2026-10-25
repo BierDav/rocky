@@ -58,6 +58,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(payload)
     }
     pub(super) fn row_payload(&self, frame: &EncryptedFrame) -> Result<RowPayload, Error> {
+        #[cfg(test)]
         let operation = frame.operation_ref()?;
         #[cfg(test)]
         if crate::AUTHOR_PAYLOAD_FRAME.with(std::cell::Cell::get) == Some(operation.hash) {
@@ -72,14 +73,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             });
         }
-        let extension = &operation.header.extensions;
-        let key = self
-            .opening_key(extension.scope, extension.generation)
-            .ok_or_else(|| denied("row payload key unavailable"))?;
-        let payload = self.decode_row_payload(
-            frame,
-            &decrypt(&key.key, &encode(extension)?, frame.body_bytes())?,
-        )?;
+        let payload = self.decode_row_payload(frame, &self.open_payload(frame)?)?;
         Ok(payload)
     }
 
@@ -219,17 +213,13 @@ impl<A: RowApplication> Inner<A> {
         if !self.frame_schema_ready(frame)? {
             return Ok(Outcome::Waiting(WaitReason::Schema));
         }
-        let grants = match if reach == tips::FrameReach::Held {
-            self.verify_frame_authority(frame, time)
-        } else {
-            self.verify_frame(frame, time)
-        } {
-            Ok(grants) => grants,
-            Err(error) => {
-                self.reject(operation.hash).await?;
-                return Ok(Outcome::Rejected(error.to_string()));
-            }
-        };
+        // A sibling line is a refusal, never dependency work for this workspace.
+        if reach == tips::FrameReach::Unfollowed {
+            self.reject(operation.hash).await?;
+            return Ok(Outcome::Rejected(
+                "frame belongs to a tip this replica does not follow".into(),
+            ));
+        }
         let extension = &operation.header.extensions;
         // Verified checkpoint pages are filling the scope: its operations
         // apply on top once the import ends.
@@ -244,6 +234,12 @@ impl<A: RowApplication> Inner<A> {
         if !self.can_read_key(key.scope, &self.local_grants(time).unwrap_or_default()) {
             return Ok(Outcome::Waiting(WaitReason::ReadGrant));
         }
+        if reach == tips::FrameReach::Held
+            && let Err(error) = self.verify_frame_authority(frame, time)
+        {
+            self.reject(operation.hash).await?;
+            return Ok(Outcome::Rejected(error.to_string()));
+        }
         if reach == tips::FrameReach::Held {
             if self.abandoned_write(frame)? {
                 return self.hold_abandoned(frame, time).await;
@@ -256,7 +252,14 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(Outcome::Waiting(WaitReason::OwnChain));
         }
-        match self.dependencies_ready(frame, &BTreeSet::new()).await {
+        let Ok(plaintext) = self.open_payload(frame) else {
+            return Ok(Outcome::Waiting(WaitReason::Undecryptable));
+        };
+        let payload = self.decode_row_payload(frame, &plaintext);
+        match self
+            .dependencies_ready(frame, &BTreeSet::new(), payload.as_ref().ok())
+            .await
+        {
             Ok(true) => {}
             Ok(false) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
             Err(error) => {
@@ -264,33 +267,31 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(Outcome::Rejected(error.to_string()));
             }
         }
-        let plaintext = decrypt(
-            &key.key,
-            &encode(&operation.header.extensions)?,
-            frame.body_bytes(),
-        );
-        let Ok(plaintext) = plaintext else {
-            return Ok(Outcome::Waiting(WaitReason::Undecryptable));
+        let grants = match self.verify_frame(frame, time) {
+            Ok(grants) => grants,
+            Err(error) => {
+                self.reject(operation.hash).await?;
+                return Ok(Outcome::Rejected(error.to_string()));
+            }
         };
-        let payload = self.decode_row_payload(frame, &plaintext);
         if let Ok(payload) = &payload
             && let Some(membership) = payload.membership()
         {
             return Box::pin(self.apply_bundle(operation, membership, time)).await;
         }
         self.conn.execute("SAVEPOINT pending", ()).await?;
-        let materialized = match payload {
+        let materialized = match &payload {
             Ok(payload) => {
-                self.materialize(frame, &payload.into_writes(), &grants, None)
+                self.materialize(frame, payload.writes(), &grants, Some(payload))
                     .await
             }
-            Err(error) => Err(error),
+            Err(error) => Err(group::shared(error)),
         };
         let result = match materialized {
             Ok((rows, admission)) => {
                 async {
                     self.record_key(key).await?;
-                    self.write_materialized(frame, rows, admission, None)
+                    self.write_materialized(frame, rows, admission, payload.as_ref().ok())
                         .await?;
                     Ok(Outcome::Applied)
                 }
@@ -346,9 +347,18 @@ impl<A: RowApplication> Inner<A> {
         &self,
         frame: &EncryptedFrame,
         bundle: &BTreeSet<Hash>,
+        opened: Option<&RowPayload>,
     ) -> Result<bool, Error> {
         let operation = frame.operation_ref()?;
 
+        let decoded;
+        let payload = match opened {
+            Some(payload) => Some(payload),
+            None => {
+                decoded = self.row_payload(frame).ok();
+                decoded.as_ref()
+            }
+        };
         let mut retired_creations = BTreeSet::new();
         // Behind a finalized base, a creation whose row is gone is retired.
         // A frame of another line stays as it was applied there.
@@ -363,16 +373,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?
                 .and_then(|record| record.signed)
                 .filter(|signed| signed.statement.seal.is_some())
-            && let Some(key) = self.opening_key(
-                operation.header.extensions.scope,
-                operation.header.extensions.generation,
-            )
-            && let Ok(plaintext) = decrypt(
-                &key.key,
-                &encode(&operation.header.extensions)?,
-                frame.body_bytes(),
-            )
-            && let Ok(payload) = self.decode_row_payload(frame, &plaintext)
+            && let Some(payload) = payload
         {
             // The live schema names rows through the path's fields.
             let fields = self.path_fields(

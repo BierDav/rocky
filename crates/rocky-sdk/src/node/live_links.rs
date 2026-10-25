@@ -2,6 +2,7 @@
 use super::*;
 use rocky_secure::network::link::{self, CloseReason, Frame, Message};
 use std::collections::BTreeSet;
+mod io;
 mod liveness;
 
 pub(super) const BUDGET: usize = 32;
@@ -15,6 +16,8 @@ struct Entry {
     persistent: bool,
     /// Requests in flight that keep a link open which is not persistent.
     shorts: usize,
+    /// Delay publication back to an origin until its durable intake updates our cursor.
+    receiving: usize,
     handle: link::channels::Handle,
     authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
@@ -87,7 +90,41 @@ impl Drop for ShortLink<'_> {
         self.registry.close_short(self.peer, self.id);
     }
 }
+struct Receiving<'a> {
+    registry: &'a Registry,
+    peer: PublicKey,
+    id: Option<u64>,
+}
+impl Drop for Receiving<'_> {
+    fn drop(&mut self) {
+        let mut entries = self
+            .registry
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries
+            .get_mut(&self.peer)
+            .filter(|entry| Some(entry.id) == self.id)
+        {
+            entry.receiving = entry.receiving.saturating_sub(1);
+        }
+        drop(entries);
+        self.registry.events.send_replace(());
+    }
+}
 impl Registry {
+    fn receiving(&self, peer: PublicKey) -> Receiving<'_> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = entries.get_mut(&peer).map(|entry| {
+            entry.receiving += 1;
+            entry.id
+        });
+        Receiving {
+            registry: self,
+            peer,
+            id,
+        }
+    }
     pub fn nodes(&self) -> Vec<PublicKey> {
         let mut nodes: Vec<_> = self
             .entries
@@ -300,10 +337,12 @@ impl Node {
         let mut stage = service.stage.subscribe();
         let mut frames = self.replica.observe_frames().await;
         let mut revisions = self.replica.observe_revision();
+        let mut ready = service.live.events.subscribe();
         loop {
             tokio::select! {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
                 changed = frames.changed() => { if changed.is_err() { break; } },
+                changed = ready.changed() => { if changed.is_err() { break; } },
                 changed = revisions.changed() => { if changed.is_err() { break; } },
             }
             settle().await;
@@ -552,6 +591,7 @@ impl Node {
                         dialed,
                         persistent,
                         shorts: 0,
+                        receiving: 0,
                         handle: opened.channels.handle.clone(),
                         authority: authority.clone(),
                         close: close.clone(),
@@ -688,6 +728,7 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
+            .filter(|(_, entry)| entry.receiving == 0)
             .map(|(peer, entry)| {
                 (
                     *peer,
@@ -729,7 +770,10 @@ impl Node {
                     .entries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                let Some(entry) = entries.get_mut(&peer).filter(|entry| entry.id == id) else {
+                let Some(entry) = entries
+                    .get_mut(&peer)
+                    .filter(|entry| entry.id == id && entry.receiving == 0)
+                else {
                     return Ok::<_, Failure>(());
                 };
                 entry.frontiers = frontiers;
@@ -870,4 +914,42 @@ fn path_json(path: &crate::transport::NetworkPath) -> Value {
         "lost_bytes": path.lost_bytes.to_string(),
         "congestion_events": path.congestion_events.to_string(),
     })
+}
+
+#[cfg(test)]
+pub(super) fn control_probe(
+    near: link::Link,
+    far: link::Link,
+) -> (
+    std::sync::mpsc::Receiver<Result<(), Failure>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (near_direction, far_direction) = (near.direction, far.direction);
+    let mut near = io::Io::start(near, None);
+    let mut far = io::Io::start(far, None);
+    let (done, answer) = std::sync::mpsc::sync_channel(1);
+    let task = tokio::spawn(async move {
+        let result: Result<(), Failure> = async {
+            near.send(Frame::new(
+                near_direction,
+                Message::Close {
+                    reason: CloseReason::Duplicate,
+                },
+            ))
+            .await?;
+            let _ = far.receive().await?;
+            far.send(Frame::new(
+                far_direction,
+                Message::Close {
+                    reason: CloseReason::Duplicate,
+                },
+            ))
+            .await?;
+            let _ = near.receive().await?;
+            Ok(())
+        }
+        .await;
+        let _ = done.send(result);
+    });
+    (answer, task)
 }

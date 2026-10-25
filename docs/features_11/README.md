@@ -89,7 +89,7 @@ never silently relaxed.
   coordinator is unavailable; only a definite refusal aborts.
 - **One current version per format.** Each phase that changes a persisted
   or wire shape moves that format by one at landing (today row 12,
-  checkpoint 17, replica 36, link 17); nothing reads an earlier one.
+  checkpoint 17, replica 37, link 17); nothing reads an earlier one.
 
 ## Phases
 

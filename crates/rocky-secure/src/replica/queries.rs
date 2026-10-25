@@ -21,6 +21,7 @@ pub(crate) struct Queries {
     pub(super) authority: Arc<AtomicU64>,
     pub(super) events: Option<Arc<TableEvents>>,
     pub(super) touched: std::sync::Mutex<Touched>,
+    readers: std::sync::Mutex<Vec<std::sync::Weak<ReadAccess>>>,
 }
 impl Default for Queries {
     fn default() -> Self {
@@ -29,6 +30,146 @@ impl Default for Queries {
             authority: Arc::new(AtomicU64::new(1)),
             events: None,
             touched: Default::default(),
+            readers: Default::default(),
+        }
+    }
+}
+pub(super) struct ReadAccess {
+    authority: u64,
+    status: SessionStatus,
+    state: std::sync::RwLock<Result<ReadState, Error>>,
+    pub(super) host: Arc<CursorHost>,
+    current: Arc<AtomicU64>,
+}
+struct ReadState {
+    path: PathBuf,
+    epoch: u64,
+    history: history::HistorySnapshot,
+    views: Vec<rocky_core::LogicalView>,
+    rules: BTreeMap<String, rocky_storage::partition_sql::TablePartitions>,
+    unavailable: BTreeMap<String, Error>,
+}
+impl ReadAccess {
+    fn snapshot(&self) -> Result<ReadState, Error> {
+        if self.current.load(Ordering::SeqCst) != self.authority || now()? >= self.status.expires {
+            return Err(Error::Sql(SqlError::Unavailable {
+                table: String::new(),
+                reason: Unavailable::Revoked,
+            }));
+        }
+        let state = self.state.read().map_err(|_| Error::Closed)?;
+        state.as_ref().map(Clone::clone).map_err(group::shared)
+    }
+}
+impl Clone for ReadState {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            epoch: self.epoch,
+            history: self.history.clone(),
+            views: self.views.clone(),
+            rules: self.rules.clone(),
+            unavailable: self
+                .unavailable
+                .iter()
+                .map(|(name, error)| (name.clone(), group::shared(error)))
+                .collect(),
+        }
+    }
+}
+impl ReadState {
+    fn statement(&self, sql: &str, params: &[SqlValue]) -> Result<String, Error> {
+        rocky_storage::partition_sql::check_with_views(sql, params, &self.rules, &self.views)
+            .map_err(|error| Error::Sql(error.into()))
+    }
+    fn available(&self, tables: &BTreeSet<String>) -> Result<(), Error> {
+        for table in tables {
+            if let Some(error) = self.unavailable.get(&table.to_ascii_lowercase()) {
+                return Err(group::shared(error));
+            }
+        }
+        Ok(())
+    }
+}
+impl<A: RowApplication> Inner<A> {
+    async fn read_state(&self, status: &SessionStatus) -> Result<ReadState, Error> {
+        let mut unavailable = BTreeMap::new();
+        let views = match &self.workspace.typed {
+            Some(typed) => {
+                for table in &typed.tables {
+                    let name = table.table.sql_name.to_ascii_lowercase();
+                    if let Err(error) = self
+                        .availability(&BTreeSet::from([name.clone()]), status)
+                        .await
+                    {
+                        unavailable.insert(name, error);
+                    }
+                }
+                typed.rows.schema().views.clone()
+            }
+            None => Vec::new(),
+        };
+        let mut epoch = self
+            .conn
+            .query("SELECT epoch FROM secure_read_epoch WHERE id=1", ())
+            .await?;
+        let epoch = epoch
+            .next()
+            .await?
+            .ok_or_else(|| Error::Corrupt("read epoch missing".into()))?
+            .get::<i64>(0)? as u64;
+        Ok(ReadState {
+            path: self.path().to_path_buf(),
+            epoch,
+            history: self.history_snapshot().await?,
+            views,
+            rules: self.partition_rules(None, status).await?,
+            unavailable,
+        })
+    }
+    pub(super) async fn register_reader(
+        &self,
+        status: &SessionStatus,
+        authority: u64,
+    ) -> Result<Arc<ReadAccess>, Error> {
+        let reader = Arc::new(ReadAccess {
+            status: status.clone(),
+            authority,
+            state: std::sync::RwLock::new(self.read_state(status).await),
+            host: self.workspace.queries.cursors.clone(),
+            current: self.workspace.queries.authority.clone(),
+        });
+        let mut readers = self
+            .workspace
+            .queries
+            .readers
+            .lock()
+            .map_err(|_| Error::Closed)?;
+        readers.retain(|reader| reader.strong_count() > 0);
+        readers.push(Arc::downgrade(&reader));
+        Ok(reader)
+    }
+    pub(super) async fn refresh_readers(&self) {
+        let readers: Vec<_> = {
+            let mut readers = self
+                .workspace
+                .queries
+                .readers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            readers.retain(|reader| reader.strong_count() > 0);
+            readers
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect()
+        };
+        for reader in readers {
+            if reader.authority == self.authority {
+                let state = self.read_state(&reader.status).await;
+                if let Ok(mut current) = reader.state.write() {
+                    *current = state;
+                }
+            }
         }
     }
 }
@@ -219,13 +360,8 @@ impl<A: RowApplication> SecureSql<A> {
         params: Vec<SqlValue>,
         limits: CursorLimits,
     ) -> Result<SnapshotCursor, Error> {
-        let checked = {
-            let inner = self.session.replica.inner.lock().await;
-            inner.check_authority(Some(self.session.authority))?;
-            inner
-                .partition_statement(sql, &params, &self.session.status)
-                .await?
-        };
+        let readiness = self.reads.snapshot()?;
+        let checked = readiness.statement(sql, &params)?;
         let analyzed = self.read_statement(&checked)?;
         self.open_cursor(analyzed.sql, params, &analyzed.tables, limits)
             .await
@@ -245,27 +381,15 @@ impl<A: RowApplication> SecureSql<A> {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> Result<SnapshotRows, Error> {
-        let checked = {
-            let inner = self.session.replica.inner.lock().await;
-            inner.check_authority(Some(self.session.authority))?;
-            inner
-                .partition_statement(sql, &params, &self.session.status)
-                .await?
-        };
+        let readiness = self.reads.snapshot()?;
+        let checked = readiness.statement(sql, &params)?;
         let analyzed = self.read_statement(&checked)?;
         if analyzed.tables.iter().any(|name| name.contains('@')) {
             return Err(Error::Sql(SqlError::Unsupported(
                 "name history in a statement of its own, outside a read transaction".into(),
             )));
         }
-        {
-            let inner = self.session.replica.inner.lock().await;
-            inner.check_authority(Some(self.session.authority))?;
-            inner.local_grants(now()?)?;
-            inner
-                .availability(&analyzed.tables, &self.session.status)
-                .await?;
-        }
+        readiness.available(&analyzed.tables)?;
         snapshot
             .run(analyzed.sql, params, self.options.result_bytes)
             .await
@@ -287,12 +411,10 @@ impl<A: RowApplication> SecureSql<A> {
         tables: &BTreeSet<String>,
         limits: CursorLimits,
     ) -> Result<SnapshotCursor, Error> {
+        let readiness = self.reads.snapshot()?;
+        readiness.available(tables)?;
         let plan = {
-            let inner = self.session.replica.inner.lock().await;
-            inner.check_authority(Some(self.session.authority))?;
-            inner.local_grants(now()?)?;
-            inner.availability(tables, &self.session.status).await?;
-            let authority = inner.workspace.queries.authority.clone();
+            let authority = self.reads.current.clone();
             let (opened, expires) = (self.session.authority, self.session.status.expires);
             let mut readable: Vec<String> = self
                 .plan
@@ -304,7 +426,7 @@ impl<A: RowApplication> SecureSql<A> {
             // `table@seal` or `table@bookmark`.
             let views = match &self.seal {
                 Some(views) => Some(views.as_ref().clone()),
-                None => inner.named_history(tables).await?,
+                None => readiness.history.named_history::<A>(tables)?,
             };
             let (prelude, requires) = match views {
                 Some(views) => {
@@ -314,7 +436,11 @@ impl<A: RowApplication> SecureSql<A> {
                 None => (Vec::new(), None),
             };
             CursorPlan {
-                path: inner.path().to_path_buf(),
+                path: readiness.path,
+                epoch: Some((
+                    "SELECT epoch FROM secure_read_epoch WHERE id=1".into(),
+                    readiness.epoch,
+                )),
                 sql,
                 params,
                 readable,
@@ -335,17 +461,7 @@ impl<A: RowApplication> SecureSql<A> {
                 }),
             }
         };
-        let host = self
-            .session
-            .replica
-            .inner
-            .lock()
-            .await
-            .workspace
-            .queries
-            .cursors
-            .clone();
-        SnapshotCursor::open(&host, self.cursors.clone(), plan).await
+        SnapshotCursor::open(&self.reads.host, self.cursors.clone(), plan).await
     }
 }
 

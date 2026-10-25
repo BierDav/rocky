@@ -406,7 +406,10 @@ impl<A: RowApplication> Inner<A> {
                         }
                     }
                 }
-                if status == "applied" && !self.dependencies_ready(&frame, &BTreeSet::new()).await?
+                if status == "applied"
+                    && !self
+                        .dependencies_ready(&frame, &BTreeSet::new(), None)
+                        .await?
                 {
                     return Err(denied("applied encrypted dependency missing"));
                 }

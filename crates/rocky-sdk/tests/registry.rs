@@ -270,7 +270,13 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
             .is_empty()
     );
     m.add(1, "Milk").await;
-    assert_eq!(common::identity::completed_peers(&synced(&m).await?), 1);
+    let report = synced(&m).await?;
+    assert_eq!(
+        common::identity::completed_peers(&report),
+        1,
+        "{report}; activity: {}",
+        m.ok(json!({"type":"activity", "after":"0"})).await
+    );
     assert_eq!(b.titles().await, ["Milk"]);
     for device in [&b, &m] {
         device.close().await;

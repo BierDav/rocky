@@ -897,6 +897,7 @@ pub(super) struct Switching {
 }
 
 /// A table as a kept seal shows it.
+#[derive(Clone)]
 struct KeptTable {
     table: String,
     /// Its columns there, unquoted.
@@ -939,7 +940,34 @@ impl<A: RowApplication> Inner<A> {
     /// Views for the tables a statement names as `table@seal`, with the
     /// seal in hex, or `table@bookmark`: the kept seal's rows of `table`.
     /// None when it names no history.
-    pub(super) async fn named_history(
+    pub(super) async fn history_snapshot(&self) -> Result<HistorySnapshot, Error> {
+        let marks = self.kept_marks().await?;
+        let mut kept = BTreeMap::new();
+        for (seal, _) in &marks {
+            kept.insert(*seal, self.kept_tables(*seal).await?);
+        }
+        Ok(HistorySnapshot {
+            typed: self.workspace.typed.clone(),
+            marks,
+            kept,
+            graph: self
+                .workspace
+                .followed
+                .as_ref()
+                .and_then(|(scope, _)| self.graphs.get(scope))
+                .cloned(),
+        })
+    }
+}
+#[derive(Clone)]
+pub(super) struct HistorySnapshot {
+    typed: Option<Arc<Typed>>,
+    marks: Vec<(Commitment, i64)>,
+    kept: BTreeMap<Commitment, Vec<KeptTable>>,
+    graph: Option<rocky_credentials::TipGraph>,
+}
+impl HistorySnapshot {
+    pub(super) fn named_history<A: RowApplication>(
         &self,
         tables: &BTreeSet<String>,
     ) -> Result<Option<SealViews>, Error> {
@@ -948,13 +976,11 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         let typed = self
-            .workspace
             .typed
             .as_deref()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
         let histories = History::of(typed);
-        let marks = self.kept_marks().await?;
-        let domain = self.workspace.followed.as_ref().map(|(scope, _)| *scope);
+        let marks = &self.marks;
         let mut views = SealViews {
             seal: [0; 32],
             needs: Vec::new(),
@@ -972,8 +998,10 @@ impl<A: RowApplication> Inner<A> {
             let seal = match decode_hex(reference) {
                 Some(seal) => seal,
                 None => {
-                    let domain = domain.ok_or_else(|| denied("no bookmark is followed"))?;
-                    let graph = self.graph_for(domain)?;
+                    let graph = self
+                        .graph
+                        .as_ref()
+                        .ok_or_else(|| denied("no bookmark is followed"))?;
                     let tip = graph
                         .bookmark(reference)
                         .map_err(credential)?
@@ -988,11 +1016,11 @@ impl<A: RowApplication> Inner<A> {
                 .map(|(_, mark)| *mark)
                 .ok_or_else(|| denied(&format!("{name}: this node does not keep that seal")))?;
             seals.insert(seal);
-            let kept = self.kept_tables(seal).await?;
+            let kept = self.kept.get(&seal).map(Vec::as_slice).unwrap_or_default();
             let shown = kept
                 .iter()
                 .find(|kept| kept.table.eq_ignore_ascii_case(table))
-                .and_then(|kept| Self::kept_select(&histories, mark, kept));
+                .and_then(|kept| Inner::<A>::kept_select(&histories, mark, kept));
             let (select, holder) = match shown {
                 Some(shown) => shown,
                 None => {
@@ -1118,7 +1146,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             Ok(())
         })?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
     pub async fn kept_seal_config(&self) -> Result<KeptSeals, Error> {

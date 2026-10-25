@@ -253,3 +253,22 @@ impl crate::Authority<'_> {
 
 #[cfg(test)]
 mod tests;
+
+impl crate::VerifiedChain {
+    pub fn partition_author(
+        &self,
+        subject: PublicKey,
+        author: u32,
+        scope: ResourceScope,
+        tuple: &PartitionTuple,
+        time: u64,
+    ) -> Result<Vec<ResourceGrant>, Error> {
+        self.selectors(subject, time)?;
+        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
+            return Err(denied(
+                "the partition author number does not belong to the signing key",
+            ));
+        }
+        resolve_leaf(&self.leaf, scope, tuple)
+    }
+}

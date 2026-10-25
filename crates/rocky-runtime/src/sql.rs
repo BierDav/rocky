@@ -316,6 +316,7 @@ impl SqlSession {
             params,
             readable: parts.readable,
             revision: parts.revision,
+            epoch: None,
             limits,
             guard: Arc::new(|| Ok(())),
             prelude: Vec::new(),

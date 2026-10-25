@@ -66,7 +66,7 @@ pub use revocation::{
 };
 pub use signed::{
     Capability, CredentialChain, Credentials, Endorsement, MAX_ENDORSEMENT_BYTES, SignedCapability,
-    SignedManifest, Verified,
+    SignedManifest, Verified, VerifiedChain,
 };
 
 pub use tips::{

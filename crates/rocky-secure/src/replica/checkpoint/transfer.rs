@@ -896,7 +896,6 @@ impl<A: RowApplication> Inner<A> {
         let time = now()?;
         // A no-frames base is served as signed, by key holders and relays alike.
         if self.no_frames_base(scope).await?.is_some() {
-            self.flush()?;
             return Ok(self
                 .served_checkpoint(scope)
                 .await?
@@ -936,7 +935,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         // Keep a transferable cut stable across page/session retries.
-        self.flush()?;
         Ok(self
             .served_checkpoint(scope)
             .await?
@@ -1001,7 +999,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<PublicKey>,
     ) -> Result<PrunedPage, Error> {
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         let mut logs = match inner.find_scope_id(scope).await? {
             Some(id) => inner.logs(id, after, true, STEP_ROWS + 1).await?,
@@ -1064,11 +1062,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<SignedCheckpoint>, Error> {
-        self.inner
-            .lock()
-            .await
-            .offered_checkpoint(peer, credentials, scope)
-            .await
+        let mut inner = self.inner.lock().await;
+        let offered = inner.offered_checkpoint(peer, credentials, scope).await?;
+        drop(flush_guard(inner, &self.inner).await?);
+        Ok(offered)
     }
     /// Whether `signed` is the verified checkpoint this replica last switched to.
     pub(crate) async fn checkpoint_installed(
@@ -1105,7 +1102,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         byte_quota: usize,
     ) -> Result<CheckpointPage, Error> {
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         if !(4096..=MAX_SECURE_FRAME).contains(&byte_quota) {
             return Err(denied("sync quota"));
@@ -1393,6 +1390,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if encode(&page)?.len() > byte_quota {
             return Err(denied("checkpoint page exceeds the byte quota"));
         }
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(page)
     }
     /// Discards only this staged checkpoint before falling back to frames.
@@ -1421,7 +1419,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         inner.load_direct().await?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         drop(inner);
         self.settle().await?;
@@ -1663,7 +1661,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if matches!(error, Error::Rejected(_) | Error::Protocol(_)) {
                 transaction!(inner, |inner| inner.clear_staging(id).await)?;
                 inner.load_direct().await?;
-                inner.flush()?;
+                drop(flush_guard(inner, &self.inner).await?);
             }
             return Err(error);
         }
@@ -1673,7 +1671,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 false => inner.clear_staging(id).await,
             })?;
             inner.load_direct().await?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
             return Err(denied(
                 "with a tip graph an imported checkpoint sits at a seal",
             ));

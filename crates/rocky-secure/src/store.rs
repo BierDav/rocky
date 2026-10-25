@@ -106,6 +106,8 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
 }
 
 pub(crate) const SCHEMA: &[&str] = &[
+    "CREATE TABLE secure_read_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL)",
+    "INSERT INTO secure_read_epoch VALUES(1,0)",
     "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,revocations BLOB NOT NULL,revision INTEGER NOT NULL)",
     "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,chain BLOB NOT NULL,UNIQUE(author,scope,sequence))",
     "CREATE TABLE secure_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,live INTEGER GENERATED ALWAYS AS (substr(fields,1,1)=X'01') VIRTUAL,shape BLOB GENERATED ALWAYS AS (substr(fields,2,CASE hex(substr(fields,2,1)) WHEN '18' THEN 2 WHEN '19' THEN 3 WHEN '1A' THEN 5 WHEN '1B' THEN 9 ELSE 1 END)) VIRTUAL,PRIMARY KEY(scope,row)) WITHOUT ROWID",

@@ -39,7 +39,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
     /// The seals still to pull, oldest request first; those now held are
     /// no longer wanted.
@@ -81,7 +81,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 Ok(())
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
         }
         wanted.retain(|seal| !held.contains(seal));
         Ok(wanted)
@@ -224,7 +224,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             inner.clear_staging(id).await
         })?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         if let Some(error) = refused {
             return Err(error);
         }

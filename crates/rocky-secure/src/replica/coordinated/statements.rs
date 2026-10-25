@@ -393,7 +393,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         Ok(batch)
     }

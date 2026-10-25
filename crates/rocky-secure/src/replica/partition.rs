@@ -14,8 +14,9 @@ impl<A: RowApplication> Inner<A> {
         policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let (mut grants, selectors) = chain
-            .verify_selectors(self.config.publisher, key, policy, time)
+        let (mut grants, selectors) = self
+            .verified_chain(chain, policy, time)?
+            .selectors(key, time)
             .map_err(credential)?;
         for (scope, tuple) in &self.partitions {
             for selector in &selectors {
@@ -37,8 +38,9 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
         scopes: &[ResourceScope],
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let (mut grants, selectors) = chain
-            .verify_selectors(self.config.publisher, key, policy, time)
+        let (mut grants, selectors) = self
+            .verified_chain(chain, policy, time)?
+            .selectors(key, time)
             .map_err(credential)?;
         grants.retain(|grant| scopes.contains(&grant.scope));
         for scope in scopes {
@@ -332,7 +334,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 inner.require_workspace_base(scope.domain).await
             })?;
-            inner.flush()?;
+            inner = flush_guard(inner, &self.inner).await?;
             inner.publish_revision().await?;
         }
         Ok(identity)
@@ -449,14 +451,13 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    pub(super) async fn partition_statement(
+    pub(super) async fn partition_rules(
         &self,
-        sql: &str,
-        params: &[SqlValue],
+        referenced: Option<&BTreeSet<String>>,
         status: &SessionStatus,
-    ) -> Result<String, Error> {
+    ) -> Result<BTreeMap<String, rocky_storage::partition_sql::TablePartitions>, Error> {
         let Some(typed) = &self.workspace.typed else {
-            return Ok(sql.into());
+            return Ok(BTreeMap::new());
         };
         let support: Vec<&str> = typed
             .rows
@@ -465,19 +466,11 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .map(|table| table.sql_name.as_str())
             .collect();
-        if typed.rows.schema().views.is_empty()
-            && typed.rows.schema().tables.iter().all(|table| {
-                table.partition_by.is_empty() && !support.contains(&table.sql_name.as_str())
-            })
-        {
-            return Ok(sql.into());
-        }
-        let referenced =
-            rocky_storage::partition_sql::referenced_tables(sql, &typed.rows.schema().views)
-                .map_err(|error| Error::Sql(error.into()))?;
         let mut rules = BTreeMap::new();
         for projected in &typed.tables {
-            if !referenced.contains(&projected.table.sql_name.to_ascii_lowercase()) {
+            if referenced.is_some_and(|names| {
+                !names.contains(&projected.table.sql_name.to_ascii_lowercase())
+            }) {
                 continue;
             }
             let logical = typed
@@ -561,6 +554,35 @@ impl<A: RowApplication> Inner<A> {
                 },
             );
         }
+        Ok(rules)
+    }
+    pub(super) async fn partition_statement(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+        status: &SessionStatus,
+    ) -> Result<String, Error> {
+        let Some(typed) = &self.workspace.typed else {
+            return Ok(sql.into());
+        };
+        let support: Vec<&str> = typed
+            .rows
+            .schema()
+            .support_tables()
+            .into_iter()
+            .map(|table| table.sql_name.as_str())
+            .collect();
+        if typed.rows.schema().views.is_empty()
+            && typed.rows.schema().tables.iter().all(|table| {
+                table.partition_by.is_empty() && !support.contains(&table.sql_name.as_str())
+            })
+        {
+            return Ok(sql.into());
+        }
+        let referenced =
+            rocky_storage::partition_sql::referenced_tables(sql, &typed.rows.schema().views)
+                .map_err(|error| Error::Sql(error.into()))?;
+        let rules = self.partition_rules(Some(&referenced), status).await?;
         if rules.is_empty() && typed.rows.schema().views.is_empty() {
             return Ok(sql.into());
         }

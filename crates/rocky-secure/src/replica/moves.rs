@@ -625,7 +625,7 @@ impl<A: RowApplication> SecureSession<A> {
                 .await
         })?;
         inner.publish_revision().await?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.replica.inner).await?);
         Ok(frames)
     }
 }

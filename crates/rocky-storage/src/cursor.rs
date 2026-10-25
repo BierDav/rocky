@@ -1,8 +1,5 @@
-//! Snapshot cursors. A cursor owns a read-only connection on its own thread
-//! and steps one statement inside one read transaction: every page comes
-//! from the snapshot the cursor opened on, whatever commits meanwhile. It
-//! pins the WAL until it ends, so an idle deadline and a maximum lifetime
-//! bound it. See `docs/runtime/queries-and-observation.md`.
+//! Snapshot cursors served by a bounded pool of reusable read-only connections.
+//! Each active cursor leases one worker and pins its snapshot until it ends.
 use crate::{
     Error,
     sql::{AbortReason, SqlError},
@@ -92,6 +89,8 @@ pub struct CursorPlan {
     pub readable: Vec<String>,
     /// Reads the snapshot's revision before the statement is compiled.
     pub revision: Option<String>,
+    /// Commit epoch the admission snapshot describes, checked inside the read transaction.
+    pub epoch: Option<(String, u64)>,
     pub limits: CursorLimits,
     pub guard: Guard,
     /// Run on the connection before the snapshot opens, such as the
@@ -172,6 +171,7 @@ impl Control {
 pub struct CursorHost {
     controls: Mutex<Vec<Weak<Control>>>,
     closed: AtomicBool,
+    workers: Mutex<Vec<Worker>>,
 }
 impl CursorHost {
     pub fn new() -> Arc<Self> {
@@ -180,6 +180,10 @@ impl CursorHost {
     /// Ends every cursor and waits until their connections are closed.
     /// Later opens are refused.
     pub fn close(&self) {
+        let mut workers = match self.workers.lock() {
+            Ok(workers) => workers,
+            Err(_) => return,
+        };
         self.closed.store(true, Ordering::SeqCst);
         let controls = match self.controls.lock() {
             Ok(mut controls) => std::mem::take(&mut *controls),
@@ -199,6 +203,14 @@ impl CursorHost {
                 }
             }
         }
+        for worker in std::mem::take(&mut *workers) {
+            drop(worker.jobs);
+            let _ = worker.thread.join();
+        }
+    }
+    /// Workers allocated so far; connections are reused between leases.
+    pub fn workers(&self) -> usize {
+        self.workers.lock().map_or(0, |workers| workers.len())
     }
     /// Open cursors, for tests and diagnostics.
     pub fn open_cursors(&self) -> usize {
@@ -216,13 +228,12 @@ impl CursorHost {
 }
 
 /// A statement stepping through one committed snapshot. Dropping it ends
-/// the read transaction and closes its connection.
+/// the read transaction and returns its worker to the pool.
 pub struct SnapshotCursor {
     columns: Vec<ResultColumn>,
     revision: Option<u64>,
     requests: Option<mpsc::Sender<Request>>,
     control: Arc<Control>,
-    thread: Option<std::thread::JoinHandle<()>>,
     /// The session's open-cursor count, released on drop.
     count: Arc<AtomicUsize>,
 }
@@ -231,9 +242,14 @@ impl Drop for SnapshotCursor {
         self.requests = None;
         self.control.cancelled.store(true, Ordering::SeqCst);
         self.count.fetch_sub(1, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            // The thread wakes at once: its request channel is gone.
-            let _ = thread.join();
+        // The disconnected channel wakes the leased worker immediately.
+        if let Ok(mut alive) = self.control.alive.lock() {
+            while *alive {
+                match self.control.finished.wait_timeout(alive, POLL) {
+                    Ok((next, _)) => alive = next,
+                    Err(_) => break,
+                }
+            }
         }
     }
 }
@@ -261,25 +277,29 @@ impl SnapshotCursor {
             alive: Mutex::new(true),
             finished: Condvar::new(),
         });
-        if let Ok(mut controls) = host.controls.lock() {
-            controls.retain(|control| control.strong_count() > 0);
-            controls.push(Arc::downgrade(&control));
-        }
         let (requests, receiver) = mpsc::channel();
         let (opened, opening) = oneshot::channel();
-        let shared = control.clone();
-        let thread = std::thread::Builder::new()
-            .name("rocky-cursor".into())
-            .spawn(move || serve(plan, receiver, opened, shared));
-        let mut cursor = Self {
+        let cursor = Self {
             columns: Vec::new(),
             revision: None,
             requests: Some(requests),
             control,
-            thread: None,
             count,
         };
-        cursor.thread = Some(thread.map_err(Error::Io)?);
+        let job = Job {
+            plan,
+            requests: receiver,
+            opened,
+            control: cursor.control.clone(),
+        };
+        if let Err(error) = host.lease(job) {
+            if let Ok(mut alive) = cursor.control.alive.lock() {
+                *alive = false;
+            }
+            cursor.control.finished.notify_all();
+            return Err(error);
+        }
+        let mut cursor = cursor;
         let opened = opening.await.map_err(|_| cursor.control.error())??;
         cursor.columns = opened.columns;
         cursor.revision = opened.revision;
@@ -346,31 +366,121 @@ fn engine(error: rusqlite::Error) -> Error {
     }
 }
 
-/// The cursor's thread: opens the snapshot, then answers requests until the
-/// handle goes away, a bound passes or the host closes.
-fn serve(
+struct Job {
     plan: CursorPlan,
     requests: mpsc::Receiver<Request>,
     opened: oneshot::Sender<Result<Opened, Error>>,
     control: Arc<Control>,
-) {
-    let end = (|| {
-        let connection = match sqlite::Connection::open_read_only(&plan.path) {
-            Ok(connection) => connection,
-            Err(error) => {
-                let _ = opened.send(Err(error.into()));
-                return End::Failed;
+}
+struct Worker {
+    jobs: mpsc::SyncSender<Job>,
+    busy: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+impl Drop for CursorHost {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+impl CursorHost {
+    fn lease(&self, job: Job) -> Result<(), Error> {
+        let mut workers = self.workers.lock().map_err(|_| Error::Closed)?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Closed);
+        }
+        let worker = match workers
+            .iter_mut()
+            .find(|worker| !worker.busy.load(Ordering::SeqCst))
+        {
+            Some(worker) => worker,
+            None => {
+                if workers.len() >= MAX_SESSION_CURSORS {
+                    return Err(Error::Quota {
+                        resource: "cursor workers",
+                        limit: MAX_SESSION_CURSORS,
+                    });
+                }
+                let (jobs, receiver) = mpsc::sync_channel::<Job>(1);
+                let busy = Arc::new(AtomicBool::new(false));
+                let working = busy.clone();
+                let thread = std::thread::Builder::new()
+                    .name("rocky-reader".into())
+                    .spawn(move || {
+                        let mut connection: Option<(PathBuf, sqlite::Connection)> = None;
+                        while let Ok(job) = receiver.recv() {
+                            let control = job.control.clone();
+                            serve(job, &mut connection);
+                            working.store(false, Ordering::SeqCst);
+                            if let Ok(mut alive) = control.alive.lock() {
+                                *alive = false;
+                            }
+                            control.finished.notify_all();
+                        }
+                    })
+                    .map_err(Error::Io)?;
+                workers.push(Worker { jobs, busy, thread });
+                workers.last_mut().ok_or(Error::Closed)?
             }
         };
-        let end = connection.hold(|raw| run(raw, &plan, &requests, opened, &control));
-        end.unwrap_or(End::Failed)
-    })();
-    control.end(end);
-    // The connection is closed: a closing host may continue.
-    if let Ok(mut alive) = control.alive.lock() {
-        *alive = false;
+        if let Ok(mut controls) = self.controls.lock() {
+            controls.retain(|control| control.strong_count() > 0);
+            controls.push(Arc::downgrade(&job.control));
+        }
+        worker.busy.store(true, Ordering::SeqCst);
+        worker.jobs.send(job).map_err(|_| Error::Closed)
     }
-    control.finished.notify_all();
+}
+fn serve(job: Job, connection: &mut Option<(PathBuf, sqlite::Connection)>) {
+    let Job {
+        plan,
+        requests,
+        opened,
+        control,
+    } = job;
+    let (end, reusable) = (|| {
+        if connection
+            .as_ref()
+            .is_none_or(|(path, _)| *path != plan.path)
+        {
+            match sqlite::Connection::open_read_only(&plan.path) {
+                Ok(opened) => *connection = Some((plan.path.clone(), opened)),
+                Err(error) => {
+                    let _ = opened.send(Err(error.into()));
+                    return (End::Failed, false);
+                }
+            }
+        }
+        let Some((_, connection)) = connection else {
+            return (End::Failed, false);
+        };
+        let (end, reusable) = connection
+            .hold(|raw| {
+                let end = run(raw, &plan, &requests, opened, &control);
+                (end, clean(raw).is_ok())
+            })
+            .unwrap_or((End::Failed, false));
+        (end, reusable)
+    })();
+    if !reusable {
+        *connection = None;
+    }
+    control.end(end);
+}
+fn clean(raw: &rusqlite::Connection) -> rusqlite::Result<()> {
+    raw.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)?;
+    raw.progress_handler(0, None::<fn() -> bool>)?;
+    if !raw.is_autocommit() {
+        raw.execute_batch("ROLLBACK")?;
+    }
+    raw.pragma_update(None, "query_only", 0)?;
+    let views = raw
+        .prepare("SELECT name FROM sqlite_temp_schema WHERE type='view'")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for view in views {
+        raw.execute_batch(&format!("DROP VIEW temp.\"{}\"", view.replace('"', "\"\"")))?;
+    }
+    Ok(())
 }
 
 fn run(
@@ -406,6 +516,12 @@ fn run(
                 None
             }
         };
+        if let Some((sql, expected)) = &plan.epoch {
+            let epoch: i64 = raw.query_row(sql, [], |row| row.get(0)).map_err(engine)?;
+            if u64::try_from(epoch).ok() != Some(*expected) {
+                return Err(Error::Conflict);
+            }
+        }
         if let Some(sql) = &plan.requires {
             let found = raw
                 .query_row(sql, [], |_| Ok(()))
@@ -722,6 +838,7 @@ mod tests {
             sql: sql.into(),
             params: Vec::new(),
             readable: vec!["items".into()],
+            epoch: None,
             revision: Some("SELECT count(*) FROM items".into()),
             limits,
             guard,
@@ -737,6 +854,59 @@ mod tests {
             page_rows: rows,
             ..CursorLimits::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_thousand_cursor_leases_reuse_the_worker_and_clear_temporary_views() {
+        let file = file(1);
+        let host = CursorHost::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        for _ in 0..1000 {
+            let mut plan = plan(&file, "SELECT * FROM leased", small(1), open());
+            plan.prelude
+                .push("CREATE TEMP VIEW leased AS SELECT id,title FROM items".into());
+            let mut cursor = SnapshotCursor::open(&host, count.clone(), plan)
+                .await
+                .unwrap();
+            assert_eq!(cursor.next().await.unwrap().rows.len(), 1);
+            drop(cursor);
+        }
+        assert_eq!(host.workers(), 1);
+        assert!(
+            SnapshotCursor::open(
+                &host,
+                count.clone(),
+                plan(&file, "SELECT * FROM leased", small(1), open())
+            )
+            .await
+            .is_err()
+        );
+        let mut cursor = SnapshotCursor::open(
+            &host,
+            count,
+            plan(&file, "SELECT id FROM items", small(1), open()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor.next().await.unwrap().rows.len(), 1);
+        drop(cursor);
+        host.close();
+        assert_eq!(host.workers(), 0);
+    }
+
+    #[tokio::test]
+    async fn readiness_from_another_commit_is_refused_inside_the_snapshot() {
+        let file = file(1);
+        let host = CursorHost::new();
+        let mut plan = plan(&file, "SELECT id FROM items", small(1), open());
+        plan.epoch = Some(("SELECT count(*) FROM items".into(), 1));
+        file.writer
+            .run_now("INSERT INTO items VALUES(2,'new')")
+            .unwrap();
+        assert!(matches!(
+            SnapshotCursor::open(&host, Arc::default(), plan).await,
+            Err(Error::Conflict)
+        ));
     }
 
     #[tokio::test]

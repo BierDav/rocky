@@ -147,7 +147,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?;
                 Ok(())
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
         }
         // A genesis-looking head after a previous dispatch may be forgotten
         // evidence. Never recreate that source log on a retry.
@@ -199,7 +199,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?;
                 Ok(())
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
         }
         let _ = coordinator
             .seal(
@@ -276,7 +276,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?;
                 Ok(())
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
             return Ok(StagedCloseStatus::Finality(proof));
         }
         let log = TipLog {

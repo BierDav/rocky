@@ -1,7 +1,7 @@
 use super::*;
 use crate::replica::group::GroupFault;
 use crate::storage::rows;
-use rocky_core::SqlValue;
+use rocky_core::{RowApplication, SqlValue};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
@@ -797,4 +797,57 @@ async fn measure_group_commit_throughput() {
             target.watermark().await.2
         );
     }
+}
+
+#[tokio::test]
+async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_the_cache() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let author = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    let member = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
+    let first = author
+        .author([71; 32], insert(&f, 1), vec![])
+        .await
+        .unwrap();
+    let second = author
+        .author([72; 32], insert(&f, 2), vec![])
+        .await
+        .unwrap();
+    let before = member.crypto_stats().await;
+    assert_eq!(
+        member.receive(first.clone()).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    let after = member.crypto_stats().await;
+    assert_eq!(after, (before.0 + 1, before.1 + 1));
+    assert_eq!(
+        member.receive(first.clone()).await.unwrap(),
+        ReceiveStatus::Duplicate
+    );
+    let revoked = revoking(
+        &f.publisher,
+        f.app().manifest().app,
+        &[],
+        &[first.chain().unwrap().credentials().0[0].id().unwrap()],
+    );
+    member.learn_revocations(&revoked).await.unwrap();
+    assert!(member.receive(second).await.is_err());
+}
+
+#[tokio::test]
+async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    let (entered, resume) = replica.pause_flush().await;
+    let author = replica.author([91; 32], insert(&f, 1), vec![]);
+    tokio::pin!(author);
+    tokio::select! {
+        result = &mut author => panic!("reply preceded the flush: {result:?}"),
+        result = entered => result.unwrap(),
+    }
+    let available = replica.inner.try_lock().is_ok();
+    resume.send(()).unwrap();
+    assert!(available, "fsync held the replica lock");
+    assert!(author.await.is_ok());
 }

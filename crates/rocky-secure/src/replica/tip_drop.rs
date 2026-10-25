@@ -236,7 +236,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         inner.publish_revision().await?;
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(count)
     }
 }

@@ -263,7 +263,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             Ok(())
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
     /// Retries the write carried into `log` as its first entry, once this
     /// node follows the tip and nothing committed there yet: the write was
@@ -334,7 +334,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let sequence = {
                 let mut inner = self.inner.lock().await;
                 let sequence = transaction!(inner, |inner| inner.next_sequence(log).await)?;
-                inner.flush()?;
+                drop(flush_guard(inner, &self.inner).await?);
                 sequence
             };
             let epoch = coordinator
@@ -425,7 +425,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 Ok(())
             })?;
-            inner.flush()?;
+            drop(flush_guard(inner, &self.inner).await?);
         }
         Box::pin(self.propose_staged(log, coordinator, peers)).await
     }

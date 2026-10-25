@@ -15,10 +15,11 @@ pub(in crate::tests) async fn state<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     let inner = replica.inner.lock().await;
-    // Rejection changes status buckets; each snapshot still proves every index exact.
+    // Rejection changes status buckets and the read epoch; projections and
+    // authenticated indexes must otherwise stay exact.
     inner.audit_positions_for_test().await.unwrap();
     let mut snapshot = Vec::new();
-    for row in rows(&inner.conn, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('secure_operations','secure_position_sources','secure_position_ranges','secure_log_ranges','secure_existence_counts') ORDER BY name").await.unwrap() {
+    for row in rows(&inner.conn, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('secure_operations','secure_position_sources','secure_position_ranges','secure_log_ranges','secure_existence_counts','secure_read_epoch') ORDER BY name").await.unwrap() {
         let [SqlValue::Text(table)] = row.as_slice() else {
             panic!("table name");
         };

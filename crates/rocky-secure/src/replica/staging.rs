@@ -310,7 +310,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("finality names another schema publication"));
         }
         inner.release_and_reload(&stage, Some(&finality)).await?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
 }

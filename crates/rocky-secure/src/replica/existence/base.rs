@@ -164,13 +164,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<ExistenceBaseAttachment>, Error> {
-        let mut inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
         let base = inner
             .existence_base(scope)
             .await?
             .filter(|base| !matches!(base.basis, ExistenceBasis::Local(_)));
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(base)
     }
     pub async fn existence_base_page(
@@ -182,7 +182,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<i64>,
         limit: usize,
     ) -> Result<ExistenceBasePage, Error> {
-        let mut inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
         if inner.archived_existence_base(scope, base).await?.is_none() {
             return Err(denied("existence base changed; restart transfer"));
@@ -202,7 +202,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let more = count < rows.len() || rows.len() == limit;
         rows.truncate(count);
         let next = more.then(|| rows.last().map(|row| row.0)).flatten();
-        inner.flush()?;
+        drop(flush_guard(inner, &self.inner).await?);
         Ok(ExistenceBasePage { base, rows, next })
     }
     /// Returns a durable cursor, resuming only the same authenticated base.
@@ -441,7 +441,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
 }

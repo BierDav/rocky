@@ -1061,7 +1061,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         // Frames leave the device: flush every commit they may include,
         // outside the lock so local writes continue meanwhile.
-        flusher.flush(commit)?;
+        flusher.run(commit).await?;
         Ok(page)
     }
     /// Records a peer's frontier as acknowledgment of everything below it.

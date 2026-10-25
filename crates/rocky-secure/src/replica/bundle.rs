@@ -422,15 +422,7 @@ impl<A: RowApplication> Inner<A> {
         first: &EncryptedFrame,
     ) -> Result<Result<Vec<EncryptedFrame>, Hash>, Error> {
         let operation = first.operation_ref()?;
-        let key = self.member_key(&operation.header.extensions)?;
-        let payload = self.decode_row_payload(
-            first,
-            &decrypt(
-                &key.key,
-                &encode(&operation.header.extensions)?,
-                first.body_bytes(),
-            )?,
-        )?;
+        let payload = self.row_payload(first)?;
         let membership = payload
             .membership()
             .ok_or_else(|| Error::Corrupt("bundle handle names a batch".into()))?;
@@ -774,7 +766,10 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(Err(WaitReason::OwnChain));
         }
-        if !self.dependencies_ready(frame, bundle).await? {
+        if !self
+            .dependencies_ready(frame, bundle, Some(&payload))
+            .await?
+        {
             return Ok(Err(WaitReason::Dependencies));
         }
         Ok(Ok((frame.clone(), payload, grants)))
@@ -786,16 +781,7 @@ impl<A: RowApplication> Inner<A> {
         index: usize,
         expected: &Membership,
     ) -> Result<RowPayload, Error> {
-        let operation = frame.operation_ref()?;
-        let key = self.member_key(&operation.header.extensions)?;
-        let payload = self.decode_row_payload(
-            frame,
-            &decrypt(
-                &key.key,
-                &encode(&operation.header.extensions)?,
-                frame.body_bytes(),
-            )?,
-        )?;
+        let payload = self.row_payload(frame)?;
         match payload.membership() {
             Some(membership)
                 if usize::from(membership.index) == index

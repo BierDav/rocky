@@ -559,7 +559,13 @@ pub(super) async fn write(replica: &EncryptedReplica<TypedRows>, sql: &str) {
     session(replica).await.run(sql, vec![]).await.unwrap();
 }
 pub(super) async fn select(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
-    session(replica).await.run(sql, vec![]).await.unwrap().rows
+    match session(replica).await.run(sql, vec![]).await {
+        Ok(result) => result.rows,
+        Err(error) => panic!(
+            "read {sql}: {error}; blockers: {:?}",
+            replica.blockers().await
+        ),
+    }
 }
 pub(super) async fn identity_insert(
     session: &SecureSql<TypedRows>,

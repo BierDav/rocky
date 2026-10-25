@@ -429,7 +429,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.authorize_held_reader(peer, chain, scope).await?;
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         let records = collect_rows(inner.conn.query(
             "SELECT f.hash,f.frame FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT 33",
             [encode(&scope)?, after.map(|hash| hash.as_bytes().to_vec()).unwrap_or_default()],

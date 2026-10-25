@@ -314,7 +314,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         inner.verified_at.remove(&id);
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         drop(inner);
         // Replay retained frames even when the peer has nothing new to send.
@@ -330,7 +330,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         inner.graph_for(domain)?;
         let settled = transaction!(inner, |inner| inner.settle_seal_rebootstrap(domain).await)?;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         Ok(settled)
     }

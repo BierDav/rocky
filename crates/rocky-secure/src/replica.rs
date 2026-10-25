@@ -9,6 +9,7 @@ pub(super) mod bundle;
 mod chains;
 pub(crate) mod checkpoint;
 mod compaction;
+mod crypto;
 pub use compaction::{CompactReport, CompactionStatus, FrameReplay, SealRebootstrap};
 mod constraints;
 mod coordinated;
@@ -297,6 +298,7 @@ pub(super) struct Inner<A> {
     pub(super) chain: Chain,
     /// Stored chains decoded recently, by digest.
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
+    crypto: Arc<crypto::Cache>,
     /// The last checkpoint statement decoded per scope number, newest or
     /// verified, with its bytes.
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
@@ -460,6 +462,13 @@ pub(super) struct Inner<A> {
 /// group's flush runs after the replica lock is released and readers and the
 /// next group do not wait behind it.
 pub(super) struct Flusher {
+    #[cfg(test)]
+    pause: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     wal: PathBuf,
     /// The last commit known flushed.
     durable: AtomicU64,
@@ -474,6 +483,15 @@ pub(super) struct Flusher {
     copy: std::sync::Mutex<Option<PathBuf>>,
 }
 impl Flusher {
+    async fn run(self: Arc<Self>, commit: u64) -> Result<(), Error> {
+        if self.durable() >= commit {
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(move || self.flush(commit))
+            .await
+            .map_err(|_| Error::Closed)?
+    }
+
     pub(super) fn durable(&self) -> u64 {
         self.durable.load(Ordering::Acquire)
     }
@@ -495,6 +513,11 @@ impl Flusher {
             return Err(Error::Io(std::io::Error::other(
                 "injected device flush failure",
             )));
+        }
+        #[cfg(test)]
+        if let Some((entered, resume)) = self.pause.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = resume.recv();
         }
         // `sync_all` is `F_FULLFSYNC` on Apple platforms, like `fullfsync=1`.
         // Windows requires write access for FlushFileBuffers.
@@ -532,6 +555,26 @@ impl Flusher {
             }
         }
         Ok(())
+    }
+}
+/// Releases the writer while forcing durability. Rechecking the commit after
+/// reacquiring prevents a serving call from including a newer unflushed write.
+async fn flush_guard<'a, A: RowApplication>(
+    mut inner: tokio::sync::MutexGuard<'a, Inner<A>>,
+    owner: &'a Mutex<Inner<A>>,
+) -> Result<tokio::sync::MutexGuard<'a, Inner<A>>, Error> {
+    let authority = inner.authority;
+    loop {
+        let (flusher, commit) = (inner.flusher.clone(), inner.commit);
+        if flusher.durable() >= commit {
+            return Ok(inner);
+        }
+        drop(inner);
+        flusher.run(commit).await?;
+        inner = owner.lock().await;
+        if inner.authority != authority {
+            return Err(Error::Conflict);
+        }
     }
 }
 /// A local commit that power loss may still remove. It is durable once
@@ -822,6 +865,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let (notifications, _) = watch::channel(0);
         let wal = PathBuf::from(wal);
         let flusher = Arc::new(Flusher {
+            #[cfg(test)]
+            pause: Default::default(),
             wal: wal.clone(),
             durable: AtomicU64::new(0),
             #[cfg(test)]
@@ -840,6 +885,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             app: Arc::new(app),
             chain: Chain::new(config.credentials.clone())?,
             chains: Default::default(),
+            crypto: Default::default(),
             decoded_checkpoints: Default::default(),
             tip_frontiers: Default::default(),
             record_dictionary: Default::default(),
@@ -1106,6 +1152,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(replica)
     }
+    #[cfg(test)]
+    pub(crate) async fn pause_flush(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        *self.inner.lock().await.flusher.pause.lock().unwrap() = Some((entered, resumed));
+        (waiting, resume)
+    }
     /// Wakes after a frame group commits, including keyless custody receipt.
     /// Duplicate incoming frames do not wake it; exports still require a flush.
     pub async fn observe_frames(&self) -> watch::Receiver<()> {
@@ -1220,6 +1278,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         exposed: bool,
         proofs: bool,
     ) -> Vec<Result<Buffered<ReceiveStatus>, Error>> {
+        let count = frames.len();
+        let frames = match self.preopen(frames).await {
+            Ok(frames) => frames,
+            Err(error) => return (0..count).map(|_| Err(group::shared(&error))).collect(),
+        };
         let mut work = Vec::new();
         let mut positions = Vec::new();
         let mut results: Vec<Option<Result<Buffered<ReceiveStatus>, Error>>> =
@@ -1410,7 +1473,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Flushes first: the status may be acknowledged to the sender.
     pub async fn receipt_status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
+        inner = flush_guard(inner, &self.inner).await?;
         inner.status(id).await
     }
     /// Merges `revocations` into the set this replica holds: the union of
@@ -1786,29 +1849,14 @@ impl<A: RowApplication> Inner<A> {
         let number = extension
             .author
             .ok_or_else(|| denied("node author number missing"))?;
+        let verified = self.verified_chain(credentials, &self.config.revocations, time)?;
         let grants = match &extension.partition {
-            Some(tuple) => credentials
-                .verify_partition_author(
-                    self.config.publisher,
-                    header.public_key,
-                    number,
-                    extension.scope,
-                    tuple,
-                    &self.config.revocations,
-                    time,
-                )
-                .map_err(credential)?,
-            None => credentials
-                .verify_author(
-                    self.config.publisher,
-                    header.public_key,
-                    number,
-                    extension.scope.table,
-                    &self.config.revocations,
-                    time,
-                )
-                .map_err(credential)?,
-        };
+            Some(tuple) => {
+                verified.partition_author(header.public_key, number, extension.scope, tuple, time)
+            }
+            None => verified.author(header.public_key, number, extension.scope.table, time),
+        }
+        .map_err(credential)?;
         if !grants.iter().any(|grant| {
             grant.scope == extension.scope
                 && grant
@@ -1939,8 +1987,9 @@ impl<A: RowApplication> Inner<A> {
             }
             _ => self.commit += 1,
         }
+        self.refresh_readers().await;
     }
-    /// Makes every commit so far durable; see `Flusher::flush`.
+    #[cfg(test)]
     pub(crate) fn flush(&mut self) -> Result<(), Error> {
         self.flusher.flush(self.commit)
     }

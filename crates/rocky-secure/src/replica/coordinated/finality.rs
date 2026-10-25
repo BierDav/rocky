@@ -297,7 +297,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.conn.execute("INSERT INTO secure_terminal_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET credentials=excluded.credentials", [node.as_bytes().to_vec(), bytes.clone()]).await?;
             Ok(())
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
 }
 impl<A: RowApplication> Inner<A> {

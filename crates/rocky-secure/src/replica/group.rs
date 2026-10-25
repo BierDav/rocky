@@ -147,9 +147,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if let Some(exposed) = exposed {
                 let flusher = inner.flusher.clone();
                 drop(inner);
-                // No await before the replies are out: a cancelled leader
-                // cannot hold back flushed results.
-                exposed.answer(&flusher);
+                // The blocking flush owns the replies even if this leader is cancelled.
+                exposed.answer(flusher).await;
                 inner = self.inner.lock().await;
             }
             // Replies are out; one bounded step keeps retained history in check.
@@ -165,7 +164,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if let Some(exposed) = exposed {
                     let flusher = inner.flusher.clone();
                     drop(inner);
-                    exposed.answer(&flusher);
+                    exposed.answer(flusher).await;
                 }
             }
         }
@@ -242,14 +241,18 @@ struct Exposed {
 }
 impl Exposed {
     /// One flush covers every exposed result in the group.
-    fn answer(self, flusher: &Flusher) {
-        let flushed = flusher.flush(self.commit);
-        for (reply, done) in self.replies {
-            let _ = reply.send(match &flushed {
-                Ok(()) => Ok((done, self.commit)),
-                Err(error) => Err(shared(error)),
-            });
-        }
+    async fn answer(self, flusher: Arc<Flusher>) {
+        // A cancelled leader still owes every queued caller its durable reply.
+        let _ = tokio::task::spawn_blocking(move || {
+            let flushed = flusher.flush(self.commit);
+            for (reply, done) in self.replies {
+                let _ = reply.send(match &flushed {
+                    Ok(()) => Ok((done, self.commit)),
+                    Err(error) => Err(shared(error)),
+                });
+            }
+        })
+        .await;
     }
 }
 
@@ -508,8 +511,10 @@ impl<A: RowApplication> Inner<A> {
         self.refuse_no_frames_contradiction(&operation.header)
             .await?;
         let extension = &operation.header.extensions;
-        if let Some(key) = self.opening_key(extension.scope, extension.generation)
-            && let Ok(plaintext) = decrypt(&key.key, &encode(extension)?, frame.body_bytes())
+        if self
+            .opening_key(extension.scope, extension.generation)
+            .is_some()
+            && let Ok(plaintext) = self.open_payload(frame)
         {
             RowPayload::check_formats(&plaintext)?;
         }
@@ -616,13 +621,15 @@ impl<A: RowApplication> Inner<A> {
 }
 
 /// The group's failure as reported to each of its callers.
-fn shared(error: &Error) -> Error {
+pub(super) fn shared(error: &Error) -> Error {
     match error {
         #[cfg(test)]
         Error::InjectedFailure => Error::InjectedFailure,
         Error::RetryExhausted => Error::RetryExhausted,
         Error::Closed => Error::Closed,
         Error::Conflict => Error::Conflict,
+        Error::Blocked(blockers) => Error::Blocked(blockers.clone()),
+        Error::Sql(error) => Error::Sql(error.clone()),
         Error::Backpressure => Error::Backpressure,
         Error::Quota { resource, limit } => Error::Quota {
             resource,

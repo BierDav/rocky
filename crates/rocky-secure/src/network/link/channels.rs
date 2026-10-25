@@ -67,6 +67,7 @@ struct Slot {
 }
 #[derive(Default)]
 struct State {
+    closed: bool,
     retired_frames: u64,
     next: u64,
     remote: u64,
@@ -127,6 +128,9 @@ impl Channels {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return Err(denied("link ended"));
+        }
         if started {
             if state.reconciling.contains_key(&direction) || generation < state.remote_reconcile {
                 return Err(denied("link reconcile lifecycle"));
@@ -157,6 +161,9 @@ impl Channels {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return Err(denied("link ended"));
+        }
         if let Packet::Open { .. } = packet {
             if frame.direction == self.handle.direction
                 || state.slots.contains_key(&key)
@@ -259,6 +266,9 @@ pub struct Reconcile {
 }
 impl Reconcile {
     pub async fn close(mut self) -> Result<(), Error> {
+        if self.handle.is_closed() {
+            return Err(denied("link ended"));
+        }
         timeout(
             TIMEOUT,
             self.handle.send.send(Frame::new(
@@ -286,7 +296,7 @@ impl Reconcile {
                 {
                     return Ok(());
                 }
-                if self.handle.send.is_closed() {
+                if self.handle.is_closed() {
                     return Err(denied("link ended before reconcile finish"));
                 }
                 events.changed().await.map_err(|_| denied("link ended"))?;
@@ -333,6 +343,19 @@ impl Handle {
     }
     pub fn is_closed(&self) -> bool {
         self.send.is_closed()
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .closed
+    }
+    /// Ends channel ownership even when the transport still owns its outgoing queue.
+    pub fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.closed = true;
+        state.slots.clear();
+        state.reconciling.clear();
+        self.events.send_replace(());
     }
     /// Called only after the link writer flushes the final reconcile marker.
     pub fn flushed_reconcile(&self, generation: u64) {
@@ -343,6 +366,9 @@ impl Handle {
     pub async fn begin_reconcile(&self) -> Result<Reconcile, Error> {
         let generation = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.closed {
+                return Err(denied("link ended"));
+            }
             if state.reconciling.contains_key(&self.direction) {
                 return Err(denied("link reconcile already active"));
             }
@@ -504,6 +530,9 @@ impl Handle {
                 events.borrow_and_update();
                 let reserved = {
                     let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    if state.closed {
+                        return Err(denied("link ended"));
+                    }
                     if let Some(channel) = (2..CHANNELS)
                         .find(|channel| !state.slots.contains_key(&(self.direction, *channel)))
                     {
@@ -589,6 +618,9 @@ impl Handle {
         (direction, channel): (bool, u16),
         packet: Packet,
     ) -> Result<(), Error> {
+        if self.is_closed() {
+            return Err(denied("link ended"));
+        }
         timeout(
             TIMEOUT,
             self.send.send(Frame {
@@ -780,14 +812,7 @@ impl Drop for Io {
 
 impl Drop for Channels {
     fn drop(&mut self) {
-        let mut state = self
-            .handle
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.slots.clear();
-        state.reconciling.clear();
-        self.handle.events.send_replace(());
+        self.handle.close();
     }
 }
 
@@ -870,6 +895,30 @@ mod tests {
             panic!("channel");
         };
         assert_eq!(io.receive().await.unwrap(), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn losing_the_channel_owner_wakes_reconcile_before_the_writer_drops_its_queue() {
+        let mut channels = channels();
+        let _outgoing = std::mem::replace(&mut channels.outgoing, mpsc::channel(1).1);
+        let handle = channels.handle.clone();
+        let reconcile = handle.begin_reconcile().await.unwrap();
+        let closing = reconcile.close();
+        tokio::pin!(closing);
+        tokio::select! {
+            result = &mut closing => panic!("reconcile finished before writer or shutdown: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        drop(channels);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut closing)
+                .await
+                .expect("shutdown did not wake reconcile")
+                .is_err()
+        );
+        assert!(handle.is_closed());
+        assert!(handle.open().await.is_err());
+        assert!(handle.begin_reconcile().await.is_err());
     }
 
     #[tokio::test]

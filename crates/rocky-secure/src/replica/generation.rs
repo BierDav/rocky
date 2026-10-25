@@ -2,7 +2,7 @@
 use super::*;
 use rocky_core::{ApplicationManifest, Generation};
 
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v36";
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v37";
 pub(super) fn identity(tip: TipId, node: PublicKey) -> Result<Vec<u8>, Error> {
     encode(&(FILE_IDENTITY, tip, node))
 }

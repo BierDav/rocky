@@ -349,6 +349,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
-        inner.flush()
+        flush_guard(inner, &self.inner).await.map(|_| ())
     }
 }

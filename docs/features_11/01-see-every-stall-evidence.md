@@ -92,12 +92,12 @@ binaries of `746c9afb` and of this change, no subscriber installed),
 | Run | Base `746c9afb` | This change |
 | --- | --- | --- |
 | 1 | 37.07 s | 39.74 s |
-| 2 | 28.40 s | PENDING |
+| 2 | 28.40 s | 44.76 s |
 
 Not verified. The machine was shared with another workspace compiling and
-running `rocky-sdk` tests (load average 44–57 on 18 cores), so runs of the
-same binary differ by 30 %. These numbers cannot confirm or refute the 3 %
-gate; rerun both binaries alternately on an idle machine.
+running `rocky-sdk` tests (load average 44–69 on 18 cores), so runs of the
+same binary differ by 30 % or more. These numbers cannot confirm or
+refute the 3 % gate; rerun both binaries alternately on an idle machine.
 
 ## Checks
 

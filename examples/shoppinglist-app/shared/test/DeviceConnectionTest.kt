@@ -7,7 +7,7 @@ import kotlin.test.*
 
 class DeviceConnectionTest {
     private val attempt = AttemptObservation(1u, "node", AttemptOperation.Reconcile, AttemptStage.Reconciliation, 989_000u, 990_000u, 1000u, AttemptOutcome.Completed, null)
-    private val peer = Peer("node", false, true, "discovery", "selected_local", emptyList(), true, PeerLink(LinkState.Open, 900u, null, emptyList()), listOf(attempt), null, null)
+    private val peer = Peer("node", false, true, "discovery", "selected_local", emptyList(), true, PeerLink(LinkState.Open, 900u, null, emptyList()), listOf(attempt), null, null, null)
 
     @Test fun `live timer follows the current link and resets on reconnect`() {
         assertEquals("Link open for 1m 40s", connectionSummary(peer, 1_000_000).title)

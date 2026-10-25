@@ -46,7 +46,9 @@ impl std::error::Error for Learned {}
 pub(crate) struct Moved {
     pub pulled: usize,
     pub pushed: usize,
+    /// Encoded bytes received.
     pub bytes: usize,
+    pub sent: usize,
     /// The checkpoint a rebootstrap imported, with the held operations it superseded.
     pub checkpoint: Option<(rocky_core::Commitment, u64)>,
 }
@@ -58,6 +60,7 @@ impl Moved {
         self.pulled += other.pulled;
         self.pushed += other.pushed;
         self.bytes += other.bytes;
+        self.sent += other.sent;
         self.checkpoint = other.checkpoint.or(self.checkpoint);
     }
 }
@@ -72,9 +75,12 @@ pub(crate) struct Transfer {
     /// Scopes the peer restores from a checkpoint, as it is importing them
     /// or behind this device's pruned prefix: no history was pushed.
     pub waiting: Vec<ResourceScope>,
+    /// The scope that was syncing when the exchange failed.
+    pub failed: Option<ResourceScope>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
+        self.failed = other.failed.or(self.failed);
         for (scope, moved) in other.scopes {
             self.add(scope, moved);
         }
@@ -375,6 +381,7 @@ async fn rows(
             }
         }
         for scope in &exchange.changed {
+            transfer.failed = Some(*scope);
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session
                 .catch_up_with_state(replica, *scope, QUOTA, true)
@@ -474,12 +481,14 @@ async fn rows(
                 transfer.wait(&[*scope]);
             }
             moved.pushed = pushed.frames;
+            moved.sent = pushed.bytes;
             transfer.add(*scope, moved);
             if pushed.exhausted {
                 exhausted = true;
                 break;
             }
         }
+        transfer.failed = None;
         // Existence logs of referenced tables, held or not (`docs/runtime/existence-logs.md`).
         if !exhausted {
             for scope in replica.existence_scopes().await? {

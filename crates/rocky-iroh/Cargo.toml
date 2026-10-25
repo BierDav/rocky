@@ -14,6 +14,7 @@ qualification = ["rocky-core/qualification"]
 test-utils = ["iroh/test-utils"]
 
 [dependencies]
+tracing.workspace = true
 rocky-core.workspace = true
 iroh = "1.3"
 iroh-dns = "1.3"

@@ -344,7 +344,7 @@ impl<A: RowApplication> Inner<A> {
             {
                 match self.hold_closed_frame(&frame, now()?).await? {
                     Outcome::Applied => held += 1,
-                    Outcome::Waiting => {
+                    Outcome::Waiting(_) => {
                         return Err(denied("cannot leave an incomplete held bundle"));
                     }
                     Outcome::Rejected(reason) => return Err(denied(&reason)),

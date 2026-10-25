@@ -7,7 +7,7 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-license = "FSL-1.1-ALv2"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [workspace.dependencies]
@@ -19,6 +19,9 @@ rocky-storage = { path = "crates/rocky-storage" }
 rocky-coordinator = { path = "crates/rocky-coordinator" }
 rocky-iroh = { path = "crates/rocky-iroh" }
 todo-app = { path = "examples/todo-app" }
+# Structured spans and events; Rocky crates never install a subscriber.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.22", default-features = false, features = ["registry", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

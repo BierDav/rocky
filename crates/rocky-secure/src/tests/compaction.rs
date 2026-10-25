@@ -766,6 +766,34 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     );
     // A keeps what it holds and takes the pruned frames from B again.
     a.replay_at_seals(scope, true).await.unwrap();
+    let label = crate::scope_label(&scope);
+    let waiting = a.blockers().await.unwrap();
+    use super::blockers::assert_named;
+    assert_named(
+        &waiting,
+        &label,
+        |kind| *kind == crate::BlockerKind::RestorationGuard,
+        crate::ClearsBy::AnyPeer,
+    );
+    let refusal = super::blockers::refused(
+        identity_insert(
+            &session(&a).await,
+            "INSERT INTO items(key,title) VALUES(?,?)",
+            vec![text("r"), text("refused")],
+        )
+        .await,
+    );
+    // The write is refused for the scope's own rebootstrap, among the rest.
+    assert_named(
+        &refusal,
+        &label,
+        |kind| matches!(kind, crate::BlockerKind::SealRebootstrap { .. }),
+        crate::ClearsBy::AnyPeer,
+    );
+    assert!(
+        refusal.iter().all(|blocker| waiting.contains(blocker)) && !refusal.is_empty(),
+        "{refusal:?} in {waiting:?}"
+    );
     assert_eq!(scalar(&a,"SELECT count(*) FROM secure_seal_anchors a JOIN secure_scope_state s ON s.id=a.scope WHERE s.scope=(SELECT scope FROM secure_evicted_logs LIMIT 1)").await,0);
     assert!(
         a.compaction_status(lineage.domain)
@@ -782,6 +810,17 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
             .unwrap()
             .rebootstrap,
         None
+    );
+    let cleared = a.blockers().await.unwrap();
+    assert!(
+        cleared.iter().all(|blocker| !matches!(
+            blocker.kind,
+            crate::BlockerKind::RestorationGuard
+                | crate::BlockerKind::LostCompaction
+                | crate::BlockerKind::SealRebootstrap { .. }
+                | crate::BlockerKind::PendingFrames { .. }
+        )),
+        "{cleared:?}"
     );
     assert_eq!(titles(&a).await, titles(&b).await);
     assert_eq!(

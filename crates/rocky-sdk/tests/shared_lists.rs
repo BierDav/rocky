@@ -218,6 +218,16 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         .call(json!({"type":"tips","action":"compact"}))
         .await?;
     writer.call(json!({"type":"sync"})).await?;
+    // The unused partition is not unverified history.
+    let status = writer.call(json!({"type":"status"})).await?;
+    assert!(
+        status["data"]["blockers"]
+            .as_array()
+            .ok_or("blockers")?
+            .iter()
+            .all(|blocker| blocker["kind"]["type"] != "seal_rebootstrap"),
+        "{status}"
+    );
     let again = writer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
@@ -255,9 +265,23 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
         .await
         .expect_err("the unrelated member still needs a verified state");
     assert!(
-        error.to_string().contains("verified seal rebootstrap"),
+        error.to_string().contains("seal rebootstrap (replay="),
         "{error}"
     );
+    // Status names the same blockers, with what clears them.
+    let status = writer.call(json!({"type":"status"})).await?;
+    let rebootstraps: Vec<&Value> = status["data"]["blockers"]
+        .as_array()
+        .ok_or("blockers")?
+        .iter()
+        .filter(|blocker| blocker["kind"]["type"] == "seal_rebootstrap")
+        .collect();
+    assert!(!rebootstraps.is_empty(), "{status}");
+    for blocker in rebootstraps {
+        assert_eq!(blocker["clears_by"]["type"], "any_peer", "{blocker}");
+        let scope = blocker["scope"].as_str().ok_or("scope")?;
+        assert!(error.to_string().contains(scope), "{scope}: {error}");
+    }
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }

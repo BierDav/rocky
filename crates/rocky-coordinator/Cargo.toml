@@ -13,6 +13,7 @@ default = ["iroh"]
 iroh = ["dep:rocky-iroh"]
 
 [dependencies]
+tracing.workspace = true
 rocky-core.workspace = true
 rocky-iroh = { workspace = true, optional = true }
 rocky-credentials.workspace = true

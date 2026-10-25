@@ -491,6 +491,8 @@ impl<A: RowApplication> Inner<A> {
         admission: Admission,
         opened_payload: Option<&RowPayload>,
     ) -> Result<(), Error> {
+        self.rows_written
+            .fetch_add(materialized.len() as u64, Ordering::Relaxed);
         let operation = frame.operation_ref()?;
         let decoded;
         let payload = match opened_payload {

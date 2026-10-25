@@ -73,6 +73,22 @@ impl VoterService {
         log: TipLog,
         pending: crate::coordinated::Pending,
     ) -> Result<Outcome, CoordinationError> {
+        let span = tracing::debug_span!(
+            "resolve",
+            position = pending.position,
+            outcome = tracing::field::Empty
+        );
+        let result =
+            tracing::Instrument::instrument(self.resolve_log_inner(log, pending), span.clone())
+                .await;
+        span.record("outcome", outcome(&result));
+        result
+    }
+    async fn resolve_log_inner(
+        &self,
+        log: TipLog,
+        pending: crate::coordinated::Pending,
+    ) -> Result<Outcome, CoordinationError> {
         let term = self.log_leader().await?;
         let acknowledgments = self
             .acknowledgments
@@ -130,6 +146,25 @@ impl VoterService {
         log: TipLog,
         pending: &crate::coordinated::Pending,
     ) -> Result<Outcome, CoordinationError> {
+        let span = tracing::debug_span!(
+            "acknowledge",
+            position = pending.position,
+            outcome = tracing::field::Empty
+        );
+        let result = tracing::Instrument::instrument(
+            self.acknowledge_log_inner(request, log, pending),
+            span.clone(),
+        )
+        .await;
+        span.record("outcome", outcome(&result));
+        result
+    }
+    async fn acknowledge_log_inner(
+        &self,
+        request: &Request,
+        log: TipLog,
+        pending: &crate::coordinated::Pending,
+    ) -> Result<Outcome, CoordinationError> {
         let term = self.log_leader().await?;
         let head = self.store.log_head(log).await?;
         if head.pending.as_ref() != Some(pending) {
@@ -165,5 +200,12 @@ impl VoterService {
             )),
             result => result,
         }
+    }
+}
+
+fn outcome(result: &Result<Outcome, CoordinationError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(error) => error.category(),
     }
 }

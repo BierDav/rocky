@@ -3305,6 +3305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3348,6 +3349,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3380,6 +3382,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3396,6 +3399,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3428,6 +3432,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "tracing",
+ "tracing-subscriber",
  "uniffi",
  "uniffi_bindgen",
  "uniffi_meta",

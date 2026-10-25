@@ -106,6 +106,12 @@ impl Node {
                     .get(&key)
                     .copied(),
                 retry,
+                last_sync: self
+                    .last_syncs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&node)
+                    .cloned(),
             });
         }
         Ok(peers)
@@ -279,6 +285,7 @@ impl Node {
                         tables: plan.tables as u64,
                     }),
                 },
+                blockers: self.blockers().await?,
                 bootstrap_pending,
                 bootstrap: serde_json::from_value(self.bootstrap_progress().await?)?,
                 imports,
@@ -329,6 +336,46 @@ impl Node {
 }
 
 impl Node {
+    /// The replica's blockers and the bootstrap intent's: scopes it still
+    /// imports and the inviter a joined device waits for.
+    pub(super) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {
+        use rocky_core::{Blocker, BlockerKind, ClearsBy, domain_label, scope_label};
+        let mut blockers = self.replica.blockers().await?;
+        let marker = self.path.with_file_name("bootstrap.json");
+        let intent: Value = match std::fs::read(&marker) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(blockers),
+            Err(error) => return Err(error.into()),
+        };
+        let since = std::fs::metadata(&marker)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs());
+        for scope in self.bootstrap_pending(&intent).await.unwrap_or_default() {
+            blockers.push(Blocker {
+                scope: scope_label(&scope),
+                kind: BlockerKind::BootstrapMarker,
+                clears_by: ClearsBy::AnyPeer,
+                since,
+            });
+        }
+        if let Some(inviter) = intent.get("inviter").and_then(Value::as_str)
+            && let Ok(key) = inviter.parse::<PublicKey>()
+            && !self.settings.lock().await.revocations.revokes(&key)
+        {
+            blockers.push(Blocker {
+                scope: domain_label(&self.domain().scope),
+                kind: BlockerKind::AwaitingInviter,
+                clears_by: ClearsBy::Peer {
+                    node: inviter.to_owned(),
+                },
+                since,
+            });
+        }
+        blockers.sort();
+        Ok(blockers)
+    }
     pub(super) fn skipped_peer(node: String, skip: SkipReason) -> PeerReconciliation {
         PeerReconciliation {
             node,
@@ -339,6 +386,8 @@ impl Node {
             waiting: Vec::new(),
             upgrade_required: false,
             retry_pending: false,
+            scopes: Vec::new(),
+            timeouts: Vec::new(),
         }
     }
     pub(super) fn peer_reconciliation(
@@ -362,7 +411,10 @@ impl Node {
             waiting: Vec::new(),
             upgrade_required: false,
             retry_pending: result.is_err(),
+            scopes: Vec::new(),
+            timeouts: Vec::new(),
         };
+        report.timeouts = timeouts(&report.attempts);
         let partial = self.observations.partial_transfer(&node);
         let transfer = match result {
             Ok((retry, transfer)) => {
@@ -389,9 +441,17 @@ impl Node {
                     scope: self.observed_scope(*scope),
                     pulled: moved.pulled as u64,
                     pushed: moved.pushed as u64,
-                    bytes: moved.bytes as u64,
+                    received_bytes: moved.bytes as u64,
+                    sent_bytes: moved.sent as u64,
                     checkpoint: moved.checkpoint.map(|(id, _)| HEXLOWER.encode(&id)),
                     superseded: moved.checkpoint.map(|(_, rows)| rows),
+                })
+                .collect();
+            report.scopes = scope_outcomes(transfer, result.is_err())
+                .into_iter()
+                .map(|(scope, outcome)| ScopeOutcome {
+                    scope: self.observed_scope(scope),
+                    outcome,
                 })
                 .collect();
         }
@@ -421,17 +481,42 @@ impl Node {
             Ok((json!({"state":"idle"}), false))
         } else {
             let transport = transport.ok_or(ServiceError::NetworkRequired("sync"))?;
-            let before = self.replica.followed_tip().await;
-            let result = self
-                .run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
-                .await;
-            // A pass that switched the followed tip syncs the new tip once more.
-            if result.is_ok() && self.replica.followed_tip().await != before {
-                self.run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
-                    .await
-            } else {
-                result
-            }
+            let span = tracing::info_span!(
+                "sync_pass",
+                automatic,
+                retry_only,
+                peers = tracing::field::Empty,
+                outcome = tracing::field::Empty
+            );
+            let result = tracing::Instrument::instrument(
+                async {
+                    let before = self.replica.followed_tip().await;
+                    let result = self
+                        .run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
+                        .await;
+                    // A pass that switched the followed tip syncs the new tip once more.
+                    if result.is_ok() && self.replica.followed_tip().await != before {
+                        self.run_sync_pass(
+                            transport,
+                            automatic,
+                            retry_only,
+                            &peers,
+                            first_attempt_id,
+                        )
+                        .await
+                    } else {
+                        result
+                    }
+                },
+                span.clone(),
+            )
+            .await;
+            span.record(
+                "peers",
+                peers.lock().unwrap_or_else(PoisonError::into_inner).len() as u64,
+            );
+            span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+            result
         };
         // A received move may have switched this device to another line.
         if result.is_ok() {
@@ -453,6 +538,15 @@ impl Node {
             skip,
             peers,
         };
+        {
+            let mut last = self
+                .last_syncs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for peer in report.peers.iter().filter(|peer| peer.skip.is_none()) {
+                last.insert(peer.node.clone(), peer.clone());
+            }
+        }
         *self
             .last_reconciliation
             .lock()
@@ -482,8 +576,75 @@ impl Node {
             prior.refused = next.refused;
             prior.waiting = next.waiting;
             prior.retry_pending = next.retry_pending;
+            prior.scopes = next.scopes;
+            for timeout in next.timeouts {
+                match prior
+                    .timeouts
+                    .iter_mut()
+                    .find(|known| known.kind == timeout.kind)
+                {
+                    Some(known) => known.count += timeout.count,
+                    None => prior.timeouts.push(timeout),
+                }
+            }
         } else {
             reports.push(next);
         }
     }
+}
+
+/// Each scope an exchange reached and how it ended.
+fn scope_outcomes(
+    transfer: &crate::sync::Transfer,
+    failed: bool,
+) -> Vec<(ResourceScope, ScopeSyncOutcome)> {
+    let mut outcomes: Vec<(ResourceScope, ScopeSyncOutcome)> = Vec::new();
+    let mut set = |scope: ResourceScope, outcome: ScopeSyncOutcome| match outcomes
+        .iter_mut()
+        .find(|(known, _)| *known == scope)
+    {
+        Some((_, known)) => *known = outcome,
+        None => outcomes.push((scope, outcome)),
+    };
+    for scope in transfer
+        .held
+        .iter()
+        .chain(transfer.scopes.iter().map(|(scope, _)| scope))
+    {
+        set(*scope, ScopeSyncOutcome::Synced);
+    }
+    for scope in &transfer.refused {
+        set(*scope, ScopeSyncOutcome::Refused);
+    }
+    for scope in &transfer.waiting {
+        set(*scope, ScopeSyncOutcome::PeerImporting);
+    }
+    if failed && let Some(scope) = transfer.failed {
+        set(scope, ScopeSyncOutcome::Failed);
+    }
+    outcomes
+}
+/// Timed-out attempts by the kind of timeout their failure names.
+fn timeouts(attempts: &[AttemptObservation]) -> Vec<TimeoutCount> {
+    let mut counts: Vec<TimeoutCount> = Vec::new();
+    for failure in attempts
+        .iter()
+        .filter_map(|attempt| attempt.failure.as_ref())
+    {
+        if failure.kind != FailureKind::Timeout {
+            continue;
+        }
+        let kind = failure
+            .detail
+            .rsplit(": ")
+            .next()
+            .filter(|last| last.ends_with("timeout"))
+            .unwrap_or("timeout")
+            .replace(' ', "_");
+        match counts.iter_mut().find(|known| known.kind == kind) {
+            Some(known) => known.count += 1,
+            None => counts.push(TimeoutCount { kind, count: 1 }),
+        }
+    }
+    counts
 }

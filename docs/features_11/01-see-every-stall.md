@@ -1,7 +1,9 @@
 # 1. See every stall
 
-Status: proposed. Owner: `rocky-secure` readiness, compaction and apply
-gates; `rocky-sdk` status and refusals; the native binding's event sink.
+Status: implemented 2026-10-25; device checks not verified, see the
+[evidence](01-see-every-stall-evidence.md). Owner: `rocky-secure`
+readiness, compaction and apply gates; `rocky-sdk` status and refusals;
+the native binding's event sink.
 Depends on nothing. Effort: one to two weeks. Follow the
 [execution contract](README.md#agent-execution-contract).
 

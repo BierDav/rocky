@@ -15,6 +15,7 @@ default = ["iroh"]
 iroh = ["dep:rocky-iroh", "dep:rocky-coordinator"]
 
 [dependencies]
+tracing.workspace = true
 rocky-core.workspace = true
 rocky-storage.workspace = true
 rocky-credentials.workspace = true
@@ -39,6 +40,7 @@ tokio = { version = "1", features = ["test-util"] }
 rocky-coordinator.workspace = true
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "3"
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

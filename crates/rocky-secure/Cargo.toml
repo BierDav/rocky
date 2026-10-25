@@ -12,6 +12,7 @@ publish.workspace = true
 qualification = ["rocky-storage/qualification"]
 
 [dependencies]
+tracing.workspace = true
 rocky-core.workspace = true
 rocky-credentials.workspace = true
 rocky-storage.workspace = true

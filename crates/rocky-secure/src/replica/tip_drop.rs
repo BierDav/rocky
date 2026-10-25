@@ -287,28 +287,4 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(false)
     }
-    pub(super) async fn ensure_tip_restored(&self) -> Result<(), Error> {
-        let graph = self
-            .graphs
-            .values()
-            .find(|graph| graph.schema_any(self.workspace.tip).is_ok());
-        let mut missing = self.conn.query(
-            "SELECT tip FROM secure_dropped_tip_frames d WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=d.hash)", ()).await?;
-        while let Some(row) = missing.next().await? {
-            let dropped: TipId = decode(&row.get::<Vec<u8>>(0)?)?;
-            let mut cursor = self.workspace.tip;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                if dropped == cursor {
-                    return Err(denied("catch up the dropped tip before authoring"));
-                }
-                let Some(graph) = graph else { break };
-                let Some((parent, _)) = Self::tip_parent(graph, cursor)? else {
-                    break;
-                };
-                cursor = parent;
-            }
-        }
-        Ok(())
-    }
 }

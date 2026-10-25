@@ -6,18 +6,7 @@
 use super::*;
 use rocky_credentials::{CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement};
 
-/// How a scope without a listed checkpoint is rebuilt from frames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameReplay {
-    /// It holds every frame it applied: its rows are rebuilt from them.
-    Local,
-    /// Frames were pruned: it keeps the ones it holds and the rest come
-    /// again from a peer that retains them.
-    Peers,
-    /// Its existence records were released at a seal off the path; only a
-    /// checkpoint with a signed existence base replaces them.
-    Unavailable,
-}
+pub use rocky_core::FrameReplay;
 
 /// A held scope whose replay base must move to a seal of the followed path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,69 +54,19 @@ impl<A: RowApplication> Inner<A> {
             }
         })
     }
-    /// Read admission of `scope`: the workspace-wide blockers, then only
-    /// this scope's own state. A scope another scope's rebootstrap waits
-    /// for stays readable; one that waits itself reads only the verified
-    /// pages of a direct import. Authoring keeps `require_workspace_base`.
+    /// Read admission of `scope`; see `readable_blockers`.
     pub(in crate::replica) async fn require_scope_readable(
         &self,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        let domain = scope.domain;
-        let waits = || denied("the workspace waits for a verified seal rebootstrap");
-        if self.graphs.contains_key(&domain) {
-            for (_, id) in self.domain_scopes(domain).await? {
-                if self.unsealed_import(id).await? {
-                    return Err(waits());
-                }
-            }
-        }
-        if self.compaction_lost(domain).await?.is_some() {
-            return Err(waits());
-        }
-        if self
-            .seal_rebootstraps(domain)
-            .await?
-            .iter()
-            .all(|need| need.scope != scope)
-            || self.authenticated_direct_import(scope).await?
-        {
-            return Ok(());
-        }
-        Err(waits())
+        blockers::refuse(self.readable_blockers(scope).await?)
     }
+    /// Authoring admission in `domain`; see `workspace_blockers`.
     pub(in crate::replica) async fn require_workspace_base(
         &self,
         domain: Scope,
     ) -> Result<(), Error> {
-        if self.graphs.contains_key(&domain) {
-            // An evicted scope reads as unavailable; its own log returning
-            // holds back only authoring.
-            for (_, id) in self.domain_scopes(domain).await? {
-                if self.unsealed_import(id).await? {
-                    return Err(denied(
-                        "the workspace waits for a verified seal rebootstrap: unsealed import",
-                    ));
-                }
-            }
-        }
-        if self.compaction_lost(domain).await?.is_some() {
-            return Err(denied(
-                "the workspace waits for a verified seal rebootstrap: lost compaction",
-            ));
-        }
-        let needs = self.seal_rebootstraps(domain).await?;
-        if let Some(need) = needs.first() {
-            return Err(denied(&format!(
-                "the workspace waits for a verified seal rebootstrap: {} scopes; first table={:02x?} encryption={:02x?} replay={:?} listed={}",
-                needs.len(),
-                &need.scope.table[..4],
-                &need.scope.encryption[..4],
-                need.replay,
-                need.listed.len(),
-            )));
-        }
-        Ok(())
+        blockers::refuse(self.workspace_blockers(domain).await?)
     }
     pub(in crate::replica) async fn seal_rebootstraps(
         &self,

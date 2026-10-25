@@ -317,7 +317,7 @@ pub struct RebootstrapReport {
 pub(in crate::replica) struct Staging {
     pub(in crate::replica) signed: SignedCheckpoint,
     pub(super) cursor: Option<Commitment>,
-    pub(super) complete: bool,
+    pub(in crate::replica) complete: bool,
     pub(super) sets: Sets,
     /// The scope held nothing when the import began: verified pages go
     /// straight into its stored rows and projection.
@@ -419,12 +419,6 @@ impl<A: RowApplication> Inner<A> {
             cursor = parent;
         }
         Ok(false)
-    }
-    pub(in crate::replica) async fn unsealed_import(&self, id: i64) -> Result<bool, Error> {
-        Ok(self
-            .staging(id)
-            .await?
-            .is_some_and(|staging| staging.signed.statement.seal.is_none()))
     }
     pub(in crate::replica) async fn staging(&self, id: i64) -> Result<Option<Staging>, Error> {
         let mut result = self
@@ -1543,6 +1537,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// its projection, readable once the page commits; otherwise they are
     /// staged for the switch.
     pub async fn stage_checkpoint_page(&self, page: CheckpointPage) -> Result<(), Error> {
+        let span = tracing::debug_span!(
+            "checkpoint_page",
+            scope = rocky_core::scope_label(&page.scope),
+            outcome = tracing::field::Empty
+        );
+        let result =
+            tracing::Instrument::instrument(self.stage_checkpoint_page_inner(page), span.clone())
+                .await;
+        crate::network::trace::outcome(&span, &result);
+        result
+    }
+    async fn stage_checkpoint_page_inner(&self, page: CheckpointPage) -> Result<(), Error> {
         let scope = page.scope;
         let (checkpoint, after) = (page.checkpoint, page.after);
         let (key, signed, cursor, publisher, known_headers) = {
@@ -1937,7 +1943,7 @@ impl<A: RowApplication> Inner<A> {
                     None => report.reapplied.push(hash),
                 },
                 incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
-                incoming::Outcome::Waiting => report.pending.push(hash),
+                incoming::Outcome::Waiting(_) => report.pending.push(hash),
             }
         }
         self.reseed_ledger(scope, id).await?;

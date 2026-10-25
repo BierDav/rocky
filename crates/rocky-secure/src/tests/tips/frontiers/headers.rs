@@ -754,3 +754,39 @@ async fn shared_parsing_keeps_frontier_hash_author_and_live_status_checks() {
     target.receive(frames[1].clone()).await.unwrap();
     target.audit(f.public).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_pending_frame_names_why_it_waits_until_it_applies() {
+    let (f, _dir, target, frames) = pending().await;
+    let blockers = target.blockers().await.unwrap();
+    let pending: Vec<_> = blockers
+        .iter()
+        .filter_map(|blocker| match blocker.kind {
+            crate::BlockerKind::PendingFrames { reason, count } => Some((
+                blocker.scope.clone(),
+                reason,
+                count,
+                blocker.clears_by.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pending,
+        vec![(
+            crate::scope_label(&f.public),
+            crate::WaitReason::Dependencies,
+            1,
+            crate::ClearsBy::AnyPeer
+        )]
+    );
+    target.receive(frames[1].clone()).await.unwrap();
+    assert!(
+        target
+            .blockers()
+            .await
+            .unwrap()
+            .iter()
+            .all(|blocker| !matches!(blocker.kind, crate::BlockerKind::PendingFrames { .. }))
+    );
+}

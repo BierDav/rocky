@@ -146,6 +146,18 @@ fn timed_out(message: &'static str) -> Error {
 impl Link {
     /// Both ends confirm their independent link budget before any data channel opens.
     pub async fn ready(&mut self, persistent: bool) -> Result<bool, Error> {
+        let span = tracing::debug_span!(
+            "ready",
+            peer = crate::network::trace::peer(&self.peer),
+            persistent,
+            outcome = tracing::field::Empty
+        );
+        let result =
+            tracing::Instrument::instrument(self.ready_inner(persistent), span.clone()).await;
+        crate::network::trace::outcome(&span, &result);
+        result
+    }
+    async fn ready_inner(&mut self, persistent: bool) -> Result<bool, Error> {
         let sent = self
             .writer
             .send(Frame::new(self.direction, Message::Ready { persistent }))
@@ -224,6 +236,32 @@ impl Link {
         .ok_or_else(|| denied("link handshake required"))
     }
     async fn open_as<A: RowApplication>(
+        stream: impl SessionStream + 'static,
+        replica: &EncryptedReplica<A>,
+        local: (PrivateKey, CredentialChain),
+        expected: Option<PublicKey>,
+        version: (u32, bool),
+    ) -> Result<Option<Self>, Error> {
+        let span = tracing::debug_span!(
+            "admission",
+            dialing = expected.is_some(),
+            peer = tracing::field::Empty,
+            scopes = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let result = tracing::Instrument::instrument(
+            Self::admit(stream, replica, local, expected, version),
+            span.clone(),
+        )
+        .await;
+        if let Ok(Some(link)) = &result {
+            span.record("peer", crate::network::trace::peer(&link.peer));
+            span.record("scopes", link.held.len() as u64);
+        }
+        crate::network::trace::outcome(&span, &result);
+        result
+    }
+    async fn admit<A: RowApplication>(
         stream: impl SessionStream + 'static,
         replica: &EncryptedReplica<A>,
         (local, credentials): (PrivateKey, CredentialChain),

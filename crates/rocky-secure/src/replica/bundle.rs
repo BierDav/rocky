@@ -526,7 +526,7 @@ impl<A: RowApplication> Inner<A> {
                 .member(opening.author.unwrap_or(author), opening)
                 .await?
             {
-                Member::Missing => return Ok(Outcome::Waiting),
+                Member::Missing => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
                 Member::Settled(frame) => settled.extend(frame.map(|frame| (*index, frame))),
                 Member::Rejected => rejected = true,
                 Member::Pending(frame) => pending.push((*index, frame)),
@@ -553,8 +553,8 @@ impl<A: RowApplication> Inner<A> {
                 .open_member(frame, *index, membership, &hashes, time)
                 .await
             {
-                Ok(Some(member)) => members.push(member),
-                Ok(None) => return Ok(Outcome::Waiting),
+                Ok(Ok(member)) => members.push(member),
+                Ok(Err(reason)) => return Ok(Outcome::Waiting(reason)),
                 Err(error) => return self.reject_members(&hashes, &error.to_string()).await,
             }
         }
@@ -609,7 +609,7 @@ impl<A: RowApplication> Inner<A> {
                 self.conn.execute("RELEASE bundle", ()).await?;
                 match error {
                     Error::Rejected(reason) if reason == identity::LEDGER_WAITS => {
-                        Ok(Outcome::Waiting)
+                        Ok(Outcome::Waiting(WaitReason::Ledger))
                     }
                     error if identity::receipts::semantic_refusal(&error) => {
                         self.reject_members(&hashes, &error.to_string()).await
@@ -647,7 +647,7 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?
             {
-                Member::Missing => return Ok(Outcome::Waiting),
+                Member::Missing => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
                 Member::Rejected => return Err(denied("a held bundle member was rejected")),
                 Member::Settled(None) => {
                     return Err(denied("held bundle member history was pruned"));
@@ -762,20 +762,22 @@ impl<A: RowApplication> Inner<A> {
         expected: &Membership,
         bundle: &BTreeSet<Hash>,
         time: u64,
-    ) -> Result<Option<BundleMember>, Error> {
+    ) -> Result<Result<BundleMember, WaitReason>, Error> {
         if !self.frame_schema_ready(frame)? {
-            return Ok(None);
+            return Ok(Err(WaitReason::Schema));
         }
         let grants = self.verify_frame(frame, time)?;
         let payload = self.membership_of(frame, index, expected)?;
         if !self
             .own_chain_ready(&frame.operation_ref()?.header, bundle)
             .await?
-            || !self.dependencies_ready(frame, bundle).await?
         {
-            return Ok(None);
+            return Ok(Err(WaitReason::OwnChain));
         }
-        Ok(Some((frame.clone(), payload, grants)))
+        if !self.dependencies_ready(frame, bundle).await? {
+            return Ok(Err(WaitReason::Dependencies));
+        }
+        Ok(Ok((frame.clone(), payload, grants)))
     }
     /// Decrypts a member and checks it carries `expected` at `index`.
     fn membership_of(
@@ -870,7 +872,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     inner
                         .open_member(&frame, index, membership, &hashes, time)
                         .await?
-                        .is_some()
+                        .is_ok()
                 );
             }
             Ok(

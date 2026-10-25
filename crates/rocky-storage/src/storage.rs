@@ -48,6 +48,8 @@ pub enum Error {
     },
     Coordination(rocky_core::CoordinationError),
     Rejected(String),
+    /// A gate refused: every blocker it found, never only the first.
+    Blocked(Vec<rocky_core::Blocker>),
     RetryExhausted,
     Conflict,
     /// Retained history reached its bound. Writes resume once a checkpoint
@@ -73,10 +75,37 @@ pub enum Error {
     InjectedFailure,
 }
 impl Error {
+    /// A short category for diagnostics; it never carries the message.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "io",
+            Self::Storage(_) => "storage",
+            Self::Protocol(_) => "protocol",
+            Self::Application(_) => "application",
+            Self::Incompatible(_) => "incompatible",
+            Self::Corrupt(_) => "corrupt",
+            Self::Durability(_) => "durability",
+            Self::Backpressure => "backpressure",
+            Self::Quota { .. } => "quota",
+            Self::Coordination(_) => "coordination",
+            Self::Rejected(_) => "rejected",
+            Self::Blocked(_) => "blocked",
+            Self::RetryExhausted => "retry_exhausted",
+            Self::Conflict => "conflict",
+            Self::Retention { .. } => "retention",
+            Self::Pruned { .. } => "pruned",
+            Self::Closed => "closed",
+            Self::Rollback { .. } => "rollback",
+            Self::Sql(_) => "sql",
+            #[cfg(any(test, feature = "test-support"))]
+            Self::InjectedFailure => "injected",
+        }
+    }
     pub fn reason(&self) -> FailureReason {
         match self {
             Self::Application(_)
             | Self::Rejected(_)
+            | Self::Blocked(_)
             | Self::Sql(crate::sql::SqlError::Denied)
             | Self::Coordination(rocky_core::CoordinationError::Denied) => FailureReason::Denial,
             Self::Protocol(ProtocolError::UnsupportedVersion { .. }) | Self::Incompatible(_) => {
@@ -128,6 +157,7 @@ impl std::fmt::Display for Error {
             Self::Corrupt(e) => write!(f, "replica consistency check failed: {e}"),
             Self::Durability(e) => write!(f, "required durability setting unavailable: {e}"),
             Self::Rejected(e) => write!(f, "replication data rejected: {e}"),
+            Self::Blocked(blockers) => f.write_str(&rocky_core::describe_blockers(blockers)),
             Self::Coordination(e) => write!(f, "coordination: {e}"),
             Self::Quota { resource, limit } => write!(f, "{resource} quota reached ({limit})"),
             Self::Backpressure => {

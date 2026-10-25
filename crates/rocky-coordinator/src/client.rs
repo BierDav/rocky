@@ -158,11 +158,27 @@ impl NetworkCoordinator {
         log: TipLog,
         action: crate::coordinated::Action,
     ) -> Result<Outcome, CoordinationError> {
-        self.call(
-            crate::transport::nonce(),
-            Operation::Coordinated { log, action },
-        )
-        .await
+        use tracing::Instrument;
+        let span = tracing::debug_span!(
+            "coordinated",
+            action = action.kind(),
+            outcome = tracing::field::Empty
+        );
+        let result = self
+            .call(
+                crate::transport::nonce(),
+                Operation::Coordinated { log, action },
+            )
+            .instrument(span.clone())
+            .await;
+        span.record(
+            "outcome",
+            match &result {
+                Ok(_) => "ok",
+                Err(error) => error.category(),
+            },
+        );
+        result
     }
     /// Commits a terminal entry: a seal, or the owner's recovery.
     fn terminal(

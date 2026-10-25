@@ -30,6 +30,7 @@ pub use replica::{
     StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement,
     UpdateMode, entry_hash, installed_tip_schema,
 };
+pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::{

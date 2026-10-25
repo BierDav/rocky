@@ -501,8 +501,9 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("followed bookmark points to a sealed tip"));
         }
+        // Without a node of the identity the gate's `LineNode` blocker refuses.
         if self.node_author.is_none() {
-            return Err(denied("this line needs an enrolled node of the identity"));
+            return Ok(());
         }
         cached.writable = Some(WritableContext {
             scope,

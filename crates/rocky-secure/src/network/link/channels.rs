@@ -535,6 +535,9 @@ impl Handle {
             sent: 0,
             received: 0,
             remaining: MAX_SECURE_BYTES,
+            span: crate::network::trace::session(key.1),
+            request: None,
+            serving: false,
         })
     }
     async fn send_frame(
@@ -556,6 +559,9 @@ impl Handle {
     }
 }
 impl Io {
+    pub(crate) fn channel(&self) -> u16 {
+        self.key.1
+    }
     pub async fn send(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
         if bytes.is_empty() || bytes.len() > MAX_SECURE_FRAME {
             return Err(denied("link channel message quota"));

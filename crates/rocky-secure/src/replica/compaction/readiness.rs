@@ -76,7 +76,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(scopes)
     }
     pub(in crate::replica) fn unverified_reason(scope: ResourceScope) -> String {
-        format!("scope {scope:?} has no verified state at a seal of the path")
+        format!(
+            "scope {} has no verified state at a seal of the path",
+            rocky_core::scope_label(&scope)
+        )
     }
     pub(in crate::replica) async fn unverified_scopes(
         &self,

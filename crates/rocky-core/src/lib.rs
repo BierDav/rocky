@@ -1,5 +1,7 @@
 //! Canonical operation protocol and the application boundary for pure reducers.
 mod binding;
+mod blocker;
+pub use blocker::*;
 mod capture;
 mod codec;
 mod coordinated;

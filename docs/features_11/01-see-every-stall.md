@@ -1,6 +1,6 @@
 # 1. See every stall
 
-Status: implemented 2026-10-25; device checks not verified, see the
+Status: implemented 2026-10-25; overhead and manual device gates open, see the
 [evidence](01-see-every-stall-evidence.md). Owner: `rocky-secure`
 readiness, compaction and apply gates; `rocky-sdk` status and refusals;
 the native binding's event sink.

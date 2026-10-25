@@ -1,7 +1,7 @@
 # 1. See every stall: evidence
 
-Status: implemented 2026-10-25 on top of `746c9afb`. Device checks are not
-verified (see [Not verified](#not-verified)).
+Status: implemented 2026-10-25 on top of `746c9afb`. The overhead and manual
+device gates remain open (see [Not verified](#not-verified)).
 
 ## What landed
 
@@ -97,9 +97,47 @@ binaries of `746c9afb` and of this change, no subscriber installed),
 Not verified. The machine was shared with another workspace compiling and
 running `rocky-sdk` tests (load average 44–69 on 18 cores), so runs of the
 same binary differ by 30 % or more. These numbers cannot confirm or
-refute the 3 % gate; rerun both binaries alternately on an idle machine.
+refute the 3 % gate. The idle-host qualification below did not reach the
+measured stage either.
+
+### Mac mini qualification, 2026-10-25
+
+The continuation of T3 thread `29f3266a-8595-4cd0-966c-de9fcad57282`
+used an Apple M4 Mac mini (`Mac16,10`, 10 physical cores, 16 GiB RAM),
+macOS 27.0.1 (26A434), Rust 1.99.0 (`b940084d7`), and the saved release
+test binaries of `746c9afb` and `3ed4ad8f`. No subscriber was installed.
+Each binary was invoked directly, alone, with the fixture's existing
+600-second timeout:
+
+```sh
+<migrations-binary> --exact \
+  a_migration_of_100000_rows_converges_on_every_member \
+  --nocapture --test-threads=1
+```
+
+| Revision / storage | Seed open | Additive open | Result |
+| --- | --- | --- | --- |
+| Base `746c9afb`, SSD, prior thread | 172.533 s | 17.199 s | Timed out at 600 s before `fill_open` |
+| Base `746c9afb`, 2 GiB APFS RAM disk, prior thread | 183.029 s | 16.934 s | Timed out at 600 s before `fill_open` |
+| Current `3ed4ad8f`, SSD, continuation | 175.278 s | 17.020 s | Timed out at 600 s before `fill_open` |
+
+The earlier current SSD attempt was interrupted after 152 seconds; it is
+not a timeout or a timing sample. The continuation's current attempt ran
+for 600.049 seconds, with load averages 2.28 / 2.03 / 1.98 before and
+2.49 / 2.45 / 2.24 after. No other builds or checks ran during it.
+A one-second process sample during preparation showed active SQLite
+execution. The prior baseline sample included `seal_drops`; these samples
+do not establish the cause of the slow preparation.
+
+None of these attempts reached `member_pull`, so there is no new overhead
+percentage. The RAM-disk attempt also failed to reach catch-up. The 3 %
+gate remains **unverified**, blocked by full-size fixture preparation
+exceeding its budget on this host. Neither the fixture nor its timeout
+was changed to obtain a result.
 
 ## Checks
+
+### Implementation-machine checks
 
 - `./scripts/lint`: pass. `cargo clippy --workspace --all-targets -D
   warnings`: clean.
@@ -115,11 +153,52 @@ refute the 3 % gate; rerun both binaries alternately on an idle machine.
   (including `DiagnosticsTest`) and `./examples/shoppinglist-app/check`:
   pass.
 
+### Mac mini continuation
+
+- `./scripts/lint`: pass.
+- `CARGO_BUILD_JOBS=2 ./scripts/check`: clippy clean; unit tier 196
+  passed, including the SDK without default features. Integration: 1,322
+  passed and one failed, with the same named header-decoding failure
+  recorded above (`expected rejection "invalid secure frame", got success`).
+  All completion-gate blocker regressions and the span/privacy test passed.
+  Integration suite time was 206.87 s within its 300 s budget, but six
+  distinct tests exceeded their two-second budgets on isolated reruns
+  (nine violations across the two feature builds). The command exits 1.
+- `sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest --tests
+  rocky.DiagnosticsTest`: pass. This reruns the real join and explicit
+  `syncOnce` through the native listener; it is not a manual shopping-app
+  device check.
+- The shopping desktop app was not run: its SDK was absent from Maven
+  local and the full multiplatform publication, which also builds iOS
+  runtimes and metadata, was not completed. The direct JVM test above
+  does not qualify the packaged SDK or change the earlier app-build evidence.
+
+Isolated integration budget violations (a dash means no violation in that
+build, not that the test was necessarily present):
+
+| Test | Workspace | SDK without defaults |
+| --- | --- | --- |
+| `rocky-sdk node::revocation_tests::reopen_completes_each_revocation_secret_boundary` | 2.61 s | 2.41 s |
+| `rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner` | 3.06 s | 3.05 s |
+| `rocky-sdk::tips trusted::a_trusted_identity_opens_a_branch_that_devices_on_main_never_see` | 2.19 s | 2.12 s |
+| `rocky-secure tests::existence::seals::a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_its_signed_base` | 2.08 s | — |
+| `rocky-secure tests::formats::unsupported_replica_and_checkpoint_formats_refuse_before_writes` | 2.23 s | — |
+| `rocky-secure tests::kept::five_kept_seals_of_one_percent_changes_add_about_five_percent` | 2.22 s | — |
+
+These timing violations were not requalified against the baseline. No
+budgets or tests were changed, and no e2e tier beyond the full-size
+migration qualification above was run in this continuation.
+
 ## Not verified
 
-- The 100k catch-up overhead gate (see [Overhead](#overhead)).
+- The 100k catch-up overhead gate (see [Overhead](#overhead)): preparation
+  times out before catch-up on this Mac mini, including the baseline on
+  a RAM disk. A valid comparison still needs both revisions to finish
+  preparation within the fixture's existing budget.
 
 - The shopping app's diagnostics file was not inspected after a manual
-  sync on desktop or Android, because no devices were used in this run.
+  sync on desktop or Android. On this Mac mini, `device_list` reports
+  `Android SDK was not found` and device support failed during installation;
+  it exposes no devices. No manual desktop sync was performed either.
 - The held-recovery "unshared partition" regression has no stored blocked
   state, so no blocker assertion was added to it.

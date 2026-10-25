@@ -246,7 +246,7 @@ fn only_a_node_of_the_in_sync_set_ends_a_log_with_an_ordinary_seal() {
         expected: log.head.commit,
         epoch: log.head.epoch,
         hash: [1; 32],
-        deadline: T + 10,
+        duration: 10,
         sequence,
     };
     // An empty log has nothing to hold: anyone ends it, aborting a pending

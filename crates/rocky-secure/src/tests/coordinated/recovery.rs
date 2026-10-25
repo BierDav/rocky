@@ -517,6 +517,14 @@ impl EntryPeers for Nobody {
 /// A coordinator that commits a recovery and then loses the reply.
 struct LostReply(Client);
 impl DomainLog for LostReply {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: rocky_core::Commitment,
+    ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+    }
     fn node(&self) -> NodeKey {
         self.0.node()
     }
@@ -696,6 +704,14 @@ async fn a_received_seal_waits_until_its_receiver_catches_up_and_joins() {
 /// A head whose window holds only its last entry.
 struct Trimmed(Client);
 impl DomainLog for Trimmed {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: rocky_core::Commitment,
+    ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+    }
     fn node(&self) -> NodeKey {
         self.0.node()
     }

@@ -19,6 +19,7 @@ pub struct NetworkCoordinator {
     certificate: Mutex<Option<SignedCapability>>,
     /// The client lane of a public service; voter TCP when absent.
     route: Option<Arc<dyn Transport>>,
+    preferred: Mutex<(Option<u64>, Option<u64>)>,
 }
 impl NetworkCoordinator {
     pub fn open(
@@ -33,6 +34,7 @@ impl NetworkCoordinator {
             key,
             certificate: Mutex::new(None),
             route: None,
+            preferred: Mutex::new((None, None)),
         })
     }
     /// Presents `certificate`, this node's under a trusted identity, with
@@ -64,56 +66,81 @@ impl NetworkCoordinator {
         client.route = Some(transport);
         Ok(client)
     }
-    /// One attempt at each reachable voter, in certified order.
+    /// Tries the hinted leader and the last responsive voter before the rest.
     async fn attempt(&self, request: &Request) -> Vec<Result<Reply, CoordinationError>> {
         let genesis = match self.genesis.id() {
             Ok(id) => id,
             Err(error) => return vec![Err(error)],
         };
-        let message = || Message::Client(Box::new(request.clone()));
+        let (last, leader) = *self
+            .preferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut queue = Vec::new();
+        for id in leader
+            .into_iter()
+            .chain(last)
+            .chain(self.genesis.genesis.voters.iter().map(|v| v.id))
+        {
+            if !queue.contains(&id) {
+                queue.push(id);
+            }
+        }
+        let mut visited = Vec::new();
         let mut replies = Vec::new();
-        match (&self.route, &self.genesis.genesis.public) {
-            (Some(transport), Some(public)) => {
-                for endpoint in public
-                    .endpoints
-                    .iter()
-                    .filter(|e| e.kind == transport.kind())
-                {
-                    let Ok(voter) = self.voter(endpoint.voter) else {
-                        continue;
-                    };
-                    let reply = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                        let mut stream = transport
-                            .connect(&endpoint.address, Protocol::Coordinate)
-                            .await
-                            .map_err(|_| CoordinationError::Unavailable)?;
-                        converse(&mut stream, voter.key, genesis, &self.key, message()).await
-                    })
-                    .await
-                    .unwrap_or(Err(CoordinationError::Unavailable));
-                    if reply.is_err() {
+        while !queue.is_empty() {
+            let id = queue.remove(0);
+            if visited.contains(&id) {
+                continue;
+            }
+            visited.push(id);
+            let Ok(voter) = self.voter(id) else {
+                continue;
+            };
+            let message = || Message::Client(Box::new(request.clone()));
+            let reply = match (&self.route, &self.genesis.genesis.public) {
+                (Some(transport), Some(public)) => {
+                    let mut reply: Result<Reply, CoordinationError> =
+                        Err(CoordinationError::Unavailable);
+                    for endpoint in public
+                        .endpoints
+                        .iter()
+                        .filter(|e| e.voter == id && e.kind == transport.kind())
+                    {
+                        reply = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                            let mut stream = transport
+                                .connect(&endpoint.address, Protocol::Coordinate)
+                                .await
+                                .map_err(|_| CoordinationError::Unavailable)?;
+                            converse(&mut stream, voter.key, genesis, &self.key, message()).await
+                        })
+                        .await
+                        .unwrap_or(Err(CoordinationError::Unavailable));
+                        if reply.is_ok() {
+                            break;
+                        }
                         transport.forget(&endpoint.address);
                     }
-                    let done = reply
-                        .as_ref()
-                        .is_ok_and(|r: &Reply| r.result != Err(CoordinationError::Unavailable));
-                    replies.push(reply);
-                    if done {
-                        break;
-                    }
+                    reply
                 }
-            }
-            _ => {
-                for voter in &self.genesis.genesis.voters {
-                    let reply = exchange(voter, genesis, &self.key, message()).await;
-                    let done = reply
-                        .as_ref()
-                        .is_ok_and(|r: &Reply| r.result != Err(CoordinationError::Unavailable));
-                    replies.push(reply);
-                    if done {
-                        break;
-                    }
+                _ => exchange(voter, genesis, &self.key, message()).await,
+            };
+            let done = if let Ok(reply) = &reply {
+                *self
+                    .preferred
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = (Some(id), reply.leader);
+                if let Some(hint) = reply.leader.filter(|hint| !visited.contains(hint)) {
+                    queue.retain(|id| *id != hint);
+                    queue.insert(0, hint);
                 }
+                reply.result != Err(CoordinationError::Unavailable)
+            } else {
+                false
+            };
+            replies.push(reply);
+            if done {
+                break;
             }
         }
         replies
@@ -318,6 +345,22 @@ impl NetworkCoordinator {
     }
 }
 impl DomainLog for NetworkCoordinator {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: Commitment,
+    ) -> CoordinationFuture<'_, LogStatus> {
+        Box::pin(async move {
+            match self
+                .coordinated(log, crate::coordinated::Action::Status { position, hash })
+                .await?
+            {
+                Outcome::CoordinatedStatus(status) => Ok(status),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
     fn node(&self) -> NodeKey {
         *self.key.public_key().as_bytes()
     }
@@ -360,7 +403,7 @@ impl DomainLog for NetworkCoordinator {
                 expected: append.expected,
                 epoch: append.epoch,
                 hash: append.hash,
-                deadline: append.deadline,
+                duration: append.duration,
                 sequence: append.sequence,
             };
             match self.coordinated(log, action).await? {

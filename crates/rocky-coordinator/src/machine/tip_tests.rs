@@ -89,7 +89,7 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
             expected: 0,
             epoch: head.epoch,
             hash: [8; 32],
-            deadline: T + 10,
+            duration: 10,
             sequence: 2,
         },
     ) else {
@@ -153,7 +153,7 @@ fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
             expected: head.commit,
             epoch: head.epoch,
             hash: [8; 32],
-            deadline: T + 10,
+            duration: 10,
             sequence: 9,
         },
     ) else {
@@ -189,7 +189,7 @@ fn a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded() {
                 expected: 0,
                 epoch: 0,
                 hash: [1; 32],
-                deadline: T + 10,
+                duration: 10,
                 sequence: 2,
             },
         ),
@@ -278,7 +278,7 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
             expected: 2,
             epoch: head.epoch,
             hash: [3; 32],
-            deadline: T + 10,
+            duration: 10,
             sequence: 3,
         },
         Action::Join {

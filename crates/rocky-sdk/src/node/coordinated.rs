@@ -83,6 +83,7 @@ impl Coordinated {
         match &self.0 {
             CoordinatedError::Unavailable => ("coordinator_unavailable", true),
             CoordinatedError::BelowMinimum => ("below_minimum", true),
+            CoordinatedError::ClockSkew { .. } => ("clock_skew", false),
             CoordinatedError::Conflict => ("conflict", true),
             CoordinatedError::Aborted => ("aborted", true),
             CoordinatedError::Undecided => ("undecided", true),

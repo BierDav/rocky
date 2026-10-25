@@ -70,6 +70,15 @@ impl Trusted {
         self.proposing().remove(&log);
     }
 }
+struct ProposalGuard<'a> {
+    trusted: &'a Trusted,
+    log: TipLog,
+}
+impl Drop for ProposalGuard<'_> {
+    fn drop(&mut self) {
+        self.trusted.end_proposal(self.log);
+    }
+}
 impl Default for Trusted {
     fn default() -> Self {
         Self {
@@ -122,21 +131,24 @@ pub struct CoordinatedCommit {
     pub hash: Commitment,
     pub frames: Vec<EncryptedFrame>,
 }
-/// Why a coordinated write did not commit. Only `Undecided` leaves its
-/// local effects in place; every other failure rolled them back, and none
-/// is queued as success.
+/// Why a coordinated write did not commit. An uncertain append stays staged
+/// for retry; only a definite refusal or confirmed abort voids its effects.
 #[derive(Debug)]
 pub enum CoordinatedError {
     /// The coordinator is unreachable; nothing was committed.
     Unavailable,
+    /// Correct the device clock before trying again.
+    ClockSkew {
+        coordinator_time: u64,
+    },
     /// The in-sync set is below the domain's minimum size.
     BelowMinimum,
     /// Another entry is pending or took the position; retry on a new slot.
     Conflict,
     /// The entry missed its deadline without enough storage acknowledgments.
     Aborted,
-    /// The coordinator was lost after assigning the entry. The local
-    /// effects stay unsent until `resolve_coordinated` decides it.
+    /// The caller's deadline passed without a definite outcome. The local
+    /// effects stay unsent until `resolve_coordinated` decides the entry.
     Undecided,
     /// Committed entries are missing locally and no peer supplied them.
     Behind,
@@ -173,6 +185,7 @@ fn coordination(error: rocky_core::CoordinationError) -> CoordinatedError {
         C::Unavailable | C::CoordinationStateLost => CoordinatedError::Unavailable,
         C::StaleHead | C::StaleEpoch => CoordinatedError::Conflict,
         C::Sealed => CoordinatedError::Sealed,
+        C::ClockSkew { coordinator_time } => CoordinatedError::ClockSkew { coordinator_time },
         other => CoordinatedError::Refused(other),
     }
 }
@@ -217,28 +230,9 @@ struct Entry {
     append: Option<Append>,
     carry: Option<SignedCarry>,
 }
-/// What the coordinator's head says of an entry.
-#[derive(Debug, PartialEq, Eq)]
-enum Decision {
-    Committed,
-    Pending,
-    Aborted,
-    /// Committed positions past the coordinator's window.
-    Unknown,
-}
+use rocky_core::LogDecision as Decision;
 fn decision(head: &LogHead, position: u64, hash: Commitment) -> Decision {
-    if let Some(pending) = &head.pending
-        && pending.position == position
-        && pending.hash == hash
-    {
-        return Decision::Pending;
-    }
-    match head.committed(position) {
-        Some(committed) if committed == hash => Decision::Committed,
-        Some(_) => Decision::Aborted,
-        None if position > head.commit => Decision::Aborted,
-        None => Decision::Unknown,
-    }
+    head.status(position, hash).decision
 }
 fn commitment_of(bytes: &[u8]) -> Result<Commitment, Error> {
     bytes
@@ -432,7 +426,7 @@ impl<A: RowApplication> Inner<A> {
             expected: slot.expected,
             epoch: slot.epoch,
             hash,
-            deadline: now()? + ENTRY_DEADLINE,
+            duration: ENTRY_DEADLINE,
             sequence: self.next_sequence(slot.log).await?,
         };
         self.conn
@@ -819,10 +813,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedCommit, CoordinatedError> {
+        let _proposal = ProposalGuard {
+            trusted: &self.domain_log,
+            log,
+        };
         let _deciding = self.domain_log.deciding.lock().await;
-        let proposed = self.propose_staged(log, coordinator, peers).await;
-        self.domain_log.end_proposal(log);
-        proposed
+        self.propose_staged(log, coordinator, peers).await
     }
     async fn propose_staged(
         &self,
@@ -837,13 +833,33 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let Some(mut entry) = own.into_iter().next() else {
             return Err(denied("no coordinated write is staged").into());
         };
+        let until =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2 * ENTRY_DEADLINE);
         if entry.state == "staged" {
             let append = entry
                 .append
                 .ok_or_else(|| Error::Corrupt("staged entry without its append".into()))?;
-            match crate::network::trace::coordinated("append", coordinator.append(log, append))
-                .await
-            {
+            let mut delay = std::time::Duration::from_millis(10);
+            let result = loop {
+                let result = tokio::time::timeout_at(
+                    until,
+                    crate::network::trace::coordinated("append", coordinator.append(log, append)),
+                )
+                .await;
+                match result {
+                    Ok(Err(CoordinationError::Unavailable)) => {
+                        if tokio::time::Instant::now() >= until {
+                            return Err(CoordinatedError::Undecided);
+                        }
+                        tokio::time::sleep_until((tokio::time::Instant::now() + delay).min(until))
+                            .await;
+                        delay = (delay * 2).min(std::time::Duration::from_millis(500));
+                    }
+                    Err(_) => return Err(CoordinatedError::Undecided),
+                    Ok(result) => break result,
+                }
+            };
+            match result {
                 Ok(pending) => {
                     self.assign(log, &entry, &pending).await?;
                     entry.pending = Some(pending);
@@ -852,8 +868,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return self.ended_own(log, &entry, coordinator, peers).await;
                 }
                 Err(error) => {
-                    // Never sent and never acknowledged: it cannot commit.
-                    self.abort_own(log, &entry).await?;
+                    if matches!(
+                        error,
+                        CoordinationError::Configuration
+                            | CoordinationError::Denied
+                            | CoordinationError::Backpressure
+                    ) {
+                        self.abort_own(log, &entry).await?;
+                    }
                     return Err(match coordination(error) {
                         CoordinatedError::Refused(rocky_core::CoordinationError::Backpressure)
                             if coordinator
@@ -877,13 +899,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .clone()
             .ok_or_else(|| Error::Corrupt("assigned entry without its assignment".into()))?;
         let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
-        let (frames, decided) = self
-            .send_own(log, &pending, &ids, coordinator, peers)
-            .await?;
+        let (frames, decided) = tokio::time::timeout_at(
+            until,
+            self.send_own(log, &pending, &ids, coordinator, peers),
+        )
+        .await
+        .map_err(|_| CoordinatedError::Undecided)??;
         let decided = match decided {
             Some(decided) => decided,
             None => {
-                self.await_decision(log, coordinator, peers, &pending, &ids)
+                self.await_decision(log, coordinator, peers, &pending, &ids, until)
                     .await?
             }
         };
@@ -938,14 +963,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
             carry,
         };
         let me = coordinator.node();
-        let Ok(head) = coordinator.log_head(log).await else {
+        let Ok(status) = coordinator
+            .pending_status(log, pending.position, pending.hash)
+            .await
+        else {
             return Ok((sent.frames, None));
         };
-        let decided = decision(&head, pending.position, pending.hash);
+        let decided = status.decision;
         if decided != Decision::Pending {
             return Ok((sent.frames, Some(decided)));
         }
-        for member in head.members.iter().filter(|member| member.key != me) {
+        for member in status
+            .members
+            .iter()
+            .filter(|member| member.key != me && member.acknowledged < pending.position)
+        {
             // A member that does not store it misses the deadline and
             // leaves the set.
             if let Ok(key) = PublicKey::from_bytes(&member.key) {
@@ -963,8 +995,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         Ok((sent.frames, decided))
     }
-    /// Retries storage and polls until `pending` is decided, a little past
-    /// its deadline. A lost coordinator leaves it undecided.
+    /// Retries missing storage promises until the caller's monotonic deadline.
     async fn await_decision(
         &self,
         log: TipLog,
@@ -972,20 +1003,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
         pending: &LogPending,
         ids: &[Hash],
+        until: tokio::time::Instant,
     ) -> Result<Decision, CoordinatedError> {
         let mut delay = std::time::Duration::from_millis(10);
         loop {
-            let Ok(head) = coordinator.log_head(log).await else {
+            if tokio::time::Instant::now() >= until {
                 return Ok(Decision::Pending);
-            };
-            let decided = decision(&head, pending.position, pending.hash);
-            if decided != Decision::Pending || now()? > pending.deadline + ENTRY_DEADLINE {
-                return Ok(decided);
             }
-            tokio::time::sleep(delay).await;
-            if let (_, Some(decided)) = self.send_own(log, pending, ids, coordinator, peers).await?
-            {
-                return Ok(decided);
+            tokio::time::sleep_until((tokio::time::Instant::now() + delay).min(until)).await;
+            let sent = tokio::time::timeout_at(
+                until,
+                self.send_own(log, pending, ids, coordinator, peers),
+            )
+            .await;
+            match sent {
+                Ok(Ok((_, Some(decided)))) => return Ok(decided),
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Ok(Decision::Pending),
+                _ => {}
             }
             delay = (delay * 2).min(std::time::Duration::from_millis(500));
         }
@@ -1202,15 +1237,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let append = entry
                 .append
                 .ok_or_else(|| Error::Corrupt("staged entry without its append".into()))?;
-            match crate::network::trace::coordinated("append", coordinator.append(log, append))
-                .await
-            {
+            let result =
+                crate::network::trace::coordinated("append", coordinator.append(log, append)).await;
+            match result {
                 Ok(pending) => self.assign(log, &entry, &pending).await?,
                 Err(error) if coordination(error.clone()) == CoordinatedError::Unavailable => {}
                 Err(rocky_core::CoordinationError::Sealed) => {
                     settled(self.ended_own(log, &entry, coordinator, peers).await)?;
                 }
-                Err(_) => self.abort_own(log, &entry).await?,
+                Err(
+                    CoordinationError::Configuration
+                    | CoordinationError::Denied
+                    | CoordinationError::Backpressure,
+                ) => self.abort_own(log, &entry).await?,
+                Err(error) => return Err(coordination(error)),
             }
         }
         // A write a seal carried here retries once this node follows the tip.
@@ -1595,6 +1635,14 @@ impl PartialEq for CoordinatedError {
         match (self, other) {
             (Self::Storage(_), _) | (_, Self::Storage(_)) => false,
             (Self::Refused(a), Self::Refused(b)) => a == b,
+            (
+                Self::ClockSkew {
+                    coordinator_time: a,
+                },
+                Self::ClockSkew {
+                    coordinator_time: b,
+                },
+            ) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         }
     }

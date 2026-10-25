@@ -317,7 +317,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
             expected: 0,
             epoch: head.epoch,
             hash: [7; 32],
-            deadline: time + 30,
+            duration: 30,
             sequence: 2,
         },
     );
@@ -449,4 +449,142 @@ async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
         write(&mut store, request(&executor, recover), 2, time).await,
         admitted
     );
+}
+
+#[tokio::test]
+async fn head_and_preflight_do_not_wait_for_a_blocked_log_sync() {
+    use openraft::storage::RaftLogStorageExt;
+    let (genesis, executor, scope, _) = certified();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+    let log = tip_log(scope);
+    let request = crate::machine::self_certified(
+        genesis.id().unwrap(),
+        [1; 32],
+        Operation::Coordinated {
+            log,
+            action: crate::coordinated::Action::Head,
+        },
+        &executor,
+        now().unwrap(),
+    )
+    .unwrap();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    *store.0.sync_gate.lock().unwrap() = Some(SyncGate {
+        entered,
+        release: gate,
+    });
+    let mut writer = store.clone();
+    let entry = Entry::<Types> {
+        log_id: LogId::new(CommittedLeaderId::new(1, 1), 1),
+        payload: EntryPayload::Blank,
+    };
+    let write = tokio::spawn(async move { writer.blocking_append([entry]).await });
+    waiting.await.unwrap();
+    let started = std::time::Instant::now();
+    let read = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        store.preflight(&request).await.unwrap();
+        store.log_head(log).await.unwrap()
+    })
+    .await;
+    let elapsed = started.elapsed();
+    assert!(!write.is_finished());
+    release.send(()).unwrap();
+    write.await.unwrap().unwrap();
+    assert_eq!(read.unwrap().commit, 0);
+    println!("head + preflight during blocked disk sync: {elapsed:?}");
+}
+
+#[tokio::test]
+async fn client_follows_authenticated_leader_hints_and_receives_clock_skew() {
+    use crate::{
+        service::Reply,
+        transport::{self, Envelope, Message},
+    };
+    let (original, executor, _, _) = certified();
+    let mut genesis = original.genesis;
+    let mut listeners = Vec::new();
+    let mut keys = Vec::new();
+    for voter in &mut genesis.voters {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let key = PrivateKey::new();
+        voter.address = listener.local_addr().unwrap().to_string();
+        voter.key = key.public_key();
+        listeners.push(listener);
+        keys.push(key);
+    }
+    let root = PrivateKey::new();
+    let genesis = CertifiedGenesis::sign(genesis, &root).unwrap();
+    let identity = genesis.id().unwrap();
+    let visited = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut servers = Vec::new();
+    for (index, (listener, key)) in listeners.into_iter().zip(keys).enumerate() {
+        let visited = visited.clone();
+        servers.push(tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let envelope = transport::read(&mut stream).await.unwrap();
+                envelope.authenticate(identity).unwrap();
+                let Message::Client(request) = decode(&envelope.body).unwrap() else {
+                    panic!("client");
+                };
+                request.authenticate(identity).unwrap();
+                visited.lock().unwrap().push(index + 1);
+                let result = if index == 0 {
+                    Err(CoordinationError::Unavailable)
+                } else {
+                    request.fresh().map(|()| Outcome::Closed)
+                };
+                let response = Envelope::from_body(
+                    identity,
+                    envelope.nonce,
+                    encode(&Reply {
+                        leader: Some(3),
+                        result,
+                    })
+                    .unwrap(),
+                    &key,
+                )
+                .unwrap();
+                transport::write(&mut stream, &response).await.unwrap();
+            }
+        }));
+    }
+    let client = crate::client::NetworkCoordinator::open(
+        genesis.clone(),
+        root.public_key(),
+        genesis.genesis.mesh,
+        executor.clone(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            client.call([1; 32], Operation::Usage).await.unwrap(),
+            Outcome::Closed
+        );
+    }
+    assert_eq!(*visited.lock().unwrap(), vec![1, 3, 3]);
+    let time = now().unwrap();
+    let request =
+        self_certified(identity, [2; 32], Operation::Usage, &executor, time + 60).unwrap();
+    let reply: Reply = transport::exchange(
+        &genesis.genesis.voters[2],
+        identity,
+        &executor,
+        Message::Client(Box::new(request)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(reply.result, Err(CoordinationError::ClockSkew { coordinator_time }) if coordinator_time.abs_diff(time) <= 1)
+    );
+    assert_eq!(
+        client.call([2; 32], Operation::Usage).await.unwrap(),
+        Outcome::Closed
+    );
+    assert_eq!(*visited.lock().unwrap(), vec![1, 3, 3, 3, 3]);
+    for server in servers {
+        server.abort();
+    }
 }

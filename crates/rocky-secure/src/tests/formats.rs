@@ -2,8 +2,7 @@ use super::*;
 use crate::storage::rows;
 use std::collections::BTreeMap;
 
-#[tokio::test]
-async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
+async fn format_template() -> (Fixture, TempDir, std::path::PathBuf, PrivateKey) {
     let f = Fixture::new();
     let template = TempDir::new().unwrap();
     let source = template.path().join("template.sqlite");
@@ -26,6 +25,12 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         .unwrap();
     drop(replica);
     let source = template.path().join("base.sqlite");
+    (f, template, source, node)
+}
+
+#[tokio::test]
+async fn unsupported_checkpoint_formats_refuse_before_writes() {
+    let (f, _template, source, node) = format_template().await;
     for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -69,9 +74,14 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn unsupported_replica_formats_refuse_before_writes() {
+    let (f, _template, source, node) = format_template().await;
     for version in [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 36,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37,
     ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -111,6 +121,11 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn damaged_replica_schema_refuses_before_writes() {
+    let (f, _template, source, node) = format_template().await;
     for damaged in [
         "DROP INDEX secure_rows_dead",
         "DROP INDEX secure_rows_shape",

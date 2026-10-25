@@ -3763,6 +3763,27 @@ pub fn error(error: &Failure) -> Value {
         }
     };
     let mut value = json!({"code": code, "retryable": retryable, "message": error.to_string()});
+    let clock = if let Some(coordinated::Coordinated(rocky_secure::CoordinatedError::ClockSkew {
+        coordinator_time,
+    })) = error.downcast_ref::<coordinated::Coordinated>()
+    {
+        Some(*coordinator_time)
+    } else {
+        match error
+            .downcast_ref::<rocky_core::CoordinationError>()
+            .or_else(|| match error.downcast_ref::<Error>() {
+                Some(Error::Coordination(error)) => Some(error),
+                _ => None,
+            }) {
+            Some(rocky_core::CoordinationError::ClockSkew { coordinator_time }) => {
+                Some(*coordinator_time)
+            }
+            _ => None,
+        }
+    };
+    if let Some(time) = clock {
+        value["coordinator_time"] = json!(time);
+    }
     if let Some(Error::Blocked(blockers)) = error.downcast_ref::<Error>() {
         value["blockers"] = json!(blockers);
     }
@@ -3773,6 +3794,7 @@ fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bo
     use rocky_core::CoordinationError::{Backpressure, Denied, Sealed, Unavailable};
     match error {
         Unavailable => ("coordinator_unavailable", true),
+        rocky_core::CoordinationError::ClockSkew { .. } => ("clock_skew", false),
         Backpressure => ("quota", true),
         Denied => ("denied", false),
         Sealed => ("sealed", false),
@@ -3796,6 +3818,32 @@ mod error_tests {
             code,
             message: "refused".into(),
         })))
+    }
+
+    #[test]
+    fn clock_skew_reports_authority_time_through_every_error_path() {
+        let time = 1_900_000_000;
+        let errors: [Failure; 3] = [
+            Box::new(rocky_core::CoordinationError::ClockSkew {
+                coordinator_time: time,
+            }),
+            Box::new(Error::Coordination(
+                rocky_core::CoordinationError::ClockSkew {
+                    coordinator_time: time,
+                },
+            )),
+            Box::new(coordinated::Coordinated(
+                rocky_secure::CoordinatedError::ClockSkew {
+                    coordinator_time: time,
+                },
+            )),
+        ];
+        for failure in errors {
+            let reported = error(&failure);
+            assert_eq!(reported["code"], "clock_skew");
+            assert_eq!(reported["coordinator_time"], time);
+            assert_eq!(reported["retryable"], false);
+        }
     }
 
     #[test]

@@ -37,7 +37,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         expected: 0,
         epoch: head.epoch,
         hash: [7; 32],
-        deadline: timestamp() + 30,
+        duration: 30,
         sequence: 2,
     };
     let (a, b) = tokio::join!(
@@ -48,9 +48,9 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         (&a, &b),
         (
             Ok(Outcome::Coordinated(LogResult::Assigned(_))),
-            Err(CoordinationError::StaleHead)
+            Err(CoordinationError::Configuration)
         ) | (
-            Err(CoordinationError::StaleHead),
+            Err(CoordinationError::Configuration),
             Ok(Outcome::Coordinated(LogResult::Assigned(_)))
         )
     ));
@@ -72,9 +72,49 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
             .unwrap(),
         Outcome::Coordinated(LogResult::Acknowledged)
     );
+    let status = first
+        .pending_status(log(cluster.scope), pending.position, pending.hash)
+        .await
+        .unwrap();
+    assert_eq!(
+        status
+            .members
+            .iter()
+            .find(|m| m.key == first.node())
+            .unwrap()
+            .acknowledged,
+        pending.position
+    );
     let leader = cluster.wait_leader(&admin).await;
-    cluster.stop(leader);
+    cluster.arm(leader, "reply.before_send");
+    // The exact append is already assigned. Its retry crashes the leader at
+    // the reply boundary, before the remaining acknowledgments.
+    let retry = Action::Append {
+        expected: 0,
+        epoch: pending.epoch,
+        hash: pending.hash,
+        duration: 30,
+        sequence: 2,
+    };
+    let proposer = if pending.proposer == cluster.executor.public_key() {
+        &first
+    } else {
+        &second
+    };
+    let _ = proposer.coordinated(log(cluster.scope), retry).await;
+    cluster.wait_exit(leader).await;
     cluster.wait_leader(&admin).await;
+    let status = first
+        .pending_status(log(cluster.scope), pending.position, pending.hash)
+        .await
+        .unwrap();
+    assert_eq!(status.decision, LogDecision::Pending);
+    assert!(
+        status
+            .members
+            .iter()
+            .all(|member| member.acknowledged < pending.position)
+    );
     assert_eq!(
         second
             .coordinated(
@@ -125,7 +165,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
                 expected: 1,
                 epoch: head.epoch,
                 hash: [8; 32],
-                deadline: timestamp() + 30,
+                duration: 30,
                 sequence: 3,
             },
         )
@@ -154,7 +194,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         "two-node successful write: 3 client calls, 2 Raft entries; leader admitted-client delta {}",
         after.metrics.requests - before.metrics.requests
     );
-    // Drive the production lazy timer; no application node sends a resolving call.
+    // Drive the explicit production deadline timer; no application node sends a resolving call.
     let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let assigned = first
         .coordinated(
@@ -163,7 +203,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
                 expected: 2,
                 epoch: head.epoch,
                 hash: [9; 32],
-                deadline: timestamp() + 2,
+                duration: 2,
                 sequence: 4,
             },
         )

@@ -23,6 +23,10 @@ pub const ENDED_LOGS: usize = 8;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
     Head,
+    Status {
+        position: u64,
+        hash: Commitment,
+    },
     /// The minimum the tip's opening names; immutable after the first join.
     Configure {
         minimum: usize,
@@ -36,7 +40,7 @@ pub enum Action {
         expected: u64,
         epoch: u64,
         hash: Commitment,
-        deadline: u64,
+        duration: u64,
         sequence: u64,
     },
     /// Volatile leader knowledge. The node must have durably stored this exact entry.
@@ -72,6 +76,7 @@ impl Action {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Head => "head",
+            Self::Status { .. } => "status",
             Self::Configure { .. } => "configure",
             Self::Join { .. } => "join",
             Self::Append { .. } => "append",
@@ -459,7 +464,7 @@ impl Log {
                 expected,
                 epoch,
                 hash,
-                deadline,
+                duration,
                 ..
             } => {
                 if !self.head.members.iter().any(|m| m.key == key) {
@@ -468,13 +473,15 @@ impl Log {
                 if !tenant_admits || self.head.members.len() < self.head.minimum {
                     return Err(CoordinationError::Backpressure);
                 }
-                if *expected != self.head.head || self.head.pending.is_some() {
-                    return Err(CoordinationError::StaleHead);
+                // An obsolete slot is a definite refusal: this append was
+                // never assigned. Retries of assigned appends returned above.
+                if *expected != self.head.head
+                    || self.head.pending.is_some()
+                    || *epoch != self.head.epoch
+                {
+                    return Err(CoordinationError::Configuration);
                 }
-                if *epoch != self.head.epoch {
-                    return Err(CoordinationError::StaleEpoch);
-                }
-                if *deadline <= time || *deadline > time.saturating_add(ACKNOWLEDGMENT_DEADLINE) {
+                if *duration == 0 || *duration > ACKNOWLEDGMENT_DEADLINE {
                     return Err(CoordinationError::Configuration);
                 }
                 let minute = time / 60;
@@ -490,7 +497,7 @@ impl Log {
                     hash: *hash,
                     position,
                     epoch: *epoch,
-                    deadline: *deadline,
+                    deadline: time.saturating_add(*duration),
                 };
                 if minute != self.minute {
                     self.minute = minute;
@@ -683,6 +690,17 @@ impl Logs {
             log.head.epoch = log.head.epoch.saturating_add(1);
         }
     }
+    pub(crate) fn status(
+        &self,
+        tip: TipId,
+        position: u64,
+        hash: Commitment,
+    ) -> rocky_core::LogStatus {
+        match self.get(tip) {
+            Some(log) => log.head.status(position, hash),
+            None => self.fresh(tip).head.status(position, hash),
+        }
+    }
     pub fn pending(&self) -> impl Iterator<Item = (TipId, &Pending)> {
         self.logs
             .iter()
@@ -798,6 +816,40 @@ mod hashes {
 }
 
 impl Head {
+    pub(crate) fn status(&self, position: u64, hash: Commitment) -> rocky_core::LogStatus {
+        use rocky_core::LogDecision;
+        let decision = if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.position == position && p.hash == hash)
+        {
+            LogDecision::Pending
+        } else if position > self.commit {
+            LogDecision::Aborted
+        } else {
+            let back = self.commit - position;
+            match usize::try_from(back)
+                .ok()
+                .and_then(|back| self.hashes.len().checked_sub(back + 1))
+                .and_then(|index| self.hashes.get(index))
+            {
+                Some(committed) if *committed == hash => LogDecision::Committed,
+                Some(_) => LogDecision::Aborted,
+                None => LogDecision::Unknown,
+            }
+        };
+        rocky_core::LogStatus {
+            decision,
+            members: self
+                .members
+                .iter()
+                .map(|m| rocky_core::LogMember {
+                    key: *m.key.as_bytes(),
+                    acknowledged: m.acknowledged,
+                })
+                .collect(),
+        }
+    }
     pub fn member(&self, key: PublicKey) -> bool {
         self.members.iter().any(|m| m.key == key)
     }
@@ -983,6 +1035,28 @@ pub struct MemoryLogClient {
     key: PublicKey,
 }
 impl rocky_core::DomainLog for MemoryLogClient {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: Commitment,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move {
+            self.logs.domain(log.scope, |logs, acks, _, _| {
+                let mut status = logs.status(log.tip, position, hash);
+                if status.decision == rocky_core::LogDecision::Pending {
+                    for member in &mut status.members {
+                        if acks.get(&log.tip).is_some_and(|keys| {
+                            keys.iter().any(|key| key.as_bytes() == &member.key)
+                        }) {
+                            member.acknowledged = position;
+                        }
+                    }
+                }
+                Ok(status)
+            })
+        })
+    }
     fn node(&self) -> rocky_core::NodeKey {
         *self.key.as_bytes()
     }
@@ -1031,7 +1105,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 expected: append.expected,
                 epoch: append.epoch,
                 hash: append.hash,
-                deadline: append.deadline,
+                duration: append.duration,
                 sequence: append.sequence,
             };
             match self

@@ -1,6 +1,5 @@
 //! The metadata port of a tip's coordinated log: the order and commit of
-//! entries trusted nodes store, never their data. See
-//! `docs/runtime/coordinated-log.md` and `docs/runtime/coordinated-writes.md`.
+//! entries trusted nodes store, never their data.
 use crate::{Commitment, Configuration, CoordinationFuture, Scope, TipId, commitment};
 
 /// A trusted node's key as its 32 bytes.
@@ -33,7 +32,7 @@ pub struct LogPending {
     /// Absolute authority-time second.
     pub deadline: u64,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LogMember {
     pub key: NodeKey,
     pub acknowledged: u64,
@@ -85,6 +84,42 @@ pub enum LogResult {
     },
 }
 
+/// A compact read of one entry, including the current leader's storage promises.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LogStatus {
+    pub decision: LogDecision,
+    pub members: Vec<LogMember>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LogDecision {
+    Pending,
+    Committed,
+    Aborted,
+    Unknown,
+}
+impl LogHead {
+    pub fn status(&self, position: u64, hash: Commitment) -> LogStatus {
+        let decision = if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.position == position && p.hash == hash)
+        {
+            LogDecision::Pending
+        } else {
+            match self.committed(position) {
+                Some(committed) if committed == hash => LogDecision::Committed,
+                Some(_) => LogDecision::Aborted,
+                None if position > self.commit => LogDecision::Aborted,
+                None => LogDecision::Unknown,
+            }
+        };
+        LogStatus {
+            decision,
+            members: self.members.clone(),
+        }
+    }
+}
+
 /// Trusted-node calls of a domain's per-tip coordinated logs. Calls occur
 /// outside storage transactions; join and append sequences increase durably
 /// per log and node, and a retried call repeats its sequence and arguments.
@@ -92,6 +127,13 @@ pub trait DomainLog: Send + Sync {
     /// This client's node key.
     fn node(&self) -> NodeKey;
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead>;
+    /// Reads one entry without transferring the committed hash window.
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: Commitment,
+    ) -> CoordinationFuture<'_, LogStatus>;
     /// Sets the minimum in-sync size a tip's opening names; refused after
     /// the log's first join.
     fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()>;
@@ -127,7 +169,8 @@ pub struct Append {
     pub expected: u64,
     pub epoch: u64,
     pub hash: Commitment,
-    pub deadline: u64,
+    /// Seconds allowed for acknowledgments, bounded by the coordinator.
+    pub duration: u64,
     pub sequence: u64,
 }
 

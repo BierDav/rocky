@@ -200,7 +200,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
             expected: 0,
             epoch: head.epoch,
             hash: [7; 32],
-            deadline: t + 20,
+            duration: 20,
             sequence: 2,
         },
     };

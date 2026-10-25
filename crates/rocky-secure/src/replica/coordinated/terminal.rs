@@ -378,7 +378,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     expected: 0,
                     epoch: head.epoch,
                     hash,
-                    deadline: now()? + ENTRY_DEADLINE,
+                    duration: ENTRY_DEADLINE,
                     sequence: inner.next_sequence(log).await?,
                 };
                 inner

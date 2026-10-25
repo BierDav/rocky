@@ -126,7 +126,7 @@ impl Fixture {
                     expected: head.commit,
                     epoch: head.epoch,
                     hash: [hash; 32],
-                    deadline: T + 10,
+                    duration: 10,
                     sequence,
                 },
                 T,
@@ -174,13 +174,13 @@ fn competing_appends_retries_and_exact_signed_acknowledgments() {
         expected: 0,
         epoch: head.epoch,
         hash: [6; 32],
-        deadline: T + 10,
+        duration: 10,
         sequence: 2,
     };
     let first = f.run(0, append.clone(), T).unwrap();
     assert_eq!(
         f.run(1, append.clone(), T),
-        Err(CoordinationError::StaleHead)
+        Err(CoordinationError::Configuration)
     );
     assert_eq!(f.run(0, append.clone(), T).unwrap(), first);
     let pending = f.state.log_head(tip_log(f.scope)).unwrap().pending.unwrap();
@@ -269,7 +269,7 @@ fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
                         expected: 0,
                         epoch: head.epoch,
                         hash: [8; 32],
-                        deadline: T + 20,
+                        duration: 20,
                         sequence: 3
                     },
                     T + 11
@@ -325,7 +325,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
                 expected: 0,
                 epoch: h.epoch,
                 hash: [1; 32],
-                deadline: T + 31,
+                duration: 31,
                 sequence: 2
             },
             T
@@ -346,7 +346,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
                 expected: p.position - 1,
                 epoch: p.epoch,
                 hash: p.hash,
-                deadline: p.deadline,
+                duration: 10,
                 sequence: 62
             },
             T + 2
@@ -361,7 +361,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
                 expected: h.commit,
                 epoch: h.epoch,
                 hash: [1; 32],
-                deadline: T + 10,
+                duration: 10,
                 sequence: 63
             },
             T + 2
@@ -376,7 +376,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
             expected: before.commit,
             epoch: before.epoch,
             hash: [2; 32],
-            deadline: T + 70,
+            duration: 10,
             sequence: 64,
         },
         T + 60,
@@ -435,7 +435,7 @@ fn hash_window_is_bounded_and_encoded_domain_footprint_is_measured() {
             expected: position - 1,
             epoch: log.head.epoch,
             hash: commitment("test-entry", &position.to_be_bytes()),
-            deadline: time + 10,
+            duration: 10,
             sequence: position + 1,
         };
         let LogResult::Assigned(pending) = log
@@ -683,4 +683,78 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
         f.state.apply_at(T, &revise(control, 10)),
         Err(CoordinationError::Backpressure)
     );
+}
+
+#[test]
+fn duration_uses_authority_time_and_retry_never_extends_assignment() {
+    let mut f = Fixture::new(2, Limits::default());
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
+    let action = Action::Append {
+        expected: 0,
+        epoch: head.epoch,
+        hash: [31; 32],
+        duration: 20,
+        sequence: 2,
+    };
+    let request = f.request(&f.nodes[0], action, T - 25);
+    let assigned = f.state.apply_at(T, &request).unwrap();
+    let Outcome::Coordinated(LogResult::Assigned(pending)) = &assigned else {
+        panic!("assignment");
+    };
+    assert_eq!(pending.deadline, T + 20);
+    assert_eq!(f.state.apply_at(T + 15, &request).unwrap(), assigned);
+}
+
+#[test]
+fn compact_status_omits_the_entire_hash_window() {
+    let mut f = Fixture::new(2, Limits::default());
+    let pending = f.append(0, 2, 17);
+    let log = tip_log(f.scope);
+    let mut head = f.state.log_head(log).unwrap();
+    head.hashes = (0..crate::coordinated::HASH_WINDOW)
+        .map(|_| [1; 32])
+        .collect();
+    let status = head.status(pending.position, pending.hash);
+    assert_eq!(status.decision, LogDecision::Pending);
+    let full_bytes = encode(&Outcome::CoordinatedHead(Box::new(head)))
+        .unwrap()
+        .len();
+    let status_bytes = encode(&Outcome::CoordinatedStatus(status)).unwrap().len();
+    println!(
+        "full head={full_bytes} bytes; pending status={status_bytes} bytes; saved={} bytes/poll",
+        full_bytes - status_bytes
+    );
+    assert!(full_bytes - status_bytes >= crate::coordinated::HASH_WINDOW * 32);
+}
+
+#[test]
+fn sixty_second_clock_skew_is_explicit_and_correction_reuses_the_append() {
+    let mut f = Fixture::new(2, Limits::default());
+    let now = now().unwrap();
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
+    let action = Action::Append {
+        expected: 0,
+        epoch: head.epoch,
+        hash: [19; 32],
+        duration: 20,
+        sequence: 2,
+    };
+    let skewed = f.request(&f.nodes[0], action.clone(), now + 60);
+    assert!(
+        matches!(skewed.fresh(), Err(CoordinationError::ClockSkew { coordinator_time }) if coordinator_time.abs_diff(now) <= 1)
+    );
+    assert!(
+        f.state
+            .log_head(tip_log(f.scope))
+            .unwrap()
+            .pending
+            .is_none()
+    );
+    let corrected = f.request(&f.nodes[0], action.clone(), now);
+    corrected.fresh().unwrap();
+    // The fixture's durable authority time is fixed independently of the device.
+    assert!(matches!(
+        f.run(0, action, T),
+        Ok(Outcome::Coordinated(LogResult::Assigned(_)))
+    ));
 }

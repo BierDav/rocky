@@ -449,6 +449,14 @@ mod coordinated {
         release: Notify,
     }
     impl DomainLog for Gated {
+        fn pending_status(
+            &self,
+            log: TipLog,
+            position: u64,
+            hash: rocky_core::Commitment,
+        ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+            Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+        }
         fn node(&self) -> NodeKey {
             self.inner.node()
         }

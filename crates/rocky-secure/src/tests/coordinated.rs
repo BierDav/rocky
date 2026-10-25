@@ -14,6 +14,7 @@ use rocky_core::{
 use std::sync::{Arc, Mutex as StdMutex};
 
 mod finality;
+mod outages;
 mod recovery;
 mod relay;
 mod seals;
@@ -34,6 +35,7 @@ fn tip_log(lineage: &Lineage) -> TipLog {
 struct Mesh {
     log: MemoryLog,
     nodes: Arc<StdMutex<Vec<Peer>>>,
+    sent: Arc<StdMutex<Vec<NodeKey>>>,
 }
 #[derive(Clone)]
 struct Peer {
@@ -50,6 +52,7 @@ impl Mesh {
         Self {
             log,
             nodes: Arc::default(),
+            sent: Arc::default(),
         }
     }
     fn add(&self, key: &PrivateKey, replica: &Replica) {
@@ -83,6 +86,7 @@ impl Mesh {
             inner: self.log.client(key.public_key()),
             acknowledges: true,
             observed: None,
+            faults: None,
         }
     }
     fn peers(&self, lineage: &Lineage, key: &PrivateKey) -> Peers {
@@ -102,8 +106,22 @@ struct Client {
     inner: rocky_coordinator::coordinated::MemoryLogClient,
     acknowledges: bool,
     observed: Option<Arc<tokio::sync::Notify>>,
+    faults: Option<Arc<StdMutex<outages::Faults>>>,
 }
 impl DomainLog for Client {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: rocky_core::Commitment,
+    ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move {
+            if let Some(faults) = &self.faults {
+                faults.lock().unwrap().polls += 1;
+            }
+            self.inner.pending_status(log, position, hash).await
+        })
+    }
     fn node(&self) -> NodeKey {
         self.inner.node()
     }
@@ -130,9 +148,47 @@ impl DomainLog for Client {
         self.inner.join(log, position, running_hash, sequence)
     }
     fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
-        self.inner.append(log, append)
+        Box::pin(async move {
+            if let Some(faults) = &self.faults {
+                let mut faults = faults.lock().unwrap();
+                faults.appends.push(append);
+                if faults.skew {
+                    return Err(CoordinationError::ClockSkew {
+                        coordinator_time: 123,
+                    });
+                }
+                if faults.unavailable > 0 {
+                    faults.unavailable -= 1;
+                    return Err(CoordinationError::Unavailable);
+                }
+            }
+            let pending = self.inner.append(log, append).await?;
+            if let Some(faults) = &self.faults {
+                let mut faults = faults.lock().unwrap();
+                if faults.lost > 0 {
+                    faults.lost -= 1;
+                    return Err(CoordinationError::Unavailable);
+                }
+            }
+            let wait = self
+                .faults
+                .as_ref()
+                .and_then(|faults| faults.lock().unwrap().append_wait.clone());
+            if let Some(entered) = wait {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(pending)
+        })
     }
     fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        if let Some(faults) = &self.faults {
+            let mut faults = faults.lock().unwrap();
+            if faults.ack_failures > 0 {
+                faults.ack_failures -= 1;
+                return Box::pin(async { Err(CoordinationError::Unavailable) });
+            }
+        }
         if !self.acknowledges {
             return Box::pin(async { Err(CoordinationError::Unavailable) });
         }
@@ -165,6 +221,7 @@ struct Peers {
 impl EntryPeers for Peers {
     fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()> {
         Box::pin(async move {
+            self.mesh.sent.lock().unwrap().push(*node.as_bytes());
             let peer = self
                 .mesh
                 .peer(node)
@@ -491,6 +548,14 @@ async fn a_missing_copy_waits_and_a_complete_chain_outside_the_hash_window_rejoi
     // A head without the entry hash models a gap older than its window.
     struct OutsideWindow(rocky_coordinator::coordinated::MemoryLogClient);
     impl DomainLog for OutsideWindow {
+        fn pending_status(
+            &self,
+            log: TipLog,
+            position: u64,
+            hash: rocky_core::Commitment,
+        ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+            Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+        }
         fn node(&self) -> NodeKey {
             self.0.node()
         }
@@ -998,27 +1063,36 @@ async fn a_node_that_missed_entries_proposes_only_after_catching_up() {
 }
 
 #[tokio::test]
-async fn without_a_coordinator_or_below_the_minimum_a_write_fails_typed_and_rolls_back() {
-    // Fixture::new checks that the first node alone is below the minimum.
+async fn an_outage_keeps_the_staged_write_until_retry_after_the_callers_deadline() {
     let fixture = Fixture::new(2).await;
     let alice = &fixture.alice;
     let slot = fixture.slot(alice).await.unwrap();
     let staged = fixture.stage(alice, slot, "alice").await.unwrap();
     fixture.mesh.log.set_available(false);
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     assert!(matches!(
         fixture.propose(alice).await,
-        Err(CoordinatedError::Unavailable)
+        Err(CoordinatedError::Undecided)
     ));
-    // Nothing stays: the frames are voided and the invoice rolled back.
-    assert!(invoices(&alice.1).await.is_empty());
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2 * ENTRY_DEADLINE));
+    assert_eq!(invoices(&alice.1).await, numbered(1));
     let staged: BTreeSet<Hash> = staged.iter().map(|frame| frame.id().unwrap()).collect();
-    assert!(held(&alice.1).await.is_disjoint(&staged));
+    assert!(held(&alice.1).await.is_superset(&staged));
     assert!(matches!(
         fixture.slot(alice).await,
         Err(CoordinatedError::Unavailable)
     ));
     fixture.mesh.log.set_available(true);
-    fixture.invoice(alice, "alice").await;
+    let committed = fixture.propose(alice).await.unwrap();
+    assert_eq!(
+        committed
+            .frames
+            .iter()
+            .map(|frame| frame.id().unwrap())
+            .collect::<BTreeSet<_>>(),
+        staged
+    );
     fixture.resolve(&fixture.bob).await;
     assert_eq!(invoices(&fixture.bob.1).await, numbered(1));
 }

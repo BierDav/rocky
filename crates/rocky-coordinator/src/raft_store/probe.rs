@@ -202,7 +202,7 @@ impl Probe {
                     expected: head.head,
                     epoch: head.epoch,
                     hash: commitment("probe", &[day, n as u64].map(u64::to_le_bytes).concat()),
-                    deadline: now + 20,
+                    duration: 20,
                     sequence,
                 };
                 let pending = match self.log(now, scope, append).await {

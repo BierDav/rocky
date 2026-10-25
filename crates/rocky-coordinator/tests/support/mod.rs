@@ -323,7 +323,7 @@ pub async fn append(
         expected: head.head,
         epoch: head.epoch,
         hash: [hash; 32],
-        deadline: timestamp() + 30,
+        duration: 30,
         sequence,
     }
 }

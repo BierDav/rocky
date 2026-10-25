@@ -38,7 +38,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     let Action::Append {
         expected,
         epoch,
-        deadline,
+        duration,
         sequence,
         ..
     } = first
@@ -53,7 +53,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
                     expected,
                     epoch,
                     hash: [9; 32],
-                    deadline,
+                    duration,
                     sequence,
                 }
             )

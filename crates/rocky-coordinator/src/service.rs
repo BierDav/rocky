@@ -27,6 +27,7 @@ const MESH_LANES: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reply {
+    pub(crate) leader: Option<u64>,
     pub(crate) result: Result<Outcome, CoordinationError>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,7 +251,10 @@ impl VoterService {
     }
     /// Admits one client request within its lanes, then answers it.
     async fn admit(&self, request: Request) -> Reply {
-        let refuse = |error| Reply { result: Err(error) };
+        let refuse = |error| Reply {
+            leader: self.raft.metrics().borrow().current_leader,
+            result: Err(error),
+        };
         if self.fenced.load(Ordering::SeqCst) {
             return refuse(CoordinationError::Unavailable);
         }
@@ -262,7 +266,20 @@ impl VoterService {
         let tenant = lane.as_ref().map(|lane| lane.try_acquire()).transpose();
         let (Ok(_client), Ok(_tenant)) = (self.clients.try_acquire(), tenant) else {
             self.counters.busy.fetch_add(1, Ordering::Relaxed);
-            return refuse(CoordinationError::Backpressure);
+            // Admission cannot know whether an earlier timed-out append was
+            // assigned. Only the replicated machine gives a definite refusal.
+            let error = if matches!(
+                &request.operation,
+                Operation::Coordinated {
+                    action: crate::coordinated::Action::Append { .. },
+                    ..
+                }
+            ) {
+                CoordinationError::Unavailable
+            } else {
+                CoordinationError::Backpressure
+            };
+            return refuse(error);
         };
         let reply = self.client(request).await;
         self.counters.record(&reply.result);
@@ -312,6 +329,22 @@ impl VoterService {
                     .ok_or(CoordinationError::Unavailable)?;
                 return Ok((Ok(outcome), log));
             }
+            if let Operation::Coordinated {
+                log,
+                action: crate::coordinated::Action::Status { position, hash },
+            } = &request.operation
+            {
+                let outcome = self
+                    .pending_status(&request, *log, *position, *hash)
+                    .await?;
+                let applied = self
+                    .raft
+                    .metrics()
+                    .borrow()
+                    .last_applied
+                    .ok_or(CoordinationError::Unavailable)?;
+                return Ok((Ok(Outcome::CoordinatedStatus(outcome)), applied));
+            }
             if let Some(read) = self.read(&request).await {
                 return read;
             }
@@ -360,10 +393,16 @@ impl VoterService {
         }
         .await;
         match result {
-            Err(error) => Reply { result: Err(error) },
+            Err(error) => Reply {
+                leader: self.raft.metrics().borrow().current_leader,
+                result: Err(error),
+            },
             Ok((data, _)) => {
                 crash("reply.before_send");
-                Reply { result: data }
+                Reply {
+                    leader: self.raft.metrics().borrow().current_leader,
+                    result: data,
+                }
             }
         }
     }
@@ -399,8 +438,11 @@ impl VoterService {
                 let _slot = slot;
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     let envelope = read(&mut stream).await?;
-                    envelope.verify(service.genesis.id()?)?;
+                    envelope.authenticate(service.genesis.id()?)?;
                     let message: Message = decode(&envelope.body)?;
+                    if !matches!(message, Message::Client(_)) {
+                        envelope.verify(service.genesis.id()?)?;
+                    }
                     let is_voter = service
                         .genesis
                         .genesis
@@ -557,7 +599,7 @@ impl VoterService {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     let genesis = service.genesis.id()?;
                     let envelope = read(&mut stream).await?;
-                    envelope.verify(genesis)?;
+                    envelope.authenticate(genesis)?;
                     let Message::Client(request) = decode(&envelope.body)? else {
                         return Err(CoordinationError::Denied);
                     };

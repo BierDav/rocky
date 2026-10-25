@@ -176,8 +176,9 @@ impl Request {
         Ok(())
     }
     pub fn fresh(&self) -> Result<(), CoordinationError> {
-        if now()?.abs_diff(self.time) > 30 {
-            return Err(CoordinationError::Denied);
+        let coordinator_time = now()?;
+        if coordinator_time.abs_diff(self.time) > 30 {
+            return Err(CoordinationError::ClockSkew { coordinator_time });
         }
         Ok(())
     }
@@ -207,7 +208,8 @@ impl Request {
             self.operation,
             Operation::Usage
                 | Operation::Coordinated {
-                    action: crate::coordinated::Action::Head,
+                    action: crate::coordinated::Action::Head
+                        | crate::coordinated::Action::Status { .. },
                     ..
                 }
         )
@@ -216,6 +218,7 @@ impl Request {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Outcome {
     CoordinatedHead(Box<crate::coordinated::Head>),
+    CoordinatedStatus(rocky_core::LogStatus),
     Coordinated(crate::coordinated::Result),
     Controlled(Commitment),
     Membership(BTreeSet<u64>),
@@ -417,6 +420,23 @@ impl Metadata {
             } => {
                 self.log_authorized(*log, &crate::coordinated::Action::Head, request, time)?;
                 Ok(Outcome::CoordinatedHead(Box::new(self.log_head(*log)?)))
+            }
+            Operation::Coordinated {
+                log,
+                action: crate::coordinated::Action::Status { position, hash },
+            } => {
+                self.log_authorized(
+                    *log,
+                    &crate::coordinated::Action::Status {
+                        position: *position,
+                        hash: *hash,
+                    },
+                    request,
+                    time,
+                )?;
+                Ok(Outcome::CoordinatedStatus(
+                    self.log_status(*log, *position, *hash)?,
+                ))
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
             _ => Err(CoordinationError::Denied),
@@ -818,7 +838,9 @@ impl Metadata {
             }
             _ => self.authorized(scope, request, time).map(|_| ()),
         }?;
-        if !matches!(action, Action::Head) && !self.state.find(scope)?.open() {
+        if !matches!(action, Action::Head | Action::Status { .. })
+            && !self.state.find(scope)?.open()
+        {
             return Err(CoordinationError::Denied);
         }
         Ok(())
@@ -848,6 +870,18 @@ impl Metadata {
         head.closed = !domain.open();
         Ok(head)
     }
+    pub(crate) fn log_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: Commitment,
+    ) -> Result<rocky_core::LogStatus, CoordinationError> {
+        Ok(self
+            .state
+            .find(log.scope)?
+            .coordinated
+            .status(log.tip, position, hash))
+    }
     fn coordinated(
         &mut self,
         log: TipLog,
@@ -862,6 +896,11 @@ impl Metadata {
                 .log_head(log)
                 .map(Box::new)
                 .map(Outcome::CoordinatedHead);
+        }
+        if let Action::Status { position, hash } = action {
+            return self
+                .log_status(log, *position, *hash)
+                .map(Outcome::CoordinatedStatus);
         }
         let domain = self.state.find(scope)?;
         let mut next = domain.coordinated.working(request.key, log.tip, action)?;

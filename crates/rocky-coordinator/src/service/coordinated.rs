@@ -1,4 +1,4 @@
-//! Volatile leader acknowledgments and lazy deadline resolution.
+//! Volatile leader acknowledgments and explicit deadline resolution.
 use super::*;
 
 pub(super) struct VolatileAcknowledgments {
@@ -11,47 +11,94 @@ impl VoterService {
     pub(super) fn watch_log_deadlines(service: &Arc<Self>) {
         let weak = Arc::downgrade(service);
         let mut metrics = service.raft.metrics();
+        let mut deadlines = service.store.deadlines();
         tokio::spawn(async move {
+            let mut retry = std::time::Duration::from_millis(100);
             loop {
-                let delay = if let Some(service) = weak.upgrade() {
-                    let leader = metrics.borrow().current_leader == Some(service.node);
-                    if leader && !service.fenced.load(Ordering::SeqCst) {
-                        let pending = service.store.pending_logs().await;
-                        let time = match now() {
-                            Ok(time) => time,
-                            Err(_) => return,
-                        };
-                        let mut next = None;
-                        for (log, entry) in pending {
-                            if entry.deadline <= time {
-                                let _ = service.resolve_log(log, entry).await;
-                            } else {
-                                next = Some(
-                                    next.map_or(entry.deadline, |n: u64| n.min(entry.deadline)),
-                                );
-                            }
-                        }
-                        // Failed resolutions retry on the next Raft metrics change.
-                        next.map(|deadline| {
-                            std::time::Duration::from_secs(deadline.saturating_sub(time))
-                        })
-                    } else {
-                        service.acknowledgments.lock().await.clear();
-                        None
-                    }
-                } else {
+                let leadership = {
+                    let metrics = metrics.borrow_and_update();
+                    (metrics.current_leader, metrics.current_term)
+                };
+                deadlines.borrow_and_update();
+                let Some(service) = weak.upgrade() else {
                     return;
                 };
-                if let Some(delay) = delay {
-                    tokio::select! {
-                        result = metrics.changed() => { if result.is_err() { return; } }
-                        () = tokio::time::sleep(delay) => {}
+                let delay = if leadership.0 == Some(service.node)
+                    && !service.fenced.load(Ordering::SeqCst)
+                {
+                    let Ok(time) = now() else {
+                        return;
+                    };
+                    let mut delay = None;
+                    let mut failed = false;
+                    for (log, entry) in service.store.pending_logs().await {
+                        let wait = if entry.deadline <= time {
+                            if service.resolve_log(log, entry).await.is_err() {
+                                failed = true;
+                                Some(retry)
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(std::time::Duration::from_secs(entry.deadline - time))
+                        };
+                        if let Some(wait) = wait {
+                            delay = Some(delay.map_or(wait, |d: std::time::Duration| d.min(wait)));
+                        }
                     }
-                } else if metrics.changed().await.is_err() {
-                    return;
+                    retry = if failed {
+                        (retry * 2).min(std::time::Duration::from_secs(2))
+                    } else {
+                        std::time::Duration::from_millis(100)
+                    };
+                    delay
+                } else {
+                    service.acknowledgments.lock().await.clear();
+                    None
+                };
+                drop(service);
+                tokio::select! {
+                    result = metrics.wait_for(|m| (m.current_leader, m.current_term) != leadership) => { if result.is_err() { return; } }
+                    result = deadlines.changed() => { if result.is_err() { return; } }
+                    () = async { match delay { Some(delay) => tokio::time::sleep(delay).await, None => std::future::pending().await } } => {}
                 }
             }
         });
+    }
+    pub(super) async fn pending_status(
+        &self,
+        request: &Request,
+        log: TipLog,
+        position: u64,
+        hash: Commitment,
+    ) -> Result<LogStatus, CoordinationError> {
+        let term = self.log_leader().await?;
+        let Outcome::CoordinatedStatus(mut status) = self.store.read(request).await? else {
+            return Err(CoordinationError::Corrupt);
+        };
+        if status.decision == LogDecision::Pending {
+            let acks = self.acknowledgments.lock().await;
+            if let Some(acks) = acks.get(&log).filter(|a| {
+                a.term == term && a.pending.position == position && a.pending.hash == hash
+            }) {
+                for member in &mut status.members {
+                    if acks
+                        .requests
+                        .iter()
+                        .any(|r| r.key.as_bytes() == &member.key)
+                    {
+                        member.acknowledged = position;
+                    }
+                }
+            }
+        }
+        // Do not return promises belonging to a term that just ended.
+        let metrics = self.raft.metrics();
+        let current = metrics.borrow();
+        if current.current_term != term || current.current_leader != Some(self.node) {
+            return Err(CoordinationError::Unavailable);
+        }
+        Ok(status)
     }
     async fn log_leader(&self) -> Result<u64, CoordinationError> {
         tokio::time::timeout(

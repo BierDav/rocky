@@ -8,6 +8,10 @@ pub type Configuration = [u8; 16];
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CoordinationError {
     Unavailable,
+    /// The signed request is outside the authority clock window.
+    ClockSkew {
+        coordinator_time: u64,
+    },
     /// The coordinator's durable state is missing where it must exist.
     CoordinationStateLost,
     UnknownDomain,
@@ -35,6 +39,7 @@ impl CoordinationError {
     pub fn category(&self) -> &'static str {
         match self {
             Self::Unavailable => "unavailable",
+            Self::ClockSkew { .. } => "clock_skew",
             Self::CoordinationStateLost => "state_lost",
             Self::UnknownDomain => "unknown_domain",
             Self::Denied => "denied",

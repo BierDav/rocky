@@ -1,9 +1,11 @@
 # 5. Coordinated writes through outages
 
-Status: proposed. Owner: `rocky-secure` coordinated writes; `rocky-coordinator`
+Status: complete (2026-10-25); see evidence for the workspace baseline failure.
+Owner: `rocky-secure` coordinated writes; `rocky-coordinator`
 service, client and Raft store; `rocky-core` coordination types. Depends on
 nothing. Effort: one week. Follow the
-[execution contract](README.md#agent-execution-contract).
+[execution contract](README.md#agent-execution-contract). Evidence is recorded in
+[the phase report](05-coordinated-writes-through-outages-evidence.md).
 
 ## Inputs and objective
 

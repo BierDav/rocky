@@ -402,7 +402,7 @@ async fn a_zero_length_recovery_aborts_pending_work_and_clears_membership() {
                 expected: 0,
                 epoch: head.epoch,
                 hash: [88; 32],
-                deadline: now().unwrap() + ENTRY_DEADLINE,
+                duration: ENTRY_DEADLINE,
                 sequence: rocky_core::next_request_sequence(0, now().unwrap() + 1)
                     .unwrap()
                     .get(),
@@ -619,6 +619,14 @@ async fn a_branch_gets_ancestor_bundles_only_through_its_inherited_frontier() {
 
 struct HeadUnavailable(Client);
 impl DomainLog for HeadUnavailable {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: rocky_core::Commitment,
+    ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+    }
     fn node(&self) -> NodeKey {
         self.0.node()
     }
@@ -804,6 +812,14 @@ async fn journal_batches(replica: &Replica) -> Vec<Vec<TipStatement>> {
 
 struct LaterHeadUnavailable(Client, rocky_core::TipId);
 impl DomainLog for LaterHeadUnavailable {
+    fn pending_status(
+        &self,
+        log: TipLog,
+        position: u64,
+        hash: rocky_core::Commitment,
+    ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
+        Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
+    }
     fn node(&self) -> NodeKey {
         self.0.node()
     }

@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
 /// The storage format this build reads; older images are refused.
-const FORMAT: u32 = 9;
+const FORMAT: u32 = 10;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -92,6 +92,7 @@ pub struct Backup {
 }
 const BACKUP: &str = "BACKUP";
 const BACKUP_LABEL: &str = "rocky.voter-backup.v1";
+#[derive(Clone)]
 struct Image {
     hard: Hard,
     fence: Option<Fence>,
@@ -116,12 +117,22 @@ pub struct Footprint {
 }
 #[derive(Clone)]
 pub struct Store(Arc<Inner>);
+#[cfg(test)]
+struct SyncGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
 struct Inner {
     root: PathBuf,
     image: Mutex<Image>,
+    /// Serializes durable mutations; metadata readers never acquire it.
+    io: Arc<Mutex<()>>,
+    deadlines: tokio::sync::watch::Sender<()>,
     /// This voter's ID, for its fence.
     node: std::sync::OnceLock<u64>,
     _lock: File,
+    #[cfg(test)]
+    sync_gate: std::sync::Mutex<Option<SyncGate>>,
 }
 fn io_error(error: impl std::error::Error + 'static) -> StorageError<u64> {
     StorageIOError::write_state_machine(&error).into()
@@ -314,6 +325,7 @@ fn check_store_format(path: &Path, backup: bool) -> Result<(), CoordinationError
     }
     Ok(())
 }
+#[allow(clippy::result_large_err)] // OpenRaft fixes the storage error type.
 impl Store {
     pub fn open(
         path: &Path,
@@ -393,8 +405,12 @@ impl Store {
         Ok(Self(Arc::new(Inner {
             root: path.to_path_buf(),
             image: Mutex::new(image),
+            io: Arc::new(Mutex::new(())),
+            deadlines: tokio::sync::watch::channel(()).0,
             node: std::sync::OnceLock::new(),
             _lock: lock,
+            #[cfg(test)]
+            sync_gate: std::sync::Mutex::new(None),
         })))
     }
     fn load(
@@ -483,6 +499,30 @@ impl Store {
         let data = seal(STATE_LABEL, hard).map_err(io_error)?;
         atomic_write(&self.0.root.join("state.cbor"), &data, stage).map_err(io_error)
     }
+    /// A blocking worker owns each durable mutation through publication, even
+    /// if its async caller is canceled. Readers retain the last durable image.
+    async fn update<T: Send + 'static>(
+        &self,
+        changed: bool,
+        mutate: impl FnOnce(&Self, &mut Image) -> Result<T, StorageError<u64>> + Send + 'static,
+    ) -> Result<T, StorageError<u64>> {
+        let io = self.0.io.clone().lock_owned().await;
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _io = io;
+            let mut image = store.0.image.blocking_lock().clone();
+            let pending = changed.then(|| image.metadata.pending_logs());
+            let result = mutate(&store, &mut image)?;
+            let changed = pending.is_some_and(|before| before != image.metadata.pending_logs());
+            *store.0.image.blocking_lock() = image;
+            if changed {
+                store.0.deadlines.send_replace(());
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(io_error)?
+    }
     fn logs_dir(&self) -> PathBuf {
         self.0.root.join("log")
     }
@@ -541,6 +581,9 @@ impl Store {
         }
         Ok(())
     }
+    pub(crate) fn deadlines(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.deadlines.subscribe()
+    }
     pub async fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
         self.0.image.lock().await.metadata.preflight(request)
     }
@@ -579,14 +622,17 @@ impl Store {
     }
     /// Removes the fence of a re-added voter.
     pub async fn lift_fence(&self) -> Result<(), CoordinationError> {
-        let mut image = self.0.image.lock().await;
-        let path = self.0.root.join(FENCE);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|_| CoordinationError::Corrupt)?;
-            sync_directory(&self.0.root).map_err(|_| CoordinationError::Corrupt)?;
-        }
-        image.fence = None;
-        Ok(())
+        self.update(false, |store, image| {
+            let path = store.0.root.join(FENCE);
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(io_error)?;
+                sync_directory(&store.0.root).map_err(io_error)?;
+            }
+            image.fence = None;
+            Ok(())
+        })
+        .await
+        .map_err(|_| CoordinationError::Corrupt)
     }
     /// Records that a membership beyond the fence names this voter a learner.
     #[allow(clippy::result_large_err)] // OpenRaft defines the storage error type.
@@ -695,40 +741,44 @@ impl Store {
     }
     /// Retained state and the bytes it occupies on disk.
     pub async fn footprint(&self) -> Result<Footprint, CoordinationError> {
-        let image = self.0.image.lock().await;
-        let mut disk_bytes = 0;
-        let mut allocated_bytes = 0;
-        let mut snapshots = 0;
-        for dir in [self.0.root.clone(), self.logs_dir(), self.snapshots_dir()] {
-            for entry in std::fs::read_dir(&dir).map_err(|_| CoordinationError::Corrupt)? {
-                let metadata = entry
-                    .map_err(|_| CoordinationError::Corrupt)?
-                    .metadata()
-                    .map_err(|_| CoordinationError::Corrupt)?;
-                if metadata.is_file() {
-                    disk_bytes += metadata.len();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        allocated_bytes += metadata.blocks() * 512;
+        self.update(false, |store, image| {
+            let mut disk_bytes = 0;
+            let mut allocated_bytes = 0;
+            let mut snapshots = 0;
+            for dir in [
+                store.0.root.clone(),
+                store.logs_dir(),
+                store.snapshots_dir(),
+            ] {
+                for entry in std::fs::read_dir(&dir).map_err(io_error)? {
+                    let metadata = entry.map_err(io_error)?.metadata().map_err(io_error)?;
+                    if metadata.is_file() {
+                        disk_bytes += metadata.len();
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            allocated_bytes += metadata.blocks() * 512;
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            allocated_bytes += metadata.len();
+                        }
+                        snapshots += usize::from(dir == store.snapshots_dir());
                     }
-                    #[cfg(not(unix))]
-                    {
-                        allocated_bytes += metadata.len();
-                    }
-                    snapshots += usize::from(dir == self.snapshots_dir());
                 }
             }
-        }
-        Ok(Footprint {
-            logs: image.logs.len(),
-            snapshots,
-            disk_bytes,
-            allocated_bytes,
-            state: image.metadata.retention(),
-            state_bytes: image.metadata.total_used()?,
-            retry_records: image.metadata.retry_records(),
+            Ok(Footprint {
+                logs: image.logs.len(),
+                snapshots,
+                disk_bytes,
+                allocated_bytes,
+                state: image.metadata.retention(),
+                state_bytes: image.metadata.total_used().map_err(io_error)?,
+                retry_records: image.metadata.retry_records(),
+            })
         })
+        .await
+        .map_err(|_| CoordinationError::Corrupt)
     }
 }
 impl RaftLogReader<Types> for Store {
@@ -746,6 +796,7 @@ impl RaftLogReader<Types> for Store {
             .collect())
     }
 }
+#[allow(clippy::result_large_err)] // OpenRaft fixes the storage error type.
 impl RaftLogStorage<Types> for Store {
     type LogReader = Self;
     async fn get_log_reader(&mut self) -> Self {
@@ -765,12 +816,15 @@ impl RaftLogStorage<Types> for Store {
         })
     }
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
-        let mut image = self.0.image.lock().await;
-        let mut hard = image.hard.clone();
-        hard.vote = Some(*vote);
-        self.persist_hard(&hard, "vote")?;
-        image.hard = hard;
-        Ok(())
+        let vote = *vote;
+        self.update(false, move |store, image| {
+            let mut hard = image.hard.clone();
+            hard.vote = Some(vote);
+            store.persist_hard(&hard, "vote")?;
+            image.hard = hard;
+            Ok(())
+        })
+        .await
     }
     async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
         Ok(self.0.image.lock().await.hard.vote)
@@ -779,12 +833,14 @@ impl RaftLogStorage<Types> for Store {
         &mut self,
         committed: Option<LogId<u64>>,
     ) -> Result<(), StorageError<u64>> {
-        let mut image = self.0.image.lock().await;
-        let mut hard = image.hard.clone();
-        hard.committed = committed;
-        self.persist_hard(&hard, "commit")?;
-        image.hard = hard;
-        Ok(())
+        self.update(false, move |store, image| {
+            let mut hard = image.hard.clone();
+            hard.committed = committed;
+            store.persist_hard(&hard, "commit")?;
+            image.hard = hard;
+            Ok(())
+        })
+        .await
     }
     async fn read_committed(&mut self) -> Result<Option<LogId<u64>>, StorageError<u64>> {
         Ok(self.0.image.lock().await.hard.committed)
@@ -798,62 +854,82 @@ impl RaftLogStorage<Types> for Store {
         I: IntoIterator<Item = Entry<Types>> + Send,
         I::IntoIter: Send,
     {
-        let mut image = self.0.image.lock().await;
-        let dir = self.logs_dir();
-        let mut written = Vec::new();
-        for entry in entries {
-            if !image.logs.contains_key(&entry.log_id.index)
-                && image.logs.len() + written.len() >= MAX_LOGS
-            {
-                return Err(other("consensus log capacity exhausted"));
+        let entries: Vec<_> = entries.into_iter().collect();
+        let result = self
+            .update(false, move |store, image| {
+                #[cfg(test)]
+                if let Some(gate) = store.0.sync_gate.lock().unwrap().take() {
+                    let _ = gate.entered.send(());
+                    let _ = gate.release.recv();
+                }
+                let dir = store.logs_dir();
+                let mut written = Vec::new();
+                for entry in entries {
+                    if !image.logs.contains_key(&entry.log_id.index)
+                        && image.logs.len() + written.len() >= MAX_LOGS
+                    {
+                        return Err(other("consensus log capacity exhausted"));
+                    }
+                    let data = seal(LOG_LABEL, &entry).map_err(io_error)?;
+                    if data.len() > MAX_LOG_BYTES {
+                        return Err(other("consensus entry capacity exhausted"));
+                    }
+                    write_synced(&dir.join(file_name(entry.log_id.index)), &data, "log")
+                        .map_err(io_error)?;
+                    written.push(entry);
+                }
+                sync_directory(&dir).map_err(io_error)?;
+                crash("log.after_sync");
+                for entry in written {
+                    image.logs.insert(entry.log_id.index, entry);
+                }
+                Ok(())
+            })
+            .await;
+        match result {
+            Ok(()) => {
+                callback.log_io_completed(Ok(()));
+                Ok(())
             }
-            let data = seal(LOG_LABEL, &entry).map_err(io_error)?;
-            if data.len() > MAX_LOG_BYTES {
-                return Err(other("consensus entry capacity exhausted"));
-            }
-            write_synced(&dir.join(file_name(entry.log_id.index)), &data, "log")
-                .map_err(io_error)?;
-            written.push(entry);
+            Err(error) => Err(error),
         }
-        sync_directory(&dir).map_err(io_error)?;
-        crash("log.after_sync");
-        for entry in written {
-            image.logs.insert(entry.log_id.index, entry);
-        }
-        callback.log_io_completed(Ok(()));
-        Ok(())
     }
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let mut image = self.0.image.lock().await;
-        // Highest first, so an interruption leaves a contiguous prefix.
-        let doomed: Vec<_> = image
-            .logs
-            .range(log_id.index..)
-            .map(|(i, _)| *i)
-            .rev()
-            .collect();
-        for index in doomed {
-            std::fs::remove_file(self.logs_dir().join(file_name(index))).map_err(io_error)?;
-            image.logs.remove(&index);
-        }
-        sync_directory(&self.logs_dir()).map_err(io_error)
+        self.update(false, move |store, image| {
+            // Highest first, so an interruption leaves a contiguous prefix.
+            let doomed: Vec<_> = image
+                .logs
+                .range(log_id.index..)
+                .map(|(i, _)| *i)
+                .rev()
+                .collect();
+            for index in doomed {
+                std::fs::remove_file(store.logs_dir().join(file_name(index))).map_err(io_error)?;
+                image.logs.remove(&index);
+            }
+            sync_directory(&store.logs_dir()).map_err(io_error)
+        })
+        .await
     }
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let mut image = self.0.image.lock().await;
-        if image
-            .snapshot
-            .as_ref()
-            .and_then(|meta| meta.last_log_id)
-            .is_none_or(|snapshot| snapshot.index < log_id.index)
-        {
-            // Raft can purge before installing its incoming snapshot. Keep recovery
-            // entries until that snapshot is durable.
-            image.pending_purge = Some(log_id);
-            return Ok(());
-        }
-        self.purge_files(&mut image, log_id)
+        self.update(false, move |store, image| {
+            if image
+                .snapshot
+                .as_ref()
+                .and_then(|meta| meta.last_log_id)
+                .is_none_or(|snapshot| snapshot.index < log_id.index)
+            {
+                // Raft can purge before installing its incoming snapshot. Keep recovery
+                // entries until that snapshot is durable.
+                image.pending_purge = Some(log_id);
+                return Ok(());
+            }
+            store.purge_files(image, log_id)
+        })
+        .await
     }
 }
+#[allow(clippy::result_large_err)] // OpenRaft fixes the storage error type.
 impl RaftStateMachine<Types> for Store {
     type SnapshotBuilder = Self;
     async fn applied_state(
@@ -870,27 +946,30 @@ impl RaftStateMachine<Types> for Store {
         I: IntoIterator<Item = Entry<Types>> + Send,
         I::IntoIter: Send,
     {
-        let mut image = self.0.image.lock().await;
-        let mut replies = Vec::new();
-        for entry in entries {
-            let reply = match entry.payload {
-                EntryPayload::Blank => Err(CoordinationError::Unavailable),
-                EntryPayload::Membership(membership) => {
-                    image.membership = StoredMembership::new(Some(entry.log_id), membership);
-                    let membership = image.membership.clone();
-                    self.observe_membership(&mut image, &membership)?;
-                    Ok(Outcome::Membership(image.metadata.desired_voters.clone()))
-                }
-                EntryPayload::Normal(proposal) => {
-                    image.metadata.apply_at(proposal.time, &proposal.request)
-                }
-            };
-            image.applied = Some(entry.log_id);
-            replies.push(reply);
-        }
-        // Applied state is durable through committed entries and snapshots.
-        crash("apply.after_apply");
-        Ok(replies)
+        let entries: Vec<_> = entries.into_iter().collect();
+        self.update(true, move |store, image| {
+            let mut replies = Vec::new();
+            for entry in entries {
+                let reply = match entry.payload {
+                    EntryPayload::Blank => Err(CoordinationError::Unavailable),
+                    EntryPayload::Membership(membership) => {
+                        image.membership = StoredMembership::new(Some(entry.log_id), membership);
+                        let membership = image.membership.clone();
+                        store.observe_membership(image, &membership)?;
+                        Ok(Outcome::Membership(image.metadata.desired_voters.clone()))
+                    }
+                    EntryPayload::Normal(proposal) => {
+                        image.metadata.apply_at(proposal.time, &proposal.request)
+                    }
+                };
+                image.applied = Some(entry.log_id);
+                replies.push(reply);
+            }
+            // Applied state is durable through committed entries and snapshots.
+            crash("apply.after_apply");
+            Ok(replies)
+        })
+        .await
     }
     async fn get_snapshot_builder(&mut self) -> Self {
         self.clone()
@@ -905,53 +984,61 @@ impl RaftStateMachine<Types> for Store {
         meta: &SnapshotMeta<u64, BasicNode>,
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
-        let data = snapshot.into_inner();
-        let metadata: Metadata = decode(&data).map_err(io_error)?;
-        let mut image = self.0.image.lock().await;
-        if metadata.genesis.id().map_err(io_error)? != image.hard.identity {
-            return Err(other("foreign snapshot"));
-        }
-        self.write_snapshot(image.hard.identity, meta, data, "install_snapshot")?;
-        image.metadata = metadata;
-        image.applied = meta.last_log_id;
-        image.membership = meta.last_membership.clone();
-        image.snapshot = Some(meta.clone());
-        self.observe_membership(&mut image, &meta.last_membership)?;
-        self.finish_purge(&mut image)
+        let meta = meta.clone();
+        self.update(true, move |store, image| {
+            let data = snapshot.into_inner();
+            let metadata: Metadata = decode(&data).map_err(io_error)?;
+            if metadata.genesis.id().map_err(io_error)? != image.hard.identity {
+                return Err(other("foreign snapshot"));
+            }
+            store.write_snapshot(image.hard.identity, &meta, data, "install_snapshot")?;
+            image.metadata = metadata;
+            image.applied = meta.last_log_id;
+            image.membership = meta.last_membership.clone();
+            image.snapshot = Some(meta.clone());
+            store.observe_membership(image, &meta.last_membership)?;
+            store.finish_purge(image)
+        })
+        .await
     }
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<Types>>, StorageError<u64>> {
-        let image = self.0.image.lock().await;
-        let Some(meta) = &image.snapshot else {
-            return Ok(None);
-        };
-        let path = self.snapshots_dir().join(file_name(snapshot_index(meta)));
-        let file: SnapshotFile =
-            unseal(SNAPSHOT_LABEL, &read(&path).map_err(io_error)?).map_err(io_error)?;
-        if file.meta != *meta {
-            return Err(other("snapshot changed"));
-        }
-        Ok(Some(Snapshot {
-            meta: file.meta,
-            snapshot: Box::new(Cursor::new(file.metadata.0)),
-        }))
+        self.update(false, |store, image| {
+            let Some(meta) = &image.snapshot else {
+                return Ok(None);
+            };
+            let path = store.snapshots_dir().join(file_name(snapshot_index(meta)));
+            let file: SnapshotFile =
+                unseal(SNAPSHOT_LABEL, &read(&path).map_err(io_error)?).map_err(io_error)?;
+            if file.meta != *meta {
+                return Err(other("snapshot changed"));
+            }
+            Ok(Some(Snapshot {
+                meta: file.meta,
+                snapshot: Box::new(Cursor::new(file.metadata.0)),
+            }))
+        })
+        .await
     }
 }
+#[allow(clippy::result_large_err)] // OpenRaft fixes the storage error type.
 impl RaftSnapshotBuilder<Types> for Store {
     async fn build_snapshot(&mut self) -> Result<Snapshot<Types>, StorageError<u64>> {
-        let mut image = self.0.image.lock().await;
-        let data = encode(&image.metadata).map_err(io_error)?;
-        let meta = SnapshotMeta {
-            last_log_id: image.applied,
-            last_membership: image.membership.clone(),
-            snapshot_id: format!("{:?}", image.applied),
-        };
-        self.write_snapshot(image.hard.identity, &meta, data.clone(), "snapshot")?;
-        image.snapshot = Some(meta.clone());
-        self.finish_purge(&mut image)?;
-        Ok(Snapshot {
-            meta,
-            snapshot: Box::new(Cursor::new(data)),
+        self.update(false, move |store, image| {
+            let data = encode(&image.metadata).map_err(io_error)?;
+            let meta = SnapshotMeta {
+                last_log_id: image.applied,
+                last_membership: image.membership.clone(),
+                snapshot_id: format!("{:?}", image.applied),
+            };
+            store.write_snapshot(image.hard.identity, &meta, data.clone(), "snapshot")?;
+            image.snapshot = Some(meta.clone());
+            store.finish_purge(image)?;
+            Ok(Snapshot {
+                meta,
+                snapshot: Box::new(Cursor::new(data)),
+            })
         })
+        .await
     }
 }
 

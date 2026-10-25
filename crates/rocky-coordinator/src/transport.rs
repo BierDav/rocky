@@ -60,16 +60,21 @@ impl Envelope {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-wire.v2",
+            "rocky.coordination-wire.v3",
             &(self.genesis, self.key, self.nonce, self.time, &self.body),
         )
     }
-    pub fn verify(&self, genesis: Commitment) -> Result<(), CoordinationError> {
-        if self.genesis != genesis
-            || now()?.abs_diff(self.time) > 30
-            || !self.key.verify(&self.signing_bytes()?, &self.signature)
-        {
+    pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
+        if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
             return Err(CoordinationError::Denied);
+        }
+        Ok(())
+    }
+    pub fn verify(&self, genesis: Commitment) -> Result<(), CoordinationError> {
+        self.authenticate(genesis)?;
+        let coordinator_time = now()?;
+        if coordinator_time.abs_diff(self.time) > 30 {
+            return Err(CoordinationError::ClockSkew { coordinator_time });
         }
         Ok(())
     }
@@ -141,7 +146,9 @@ pub(crate) async fn converse<T: Serialize + DeserializeOwned>(
     let envelope = Envelope::sign(genesis, nonce(), &message, key)?;
     write(stream, &envelope).await?;
     let response = read(stream).await?;
-    response.verify(genesis)?;
+    // A fresh nonce binds the signed response to this call even when the
+    // device's clock is wrong; the reply can therefore report ClockSkew.
+    response.authenticate(genesis)?;
     if response.key != voter || response.nonce != envelope.nonce {
         return Err(CoordinationError::Denied);
     }

@@ -435,3 +435,420 @@ Final check output is `/tmp/rocky-sync-opt/check-final.log`; the earlier run is
 These artifacts remain outside the temporary workspace. This work improves the
 measured bootstrap but does not complete phase 8 qualification or produce a
 fully green required check.
+
+## Further SQLite experiments (2026-10-25)
+
+Work used Jujutsu workspace `rocky-sync-opt-next` under `~/AgentWorkspaces`,
+on top of the verified-header optimization above. Artifacts, controllers and
+JSON results remain under `/tmp/rocky-sync-opt-next`. The starting profile is
+the matching optimized phone sample above: SQLite accounted for 41.20% of
+sampled cycles, with substantial reads, writes and checkpoint work. These
+experiments use the same sealed source snapshot, frozen consumer bindings,
+fresh synthetic directories and issuer-profile members. They do not change
+the shopping application or its household.
+
+### Rejected SQLite cache experiment
+
+Writable connections were tested with a 32 MiB suggested SQLite page cache
+and 1,024 prepared statements instead of the default page cache and 128
+statements. The original artifact's phone imports took **102.571 s** and
+**133.772 s**; the cache variant took **119.843 s**, between those observations.
+Post-bootstrap process counters showed bytes read through system calls falling
+from **5.975 / 5.993 GB** to **2.922 GB**, but physical writes stayed near
+**2.89–2.91 GB**. This did not establish a wall-clock benefit. The cache changes
+were removed; no additional SQLite cache allocation is retained.
+
+The cache variant's three-node data checks passed and 20 phone/desktop updates
+had p95 **138.90 ms**. Its relay observations were **2.894–23.390 s**. These
+results belong to the rejected artifact, not the final code.
+
+### Retained WAL checkpoint thresholds
+
+The secure replica now attempts passive checkpoints at **16 MiB** instead of
+4 MiB, and truncating checkpoints at **64 MiB** instead of 16 MiB. This gives
+checkpointing more committed pages over which to combine writes. The nominal
+truncation threshold grows by 48 MiB per replica; it is not an absolute file
+size cap when a transaction overshoots or a reader prevents checkpointing.
+Per-page transactions, cursor updates, explicit durable flushes, synchronous
+mode and full device-flush settings are unchanged. No stored or wire format
+changed.
+
+The sequential two-desktop probes `host-baseline` and `host-wal` completed
+fresh 100k bootstraps in **17.605 s / 11.562 s**, an observed **34.3% reduction**.
+Both checked every generated row and value, allowing the source fixture's
+previously edited `k000001` title. Starting host loads were **9.14 / 8.88** on
+18 cores, with no verification build overlapping either probe. Five empty
+reconciliations were **36.0–38.4 ms / 35.8–37.8 ms**. This is one host pair,
+not repeated device qualification.
+
+`phone-wal-retry-three-relay` used the physical Pixel 11 Pro and the final WAL
+artifact. Its phone bootstrap took **107.029 s**, within the original
+artifact's **102.571–133.772 s** range. This does not establish a phone
+wall-clock speedup, and the **60 s gate remains unmet**. Its post-bootstrap
+`/proc/<pid>/io` counter reported **2,472,243,200 physical bytes written**,
+versus **2,909,671,424 / 2,910,425,088** in the two baseline runs: about
+**15% fewer writes**. These process counters include open/join and WAL work,
+not only checkpoint row storage. Starting host loads for the baseline,
+baseline repeat and WAL runs were **17.73 / 6.34 / 11.30**; builds did not
+overlap their measurements. Device and network variability remain.
+
+All 100,000 rows and generated values were checked on the source and phone.
+Twenty alternating automatic row transfers had nearest-rank **p95 130.24 ms**,
+maximum **130.59 ms**, observing the **1 s p95 gate** on this fixture. Five
+empty phone LAN reconciliations took **1.145–1.450 s**.
+
+A second desktop then joined and checked all rows, values and the latest
+edited title. Its bootstrap took **14.551 s**, including peer-closed-link
+attempts against another peer; that peer remained marked for retry in its
+report. The data checks passed and all three replicas ended readable and
+writable. Public node IDs:
+
+- Source: `c7bd0b99ff6f59e0e420195a479b9b09d5f16171e73ae614d218b873921959b0`.
+- Phone: `78739251608c2773d623617f94cecf5ee05b92394c8a401e3e4f36a3578c8929`.
+- Second desktop: `cf3ce5ac96893d04c6935538a09736e1d565882225a45a7937a7920e60729730`.
+
+The same three replicas were reopened with loopback-only endpoint bindings
+and local/topic discovery disabled. The phone reported a connected relay at
+`https://euc1-1.relay.n0.iroh.link./`. Five empty reconciliations took
+**7.395, 6.587, 2.860, 8.258 and 4.301 s**. They transferred no rows and
+reported no refusal, waiting scope or timeout; three reports included
+peer-closed-link attempts, whose elapsed times are included. The **2 s relay
+gate remains unmet**. All three replicas again ended readable and writable.
+
+The first WAL probe, `phone-wal-three-relay`, lost its control connection
+before returning a bootstrap timing. Its ADB control forward was absent
+afterward. It is excluded from timing comparisons; the cause was not
+established. Restoring the forward and using a fresh directory made the retry
+above complete.
+
+Final native SHA-256 values; the Android library was checked against the installed APK:
+
+- Android, stripped: `139705410c6d25797831ac95856619e0b483e3c9ed4b893c41355713c3bbea36`.
+- macOS: `7e56f31ec005654169c6047552763ead0c4077c40ee0409712a172edb5b79a35`.
+
+The final artifacts are in `/tmp/rocky-sync-opt-next/wal`; the rejected cache
+artifacts remain in its parent directory. The **100 ms latency-shaping** and
+**shopping UI** checks were not repeated and remain unverified. This work
+reduces measured checkpoint I/O and host import time; it does not qualify
+phase 8.
+
+### Final verification of the retained thresholds
+
+- `./scripts/lint`, `./scripts/commitlint --jj`, both release native builds
+  and workspace Clippy with warnings denied passed.
+- `./scripts/check --build` created workspace and SDK-without-defaults
+  archives; `./scripts/check --from` ran the full checks from those artifacts,
+  with eight nextest workers. All **200 unit tests** and **1,379 integration
+  assertions** passed. Workspace and SDK integration runs took **156.853 s**
+  and **85.658 s**; the checker reported **255.84 s**, within **300 s**.
+- **The final check exited 1** on unchanged **2 s** per-test budgets:
+  `rocky-sdk node::revocation_tests::reopen_completes_each_revocation_secret_boundary`
+  (**2.24 s / 2.13 s** isolated in the two builds);
+  `rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+  (**2.26 s / 2.48 s**); and
+  `rocky-sdk::concurrent_rotation two_revoked_list_readers_open_the_opposite_sibling_but_not_the_superseding_rows`
+  (**2.30 s** in the SDK build). Assertions passed. The first two overruns
+  were already recorded above; the concurrent-rotation overrun was not.
+  No assertion, tier or budget was changed, and no cause is attributed to the
+  new overrun. This is not a fully green required check.
+
+Final build and check logs are `wal/check-build.log` and `wal/check-final.log`
+under `/tmp/rocky-sync-opt-next`. The earlier cache experiment's full check
+is `check.log`; it also passed all assertions but exceeded the previously
+recorded revocation/reopen and tips-race budgets. All artifacts remain outside
+the temporary workspace.
+
+## Page-batched checkpoint row storage (2026-10-25)
+
+Work used Jujutsu workspace `rocky-sync-opt-20261025` under
+`~/AgentWorkspaces`, based on the retained WAL thresholds above. Raw logs,
+controllers, native libraries and fresh synthetic databases are in
+`/tmp/rocky-sync-opt-20261025` on the execution host.
+
+Checkpoint import now checks for existing rows once per page and inserts
+encoded rows in bounded multi-row statements. Direct imports use the already
+resolved integer scope ID to write `secure_rows`, retaining its normal row
+triggers, rather than resolving the scope through the writable view for
+every row. Both direct and staged imports batch the checkpoint row copy.
+The maximum is 256 rows (768 bound parameters) per insert. Row dictionaries,
+creation clocks, provenance, partition and identity checks, projections and
+page cursors remain in the same transaction. Signatures, durability settings,
+wire and stored formats are unchanged.
+
+A regression injects an existing row at the end of an incoming page, checks
+that the page is refused and compares every authoritative SQL table before
+and after refusal. Existing checkpoint fault, process-exit, resume and
+concurrent-write checks exercise page atomicity and recovery.
+
+### Verification
+
+- `./scripts/lint`, `./scripts/commitlint --jj`, workspace Clippy with
+  warnings denied and both release native builds passed.
+- The focused checkpoint run passed 75 tests (one ignored measurement).
+  After correcting the new regression's privileged injection to copy valid
+  stored record bytes, its isolated nextest run passed in **265 ms**. The
+  final full run also passed it in **834 ms**.
+- The final `./scripts/check` used eight nextest workers and passed all
+  **200 unit** and **1,380 integration** tests, including the SDK
+  without default features. Integration runs took **166.606 s / 134.576 s**.
+- **The check exited 1**: the checker measured **303.07 s** against the
+  **300 s** integration suite budget. The unchanged **2 s** test budgets
+  also rejected the tips race
+  `revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+  (**2.09 s / 2.41 s** isolated, scaled by host load) and concurrent rotation
+  `two_revoked_list_readers_open_the_opposite_sibling_but_not_the_superseding_rows`
+  (**2.20 s**). These tests' overruns were already recorded above; their
+  assertions passed. No budget or tier was changed. Other Rocky compilation
+  was active on the shared host. This is not a fully green required check.
+
+Final verification logs are `check-final-fixed.log`, `lint-verified.log`,
+`commitlint.log` and `duplicate-regression.log` under the artifact directory.
+The earlier `check-verified.log` contains the invalid regression-fixture
+injection and was stopped during redundant timing reruns after the corrected
+full check began; it is diagnostic evidence, not the final result.
+
+### Host observations
+
+The frozen JVM consumer, sealed 100k source snapshot, schema and value checks
+are the same as the preceding WAL experiment. Each probe cloned that source
+and joined a fresh member, checking all 100,000 rows and every generated
+value on both replicas. The source's previously edited `k000001` title remains
+allowed. No verification from this workspace overlapped these measurements.
+Other work in the recovery workspace was running CPU-intensive tests.
+
+The first baseline, before the verification builds, took **11.121 s**, with
+host load **11.17** on 18 cores. After verification, the adjacent baseline /
+batch pair took **30.620 s / 21.260 s**, starting at loads **29.80 / 41.00**.
+The reverse-order batch / baseline pair took **17.609 s / 38.804 s**, at
+**26.95 / 25.01**. Both adjacent pairs favor batching, but the baseline spread
+shows that these are shared-host observations, not an isolated causal speedup
+or phone qualification. Five empty reconciliations per later run ranged from
+**47.5–256.7 ms** with batching and **54.6–126.7 ms** without it. The first
+baseline's empty reconciliations were **35.2–38.1 ms**.
+
+### Phone observations and qualification limits
+
+The physical Pixel 11 Pro (`66121FDKX001MF`) lost its USB connection before
+the first baseline began. A wireless-ADB retry was interrupted by the user's
+phone restart before returning a bootstrap timing. Both attempts are excluded.
+After reconnecting to the same verified hardware serial over wireless ADB,
+`phone-baseline-reboot` completed a fresh 100k import in **65.047 s**, checked
+all rows and generated values, and passed 20 alternating automatic updates
+with nearest-rank **p95 308.67 ms**. Five empty LAN reconciliations took
+**529.2–601.4 ms**; both replicas ended readable and writable.
+
+The candidate `phone-batch-three-relay` returned a fresh bootstrap time of
+**107.247 s**. This is slower than the immediately preceding post-reboot
+baseline, and does **not** demonstrate a phone improvement. The **60 s gate
+remains unmet**. Shared-host observations favor batching, but neither these
+runs nor the earlier baseline spread establish an isolated device speedup.
+No further optimization was attempted after the owner's request to finish.
+
+The candidate native libraries were built from the retained source and the
+installed APK's library was checked byte-for-byte. SHA-256 values:
+
+- Android (`--strip-debug`): `c39247b141d6d26dcd310c07699764859a6a10a0f69f6e6ab0cd47e748ae9e87`.
+- macOS: `5ea459c521626dad0814c8cb3395fb6a1854453f65a111643dae15acae98f41c`.
+
+Both phone runs use the wireless control bridge; their one-row timings
+include that bridge and read polling. All data belongs to fresh synthetic
+fixtures and `org.example.rocky.load100k`, not the shopping household. The
+**100 ms latency-shaping** and **three-device shopping UI** checks were not
+repeated and remain unverified. Phase 8 is not qualified by this work.
+
+The candidate probe completed successfully after the merge. It checked all
+100,000 rows and generated values, passed 20 alternating phone/desktop
+updates with nearest-rank **p95 150.68 ms**, maximum **176.69 ms**, and measured
+five empty LAN reconciliations at **477.8–592.1 ms**. The second host JVM
+replica bootstrapped in **12.308 s**, checked every row/value and the latest
+edited title, and reported no retry-pending peer, refusal or timeout. All
+three replicas ended readable and writable.
+
+Public node IDs for the candidate probe:
+
+- Source: `c7bd0b99ff6f59e0e420195a479b9b09d5f16171e73ae614d218b873921959b0`.
+- Phone: `99fbfb1485fa9f730e66366e16df872e5896ae1efe8410d38595a74d87caac72`.
+- Second host JVM: `68c0008851a8fa53be6c6f42b78b527da0b672dd034b428cb405be4a6274825d`.
+
+Reopening the same three replicas with loopback-only endpoint bindings and
+local/topic discovery disabled connected the phone to
+`https://euc1-1.relay.n0.iroh.link./`. Five empty reconciliations took
+**9.202, 2.454, 2.552, 2.412 and 8.816 s**, with no row transfers. These
+include all attempts in each reconciliation; the **2 s relay gate remains
+unmet**. All three again ended readable and writable. The one-row **1 s p95**
+gate was observed on the candidate; the bootstrap and relay gates were not.
+
+The retained changes were squashed into the original working change, and
+Jujutsu workspace `rocky-sync-opt-20261025` and its directory were removed.
+Artifacts remain in `/tmp/rocky-sync-opt-20261025` independently of that
+workspace. No further optimization was made after the owner's stop request.
+
+
+## Page-batched creation stubs (2026-10-26)
+
+Work uses Jujutsu workspace `rocky-sync-opt` under `~/AgentWorkspaces`,
+based on `02b50e55`, preserving the main checkout's pending checkpoint-write
+optimizations. Artifacts are in `/tmp/rocky-sync-opt-20261026` independently
+of the temporary workspace.
+
+The starting profile is the matching optimized phone sample in
+`/tmp/rocky-sync-opt`, summarized above: `sqlite3_step` accounts for 41.20%
+of sampled cycles. Inspection found that every imported row repeated a
+creation-stub lookup and, for a direct import, a stub upsert, including rows
+sharing one creation operation. Import now collects distinct creations per
+page, checks their clocks against one another and the previously staged
+stubs with one bounded query, and batches the staging and direct stub writes.
+The page's creation set counts only newly seen operations. At most 256 rows
+enter a production page, bounding inserts to 768 parameters. Row checks,
+projection, stubs and cursor remain in the same transaction. Durability,
+credentials, signatures and stored/wire formats are unchanged.
+
+The regression uses rows sharing one creation across multiple pages, for
+both direct and staged imports. Pages signed by the legitimate source with
+conflicting clocks within a page or against a preceding page are refused;
+every authoritative SQL table is compared before and after refusal. Valid
+pages still finish, audit and retain exactly one checkpoint creation stub.
+
+
+### Verification
+
+- `./scripts/lint`, `./scripts/commitlint --jj`, workspace Clippy with warnings
+  denied, and release native builds for macOS and Android passed. The installed
+  load-probe APK's library was pulled and checked byte-for-byte after each
+  installation. Frozen consumer ABI checks passed for both builds.
+- The final `./scripts/check`, using eight nextest workers, passed **200 unit**
+  and **1,381 integration assertions**: **1,077** workspace and **304** SDK
+  without default features. The new regression passed in **0.771 s**.
+  Integration runs took **149.684 s / 79.958 s**; the checker reported
+  **230.81 s**, within the unchanged **300 s** suite budget.
+- **The required check exited 1** on unchanged **2 s** per-test budgets:
+  `rocky-sdk::service prerequisites::real_voters_finalize_an_owner_seal_after_a_trusted_write`
+  took **4.03 s** isolated, and
+  `rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+  took **2.22 s / 2.21 s** in the two builds. Assertions passed. The tips-race
+  overrun was previously recorded; no cause is attributed to the service
+  overrun. No assertion, tier or budget was changed. This is not a fully green
+  required check. Full output and tier reports are in `check.log` and
+  `test-tiers-final/` under the artifact directory.
+
+### Device observations and limits
+
+Both builds used the same frozen JVM/Android consumer, sealed synthetic 100k
+source snapshot and schema as the preceding experiments. Each import joined a
+fresh directory and checked all 100,000 keys and generated values, allowing the
+source fixture's previously edited `k000001` title. No verification build or
+host benchmark overlapped the phone measurements. Wireless ADB controlled the
+physical Pixel 11 Pro (`66121FDKX001MF`); the source and joining phone both used
+the issuer profile. The first phone attempt reused an older fixture path and
+was refused before import; it is excluded. Successful runs use date-specific
+fresh paths.
+
+The adjacent phone baseline / candidate bootstraps took **169.213 s /
+158.185 s**, an observed **6.5%** decrease in one pair. This does not establish
+an isolated causal improvement given the previously recorded device spread;
+the **60 s gate remains unmet**. Post-bootstrap process counters were
+**2,473,472,000 / 2,475,184,128 physical bytes written**, including open/join.
+The change does not demonstrate reduced physical I/O.
+
+Each run passed 20 alternating automatic phone/desktop updates. Nearest-rank
+p95 was **155.72 ms / 160.01 ms**; the candidate maximum was **186.84 ms**.
+These timings include the wireless control bridge and read polling. Five empty
+LAN reconciliations took **581.7–684.8 ms / 537.0–570.4 ms**. The candidate's
+second host JVM joined in **11.705 s**, checked every row/value and the latest
+edited title, and all three replicas ended readable and writable.
+
+The candidate then reopened those three replicas on loopback-only endpoint
+bindings with local/topic discovery disabled. All five empty relay attempts
+are included: **10.058, 2.450, 6.753, 2.691 and 2.663 s**. All three remained
+readable and writable. The **2 s relay gate remains unmet**. The one-row p95
+gate was observed for this fixture; the **100 ms per-hop catch-up** and
+**three-device shopping UI** checks were not repeated and remain unverified.
+This work does not qualify phase 8 and does not change the shopping household.
+
+Candidate public node IDs:
+
+- Source: `c7bd0b99ff6f59e0e420195a479b9b09d5f16171e73ae614d218b873921959b0`.
+- Phone: `59f82c3a3394ec7d5cae9e4dc755331eb45c7e2d340eef60e33db7d7eefb17fd`.
+- Second host JVM: `11bb0b95efe1c0ad7d8d679105258a6a38ba92c126bccc6e0bc70db40e332e19`.
+
+Candidate native SHA-256 values:
+
+- Android (`--strip-debug`): `485fdb745459072b95052fc24e608a0db48da07ae58c3b9bc8afd790f4d8e939`.
+- macOS: `6e8dc1e666f666f717d328471c7eef552d3d68bea7f874fa6da4e21662b8c1d3`.
+
+
+### Host observations
+
+The clean baseline / candidate pair took **10.545 s / 10.711 s**. The
+reverse-order candidate / baseline pair took **11.567 s / 10.700 s**. Both
+checked every generated row and value, without overlapping verification or
+phone runs. Starting host loads were **3.14 / 3.42 / 2.98 / 5.52** on 18
+cores. These pairs do **not** demonstrate a host speedup. Five empty host
+reconciliations per run ranged from **33.5–37.0 ms**. An earlier exploratory
+baseline took **11.769 s** while test compilation was active and is excluded
+from the clean comparison.
+
+The retained change reduces repeated SQL statements, with clock-conflict and
+atomicity coverage; these runs do not establish a causal wall-clock benefit.
+The device observation is one pair and the host pairs did not favor batching.
+The substantial bootstrap and relay qualification gaps remain explicit.
+
+
+The retained edits were squashed into the original working change
+`lqnpvvoy`, preserving its preceding checkpoint optimizations. File hashes
+were checked after the merge. Jujutsu workspace `rocky-sync-opt` and its
+directory were removed; artifacts remain under `/tmp/rocky-sync-opt-20261026`.
+
+
+## Four-page commit experiment (2026-10-26)
+
+Jujutsu workspace `sync-quota` (`~/AgentWorkspaces/rocky-sync-quota`)
+started from working change `lqnpvvoy` (`79b848d5`), preserving the preceding
+checkpoint optimizations. The candidate collected each existing four-page
+network window, verified its pages off the replica lock, then stored the
+window in one transaction. It retained ordered cursors and resolved creation
+headers supplied by earlier pages within the window. The hypothesis was
+fewer repeated WAL writes of index pages across page commits; no format or
+durability setting changed.
+
+The host baseline / candidate pair imported the same sealed synthetic 100k
+source into fresh members, checking every key and generated value. Bootstrap
+took **13.653 s / 22.017 s**, starting at host loads **29.18 / 41.39** on
+18 cores. Five empty reconciliations ranged **38.4–43.6 ms / 51.3–61.0 ms**.
+Verification and other phase work shared the host. This pair does not show
+a benefit and is not an isolated causal comparison.
+
+The installed phone baseline library matched the preceding candidate's
+SHA-256 (`485fdb745459072b95052fc24e608a0db48da07ae58c3b9bc8afd790f4d8e939`).
+The fresh baseline import started on the physical Pixel 11 Pro, but its
+control connection closed without a protocol result. No bootstrap timing
+or row verification was returned, so that attempt is excluded. The new
+candidate was not installed or measured on the phone. No physical-I/O
+comparison, relay qualification, latency-shaping or shopping UI check was
+completed in this experiment. The shopping household was untouched.
+
+Static lint, workspace Clippy with warnings denied, and release native
+builds for macOS and Android passed for the candidate. Frozen JVM consumer
+ABI checks and both host probes passed. The candidate's full check was
+stopped during the second unit-tier feature build when the experiment was
+rejected; it is not a completed test result. Its new rollback/reopen
+regression is retained only in the saved experimental patch.
+
+**The candidate code was discarded.** It did not demonstrate a speedup,
+and there is no evidence it can halve bootstrap time. Phase 8 remains
+unqualified. Further storage optimization is deferred to phase 9, after
+phase 4's recovery contracts land; base/overlay storage, compact indexes
+and page-cache tuning directly address the remaining storage cost.
+
+Source patch, logs and native artifacts remain under
+`/tmp/rocky-sync-quota-20261026`, independently of the temporary workspace.
+
+Final retained change: this evidence entry only. `./scripts/lint` and
+`./scripts/commitlint --jj` passed. A fresh `./scripts/check` passed Clippy
+for the retained source, then was stopped during test compilation amid
+concurrent phase builds. Neither full-check attempt completed; no green
+unit/integration result is claimed for this experiment.
+
+The evidence entry was integrated back into `lqnpvvoy`; workspace
+`sync-quota` and its directory were removed. Earlier checkpoint optimizations
+and the independent recovery and lighter-replica workspaces were preserved.

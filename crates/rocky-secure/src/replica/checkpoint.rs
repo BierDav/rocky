@@ -31,7 +31,9 @@ use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, PrunedPage, RebootstrapReport};
 #[cfg(test)]
-pub(crate) use transfer::{forge_page, forge_page_bindings, forge_page_legend, page_header_count};
+pub(crate) use transfer::{
+    forge_page, forge_page_bindings, forge_page_clocks, forge_page_legend, page_header_count,
+};
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_compaction_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",

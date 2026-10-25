@@ -12,9 +12,9 @@ pub(super) const GROUP_REQUESTS: usize = 64;
 /// Request bytes per group; a single larger request still forms its own group.
 pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
 /// WAL size that triggers a passive checkpoint between groups.
-pub(super) const WAL_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const WAL_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 /// WAL size that triggers a truncating checkpoint between groups.
-pub(super) const WAL_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const WAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(super) enum Work {
     Author {

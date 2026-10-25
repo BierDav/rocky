@@ -582,8 +582,65 @@ impl<A: RowApplication> Inner<A> {
         let mut sets = staging.sets.clone();
         sets.merge_rows(&page.delta);
         let blob = encode(&scope)?;
-        for (row, PageRow { clock, .. }, record) in &page.rows {
+        let mut creations = BTreeMap::new();
+        for (_, PageRow { clock, .. }, record) in &page.rows {
+            if creations
+                .insert(record.creation, *clock)
+                .is_some_and(|known| known != *clock)
+            {
+                return Err(denied("checkpoint creation clocks disagree"));
+            }
+        }
+        let mut fresh = creations.clone();
+        if !creations.is_empty() {
+            let placeholders = vec!["?"; creations.len()].join(",");
+            let mut keys = vec![SqlValue::Integer(id)];
+            keys.extend(
+                creations
+                    .keys()
+                    .map(|hash| SqlValue::Blob(hash.as_bytes().to_vec())),
+            );
+            for row in collect_rows(self.conn.query(
+                format!("SELECT hash,clock FROM secure_rebootstrap_stubs WHERE scope=? AND hash IN ({placeholders})"),
+                bindings(keys),
+            ).await?).await? {
+                let [SqlValue::Blob(hash), SqlValue::Integer(clock)] = row.as_slice() else {
+                    return Err(Error::Corrupt("checkpoint creation stub".into()));
+                };
+                let hash = hash_of(hash)?;
+                if fresh.remove(&hash) != Some(*clock as u64) {
+                    return Err(denied("checkpoint creation clocks disagree"));
+                }
+            }
+        }
+        for (hash, clock) in &fresh {
+            sets.create(*hash, *clock);
+        }
+        let mut stored = Vec::with_capacity(page.rows.len() * 3);
+        if staging.direct && !page.rows.is_empty() {
+            let mut keys = vec![SqlValue::Integer(id)];
+            keys.extend(
+                page.rows
+                    .iter()
+                    .map(|(row, ..)| SqlValue::Blob(row.to_vec())),
+            );
+            let placeholders = vec!["?"; page.rows.len()].join(",");
+            if !collect_rows(self.conn.query(
+                format!("SELECT row FROM secure_rows WHERE scope=? AND row IN ({placeholders}) LIMIT 1"),
+                bindings(keys),
+            ).await?).await?.is_empty() {
+                return Err(Error::Corrupt(
+                    "a checkpoint row is already stored during its import".into(),
+                ));
+            }
+        }
+        for (row, _, record) in &page.rows {
             let fields = self.encode_record(record).await?;
+            stored.extend([
+                SqlValue::Integer(id),
+                SqlValue::Blob(row.to_vec()),
+                SqlValue::Blob(fields),
+            ]);
             // A row moved out leaves a tombstone without an image.
             if let Some(tuple) = &statement.partition
                 && !(record.deleted && record.fields.is_empty())
@@ -618,68 +675,60 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             if staging.direct {
-                if self.row(scope, *row).await?.is_some() {
-                    return Err(Error::Corrupt(
-                        "a checkpoint row is already stored during its import".into(),
-                    ));
-                }
-                self.conn
-                    .execute(
-                        "INSERT INTO secure_row_records VALUES(?,?,?)",
-                        bindings(vec![
-                            SqlValue::Blob(blob.clone()),
-                            SqlValue::Blob(row.to_vec()),
-                            SqlValue::Blob(fields.clone()),
-                        ]),
-                    )
-                    .await?;
                 self.index_row_key(&blob, row, record).await?;
-                // Every stored row's creation stays known, as after the switch.
-                self.put_stub(record.creation, id, *clock, true).await?;
             }
+        }
+        for (direct, stubs) in [(false, &fresh), (true, &creations)] {
+            if stubs.is_empty() || direct && !staging.direct {
+                continue;
+            }
+            let (table, value, conflict) = match direct {
+                true => (
+                    "secure_stubs(scope,hash,clock,creation)",
+                    "(?,?,?,1)",
+                    " ON CONFLICT(hash) DO UPDATE SET creation=1",
+                ),
+                false => ("secure_rebootstrap_stubs(scope,hash,clock)", "(?,?,?)", ""),
+            };
+            let values = vec![value; stubs.len()].join(",");
+            let parameters = stubs
+                .iter()
+                .flat_map(|(hash, clock)| {
+                    [
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(hash.as_bytes().to_vec()),
+                        integer(*clock),
+                    ]
+                })
+                .collect();
             self.conn
                 .execute(
-                    match staging.direct {
-                        true => "INSERT INTO secure_checkpoint_rows VALUES(?,?,?)",
-                        false => "INSERT INTO secure_rebootstrap_rows VALUES(?,?,?)",
-                    },
-                    bindings(vec![
-                        SqlValue::Integer(id),
-                        SqlValue::Blob(row.to_vec()),
-                        SqlValue::Blob(fields.clone()),
-                    ]),
+                    format!("INSERT INTO {table} VALUES {values}{conflict}"),
+                    bindings(parameters),
                 )
                 .await?;
-            let creation = record.creation;
-            let known = collect_rows(
+        }
+        // Pages contain at most STEP_ROWS rows, keeping these statements bounded.
+        if !stored.is_empty() {
+            let values = vec!["(?,?,?)"; page.rows.len()].join(",");
+            if staging.direct {
                 self.conn
-                    .query(
-                        "SELECT clock FROM secure_rebootstrap_stubs WHERE scope=? AND hash=?",
-                        bindings(vec![
-                            SqlValue::Integer(id),
-                            SqlValue::Blob(creation.as_bytes().to_vec()),
-                        ]),
+                    .execute(
+                        format!("INSERT INTO secure_rows VALUES {values}"),
+                        bindings(stored.clone()),
                     )
-                    .await?,
-            )
-            .await?;
-            match known.first().map(Vec::as_slice) {
-                Some([SqlValue::Integer(known)]) if *known as u64 == *clock => {}
-                Some(_) => return Err(denied("checkpoint creation clocks disagree")),
-                None => {
-                    sets.create(creation, *clock);
-                    self.conn
-                        .execute(
-                            "INSERT INTO secure_rebootstrap_stubs VALUES(?,?,?)",
-                            bindings(vec![
-                                SqlValue::Integer(id),
-                                SqlValue::Blob(creation.as_bytes().to_vec()),
-                                SqlValue::Integer(*clock as i64),
-                            ]),
-                        )
-                        .await?;
-                }
+                    .await?;
             }
+            let table = match staging.direct {
+                true => "secure_checkpoint_rows",
+                false => "secure_rebootstrap_rows",
+            };
+            self.conn
+                .execute(
+                    format!("INSERT INTO {table} VALUES {values}"),
+                    bindings(stored),
+                )
+                .await?;
         }
         if staging.direct {
             // The scope's digest keeps following its stored rows.
@@ -2243,4 +2292,26 @@ pub(crate) fn forge_page_legend(
 pub(crate) fn page_header_count(page: &CheckpointPage, key: &[u8; 32]) -> usize {
     let plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
     plain.headers.len()
+}
+
+#[cfg(test)]
+pub(crate) fn forge_page_clocks(
+    page: &mut CheckpointPage,
+    key: &[u8; 32],
+    signer: &PrivateKey,
+    all: bool,
+) {
+    let mut plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
+    for row in plain.rows.iter_mut().take(if all { usize::MAX } else { 1 }) {
+        row.clock += 1;
+    }
+    plain.signature = signer.sign(&page_signing_bytes(&plain).unwrap());
+    page.rows = EncryptedPackage::seal(
+        page.rows.scope,
+        page.rows.generation,
+        PackageKind::Checkpoint,
+        key,
+        &encode(&plain).unwrap(),
+    )
+    .unwrap();
 }

@@ -3,6 +3,7 @@ use super::super::replica::checkpoint::Stage;
 use super::*;
 use crate::storage::rows;
 use network::NativeSession;
+use rocky_core::SqlValue;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -1465,6 +1466,125 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     }
     b.stage_checkpoint_page(first).await.unwrap();
     assert!(!all_rows(&f, &b).await.is_empty());
+}
+
+/// A direct import refuses any row already stored, including one late in a page.
+#[tokio::test]
+async fn a_direct_page_never_overwrites_an_existing_row() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    for index in 0..20 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = compacted(&f, &a).await;
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let first = page_of(&a, (&b_key, &b_credentials), &signed, None).await;
+    let cursor = first.next;
+    assert!(cursor.is_some());
+    b.stage_checkpoint_page(first).await.unwrap();
+    let mut page = page_of(&a, (&b_key, &b_credentials), &signed, cursor).await;
+    let mut duplicate = Vec::new();
+    crate::replica::checkpoint::forge_page(&mut page, &[11; 32], |rows| {
+        duplicate = rows.last().unwrap().0.clone();
+    });
+    {
+        let inner = b.inner.lock().await;
+        // Simulate a conflicting stored row without touching the import cursor.
+        inner
+            .conn
+            .execute(
+                "INSERT INTO secure_rows SELECT scope,?,fields FROM secure_rows WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?) LIMIT 1",
+                crate::storage::bindings(vec![
+                    SqlValue::Blob(duplicate),
+                    SqlValue::Blob(encode(&f.public).unwrap()),
+                ]),
+            )
+            .await
+            .unwrap();
+    }
+    let before = crate::tests::compaction::audit::snapshot(&b).await;
+    assert!(matches!(
+        b.stage_checkpoint_page(page).await,
+        Err(Error::Corrupt(_))
+    ));
+    assert_eq!(crate::tests::compaction::audit::snapshot(&b).await, before);
+    assert_eq!(
+        b.rebootstrap_progress(f.public).await.unwrap().unwrap().1,
+        cursor
+    );
+}
+
+/// Shared creations count once; conflicting clocks in or across pages roll back.
+#[tokio::test]
+async fn checkpoint_creation_clocks_agree_within_and_across_pages() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    a.author_buffered(
+        handle(0),
+        (0..24)
+            .flat_map(|index| insert(&f, index, "base"))
+            .collect(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let signed = compacted(&f, &a).await;
+    for direct in [true, false] {
+        let (b, credentials) = open(&f, &dir.path().join(format!("b-{direct}.db")), &b_key).await;
+        if !direct {
+            b.author_buffered(handle(100), insert(&f, 100, "local"), vec![])
+                .await
+                .unwrap();
+        }
+        share_graph(&f, &a, (&b, &b_key, &credentials)).await;
+        b.begin_rebootstrap(signed.clone()).await.unwrap();
+        let first = page_of(&a, (&b_key, &credentials), &signed, None).await;
+        assert!(first.next.is_some());
+        let mut conflicting = first.clone();
+        crate::replica::checkpoint::forge_page_clocks(&mut conflicting, &[11; 32], &a_key, false);
+        let before = crate::tests::compaction::audit::snapshot(&b).await;
+        assert!(
+            b.stage_checkpoint_page(conflicting)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint creation clocks disagree")
+        );
+        assert_eq!(crate::tests::compaction::audit::snapshot(&b).await, before);
+        let cursor = first.next;
+        b.stage_checkpoint_page(first).await.unwrap();
+        let mut second = page_of(&a, (&b_key, &credentials), &signed, cursor).await;
+        crate::replica::checkpoint::forge_page_clocks(&mut second, &[11; 32], &a_key, true);
+        let before = crate::tests::compaction::audit::snapshot(&b).await;
+        assert!(
+            b.stage_checkpoint_page(second)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint creation clocks disagree")
+        );
+        assert_eq!(crate::tests::compaction::audit::snapshot(&b).await, before);
+        let mut after = cursor;
+        while let Some(cursor) = after {
+            let page = page_of(&a, (&b_key, &credentials), &signed, Some(cursor)).await;
+            after = page.next;
+            b.stage_checkpoint_page(page).await.unwrap();
+        }
+        b.finish_rebootstrap(f.public).await.unwrap();
+        b.audit(f.public).await.unwrap();
+        assert_eq!(
+            count(&b, "SELECT count(*) FROM secure_checkpoint_stubs").await,
+            1
+        );
+    }
 }
 
 /// A failed first page leaves no durable cursor. Its already requested

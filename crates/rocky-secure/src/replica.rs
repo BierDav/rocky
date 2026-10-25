@@ -1520,16 +1520,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.inner.lock().await.revocation_digest()
     }
     #[cfg(test)]
-    pub(crate) async fn applied_ack_count(&self) -> usize {
-        rows(
-            &self.inner.lock().await.conn,
-            "SELECT hash FROM secure_ack WHERE applied=1",
-        )
-        .await
-        .unwrap()
-        .len()
-    }
-    #[cfg(test)]
     pub(crate) async fn inject_failure(&self, retries: usize, failures: usize) {
         let mut inner = self.inner.lock().await;
         inner.retry_before_commit = retries;

@@ -1,6 +1,7 @@
 # 3. Links that outlive a request
 
-Status: proposed. Owner: `rocky-secure` link channels, network sessions and
+Status: implemented; qualification incomplete. See the
+[evidence](03-links-that-outlive-a-request-evidence.md). Owner: `rocky-secure` link channels, network sessions and
 serving; `rocky-sdk` sync, live links and retry scheduling. Depends on
 nothing; its loss scenarios use [phase 2](02-deterministic-simulation.md)
 when available. Effort: one to two weeks. Follow the

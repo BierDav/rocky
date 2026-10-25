@@ -689,17 +689,11 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
                 c.follow_bookmark(f.public.domain, "main").await.unwrap();
             }
             session.sync_tip_graph(&c).await.unwrap();
-            assert!(
-                session
-                    .pull(&c, vec![f.public], None, MAX_SECURE_FRAME / 2)
-                    .await
-                    .is_err()
-            );
             let pulled = session
-                .pull_page(&c, vec![f.public], None, MAX_SECURE_FRAME / 2)
+                .catch_up(&c, f.public, MAX_SECURE_FRAME / 2)
                 .await
                 .unwrap();
-            assert_eq!(pulled.rebootstrap, vec![f.public]);
+            assert!(pulled.behind);
             assert_eq!(all_rows(&f, &c).await, before);
             if let Some((stage, skip)) = fault {
                 c.inject_stage_fault(stage, skip).await;

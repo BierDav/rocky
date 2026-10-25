@@ -479,6 +479,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         let mut graphs = BTreeMap::new();
         for statement in statements {
+            statement.id()?;
             let scope = statement.scope();
             if let std::collections::btree_map::Entry::Vacant(entry) = graphs.entry(scope) {
                 entry.insert(inner.scope_graph(scope)?);

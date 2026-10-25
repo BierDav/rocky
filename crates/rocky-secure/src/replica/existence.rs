@@ -88,7 +88,14 @@ impl ExistenceRecord {
         Ok(rocky_core::commitment(HASH, &encode(self)?))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        encode(self)
+        let bytes = encode(self)?;
+        if bytes.len() > SECURE_MESSAGE_BYTES - 1024 {
+            return Err(Error::Quota {
+                resource: "existence record",
+                limit: SECURE_MESSAGE_BYTES - 1024,
+            });
+        }
+        Ok(bytes)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let record: Self = decode(bytes)?;
@@ -712,30 +719,43 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<ExistencePage, Error> {
         let limit = limit.clamp(1, MAX_EXISTENCE_PAGE);
         let mut records = Vec::new();
+        let mut bytes = 1024;
         for _ in 0..16 {
             let page = self.existence_scan(scope, after, limit).await?;
-            after = page.next;
             for record in page.records {
-                if let Some(graph) = self.graphs.get(&scope.domain)
-                    && !self.visible_frame(
+                let position = (record.signer, record.sequence());
+                let visible = match self.graphs.get(&scope.domain) {
+                    Some(graph) => self.visible_frame(
                         graph,
                         record.statement.tip,
                         record.statement.author,
                         record.statement.author_sequence,
                         self.workspace.tip,
-                    )?
+                    )?,
+                    None => true,
+                };
+                if visible
+                    && known
+                        .get(&record.signer)
+                        .is_none_or(|held| record.sequence() > *held)
                 {
-                    continue;
-                }
-                if known
-                    .get(&record.signer)
-                    .is_none_or(|held| record.sequence() > *held)
-                {
+                    let size = record.to_bytes()?.len();
+                    if records.len() == limit || bytes + size > SECURE_MESSAGE_BYTES {
+                        return Ok(ExistencePage {
+                            records,
+                            next: after,
+                        });
+                    }
+                    bytes += size;
                     records.push(record);
                 }
+                after = Some(position);
             }
-            if after.is_none() || records.len() >= limit {
-                break;
+            if page.next.is_none() {
+                return Ok(ExistencePage {
+                    records,
+                    next: None,
+                });
             }
         }
         Ok(ExistencePage {

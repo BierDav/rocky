@@ -187,15 +187,8 @@ impl NativeSession {
                 }
                 other => other?,
             };
-            match (message, handler) {
-                (Message::Contacts(message), Some(handler)) => {
-                    self.answer_contact(replica, handler, message).await?;
-                }
-                (Message::Delivery(message), _) => {
-                    self.answer_delivery(deliveries, message).await?;
-                }
-                (message, _) => self.answer(replica, message).await?,
-            }
+            self.respond(replica, message, Some(deliveries), handler)
+                .await?;
         }
     }
     /// One delivery round with the acceptor: hand over, deposit, collect.
@@ -277,7 +270,7 @@ impl NativeSession {
         }
         Ok(report)
     }
-    async fn answer_delivery(
+    pub(super) async fn answer_delivery(
         &mut self,
         port: &dyn Deliveries,
         message: DeliveryMessage,

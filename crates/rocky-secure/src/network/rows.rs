@@ -1,7 +1,6 @@
 //! Row transfer: pulls by subscription, ranges by frontier, pushes, scope
 //! lists and remote reads.
 use super::*;
-use checkpoints::CheckpointMessage;
 
 /// Frames in one transfer page.
 pub(super) const MAX_SECURE_PAGE: usize = 32;
@@ -13,23 +12,6 @@ pub(super) enum RowMessage {
     },
     MigrationRecord {
         descriptor: Option<Box<rocky_credentials::SignedMigrationPublication>>,
-    },
-    Pull {
-        scopes: Vec<ResourceScope>,
-        after: Option<Hash>,
-        quota: usize,
-    },
-    Page {
-        frames: Vec<EncryptedFrame>,
-        next: Option<Hash>,
-        /// Subscribed scopes whose history is pruned at the sender.
-        pruned: Vec<ResourceScope>,
-        /// Void records consuming the positions before the frames.
-        voids: Vec<SignedVoid>,
-    },
-    Ack {
-        id: Hash,
-        applied: bool,
     },
     Range {
         frontier: ScopeFrontier,
@@ -71,15 +53,6 @@ pub(super) enum RowMessage {
     },
 }
 
-/// The outcome of one pull.
-#[derive(Clone, Debug)]
-pub struct Pulled {
-    pub next: Option<Hash>,
-    /// Frames refused because the session never carried their chain.
-    pub incomplete: usize,
-    /// Scopes whose pruned history at the peer this replica does not hold.
-    pub rebootstrap: Vec<ResourceScope>,
-}
 /// What one catch-up pass of a scope did.
 #[derive(Clone, Debug, Default)]
 pub struct CatchUp {
@@ -153,122 +126,6 @@ impl NativeSession {
             }
         }
         Ok(())
-    }
-    /// Each pull supplies current subscriptions. Leaving a scope removes it from later pulls.
-    /// A scope whose history the peer pruned past what this replica holds
-    /// fails the pull; `pull_page` reports such scopes instead.
-    pub async fn pull<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        scopes: Vec<ResourceScope>,
-        after: Option<Hash>,
-        quota: usize,
-    ) -> Result<Option<Hash>, Error> {
-        let pulled = self.pull_page(replica, scopes, after, quota).await?;
-        if !pulled.rebootstrap.is_empty() {
-            return Err(denied(
-                "behind the peer's pruned prefix; rebootstrap the scope",
-            ));
-        }
-        Ok(pulled.next)
-    }
-    /// One pull. Frames of a scope this replica is behind the peer's pruned_prefix
-    /// for are not received; the scope is returned in `rebootstrap`.
-    pub async fn pull_page<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        scopes: Vec<ResourceScope>,
-        after: Option<Hash>,
-        quota: usize,
-    ) -> Result<Pulled, Error> {
-        self.ensure_holding(replica, &scopes).await?;
-        self.acquire_required_migrations(replica).await?;
-        self.send(RowMessage::Pull {
-            scopes: scopes.clone(),
-            after,
-            quota,
-        })
-        .await?;
-        let RowMessage::Page {
-            frames,
-            next,
-            pruned,
-            voids,
-        } = self.reply::<RowMessage>().await?
-        else {
-            return Err(denied("unexpected native response"));
-        };
-        let mut rebootstrap = Vec::new();
-        for scope in pruned {
-            if !scopes.contains(&scope) {
-                return Err(denied("native response outside subscription"));
-            }
-            let mut after = None;
-            loop {
-                self.send(CheckpointMessage::Pruned { scope, after })
-                    .await?;
-                let CheckpointMessage::PrunedLogs { page } =
-                    self.reply::<CheckpointMessage>().await?
-                else {
-                    return Err(denied("unexpected pruned_prefix response"));
-                };
-                if page.scope != scope || page.logs.len() > MAX_SECURE_PAGE * 8 {
-                    return Err(denied("pruned_prefix outside subscription"));
-                }
-                if replica.behind_pruned(&page).await? {
-                    rebootstrap.push(scope);
-                    break;
-                }
-                after = page.next;
-                if after.is_none() {
-                    break;
-                }
-            }
-        }
-        let mut held = Vec::with_capacity(frames.len());
-        for frame in frames {
-            if !rebootstrap.contains(&frame.scope()?) {
-                held.push(frame);
-            }
-        }
-        let frames = held;
-        if frames.len() > MAX_SECURE_PAGE
-            || frames
-                .iter()
-                .fold(0usize, |sum, frame| sum.saturating_add(frame.weight()))
-                > quota
-        {
-            return Err(denied("native page quota"));
-        }
-        receive_voids(replica, &voids, &scopes).await?;
-        let (frames, incomplete) = self.complete_frames(frames)?;
-        let mut ids = Vec::with_capacity(frames.len());
-        for frame in &frames {
-            if !scopes.contains(&frame.scope()?) {
-                return Err(denied("native response outside subscription"));
-            }
-            ids.push(frame.id()?);
-        }
-        // The page is received in shared transactions; acknowledgments follow the commit.
-        for (id, status) in ids
-            .into_iter()
-            .zip(replica.receive_migration_all(frames).await)
-        {
-            let status = status?;
-            let applied = matches!(status, ReceiveStatus::Applied | ReceiveStatus::Abandoned)
-                || (status == ReceiveStatus::Duplicate
-                    && replica.receipt_status(id).await? == ReceiveStatus::Applied);
-            if status != ReceiveStatus::Rejected {
-                self.send(RowMessage::Ack { id, applied }).await?;
-                self.acknowledged("unexpected acknowledgment response")
-                    .await?;
-            }
-        }
-        Ok(Pulled {
-            next,
-            incomplete,
-            rebootstrap,
-        })
     }
     /// Pulls every frame of `scope` this replica lacks in bounded pages and
     /// acknowledges its frontier after each page. Stops at once when this
@@ -540,36 +397,6 @@ impl NativeSession {
                     .map(Box::new);
                 self.send(RowMessage::MigrationRecord { descriptor }).await
             }
-            RowMessage::Pull {
-                scopes,
-                after,
-                quota,
-            } => {
-                // Leave room for canonical envelope and session signature overhead.
-                if quota > MAX_SECURE_FRAME / 2 {
-                    return Err(denied("native page quota"));
-                }
-                let mut page = replica
-                    .transfer_page(self.peer, &self.credentials, &scopes, after, quota)
-                    .await?;
-                for frame in &page.frames {
-                    self.served_frames.insert(frame.id()?, frame.scope()?);
-                }
-                self.carry_chains(&mut page.frames).await?;
-                self.send(RowMessage::Page {
-                    frames: page.frames,
-                    next: page.next,
-                    pruned: page.pruned,
-                    voids: page.voids,
-                })
-                .await
-            }
-            RowMessage::Ack { id, applied } => {
-                replica
-                    .acknowledge(self.peer, &self.credentials, id, applied)
-                    .await?;
-                self.send(Message::Acknowledged).await
-            }
             RowMessage::Range {
                 frontier,
                 after,
@@ -581,9 +408,6 @@ impl NativeSession {
                 let mut page = replica
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
-                for frame in &page.frames {
-                    self.served_frames.insert(frame.id()?, frame.scope()?);
-                }
                 self.carry_chains(&mut page.frames).await?;
                 self.send(RowMessage::RangeFrames {
                     page: Box::new(page),

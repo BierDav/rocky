@@ -955,10 +955,11 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
     let client = async {
         assert_eq!(
             session
-                .pull(&target, vec![fixture.public], None, MAX_SECURE_FRAME / 2)
+                .catch_up(&target, fixture.public, MAX_SECURE_FRAME / 2)
                 .await
-                .unwrap(),
-            None
+                .unwrap()
+                .frames,
+            1
         );
     };
     tokio::join!(server, client);
@@ -966,7 +967,13 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
         target.snapshot(fixture.public).await.unwrap().rows[&[1; 32]],
         fixture.app().name("Native")
     );
-    assert_eq!(source.applied_ack_count().await, 1);
+    let acknowledged = crate::storage::rows(
+        &source.inner.lock().await.conn,
+        "SELECT applied FROM secure_peer_frontiers",
+    )
+    .await
+    .unwrap();
+    assert_eq!(acknowledged, vec![vec![rocky_core::SqlValue::Integer(1)]]);
 }
 
 #[tokio::test]
@@ -1364,7 +1371,6 @@ async fn native_pull(
     source_identity: (&PrivateKey, CredentialChain),
     target_identity: (&PrivateKey, CredentialChain),
     scopes: Vec<ResourceScope>,
-    count: usize,
 ) {
     let (near, far) = network::link::testing::tcp().await;
     let (mut session, mut served) = network::link::testing::sessions_over(
@@ -1375,21 +1381,21 @@ async fn native_pull(
     )
     .await
     .unwrap();
-    let server = async {
-        for _ in 0..=count {
-            served.serve_once(source).await.unwrap();
-        }
-    };
+    let server = served.serve_to_end(source);
     let client = async {
-        assert!(
-            session
-                .pull(target, scopes, None, MAX_SECURE_FRAME / 2)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for scope in scopes {
+            assert!(
+                !session
+                    .catch_up(target, scope, MAX_SECURE_FRAME / 2)
+                    .await
+                    .unwrap()
+                    .exhausted
+            );
+        }
+        session.close().await.unwrap();
     };
-    tokio::join!(server, client);
+    let (served, ()) = tokio::join!(server, client);
+    served.unwrap();
 }
 
 #[tokio::test]
@@ -1459,18 +1465,9 @@ async fn two_native_clients_and_keyless_relay_with_offline_manifest() {
         (&alice, acred),
         (&relay, rcred.clone()),
         vec![fixture.public, fixture.private],
-        2,
     )
     .await;
-    native_pull(
-        &r,
-        &b,
-        (&relay, rcred),
-        (&bob, bcred),
-        vec![fixture.public],
-        1,
-    )
-    .await;
+    native_pull(&r, &b, (&relay, rcred), (&bob, bcred), vec![fixture.public]).await;
     assert_eq!(
         b.snapshot(fixture.public).await.unwrap().rows[&[1; 32]],
         fixture.app().name("Offline")

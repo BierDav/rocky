@@ -261,28 +261,35 @@ impl Erp {
     /// Copies every existence record of `table` that `to` lacks from `from`.
     async fn existence(&self, from: &Device, to: &Device, table: &str) {
         let scope = self.scope(table);
-        let page = from
-            .replica
-            .existence_page(
-                to.node.public_key(),
-                &to.credentials,
-                scope,
-                &to.replica.existence_frontier(scope).await.unwrap(),
-                None,
-                crate::MAX_EXISTENCE_PAGE,
-            )
-            .await
-            .unwrap();
-        for status in to
-            .replica
-            .receive_existence_all(page.records)
-            .await
-            .unwrap()
-        {
-            assert!(matches!(
-                status,
-                ReceiveStatus::Applied | ReceiveStatus::Duplicate
-            ));
+        let mut after = None;
+        loop {
+            let page = from
+                .replica
+                .existence_page(
+                    to.node.public_key(),
+                    &to.credentials,
+                    scope,
+                    &to.replica.existence_frontier(scope).await.unwrap(),
+                    after,
+                    crate::MAX_EXISTENCE_PAGE,
+                )
+                .await
+                .unwrap();
+            after = page.next;
+            for status in to
+                .replica
+                .receive_existence_all(page.records)
+                .await
+                .unwrap()
+            {
+                assert!(matches!(
+                    status,
+                    ReceiveStatus::Applied | ReceiveStatus::Duplicate
+                ));
+            }
+            if after.is_none() {
+                break;
+            }
         }
     }
 }

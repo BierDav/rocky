@@ -69,10 +69,23 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         seal: Commitment,
     ) -> Result<SealPull, Error> {
+        self.pull_seal_scopes(replica, seal, &[]).await
+    }
+    async fn pull_seal_scopes<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        seal: Commitment,
+        selected: &[ResourceScope],
+    ) -> Result<SealPull, Error> {
         let Some((domain, _)) = replica.followed_bookmark().await else {
             return Err(denied("follow a bookmark before pulling a seal"));
         };
-        let scopes = replica.seal_pull_scopes(domain, seal).await?;
+        let scopes: Vec<_> = replica
+            .seal_pull_scopes(domain, seal)
+            .await?
+            .into_iter()
+            .filter(|scope| selected.is_empty() || selected.contains(scope))
+            .collect();
         let shared = replica
             .peer_holds(self.peer, &self.credentials, &scopes)
             .await?;
@@ -129,11 +142,19 @@ impl NativeSession {
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<bool, Error> {
+        self.pull_wanted_seals_for_scopes(replica, &[]).await
+    }
+    /// Pulls wanted checkpoint state only for the selected request scopes.
+    pub async fn pull_wanted_seals_for_scopes<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+    ) -> Result<bool, Error> {
         let Some((domain, _)) = replica.followed_bookmark().await else {
             return Ok(true);
         };
         for seal in replica.wanted_seals(domain).await? {
-            if self.pull_seal(replica, seal).await? == SealPull::Exhausted {
+            if self.pull_seal_scopes(replica, seal, scopes).await? == SealPull::Exhausted {
                 return Ok(false);
             }
         }
@@ -179,10 +200,23 @@ impl NativeSession {
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<bool, Error> {
+        self.rebootstrap_scopes_at_seals(replica, &[]).await
+    }
+    /// Limits recovery to the selected scopes; an empty selection means every scope.
+    pub async fn rebootstrap_scopes_at_seals<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+    ) -> Result<bool, Error> {
         let Some((domain, _)) = replica.followed_bookmark().await else {
             return Ok(true);
         };
-        let needs = replica.seal_rebootstraps(domain).await?;
+        let needs: Vec<_> = replica
+            .seal_rebootstraps(domain)
+            .await?
+            .into_iter()
+            .filter(|need| scopes.is_empty() || scopes.contains(&need.scope))
+            .collect();
         if needs.is_empty()
             && replica
                 .compaction_status(domain)

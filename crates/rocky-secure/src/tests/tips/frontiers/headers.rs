@@ -219,7 +219,11 @@ async fn replace_header(replica: &Replica, bytes: &[u8]) {
 }
 
 fn rejected<T>(result: Result<T, Error>, expected: &str) {
-    assert!(matches!(result, Err(Error::Rejected(message)) if message == expected));
+    match result {
+        Err(Error::Rejected(message)) => assert_eq!(message, expected),
+        Err(error) => panic!("expected rejection {expected:?}, got {error:?}"),
+        Ok(_) => panic!("expected rejection {expected:?}, got success"),
+    }
 }
 
 #[tokio::test]

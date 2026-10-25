@@ -27,6 +27,7 @@ pub(super) enum TipMessage {
     CandidateQuery,
     CandidatePush {
         statements: Vec<TipStatement>,
+        last: bool,
     },
     CandidateCount(usize),
 }
@@ -51,7 +52,7 @@ impl NativeSession {
                 return Err(denied("unexpected tip graph response"));
             };
             let end = ordered_page(&statements, after)?;
-            if next.is_some() && (statements.len() != PAGE || next != end) {
+            if next.is_some() && (statements.is_empty() || next != end) {
                 return Err(denied("tip graph cursor outside its page"));
             }
             learned.extend(statements);
@@ -64,8 +65,8 @@ impl NativeSession {
         replica.receive_tip_statements(&learned).await?;
         after = None;
         loop {
-            let statements = replica.tip_statements(after, PAGE).await?;
-            let last = statements.len() < PAGE;
+            let (statements, more) = tip_page(replica.tip_statements(after, PAGE).await?)?;
+            let last = !more;
             after = ordered_page(&statements, after)?;
             self.send(TipMessage::Push { statements, last }).await?;
             if !matches!(self.reply::<TipMessage>().await?, TipMessage::Stored) {
@@ -91,30 +92,38 @@ impl NativeSession {
     ) -> Result<(), Error> {
         match message {
             TipMessage::CandidateQuery => {
-                let batches = replica.pending_tip_candidates().await?;
+                let batches = candidate_pages(replica.pending_tip_candidates().await?)?;
                 self.send(TipMessage::CandidateCount(batches.len())).await?;
-                for statements in batches {
-                    self.send(TipMessage::CandidatePush { statements }).await?;
+                for (statements, last) in batches {
+                    self.send(TipMessage::CandidatePush { statements, last })
+                        .await?;
                 }
                 Ok(())
             }
-            TipMessage::CandidatePush { statements } => {
-                replica.receive_tip_statements(&statements).await?;
+            TipMessage::CandidatePush { statements, last } => {
+                if statements.len() > PAGE || (!last && statements.is_empty()) {
+                    return Err(denied("candidate page quota"));
+                }
+                self.tip_incoming.extend(statements);
+                if last {
+                    let batch = std::mem::take(&mut self.tip_incoming);
+                    replica.receive_tip_statements(&batch).await?;
+                }
                 self.send(TipMessage::Stored).await
             }
             TipMessage::Query { after } => {
                 if !self.tip_incoming.is_empty() {
                     return Err(denied("tip graph push is incomplete"));
                 }
-                let statements = replica.tip_statements(after, PAGE).await?;
+                let (statements, more) = tip_page(replica.tip_statements(after, PAGE).await?)?;
                 let end = ordered_page(&statements, after)?;
-                let next = (statements.len() == PAGE).then_some(end).flatten();
+                let next = more.then_some(end).flatten();
                 self.send(TipMessage::Page { statements, next }).await
             }
             TipMessage::Push { statements, last } => {
                 let previous = self.tip_incoming.last().map(TipStatement::id).transpose()?;
                 ordered_page(&statements, previous)?;
-                if !last && statements.len() != PAGE {
+                if !last && statements.is_empty() {
                     return Err(denied("incomplete tip graph push page"));
                 }
                 self.tip_incoming.extend(statements);
@@ -161,7 +170,7 @@ impl NativeSession {
             .map(TipStatement::id)
             .collect::<Result<Vec<_>, _>>()?;
         let digest = rocky_core::commitment("rocky.tip-graph.v1", &encode(&ids)?);
-        let batches = replica.pending_tip_candidates().await?;
+        let batches = candidate_pages(replica.pending_tip_candidates().await?)?;
         let TipMessage::Digest(theirs, count) = self
             .swap_tips(initiator, TipMessage::Digest(digest, batches.len()))
             .await?
@@ -169,7 +178,7 @@ impl NativeSession {
             return Err(denied("unexpected tip graph digest"));
         };
         if theirs != digest {
-            let mut pages = ours.chunks(PAGE);
+            let mut pages = statement_pages(ours)?.into_iter();
             let mut learned = Vec::new();
             let (mut sent, mut received) = (false, false);
             let mut previous = None;
@@ -180,7 +189,7 @@ impl NativeSession {
                     .swap_tips(
                         initiator,
                         TipMessage::Statements {
-                            statements: page.to_vec(),
+                            statements: page,
                             last: sent,
                         },
                     )
@@ -215,19 +224,31 @@ impl NativeSession {
             replica.receive_tip_statements(&learned).await?;
         }
         let mut batches = batches.into_iter();
+        let mut candidate = Vec::new();
         for index in 0..count.max(batches.len()) {
-            let statements = batches.next().unwrap_or_default();
-            let TipMessage::CandidatePush { statements } = self
-                .swap_tips(initiator, TipMessage::CandidatePush { statements })
+            let (statements, last) = batches.next().unwrap_or((Vec::new(), true));
+            let TipMessage::CandidatePush { statements, last } = self
+                .swap_tips(initiator, TipMessage::CandidatePush { statements, last })
                 .await?
             else {
                 return Err(denied("unexpected pending candidate"));
             };
             if index < count {
-                replica.receive_tip_statements(&statements).await?;
-            } else if !statements.is_empty() {
+                if statements.len() > PAGE || (!last && statements.is_empty()) {
+                    return Err(denied("candidate page quota"));
+                }
+                candidate.extend(statements);
+                if last {
+                    replica
+                        .receive_tip_statements(&std::mem::take(&mut candidate))
+                        .await?;
+                }
+            } else if !statements.is_empty() || !last {
                 return Err(denied("candidate beyond declared count"));
             }
+        }
+        if !candidate.is_empty() {
+            return Err(denied("incomplete pending candidate"));
         }
         let TipMessage::Followed(tip) = self
             .swap_tips(
@@ -250,14 +271,28 @@ impl NativeSession {
         let TipMessage::CandidateCount(count) = self.reply::<TipMessage>().await? else {
             return Err(denied("unexpected pending candidate count"));
         };
+        let mut candidate = Vec::new();
         for _ in 0..count {
-            let TipMessage::CandidatePush { statements } = self.reply::<TipMessage>().await? else {
+            let TipMessage::CandidatePush { statements, last } = self.reply::<TipMessage>().await?
+            else {
                 return Err(denied("unexpected pending candidate"));
             };
-            replica.receive_tip_statements(&statements).await?;
+            if statements.len() > PAGE || (!last && statements.is_empty()) {
+                return Err(denied("candidate page quota"));
+            }
+            candidate.extend(statements);
+            if last {
+                replica
+                    .receive_tip_statements(&std::mem::take(&mut candidate))
+                    .await?;
+            }
         }
-        for statements in replica.pending_tip_candidates().await? {
-            self.send(TipMessage::CandidatePush { statements }).await?;
+        if !candidate.is_empty() {
+            return Err(denied("incomplete pending candidate"));
+        }
+        for (statements, last) in candidate_pages(replica.pending_tip_candidates().await?)? {
+            self.send(TipMessage::CandidatePush { statements, last })
+                .await?;
             if !matches!(self.reply::<TipMessage>().await?, TipMessage::Stored) {
                 return Err(denied("unexpected pending candidate acknowledgment"));
             }
@@ -297,4 +332,41 @@ fn ordered_page(
         previous = Some(id);
     }
     Ok(previous)
+}
+
+pub(super) fn tip_page(
+    mut statements: Vec<TipStatement>,
+) -> Result<(Vec<TipStatement>, bool), Error> {
+    let count = page_len(&statements, PAGE)?;
+    let more = count < statements.len() || statements.len() == PAGE;
+    statements.truncate(count);
+    Ok((statements, more))
+}
+pub(super) fn statement_pages(
+    statements: Vec<TipStatement>,
+) -> Result<Vec<Vec<TipStatement>>, Error> {
+    let mut pages = Vec::new();
+    let mut remaining = statements.as_slice();
+    while !remaining.is_empty() {
+        let count = page_len(remaining, PAGE)?;
+        pages.push(remaining[..count].to_vec());
+        remaining = &remaining[count..];
+    }
+    Ok(pages)
+}
+pub(super) fn candidate_pages(
+    batches: Vec<Vec<TipStatement>>,
+) -> Result<Vec<(Vec<TipStatement>, bool)>, Error> {
+    let mut result = Vec::new();
+    for batch in batches {
+        let pages = statement_pages(batch)?;
+        let length = pages.len();
+        result.extend(
+            pages
+                .into_iter()
+                .enumerate()
+                .map(|(i, page)| (page, i + 1 == length)),
+        );
+    }
+    Ok(result)
 }

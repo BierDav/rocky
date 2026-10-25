@@ -54,69 +54,78 @@ impl NativeSession {
             if batch.is_empty() {
                 continue;
             }
-            let mut frontiers = Vec::new();
-            for scope in &batch {
-                frontiers.push(replica.frontier(*scope).await?);
-            }
-            validate_frontiers(&frontiers)?;
-            let partitions = replica
-                .tuple_proofs(self.peer, &self.credentials, &batch)
-                .await?;
-            self.send(FrontierMessage::FrontiersQuery {
-                frontiers: frontiers.clone(),
-                partitions,
-                proofs: replica.holding_proofs(self.binding, &batch).await?,
-            })
-            .await?;
-            let FrontierMessage::Frontiers { states } = self.reply::<FrontierMessage>().await?
-            else {
-                return Err(denied("unexpected frontier batch response"));
-            };
-            if states.len() != batch.len()
-                || states
-                    .iter()
-                    .zip(&batch)
-                    .any(|(reply, scope)| reply.scope() != *scope)
-            {
-                return Err(denied("frontier batch outside request"));
-            }
-            let held: Vec<_> = frontiers
-                .iter()
-                .zip(states)
-                .filter_map(|(local, reply)| match reply {
-                    FrontierReply::Held(state) => {
-                        self.offered.insert(local.scope);
-                        Some((local, state))
-                    }
-                    FrontierReply::Refused(scope) => {
-                        refused.push(scope);
-                        None
-                    }
-                })
-                .collect();
-            if held.is_empty() {
-                continue;
-            }
-            let remote: Vec<_> = held
-                .iter()
-                .map(|(_, state)| state.frontier.clone())
-                .collect();
-            replica
-                .inner
-                .lock()
-                .await
-                .record_frontiers(self.peer, &self.credentials, &remote)
-                .await?;
-            for (local, state) in held {
-                if state.importing {
-                    importing.push(local.scope);
-                } else if local != &state.frontier
-                    || local.logs.iter().any(|log| log.held != log.applied)
+            let mut remaining = batch.as_slice();
+            while !remaining.is_empty() {
+                let mut frontiers = Vec::new();
+                for scope in remaining {
+                    frontiers.push(replica.frontier(*scope).await?);
+                }
+                validate_frontiers(&frontiers)?;
+                let partitions = replica
+                    .tuple_proofs(self.peer, &self.credentials, remaining)
+                    .await?;
+                let proofs = replica.holding_proofs(self.binding, remaining).await?;
+                let query = frontier_query(frontiers, &partitions, &proofs)?;
+                let FrontierMessage::FrontiersQuery {
+                    frontiers: selected,
+                    ..
+                } = &query
+                else {
+                    return Err(denied("frontier query"));
+                };
+                let mut frontiers = selected.clone();
+                self.send(query).await?;
+                let FrontierMessage::Frontiers { states } = self.reply::<FrontierMessage>().await?
+                else {
+                    return Err(denied("unexpected frontier batch response"));
+                };
+                if states.is_empty()
+                    || states.len() > frontiers.len()
+                    || states
+                        .iter()
+                        .zip(&frontiers)
+                        .any(|(reply, frontier)| reply.scope() != frontier.scope)
                 {
-                    changed.push(local.scope);
-                } else {
-                    // Nothing to pull: a resubscribed scope is complete again.
-                    replica.restored(local.scope).await?;
+                    return Err(denied("frontier batch outside request"));
+                }
+                remaining = &remaining[states.len()..];
+                frontiers.truncate(states.len());
+                let held: Vec<_> = frontiers
+                    .iter()
+                    .zip(states)
+                    .filter_map(|(local, reply)| match reply {
+                        FrontierReply::Held(state) => {
+                            self.offered.insert(local.scope);
+                            Some((local, state))
+                        }
+                        FrontierReply::Refused(scope) => {
+                            refused.push(scope);
+                            None
+                        }
+                    })
+                    .collect();
+
+                let remote: Vec<_> = held
+                    .iter()
+                    .map(|(_, state)| state.frontier.clone())
+                    .collect();
+                replica
+                    .inner
+                    .lock()
+                    .await
+                    .record_frontiers(self.peer, &self.credentials, &remote)
+                    .await?;
+                for (local, state) in held {
+                    if state.importing {
+                        importing.push(local.scope);
+                    } else if local != &state.frontier
+                        || local.logs.iter().any(|log| log.held != log.applied)
+                    {
+                        changed.push(local.scope);
+                    } else {
+                        // Nothing to pull: a resubscribed scope is complete again.
+                        replica.restored(local.scope).await?;
+                    }
                 }
             }
         }
@@ -172,7 +181,7 @@ impl NativeSession {
             .into_iter()
             .map(|reply| (reply.scope(), reply))
             .collect();
-        let states = scopes
+        let mut states: Vec<_> = scopes
             .iter()
             .map(|scope| {
                 replies
@@ -180,6 +189,41 @@ impl NativeSession {
                     .unwrap_or(FrontierReply::Refused(*scope))
             })
             .collect();
+        let count = page_len(&states, MAX_FRONTIER_SCOPES)?;
+        states.truncate(count);
         self.send(FrontierMessage::Frontiers { states }).await
+    }
+}
+
+pub(super) fn frontier_query(
+    mut frontiers: Vec<ScopeFrontier>,
+    partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+    proofs: &[(ResourceScope, Vec<holdings::HoldingProof>)],
+) -> Result<FrontierMessage, Error> {
+    loop {
+        let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+        let query = FrontierMessage::FrontiersQuery {
+            frontiers: frontiers.clone(),
+            partitions: partitions
+                .iter()
+                .filter(|(scope, _)| scopes.contains(scope))
+                .cloned()
+                .collect(),
+            proofs: proofs
+                .iter()
+                .filter(|(scope, _)| scopes.contains(scope))
+                .cloned()
+                .collect(),
+        };
+        if encode(&query)?.len() <= SECURE_MESSAGE_BYTES {
+            return Ok(query);
+        }
+        if frontiers.len() == 1 {
+            return Err(Error::Quota {
+                resource: "frontier",
+                limit: SECURE_MESSAGE_BYTES,
+            });
+        }
+        frontiers.pop();
     }
 }

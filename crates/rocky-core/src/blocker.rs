@@ -21,6 +21,8 @@ pub struct Blocker {
 pub enum BlockerKind {
     /// The bootstrap intent still imports this scope from a checkpoint.
     BootstrapMarker,
+    /// The latest request for this scope failed or was refused.
+    SyncRequest { refused: bool },
     /// A joined device waits for one exchange with its inviter.
     AwaitingInviter,
     /// The owner imports the scope and it holds no rows yet.
@@ -127,6 +129,10 @@ fn label(prefix: &str, bytes: Result<Vec<u8>, serde_json::Error>) -> String {
 impl fmt::Display for Blocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match &self.kind {
+            BlockerKind::SyncRequest { refused } => format!(
+                "sync request {}",
+                if *refused { "refused" } else { "failed" }
+            ),
             BlockerKind::BootstrapMarker => "bootstrap marker".into(),
             BlockerKind::AwaitingInviter => "awaiting inviter".into(),
             BlockerKind::Importing => "importing".into(),

@@ -816,7 +816,7 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         );
     };
     let (served, ()) = tokio::join!(serve(served), client);
-    assert!(served.is_err());
+    served.unwrap();
     let page = public_only.snapshot(f.public).await.unwrap();
     assert_eq!((page.rows.len(), page.complete), (40, true));
     assert!(public_only.companion(f.private, [1; 32]).await.is_err());

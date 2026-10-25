@@ -359,6 +359,7 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             let mut waiting = Box::pin(a.readiness_after(&client, token));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             let dials = hub.protocol_dials("a", "b", Protocol::Link);
+            let reverse_dials = hub.protocol_dials("b", "a", Protocol::Link);
             // As iroh's idle timeout ends a connection to a vanished peer.
             hub.sever_links("b");
             until(|| service.live.len() == 0).await;
@@ -381,9 +382,18 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
                     .any(|event| event["kind"] == "link_closed" && event["reason"] == "error")
             );
             assert_eq!(hub.protocol_dials("a", "b", Protocol::Link), dials);
-            tokio::time::advance(Duration::from_secs(1)).await;
+            let deadline = a.retries.lock().unwrap()[&peer]
+                .link_retry
+                .deadline()
+                .ok_or("link retry deadline")?;
+            tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await;
             until(|| service.live.len() == 1).await;
-            assert!(hub.protocol_dials("a", "b", Protocol::Link) > dials);
+            assert!(
+                hub.protocol_dials("a", "b", Protocol::Link)
+                    + hub.protocol_dials("b", "a", Protocol::Link)
+                    > dials + reverse_dials
+            );
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1599,4 +1609,77 @@ fn failed_report(report: &Value) -> bool {
                 })
         })
     })
+}
+
+#[tokio::test(start_paused = true)]
+async fn incoming_pushes_do_not_wait_for_page_publication() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = b.current().ok_or("service")?;
+            let _publishing = service.live.publishing.lock().await;
+            let revision = *b.replica.observe_revision().borrow();
+            add(&a, 1).await?;
+            until(|| *b.replica.observe_revision().borrow() > revision).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            drop(_publishing);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn pushes_over_the_handler_limit_reconcile_without_reopening_the_link() -> Result<(), Failure>
+{
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = b.current().ok_or("service")?;
+            let gate = Arc::new(Semaphore::new(0));
+            *service.live.push_gate.lock().unwrap() = Some(gate.clone());
+            let before = [hub.dials_to("a"), hub.dials_to("b")];
+            for index in 1..=24 {
+                add(&a, index).await?;
+                tokio::task::yield_now().await;
+            }
+            // Send enough duplicate pages to exceed the handler limit even when
+            // the publisher coalesces all commits into only a few pages.
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let contact = a
+                .settings
+                .lock()
+                .await
+                .targets()
+                .into_iter()
+                .find(|(node, _)| *node == peer)
+                .ok_or("peer contact")?
+                .1;
+            let source = a.current().ok_or("source service")?;
+            let handle = a.request_link(&*source.transport, peer, &contact).await?;
+            let cursor = rocky_secure::ScopeFrontier {
+                scope: a.app_scopes()[0],
+                logs: vec![],
+            };
+            for _ in 0..24 {
+                handle.push_committed(&a.replica, &cursor).await?;
+                tokio::task::yield_now().await;
+            }
+            until(|| service.live.dropped_pushes.load(Ordering::SeqCst) > 0).await;
+            gate.add_permits(8);
+            *service.live.push_gate.lock().unwrap() = None;
+            b.sync(&*service.transport).await?;
+            assert_eq!(rows(&b).await?.len(), 24);
+            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
+            assert_eq!(service.live.len(), 1);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
 }

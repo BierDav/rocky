@@ -137,7 +137,7 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
             server.serve_once(&x).await.unwrap();
             server.serve_once(&x).await.unwrap();
         },
-        client.pull(&y, vec![f.public], None, MAX_SECURE_FRAME / 2)
+        client.catch_up(&y, f.public, MAX_SECURE_FRAME / 2)
     );
     let () = served;
     pulled.unwrap();

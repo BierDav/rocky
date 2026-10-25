@@ -31,6 +31,7 @@ pub(crate) struct Request {
     span: Span,
     started: Instant,
     bytes: usize,
+    deadline: tokio::time::Instant,
 }
 impl Request {
     pub(crate) fn start(session: &Span, channel: u16, family: &'static str) -> Self {
@@ -46,7 +47,11 @@ impl Request {
             ),
             started: Instant::now(),
             bytes: 0,
+            deadline: tokio::time::Instant::now() + super::REQUEST_LIMIT,
         }
+    }
+    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
     }
     pub(crate) fn sent(&mut self, bytes: usize) {
         self.bytes = self.bytes.saturating_add(bytes);

@@ -8,7 +8,7 @@ use rocky_credentials::{
 };
 
 /// Largest stored or exchanged tip statement: a finality record.
-pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = rocky_credentials::MAX_FINALITY_BYTES + 64;
+pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = SECURE_MESSAGE_BYTES - 1024;
 
 pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
     graph
@@ -65,6 +65,12 @@ pub enum TipStatement {
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
+        if encode(self)?.len() > MAX_TIP_STATEMENT_BYTES {
+            return Err(Error::Quota {
+                resource: "tip statement",
+                limit: MAX_TIP_STATEMENT_BYTES,
+            });
+        }
         match self {
             Self::Seal(s) => s.id(),
             Self::Opening(s) => s.id(),

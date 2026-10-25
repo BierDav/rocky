@@ -189,7 +189,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let limit = limit.clamp(1, MAX_EXISTENCE_PAGE);
         let found = rows_with(&inner.conn, "SELECT id,created,deleted FROM secure_existence_archive_rows WHERE base=? AND id>? ORDER BY id LIMIT ?", vec![SqlValue::Blob(base.to_vec()),SqlValue::Integer(after.unwrap_or(0)),SqlValue::Integer(limit as i64)]).await?;
-        let rows = found
+        let mut rows = found
             .iter()
             .map(|row| {
                 let [SqlValue::Integer(id), created, deleted] = row.as_slice() else {
@@ -198,9 +198,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Ok((*id, nullable_hash(created)?, nullable_hash(deleted)?))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let next = (rows.len() == limit)
-            .then(|| rows.last().map(|row| row.0))
-            .flatten();
+        let count = page_len(&rows, limit)?;
+        let more = count < rows.len() || rows.len() == limit;
+        rows.truncate(count);
+        let next = more.then(|| rows.last().map(|row| row.0)).flatten();
         inner.flush()?;
         Ok(ExistenceBasePage { base, rows, next })
     }

@@ -38,11 +38,12 @@
   behavior and keep cleanup relevant to the work at hand.
 - Keep the code easy to navigate with focused modules, clear names and explicit
   ownership. Follow definitions and callers instead of maintaining file inventories.
-- Keep only AGENTS instructions, the simple root README and `docs/features_10`
-  as project documentation. Do not recreate removed guides or architecture docs.
+- Keep only AGENTS instructions, the simple root README, `docs/features_11`
+  (the current roadmap) and `docs/features_10` (its completed predecessor) as
+  project documentation. Do not recreate removed guides or architecture docs.
 - Keep comments and API docs short, focused on intent, invariants or surprising
   constraints. Express behavior through code and meaningful tests.
-- Record phase status and measured evidence within `docs/features_10`.
+- Record phase status and measured evidence within `docs/features_11`.
 
 ## Implementation boundaries
 

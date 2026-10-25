@@ -1121,6 +1121,17 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
                 .await
                 .unwrap()
         );
+        let before = client.sent_counts.held_frames;
+        assert!(
+            !client
+                .sync_held_changes(&b, f.public, MAX_SECURE_FRAME / 2)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            client.sent_counts.held_frames, before,
+            "unchanged held frames were resent"
+        );
         client.close().await.unwrap();
     });
     served.unwrap();

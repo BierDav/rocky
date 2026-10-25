@@ -54,19 +54,30 @@ pub trait PathSource: Send + Sync {
 pub struct Stream {
     io: Box<dyn SessionStream>,
     paths: Option<Arc<dyn PathSource>>,
+    lanes: Vec<Box<dyn SessionStream>>,
 }
 impl Stream {
     pub fn new(io: impl SessionStream + 'static) -> Self {
         Self {
             io: Box::new(io),
             paths: None,
+            lanes: Vec::new(),
         }
     }
     pub fn with_paths(io: impl SessionStream + 'static, paths: Arc<dyn PathSource>) -> Self {
         Self {
             io: Box::new(io),
             paths: Some(paths),
+            lanes: Vec::new(),
         }
+    }
+    /// Additional ordered lanes bound to this stream's peer and connection.
+    pub fn with_lanes(mut self, lanes: Vec<Box<dyn SessionStream>>) -> Self {
+        self.lanes = lanes;
+        self
+    }
+    pub fn take_lanes(&mut self) -> Vec<Box<dyn SessionStream>> {
+        std::mem::take(&mut self.lanes)
     }
     /// The stream's paths, which outlive the stream for status reads.
     pub fn paths(&self) -> Option<Arc<dyn PathSource>> {
@@ -119,7 +130,7 @@ impl Protocol {
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Link => b"rocky/link/4",
+            Self::Link => b"rocky/link/5",
             Self::Renew => b"rocky/sdk-renew/2",
             Self::Coordinate => b"rocky/coordinator/3",
         }
@@ -262,6 +273,6 @@ mod tests {
     fn only_current_protocols_are_named() {
         assert_eq!(Protocol::named(b"rocky/command/2"), None);
         assert_eq!(Protocol::named(b"rocky/link/1"), None);
-        assert_eq!(Protocol::named(b"rocky/link/4"), Some(Protocol::Link));
+        assert_eq!(Protocol::named(b"rocky/link/5"), Some(Protocol::Link));
     }
 }

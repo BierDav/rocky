@@ -259,3 +259,127 @@ async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_pref
     assert!(ids(&b).await.is_empty());
     assert!(b.snapshot(f.public).await.unwrap().rows.is_empty());
 }
+
+#[tokio::test]
+async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
+    use crate::network::link::{Frame, Message, channels::Packet};
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
+    let a = super::revocations::open(&f, &dir, "lane-a.db", &alice).await;
+    let b = super::revocations::open(&f, &dir, "lane-b.db", &bob).await;
+    let (left, right) = super::revocations::hello((&alice, &a), (&bob, &b), &f).await;
+    let (mut left, mut right) = (left.unwrap(), right.unwrap());
+    let mut near: Vec<Box<dyn network::SessionStream>> = Vec::new();
+    let mut far: Vec<Box<dyn network::SessionStream>> = Vec::new();
+    for _ in 0..4 {
+        let (a, b) = tokio::io::duplex(1);
+        near.push(Box::new(a));
+        far.push(Box::new(b));
+    }
+    left.attach_lanes(near).unwrap();
+    // The peer is not reading any of the added lanes. This signed frame
+    // cannot fit its one-byte pipe, but control must still be delivered.
+    left.writer
+        .send(Frame {
+            channel: 2,
+            through: Vec::new(),
+            direction: false,
+            message: Message::Channel(Packet::Data {
+                generation: 0,
+                bytes: vec![1; 8192],
+                last: true,
+            }),
+        })
+        .await
+        .unwrap();
+    let pushed = super::revocations::insert(&a, &f, 1, "bulk").await;
+    left.writer
+        .send(Frame::new(
+            false,
+            Message::Push {
+                scope: f.public,
+                frames: vec![pushed],
+                voids: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    left.writer
+        .send(Frame::new(false, Message::Ready { persistent: true }))
+        .await
+        .unwrap();
+    let control = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        right.reader.receive(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        control.message,
+        Message::Ready { persistent: true }
+    ));
+    right.attach_lanes(far).unwrap();
+    left.writer
+        .send(Frame {
+            channel: 3,
+            through: Vec::new(),
+            direction: false,
+            message: Message::Channel(Packet::Open { generation: 1 }),
+        })
+        .await
+        .unwrap();
+    let mut found = false;
+    let mut pushed = false;
+    for _ in 0..3 {
+        let frame = right.reader.receive().await.unwrap();
+        found |= frame.channel == 3;
+        pushed |= matches!(frame.message, Message::Push { .. });
+    }
+    assert!(found && pushed);
+}
+
+#[tokio::test]
+async fn graph_reconciliation_sends_only_missing_statements_and_none_when_unchanged() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
+    let a = super::revocations::open(&f, &dir, "difference-a.db", &alice).await;
+    let b = super::revocations::open(&f, &dir, "difference-b.db", &bob).await;
+    let tip = a.followed_tip().await;
+    let common: Vec<_> = (0..65)
+        .map(|i| movement(&f, &format!("shared-{i}"), None, tip))
+        .collect();
+    a.receive_tip_statements(&common).await.unwrap();
+    b.receive_tip_statements(&common).await.unwrap();
+    a.receive_tip_statements(&[movement(&f, "only-a", None, tip)])
+        .await
+        .unwrap();
+    b.receive_tip_statements(&[movement(&f, "only-b", None, tip)])
+        .await
+        .unwrap();
+    let (left, right) = super::revocations::hello((&alice, &a), (&bob, &b), &f).await;
+    let (left, right) = (left.unwrap(), right.unwrap());
+    assert_eq!((left.statements_sent, right.statements_sent), (1, 1));
+    assert_eq!(ids(&a).await, ids(&b).await);
+    let (mut client, mut server) = network::link::testing::requests(right, left).await.unwrap();
+    let ((), served) = tokio::join!(
+        async {
+            client.sync_tip_graph(&b).await.unwrap();
+            assert_eq!(client.sent_counts.statements, 0);
+            client.close().await.unwrap();
+        },
+        server.serve_to_end(&a)
+    );
+    served.unwrap();
+    assert_eq!(server.sent_counts.statements, 0);
+    let (left, right) = super::revocations::hello((&alice, &a), (&bob, &b), &f).await;
+    assert_eq!(
+        (
+            left.unwrap().statements_sent,
+            right.unwrap().statements_sent
+        ),
+        (0, 0)
+    );
+}

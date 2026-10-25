@@ -3,6 +3,10 @@ use super::*;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum HeldMessage {
+    Token {
+        scope: ResourceScope,
+        digest: Commitment,
+    },
     Pull {
         scope: ResourceScope,
         after: Option<Hash>,
@@ -36,6 +40,23 @@ impl NativeSession {
             return Ok(false);
         }
         if !self.try_scoped_holding(replica, &[scope], true).await? {
+            return Ok(false);
+        }
+        let digest = replica
+            .held_token(self.peer, &self.credentials, scope)
+            .await?;
+        self.send(HeldMessage::Token { scope, digest }).await?;
+        let HeldMessage::Token {
+            scope: returned,
+            digest: theirs,
+        } = self.reply::<HeldMessage>().await?
+        else {
+            return Err(denied("unexpected held token response"));
+        };
+        if returned != scope {
+            return Err(denied("held token outside request"));
+        }
+        if digest == theirs {
             return Ok(false);
         }
         let mut after = None;
@@ -128,6 +149,14 @@ impl NativeSession {
         message: HeldMessage,
     ) -> Result<(), Error> {
         match message {
+            HeldMessage::Token { scope, .. } => {
+                self.require_holding(replica, scope).await?;
+                let digest = replica
+                    .held_token(self.peer, &self.credentials, scope)
+                    .await?;
+                self.send(HeldMessage::Token { scope, digest }).await
+            }
+
             HeldMessage::Pull {
                 scope,
                 after,

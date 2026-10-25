@@ -1,8 +1,10 @@
-//! The complete metadata graph travels during admission, independently of tips.
+//! Reconcile sorted statement digests before transferring missing metadata.
 use super::*;
 use crate::TipStatement;
 
 const PAGE: usize = 32;
+mod diff;
+use diff::{graph_statements, ids_digest, range_ids};
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum TipMessage {
@@ -12,12 +14,21 @@ pub(super) enum TipMessage {
         last: bool,
     },
     Followed(rocky_core::TipId),
-    Query {
-        after: Option<Commitment>,
+    Range {
+        prefix: Commitment,
+        depth: u16,
     },
-    Page {
-        statements: Vec<TipStatement>,
-        next: Option<Commitment>,
+    Summary {
+        digest: Commitment,
+        count: usize,
+    },
+    Ids {
+        prefix: Commitment,
+        depth: u16,
+    },
+    Identifiers(Vec<Commitment>),
+    Fetch {
+        ids: Vec<Commitment>,
     },
     Push {
         statements: Vec<TipStatement>,
@@ -44,38 +55,7 @@ impl NativeSession {
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
-        let mut after = None;
-        let mut learned = Vec::new();
-        loop {
-            self.send(TipMessage::Query { after }).await?;
-            let TipMessage::Page { statements, next } = self.reply::<TipMessage>().await? else {
-                return Err(denied("unexpected tip graph response"));
-            };
-            let end = ordered_page(&statements, after)?;
-            if next.is_some() && (statements.is_empty() || next != end) {
-                return Err(denied("tip graph cursor outside its page"));
-            }
-            learned.extend(statements);
-            match next {
-                Some(cursor) => after = Some(cursor),
-                None => break,
-            }
-        }
-        // A dependency may sort after every record depending on it.
-        replica.receive_tip_statements(&learned).await?;
-        after = None;
-        loop {
-            let (statements, more) = tip_page(replica.tip_statements(after, PAGE).await?)?;
-            let last = !more;
-            after = ordered_page(&statements, after)?;
-            self.send(TipMessage::Push { statements, last }).await?;
-            if !matches!(self.reply::<TipMessage>().await?, TipMessage::Stored) {
-                return Err(denied("unexpected tip graph acknowledgment"));
-            }
-            if last {
-                break;
-            }
-        }
+        self.reconcile_graph(replica, None).await?;
         self.sync_candidates(replica).await?;
         self.send(TipMessage::Followed(replica.followed_tip().await))
             .await?;
@@ -111,14 +91,46 @@ impl NativeSession {
                 }
                 self.send(TipMessage::Stored).await
             }
-            TipMessage::Query { after } => {
-                if !self.tip_incoming.is_empty() {
-                    return Err(denied("tip graph push is incomplete"));
+            TipMessage::Range { prefix, depth } => {
+                let graph = graph_statements(replica).await?;
+                let ids = range_ids(&graph, prefix, depth)?;
+                self.send(TipMessage::Summary {
+                    digest: ids_digest(&ids)?,
+                    count: ids.len(),
+                })
+                .await
+            }
+            TipMessage::Ids { prefix, depth } => {
+                let graph = graph_statements(replica).await?;
+                let ids = range_ids(&graph, prefix, depth)?;
+                if ids.len() > PAGE {
+                    return Err(denied("tip identifiers quota"));
                 }
-                let (statements, more) = tip_page(replica.tip_statements(after, PAGE).await?)?;
-                let end = ordered_page(&statements, after)?;
-                let next = more.then_some(end).flatten();
-                self.send(TipMessage::Page { statements, next }).await
+                self.send(TipMessage::Identifiers(ids)).await
+            }
+            TipMessage::Fetch { ids } => {
+                if ids.len() > PAGE || ids.windows(2).any(|p| p[0] >= p[1]) {
+                    return Err(denied("tip fetch quota or order"));
+                }
+                let graph = graph_statements(replica).await?;
+                let statements = graph
+                    .into_iter()
+                    .filter(|(id, _)| ids.contains(id))
+                    .map(|(_, s)| s)
+                    .collect();
+                let mut pages = statement_pages(statements)?;
+                if pages.is_empty() {
+                    pages.push(Vec::new());
+                }
+                let count = pages.len();
+                for (i, statements) in pages.into_iter().enumerate() {
+                    self.send(TipMessage::Statements {
+                        statements,
+                        last: i + 1 == count,
+                    })
+                    .await?;
+                }
+                Ok(())
             }
             TipMessage::Push { statements, last } => {
                 let previous = self.tip_incoming.last().map(TipStatement::id).transpose()?;
@@ -152,24 +164,9 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         initiator: bool,
     ) -> Result<(), Error> {
-        let mut ours = Vec::new();
-        let mut after = None;
-        loop {
-            let page = replica.tip_statements(after, PAGE).await?;
-            let last = page.len() < PAGE;
-            if let Some(statement) = page.last() {
-                after = Some(statement.id()?);
-            }
-            ours.extend(page);
-            if last {
-                break;
-            }
-        }
-        let ids = ours
-            .iter()
-            .map(TipStatement::id)
-            .collect::<Result<Vec<_>, _>>()?;
-        let digest = rocky_core::commitment("rocky.tip-graph.v1", &encode(&ids)?);
+        let graph = graph_statements(replica).await?;
+        let ids: Vec<_> = graph.iter().map(|(id, _)| *id).collect();
+        let digest = ids_digest(&ids)?;
         let batches = candidate_pages(replica.pending_tip_candidates().await?)?;
         let TipMessage::Digest(theirs, count) = self
             .swap_tips(initiator, TipMessage::Digest(digest, batches.len()))
@@ -178,50 +175,7 @@ impl NativeSession {
             return Err(denied("unexpected tip graph digest"));
         };
         if theirs != digest {
-            let mut pages = statement_pages(ours)?.into_iter();
-            let mut learned = Vec::new();
-            let (mut sent, mut received) = (false, false);
-            let mut previous = None;
-            while !(sent && received) {
-                let page = pages.next().unwrap_or_default();
-                sent = pages.len() == 0;
-                let TipMessage::Statements { statements, last } = self
-                    .swap_tips(
-                        initiator,
-                        TipMessage::Statements {
-                            statements: page,
-                            last: sent,
-                        },
-                    )
-                    .await?
-                else {
-                    return Err(denied("unexpected tip graph page"));
-                };
-                if statements.len() > PAGE
-                    || (received && (!statements.is_empty() || !last))
-                    || (!last && statements.is_empty())
-                {
-                    return Err(denied("tip graph page outside the exchange"));
-                }
-                for statement in statements {
-                    let id = statement.id()?;
-                    if previous.is_some_and(|previous| id <= previous) {
-                        return Err(denied("tip graph statements are not ordered"));
-                    }
-                    previous = Some(id);
-                    learned.push(statement);
-                }
-                received |= last;
-            }
-            let received_ids = learned
-                .iter()
-                .map(TipStatement::id)
-                .collect::<Result<Vec<_>, _>>()?;
-            if rocky_core::commitment("rocky.tip-graph.v1", &encode(&received_ids)?) != theirs {
-                return Err(denied("tip graph digest mismatch"));
-            }
-            // Dependencies may sort into later pages; verify the complete union.
-            replica.receive_tip_statements(&learned).await?;
+            self.reconcile_graph(replica, Some(initiator)).await?;
         }
         let mut batches = batches.into_iter();
         let mut candidate = Vec::new();
@@ -334,14 +288,6 @@ fn ordered_page(
     Ok(previous)
 }
 
-pub(super) fn tip_page(
-    mut statements: Vec<TipStatement>,
-) -> Result<(Vec<TipStatement>, bool), Error> {
-    let count = page_len(&statements, PAGE)?;
-    let more = count < statements.len() || statements.len() == PAGE;
-    statements.truncate(count);
-    Ok((statements, more))
-}
 pub(super) fn statement_pages(
     statements: Vec<TipStatement>,
 ) -> Result<Vec<Vec<TipStatement>>, Error> {

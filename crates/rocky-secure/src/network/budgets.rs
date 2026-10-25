@@ -107,13 +107,6 @@ fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledg
     assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), input.len());
     for page in pages {
         fits(
-            tips::TipMessage::Page {
-                statements: page.clone(),
-                next: Some([255; 32]),
-            }
-            .into(),
-        );
-        fits(
             tips::TipMessage::Statements {
                 statements: page.clone(),
                 last: false,

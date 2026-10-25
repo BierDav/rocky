@@ -266,3 +266,62 @@ async fn relay_notifications_preserve_an_existing_direct_stream() -> Result<(), 
     router.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_link_has_four_request_streams_and_an_independent_control_stream() -> Result<(), Failure>
+{
+    let a = local().start([51; 32]).await?;
+    let b = local().start([52; 32]).await?;
+    let (a, b) = (a.transport(), b.transport());
+    b.listen(true);
+    let mut near = a.connect(&b.address().await?, Protocol::Link).await?;
+    let (protocol, mut far) = b.accept().await.ok_or("closed")?;
+    assert_eq!(protocol, Protocol::Link);
+    let mut outgoing = near.take_lanes();
+    let mut incoming = far.take_lanes();
+    assert_eq!((outgoing.len(), incoming.len()), (4, 4));
+    for (index, (send, receive)) in outgoing.iter_mut().zip(&mut incoming).enumerate() {
+        send.write_u8(index as u8).await?;
+        assert_eq!(receive.read_u8().await?, index as u8);
+    }
+    // Ending a request lane leaves both control directions usable.
+    outgoing[0].shutdown().await?;
+    near.write_u8(7).await?;
+    assert_eq!(far.read_u8().await?, 7);
+    far.write_u8(9).await?;
+    assert_eq!(near.read_u8().await?, 9);
+    far.write_u8(11).await?;
+    far.shutdown().await?;
+    drop(incoming);
+    drop(far);
+    assert_eq!(near.read_u8().await?, 11);
+    a.close().await;
+    b.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_a_borrowed_attachment_ends_its_link_lanes_and_keeps_the_endpoint()
+-> Result<(), Failure> {
+    let endpoint = local().bind([53; 32]).await?;
+    let attachment = Attachment::new(endpoint.clone());
+    let router = attachment
+        .register(Router::builder(endpoint.clone()))
+        .spawn();
+    let a = attachment.transport();
+    let other = local().start([54; 32]).await?;
+    let b = other.transport();
+    b.listen(true);
+    let _near = a.connect(&b.address().await?, Protocol::Link).await?;
+    let (_, mut far) = b.accept().await.ok_or("closed")?;
+    let mut lanes = far.take_lanes();
+    a.close().await;
+    assert!(!endpoint.is_closed());
+    assert!(far.read_u8().await.is_err());
+    for lane in &mut lanes {
+        assert!(lane.read_u8().await.is_err());
+    }
+    b.close().await;
+    router.shutdown().await?;
+    Ok(())
+}

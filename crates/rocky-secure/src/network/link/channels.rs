@@ -70,7 +70,7 @@ struct State {
     closed: bool,
     retired_frames: u64,
     next: u64,
-    remote: u64,
+    remote: BTreeMap<u16, u64>,
     reconciling: BTreeMap<bool, u64>,
     next_reconcile: u64,
     remote_reconcile: u64,
@@ -167,13 +167,16 @@ impl Channels {
         if let Packet::Open { .. } = packet {
             if frame.direction == self.handle.direction
                 || state.slots.contains_key(&key)
-                || generation < state.remote
+                || generation < state.remote.get(&frame.channel).copied().unwrap_or(0)
             {
                 return Err(denied("link channel open quota/sequence"));
             }
-            state.remote = generation
-                .checked_add(1)
-                .ok_or_else(|| denied("link channel generation exhausted"))?;
+            state.remote.insert(
+                frame.channel,
+                generation
+                    .checked_add(1)
+                    .ok_or_else(|| denied("link channel generation exhausted"))?,
+            );
             let (send, receive) = mpsc::channel(QUEUE);
             state.slots.insert(
                 key,
@@ -601,6 +604,8 @@ impl Handle {
             offered: admission.offered.clone(),
             entry: None,
             tip_incoming: Vec::new(),
+            #[cfg(test)]
+            sent_counts: SentCounts::default(),
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,
@@ -625,6 +630,7 @@ impl Handle {
             TIMEOUT,
             self.send.send(Frame {
                 channel,
+                through: Vec::new(),
                 direction,
                 message: Message::Channel(packet),
             }),
@@ -668,6 +674,7 @@ impl Io {
         if !self.closed {
             let _ = self.handle.send.try_send(Frame {
                 channel: self.key.1,
+                through: Vec::new(),
                 direction: self.key.0,
                 message: Message::Channel(Packet::End {
                     generation: self.generation,
@@ -845,6 +852,7 @@ mod tests {
     fn frame(channel: u16, packet: Packet) -> Frame {
         Frame {
             channel,
+            through: Vec::new(),
             direction: true,
             message: Message::Channel(packet),
         }

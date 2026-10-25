@@ -3,9 +3,11 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 17;
+pub(super) const HANDSHAKE_VERSION: u32 = 18;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
+mod lanes;
+pub use lanes::{Reader, Writer};
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
 
@@ -47,6 +49,8 @@ pub enum Message {
 #[serde(deny_unknown_fields)]
 pub struct Frame {
     pub channel: u16,
+    /// Per-lane delivery barrier for the final reconciliation marker.
+    pub through: Vec<u64>,
     /// The request lane: false for the dialer, true for the acceptor.
     pub direction: bool,
     pub message: Message,
@@ -54,6 +58,7 @@ pub struct Frame {
 impl Frame {
     pub fn new(direction: bool, message: Message) -> Self {
         Self {
+            through: Vec::new(),
             channel: match message {
                 Message::Changed { .. } | Message::Push { .. } | Message::Reconcile { .. } => 1,
                 _ => 0,
@@ -63,6 +68,12 @@ impl Frame {
         }
     }
     fn validate(&self) -> Result<(), Error> {
+        if !self.through.is_empty()
+            && (self.through.len() != 5
+                || !matches!(self.message, Message::Reconcile { started: false, .. }))
+        {
+            return Err(denied("link delivery barrier"));
+        }
         let channel = match &self.message {
             Message::Channel(packet) => {
                 packet.validate()?;
@@ -103,22 +114,25 @@ pub struct Link {
     /// Bytes the handshake itself exchanged, before holdings.
     #[cfg(test)]
     pub(crate) handshake_bytes: usize,
+    #[cfg(test)]
+    pub(crate) statements_sent: usize,
     pub held: Vec<ResourceScope>,
     pub offered: Vec<ResourceScope>,
     pub direction: bool,
     pub expires: u64,
+    pub local_states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub channels: channels::Channels,
     pub reader: Reader,
     pub writer: Writer,
 }
-pub struct Reader {
+struct FrameReader {
     stream: ReadHalf<Box<dyn SessionStream>>,
     peer: PublicKey,
     signing: Commitment,
     sequence: u64,
 }
-pub struct Writer {
+struct FrameWriter {
     stream: WriteHalf<Box<dyn SessionStream>>,
     local: PrivateKey,
     signing: Commitment,
@@ -321,12 +335,17 @@ impl Link {
             session.accept_link_holdings(replica).await?;
             session.offer_link_holdings(replica, &scopes).await?;
         }
+        let mut local_states = std::collections::BTreeMap::new();
         let states = if side == Side::Initiator {
-            session.offer_link_states(replica).await?;
+            session
+                .offer_link_states(replica, &mut local_states)
+                .await?;
             session.accept_link_states().await?
         } else {
             let states = session.accept_link_states().await?;
-            session.offer_link_states(replica).await?;
+            session
+                .offer_link_states(replica, &mut local_states)
+                .await?;
             states
         };
         let held = session.proved.iter().copied().collect();
@@ -339,24 +358,27 @@ impl Link {
             peer: session.peer,
             #[cfg(test)]
             handshake_bytes,
+            #[cfg(test)]
+            statements_sent: session.sent_counts.statements,
             channels,
             states,
+            local_states,
             held,
             offered: session.offered.iter().copied().collect(),
             direction: side == Side::Acceptor,
             expires: credentials.expires().min(session.credentials.expires()),
-            reader: Reader {
+            reader: Reader::new(FrameReader {
                 stream: read,
                 peer: session.peer,
                 signing: session.signing,
                 sequence: session.received,
-            },
-            writer: Writer {
+            }),
+            writer: Writer::new(FrameWriter {
                 stream: write,
                 local: session.local,
                 signing: session.signing,
                 sequence: session.sent,
-            },
+            }),
         }))
     }
 }
@@ -480,12 +502,15 @@ impl NativeSession {
     async fn offer_link_states<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
+        local_states: &mut std::collections::BTreeMap<ResourceScope, Commitment>,
     ) -> Result<(), Error> {
         let scopes: Vec<_> = self.proved.iter().copied().collect();
         for batch in scopes.chunks(SIGNAL_SCOPES) {
             let mut states = Vec::new();
             for scope in batch {
-                states.push((*scope, scope_token(replica, *scope).await?));
+                let token = scope_token(replica, *scope).await?;
+                local_states.insert(*scope, token);
+                states.push((*scope, token));
             }
             self.send(super::Message::LinkState(states)).await?;
             self.acknowledged("link state acknowledgement").await?;
@@ -595,7 +620,7 @@ impl NativeSession {
         }
     }
 }
-impl Writer {
+impl FrameWriter {
     /// Finishes queued frames before a transport resets an unfinished stream.
     pub async fn finish(&mut self) -> Result<(), Error> {
         timeout(TIMEOUT, self.stream.shutdown())
@@ -642,7 +667,7 @@ pub(super) fn closed_by_peer() -> std::io::Error {
         "the peer closed the link",
     )
 }
-impl Reader {
+impl FrameReader {
     /// Idle reads have no deadline; started frames must keep making chunk progress.
     pub async fn receive(&mut self) -> Result<Frame, Error> {
         let first = self.stream.read_u8().await.map_err(|error| {
@@ -690,6 +715,7 @@ mod tests {
         assert!(
             Frame {
                 channel: CHANNELS,
+                through: Vec::new(),
                 direction: false,
                 message: close()
             }
@@ -699,6 +725,7 @@ mod tests {
         assert!(
             Frame {
                 channel: 1,
+                through: Vec::new(),
                 direction: false,
                 message: close()
             }
@@ -785,13 +812,14 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         // Transport and handshake each accept one current version.
         assert_eq!(
-            rocky_core::net::Protocol::named(b"rocky/link/4"),
+            rocky_core::net::Protocol::named(b"rocky/link/5"),
             Some(rocky_core::net::Protocol::Link)
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v17");
+        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/4"), None);
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v18");
     }
 }
 
@@ -805,6 +833,7 @@ mod integration_tests {
         let binding = [3; 32];
         let frame = Frame {
             channel: 2,
+            through: Vec::new(),
             direction: false,
             message: Message::Channel(channels::Packet::Data {
                 generation: 0,
@@ -822,7 +851,7 @@ mod integration_tests {
         assert!(bytes.len() > IO_CHUNK);
         let (near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
         let (stream, _) = tokio::io::split(Box::new(near) as Box<dyn SessionStream>);
-        let mut reader = Reader {
+        let mut reader = FrameReader {
             stream,
             peer: signer.public_key(),
             signing: binding,
@@ -846,7 +875,7 @@ mod integration_tests {
         for length in [0, FRAME_BYTES as u32 + 1] {
             let (near, mut far) = tokio::io::duplex(16);
             let (stream, _) = tokio::io::split(Box::new(near) as Box<dyn SessionStream>);
-            let mut reader = Reader {
+            let mut reader = FrameReader {
                 stream,
                 peer: PrivateKey::new().public_key(),
                 signing: [0; 32],

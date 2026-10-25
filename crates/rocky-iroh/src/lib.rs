@@ -2,7 +2,8 @@
 //! an endpoint and router the application owns; `Options` is the starter
 //! that binds and owns its own. See `docs/runtime/sdk-transports.md`.
 use rocky_core::net::{
-    BoxFuture, Connector, Discovery, Failure, NetworkPath, PathSource, Protocol, Stream, Transport,
+    BoxFuture, Connector, Discovery, Failure, NetworkPath, PathSource, Protocol, SessionStream,
+    Stream, Transport,
 };
 use serde::Deserialize;
 use std::{
@@ -16,7 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, Join, ReadBuf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, Join, ReadBuf},
     sync::{Mutex, Semaphore, mpsc, watch},
 };
 
@@ -98,6 +99,109 @@ fn stream(connection: Connection, (send, recv): (SendStream, RecvStream)) -> Str
     )
 }
 
+/// A link owns its connection, including the lanes hidden from the service.
+struct LinkConnection(Connection);
+impl Drop for LinkConnection {
+    fn drop(&mut self) {
+        self.0.close(CLOSED.into(), b"link ended");
+    }
+}
+struct LinkLane {
+    io: Join<RecvStream, SendStream>,
+    shutdown: Option<BoxFuture<'static, std::io::Result<()>>>,
+    finished: bool,
+    _owner: Arc<LinkConnection>,
+}
+impl AsyncRead for LinkLane {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for LinkLane {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.finished {
+            return Poll::Ready(Ok(()));
+        }
+        if self.shutdown.is_none() {
+            self.io
+                .writer_mut()
+                .finish()
+                .map_err(std::io::Error::other)?;
+            let stopped = self.io.writer().stopped();
+            // Keep the dedicated connection alive until the peer has the
+            // final bytes, including a resolution reply or signed Close.
+            self.shutdown = Some(Box::pin(async move {
+                match stopped.await.map_err(std::io::Error::other)? {
+                    None => Ok(()),
+                    Some(_) => Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "link stream stopped",
+                    )),
+                }
+            }));
+        }
+        let Some(shutdown) = &mut self.shutdown else {
+            return Poll::Ready(Err(std::io::Error::other("link shutdown state")));
+        };
+        let result = shutdown.as_mut().poll(cx);
+        if result.is_ready() {
+            self.finished = true;
+        }
+        result
+    }
+}
+async fn link_stream(
+    connection: Connection,
+    dialing: bool,
+    links: &std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
+) -> Result<Stream, Failure> {
+    let owner = Arc::new(LinkConnection(connection.clone()));
+    {
+        let mut links = links.lock().unwrap_or_else(PoisonError::into_inner);
+        links.retain(|link| link.strong_count() > 0);
+        if links.len() >= 2 * CONNECTIONS {
+            return Err("link connection quota".into());
+        }
+        links.push(Arc::downgrade(&owner));
+    }
+    let mut lanes: Vec<Box<dyn SessionStream>> = Vec::new();
+    for lane in 0..5u8 {
+        let (mut send, mut recv) = if dialing {
+            connection.open_bi().await?
+        } else {
+            connection.accept_bi().await?
+        };
+        // Opening a QUIC stream becomes visible only after its first write.
+        if dialing {
+            send.write_all(&[lane]).await?;
+        } else if recv.read_u8().await? != lane {
+            return Err("link lane order".into());
+        }
+        lanes.push(Box::new(LinkLane {
+            io: tokio::io::join(recv, send),
+            shutdown: None,
+            finished: false,
+            _owner: owner.clone(),
+        }));
+    }
+    let control = lanes.remove(0);
+    Ok(Stream::with_paths(control, Arc::new(Paths(connection))).with_lanes(lanes))
+}
+
 /// iroh's per-path QUIC measurements of one connection.
 struct Paths(Connection);
 impl PathSource for Paths {
@@ -146,6 +250,7 @@ struct Shared {
     sender: mpsc::Sender<(Protocol, Stream)>,
     incoming: Mutex<mpsc::Receiver<(Protocol, Stream)>>,
     connections: Mutex<HashMap<(EndpointId, Protocol), Connection>>,
+    link_connections: std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
     inbound: Semaphore,
     inbound_links: Semaphore,
     closed: watch::Sender<bool>,
@@ -216,6 +321,7 @@ impl Attachment {
             sender,
             incoming: Mutex::new(receiver),
             connections: Mutex::new(HashMap::new()),
+            link_connections: Default::default(),
             inbound: Semaphore::new(CONNECTIONS),
             inbound_links: Semaphore::new(CONNECTIONS),
             closed: watch::channel(false).0,
@@ -342,6 +448,26 @@ impl ProtocolHandler for Handler {
             attachment.refuse(&connection, BUSY, b"busy");
             return Ok(());
         };
+        if protocol == Protocol::Link {
+            match tokio::time::timeout(
+                TIMEOUT,
+                link_stream(connection.clone(), false, &self.0.link_connections),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => {
+                    if self.0.sender.try_send((protocol, stream)).is_err() {
+                        self.0.refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                    tokio::select! {
+                        _ = connection.closed() => {},
+                        _ = closed.wait_for(|closed| *closed) => { connection.close(CLOSED.into(), b"closed"); },
+                    }
+                }
+                _ => attachment.refuse(&connection, CLOSED, b"link lanes"),
+            }
+            return Ok(());
+        }
         // Duplicate link handshakes must reach the service's tie-break/busy reply.
         let slots = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
         loop {
@@ -469,7 +595,8 @@ impl Transport for Attachment {
                     let address: EndpointAddr = serde_json::from_str(address)?;
                     let key = (address.id, protocol);
                     let cached = self.0.connections.lock().await.get(&key).cloned();
-                    if let Some(connection) = cached
+                    if protocol != Protocol::Link
+                        && let Some(connection) = cached
                         && connection.close_reason().is_none()
                         && let Ok(Ok(pair)) =
                             tokio::time::timeout(TIMEOUT, connection.open_bi()).await
@@ -495,6 +622,13 @@ impl Transport for Attachment {
                         Some(dialed) => dialed,
                         None => dial(address).await,
                     }??;
+                    if protocol == Protocol::Link {
+                        return tokio::time::timeout(
+                            TIMEOUT,
+                            link_stream(connection, true, &self.0.link_connections),
+                        )
+                        .await?;
+                    }
                     let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
                     let mut connections = self.0.connections.lock().await;
                     connections.retain(|_, connection| connection.close_reason().is_none());
@@ -522,6 +656,18 @@ impl Transport for Attachment {
         let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
             return;
         };
+        for link in self
+            .0
+            .link_connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+        {
+            if link.0.remote_id() == address.id {
+                link.0.close(CLOSED.into(), b"forgotten");
+            }
+        }
         if let Ok(mut connections) = self.0.connections.try_lock() {
             connections.retain(|(id, _), connection| {
                 let keep = *id != address.id;
@@ -566,6 +712,16 @@ impl Transport for Attachment {
             self.0.incoming.lock().await.close();
             for (_, connection) in self.0.connections.lock().await.drain() {
                 connection.close(CLOSED.into(), b"closed");
+            }
+            for link in self
+                .0
+                .link_connections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .drain(..)
+                .filter_map(|link| link.upgrade())
+            {
+                link.0.close(CLOSED.into(), b"closed");
             }
             let router = self
                 .0

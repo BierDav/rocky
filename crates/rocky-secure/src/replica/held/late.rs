@@ -415,6 +415,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 
     /// Original signed frames of unresolved held changes, ordered by hash.
+    pub(crate) async fn held_token(
+        &self,
+        peer: PublicKey,
+        chain: &CredentialChain,
+        scope: ResourceScope,
+    ) -> Result<Commitment, Error> {
+        self.authorize_held_reader(peer, chain, scope).await?;
+        let mut inner = self.inner.lock().await;
+        transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
+        inner = flush_guard(inner, &self.inner).await?;
+        let records = collect_rows(inner.conn.query(
+            "SELECT f.hash FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? ORDER BY f.hash",
+            [encode(&scope)?],
+        ).await?).await?;
+        let mut hashes = Vec::new();
+        for record in records {
+            let [SqlValue::Blob(hash)] = record.as_slice() else {
+                return Err(Error::Corrupt("held frame hash".into()));
+            };
+            hashes.push(hash.clone());
+        }
+        Ok(rocky_core::commitment(
+            "rocky.held-token.v1",
+            &encode(&hashes)?,
+        ))
+    }
     pub async fn held_frame_page(
         &self,
         peer: PublicKey,

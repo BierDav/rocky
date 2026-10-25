@@ -268,6 +268,8 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
     assert_eq!((pass.frames, pass.lag), (100, 0));
     // At most 32 frames per page, and nothing is sent twice in the next pass.
     assert!(pass.pages >= 4);
+    assert_eq!(session.sent_counts.ranges, pass.pages);
+    assert_eq!(session.sent_counts.acknowledgments, 1);
     let again = session
         .catch_up(&device.replica, scope, QUOTA)
         .await

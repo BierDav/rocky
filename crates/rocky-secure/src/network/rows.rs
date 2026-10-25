@@ -128,7 +128,7 @@ impl NativeSession {
         Ok(())
     }
     /// Pulls every frame of `scope` this replica lacks in bounded pages and
-    /// acknowledges its frontier after each page. Stops at once when this
+    /// pipelines the next request while applying each page. Stops at once when this
     /// replica is behind the peer's pruned_prefix.
     pub async fn catch_up<A: RowApplication>(
         &mut self,
@@ -155,21 +155,24 @@ impl NativeSession {
         // The frontier last reported as held; only peer bookkeeping follows
         // it, and a stale one only costs frames sent again.
         let mut held = None;
+        let mut asked = false;
         loop {
-            if self.low(quota) {
+            if !asked && self.low(quota) {
                 report.exhausted = true;
                 return Ok(report);
             }
-            let frontier = match held.take() {
-                Some(frontier) => frontier,
-                None => replica.frontier(scope).await?,
-            };
-            self.send(RowMessage::Range {
-                frontier,
-                after,
-                quota,
-            })
-            .await?;
+            if !asked {
+                let frontier = match held.take() {
+                    Some(frontier) => frontier,
+                    None => replica.frontier(scope).await?,
+                };
+                self.send(RowMessage::Range {
+                    frontier,
+                    after,
+                    quota,
+                })
+                .await?;
+            }
             let RowMessage::RangeFrames { page } = self.reply::<RowMessage>().await? else {
                 return Err(denied("unexpected range response"));
             };
@@ -200,6 +203,17 @@ impl NativeSession {
                 self.complete_frames(page.frames)?;
                 report.state = Some(state);
                 return Ok(report);
+            }
+            // Only a committed frontier is acknowledged. The cursor skips the
+            // page being applied even though its frontier is not held yet.
+            asked = page.next.is_some() && !self.low(quota);
+            if asked {
+                self.send(RowMessage::Range {
+                    frontier: replica.frontier(scope).await?,
+                    after: page.next,
+                    quota,
+                })
+                .await?;
             }
             report.frames += page.frames.len();
             receive_voids(replica, &page.voids, &[scope]).await?;
@@ -233,13 +247,12 @@ impl NativeSession {
             span.record("outcome", "ok");
             let frontier = replica.frontier(scope).await?;
             report.lag = frontier.lag_behind(&page.frontier);
-            self.send(RowMessage::Held {
-                frontier: frontier.clone(),
-            })
-            .await?;
-            held = Some(frontier);
-            self.acknowledged("unexpected acknowledgment response")
-                .await?;
+            held = Some(frontier.clone());
+            if !asked {
+                self.send(RowMessage::Held { frontier }).await?;
+                self.acknowledged("unexpected acknowledgment response")
+                    .await?;
+            }
             // The sender's own frontier is its acknowledgment of what it holds.
             replica
                 .acknowledge_frontier(self.peer, &self.credentials, &page.frontier)
@@ -405,6 +418,9 @@ impl NativeSession {
                 if quota > MAX_SECURE_FRAME / 2 {
                     return Err(denied("native page quota"));
                 }
+                replica
+                    .acknowledge_frontier(self.peer, &self.credentials, &frontier)
+                    .await?;
                 let mut page = replica
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;

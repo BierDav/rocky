@@ -162,6 +162,7 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
             checkpoint: [0; 32],
             after: None,
             quota: 1024,
+            window: 4,
         }
         .into(),
         RowMessage::Read {

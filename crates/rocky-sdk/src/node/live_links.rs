@@ -432,7 +432,7 @@ impl Node {
     pub(super) async fn admit_link(
         self: &Arc<Self>,
         service: Arc<Link>,
-        stream: Stream,
+        mut stream: Stream,
         expected: Option<PublicKey>,
         settings: Shared<Settings>,
         handshake_permit: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -447,6 +447,7 @@ impl Node {
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
         let paths = stream.paths();
+        let lanes = stream.take_lanes();
         let opened = match expected {
             Some(_) => Box::pin(link::Link::open(
                 stream,
@@ -475,6 +476,7 @@ impl Node {
                 None => return Ok(()),
             },
         };
+        opened.attach_lanes(lanes)?;
         if !self.foreground.load(Ordering::SeqCst)
             || !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open
@@ -549,7 +551,11 @@ impl Node {
         for scope in &opened.held {
             cursors.insert(*scope, self.replica.frontier(*scope).await?);
             auxiliary.insert(*scope, self.link_auxiliary(*scope).await?);
-            frontiers.insert(*scope, self.link_scope_state(*scope).await?);
+            let token = match opened.local_states.get(scope) {
+                Some(token) => *token,
+                None => self.link_scope_state(*scope).await?,
+            };
+            frontiers.insert(*scope, token);
         }
         let initial: Vec<_> = frontiers
             .iter()

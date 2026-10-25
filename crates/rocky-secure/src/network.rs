@@ -260,7 +260,19 @@ enum SessionIo {
     Native(Box<dyn SessionStream>),
     Channel(Box<link::channels::Io>),
 }
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SentCounts {
+    pub statements: usize,
+    pub ranges: usize,
+    pub acknowledgments: usize,
+    pub checkpoint_requests: usize,
+    pub checkpoint_pages: usize,
+    pub held_frames: usize,
+}
 pub struct NativeSession {
+    #[cfg(test)]
+    pub(crate) sent_counts: SentCounts,
     stream: SessionIo,
     local: PrivateKey,
     peer: PublicKey,
@@ -466,6 +478,8 @@ impl NativeSession {
             offered: Default::default(),
             entry: None,
             tip_incoming: Vec::new(),
+            #[cfg(test)]
+            sent_counts: SentCounts::default(),
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,
@@ -538,6 +552,26 @@ impl NativeSession {
     }
     async fn send(&mut self, message: impl Into<Message>) -> Result<(), Error> {
         let message = message.into();
+        #[cfg(test)]
+        match &message {
+            Message::Tips(
+                TipMessage::Statements { statements, .. }
+                | TipMessage::Push { statements, .. }
+                | TipMessage::CandidatePush { statements, .. },
+            ) => self.sent_counts.statements += statements.len(),
+            Message::Rows(RowMessage::Range { .. }) => self.sent_counts.ranges += 1,
+            Message::Rows(RowMessage::Held { .. }) => self.sent_counts.acknowledgments += 1,
+            Message::Checkpoints(CheckpointMessage::CheckpointPull { .. }) => {
+                self.sent_counts.checkpoint_requests += 1
+            }
+            Message::Checkpoints(CheckpointMessage::CheckpointRows { .. }) => {
+                self.sent_counts.checkpoint_pages += 1
+            }
+            Message::HeldChanges(
+                HeldMessage::Page { frames, .. } | HeldMessage::Push { frames, .. },
+            ) => self.sent_counts.held_frames += frames.len(),
+            _ => {}
+        }
         let bytes = encode(&message)?;
         let signature = self
             .local

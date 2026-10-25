@@ -41,9 +41,11 @@ pub(super) enum CheckpointMessage {
         checkpoint: Commitment,
         after: Option<Commitment>,
         quota: usize,
+        window: u8,
     },
     CheckpointRows {
         page: Box<CheckpointPage>,
+        last: bool,
     },
 }
 
@@ -365,11 +367,14 @@ impl NativeSession {
         (mut after, mut complete): (Option<Commitment>, bool),
         quota: usize,
     ) -> Result<bool, Error> {
-        // Whether the page after `after` is already asked for.
-        let mut asked = false;
+        if !(4096..=CHECKPOINT_PAGE).contains(&quota) {
+            return Err(denied("native page quota"));
+        }
+        let mut left = 0;
         while !complete {
-            if !asked {
-                if self.low(quota) {
+            if left == 0 {
+                let window = self.checkpoint_window(quota);
+                if window == 0 {
                     return Ok(false);
                 }
                 self.send(CheckpointMessage::CheckpointPull {
@@ -377,10 +382,12 @@ impl NativeSession {
                     checkpoint,
                     after,
                     quota,
+                    window,
                 })
                 .await?;
+                left = window;
             }
-            let CheckpointMessage::CheckpointRows { page } =
+            let CheckpointMessage::CheckpointRows { page, last } =
                 self.reply::<CheckpointMessage>().await?
             else {
                 return Err(denied("unexpected checkpoint response"));
@@ -388,22 +395,36 @@ impl NativeSession {
             if page.scope != scope || page.checkpoint != checkpoint || page.after != after {
                 return Err(denied("checkpoint page outside request"));
             }
+            left -= 1;
+            if !last && (left == 0 || page.next.is_none()) {
+                return Err(denied("checkpoint window outside request"));
+            }
             (after, complete) = (page.next, page.next.is_none());
-            // The peer cuts the next page while this one is verified and
-            // stored: a page costs the slower of the two, not their sum.
-            asked = !complete && !self.low(quota);
-            if asked {
+            if last {
+                left = 0;
+            }
+            // Request the next window before storing the end of this one.
+            let window = self.checkpoint_window(quota);
+            if last && !complete && window > 0 {
                 self.send(CheckpointMessage::CheckpointPull {
                     scope,
                     checkpoint,
                     after,
                     quota,
+                    window,
                 })
                 .await?;
+                left = window;
             }
             replica.stage_checkpoint_page(*page).await?;
         }
         Ok(true)
+    }
+    fn checkpoint_window(&self, quota: usize) -> u8 {
+        if self.low(quota) {
+            return 0;
+        }
+        ((self.remaining.saturating_sub(64 * 1024) / (quota + 8192)).min(4)) as u8
     }
     /// Serves until the session ends or an answer fails; returns how many
     /// checkpoint pages the peer asked for.
@@ -584,28 +605,36 @@ impl NativeSession {
             CheckpointMessage::CheckpointPull {
                 scope,
                 checkpoint,
-                after,
+                mut after,
                 quota,
+                window,
             } => {
-                // The page bounds its encoding, signed frame included, by `quota`;
-                // the remainder covers the envelope and session signature.
-                if quota > CHECKPOINT_PAGE {
+                if quota > CHECKPOINT_PAGE || !(1..=4).contains(&window) {
                     return Err(denied("native page quota"));
                 }
-                let page = replica
-                    .checkpoint_page(
-                        self.peer,
-                        &self.credentials,
-                        scope,
-                        checkpoint,
-                        after,
-                        quota,
-                    )
+                for index in 0..window {
+                    let page = replica
+                        .checkpoint_page(
+                            self.peer,
+                            &self.credentials,
+                            scope,
+                            checkpoint,
+                            after,
+                            quota,
+                        )
+                        .await?;
+                    after = page.next;
+                    let last = after.is_none() || index + 1 == window || self.low(quota);
+                    self.send(CheckpointMessage::CheckpointRows {
+                        page: Box::new(page),
+                        last,
+                    })
                     .await?;
-                self.send(CheckpointMessage::CheckpointRows {
-                    page: Box::new(page),
-                })
-                .await
+                    if last {
+                        break;
+                    }
+                }
+                Ok(())
             }
             _ => Err(denied("unexpected native request")),
         }

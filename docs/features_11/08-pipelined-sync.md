@@ -1,6 +1,7 @@
 # 8. Pipelined sync
 
-Status: proposed. Owner: `rocky-secure` network sessions, rows, tips and
+Status: implemented; performance and device qualification incomplete. See
+[evidence](08-pipelined-sync-evidence.md). Owner: `rocky-secure` network sessions, rows, tips and
 checkpoint transfer; `rocky-iroh` streams; `rocky-sdk` sync. Depends on
 [phase 3](03-links-that-outlive-a-request.md) and
 [phase 6](06-database-thread.md). Effort: two to three weeks. Follow the

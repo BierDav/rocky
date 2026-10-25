@@ -267,49 +267,59 @@ pub(crate) async fn bootstrap(
     replica
         .set_importing(pending.iter().copied().collect())
         .await;
-    for plan in planned {
-        let scope = plan.scope;
-        let imported = async {
-            let mut imported = false;
-            for _ in 0..SESSIONS {
-                let mut session = match first.take() {
-                    Some(session) => session,
-                    None => session(replica, upstream).await?,
-                };
-                let (catch_up, checkpoint) = if imported {
-                    (
-                        session.sync_scope(replica, scope, QUOTA).await?.catch_up,
-                        None,
-                    )
-                } else {
-                    let report = session
-                        .bootstrap_scope(replica, scope, QUOTA)
-                        .await?
-                        .ok_or("the peer withdrew its checkpoint")?;
-                    imported = report.rebootstrap.is_some();
-                    (
-                        report.catch_up,
-                        report.rebootstrap.map(|r| (r.checkpoint, r.superseded)),
-                    )
-                };
-                transfer.add(
-                    scope,
-                    Moved {
-                        pulled: catch_up.frames,
-                        bytes: catch_up.bytes,
-                        checkpoint,
-                        ..Moved::default()
-                    },
-                );
-                session.close().await?;
-                if !catch_up.exhausted {
-                    replica.flush().await?;
-                    return Ok::<_, Failure>(());
+    use futures_util::{StreamExt, stream};
+    let mut imports = stream::iter(planned.into_iter().map(|plan| {
+        let mut first = first.take();
+        async move {
+            let scope = plan.scope;
+            let mut moved = Transfer::default();
+            let imported = async {
+                let mut imported = false;
+                for _ in 0..SESSIONS {
+                    let mut session = match first.take() {
+                        Some(session) => session,
+                        None => session(replica, upstream).await?,
+                    };
+                    let (catch_up, checkpoint) = if imported {
+                        (
+                            session.sync_scope(replica, scope, QUOTA).await?.catch_up,
+                            None,
+                        )
+                    } else {
+                        let report = session
+                            .bootstrap_scope(replica, scope, QUOTA)
+                            .await?
+                            .ok_or("the peer withdrew its checkpoint")?;
+                        imported = report.rebootstrap.is_some();
+                        (
+                            report.catch_up,
+                            report.rebootstrap.map(|r| (r.checkpoint, r.superseded)),
+                        )
+                    };
+                    moved.add(
+                        scope,
+                        Moved {
+                            pulled: catch_up.frames,
+                            bytes: catch_up.bytes,
+                            checkpoint,
+                            ..Moved::default()
+                        },
+                    );
+                    session.close().await?;
+                    if !catch_up.exhausted {
+                        replica.flush().await?;
+                        return Ok::<_, Failure>(());
+                    }
                 }
+                Err("bootstrap exceeded its session budget; it continues on the next sync".into())
             }
-            Err("bootstrap exceeded its session budget; it continues on the next sync".into())
+            .await;
+            (scope, moved, imported)
         }
-        .await;
+    }))
+    .buffer_unordered(4);
+    while let Some((scope, moved, imported)) = imports.next().await {
+        transfer.extend(moved);
         match imported {
             Ok(()) => {
                 pending.retain(|known| *known != scope);
@@ -321,6 +331,7 @@ pub(crate) async fn bootstrap(
             Err(error) => transfer.request_failed(scope, &error),
         }
     }
+    drop(imports);
     if let Some(session) = first.take() {
         session.close().await?;
     }
@@ -376,37 +387,47 @@ async fn rows(
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
 ) -> Result<(), Failure> {
-    let mut refresh = true;
-    for scope in scopes {
-        let result = rows_scope(
-            replica,
-            upstream,
-            &[*scope],
-            &progress,
-            transfer,
-            first.take(),
-            refresh,
-        )
-        .await;
+    use futures_util::{StreamExt, stream};
+    let mut planning = match first.take() {
+        Some(session) => session,
+        None => session(replica, upstream).await?,
+    };
+    planning.sync_tip_graph(replica).await?;
+    planning.close().await?;
+    let mut pending = stream::iter(scopes.iter().copied().map(|scope| {
+        let progress = &progress;
+        async move {
+            let mut moved = Transfer::default();
+            let result = rows_scope(
+                replica,
+                upstream,
+                &[scope],
+                progress,
+                &mut moved,
+                None,
+                false,
+            )
+            .await;
+            (scope, moved, result)
+        }
+    }))
+    .buffer_unordered(4);
+    while let Some((scope, moved, result)) = pending.next().await {
+        transfer.extend(moved);
         match result {
-            Ok(session) => {
-                first = Some(session);
-                refresh = false;
-            }
+            Ok(session) => session.close().await?,
             Err(error) => {
                 if error.is::<Learned>() {
                     return Err(error);
                 }
-                transfer.request_failed(*scope, &error);
+                transfer.request_failed(scope, &error);
                 progress(false);
-                refresh = true;
             }
         }
     }
-    if let Some(mut session) = first {
-        session.pull_placements(replica).await?;
-        session.close().await?;
-    }
+    let mut session = session(replica, upstream).await?;
+    session.pull_placements(replica).await?;
+    session.close().await?;
     Ok(())
 }
 async fn rows_scope(

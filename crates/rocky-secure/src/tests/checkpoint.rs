@@ -1467,9 +1467,8 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     assert!(!all_rows(&f, &b).await.is_empty());
 }
 
-/// The importer asks for the next page before it stores the one it holds,
-/// so its peer cuts a page while another is verified and stored: when
-/// storing the first page fails, the second was already asked for.
+/// A failed first page leaves no durable cursor. Its already requested
+/// window is discarded with the channel, and a later session resumes it.
 #[tokio::test]
 async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     let f = Fixture::new();
@@ -1503,7 +1502,7 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
         "{:?}",
         imported.err()
     );
-    assert_eq!(pages, 2);
+    assert_eq!(pages, 1);
     assert!(all_rows(&f, &b).await.is_empty());
     // The failed page was not stored: the import resumes from it.
     let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
@@ -1660,3 +1659,56 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
 mod no_frames;
 
 mod audit;
+
+#[tokio::test]
+async fn checkpoint_pages_travel_in_windows_of_four_and_install_in_order() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, a_credentials) = open(&f, &dir.path().join("window-a.db"), &a_key).await;
+    let name = "w".repeat(200);
+    for index in 0..48 {
+        a.author_buffered(handle(index), insert(&f, index, &name), vec![])
+            .await
+            .unwrap();
+    }
+    compacted(&f, &a).await;
+    let (b, b_credentials) = open(&f, &dir.path().join("window-b.db"), &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
+    let (mut client, mut server) = network::link::testing::sessions(
+        (&b, b_key.clone(), b_credentials),
+        (&a, a_key, a_credentials),
+    )
+    .await
+    .unwrap();
+    let ((pulled, requests), served) = tokio::join!(
+        async {
+            let report = client.rebootstrap(&b, f.public, 4096).await.unwrap();
+            let requests = client.sent_counts.checkpoint_requests;
+            client.close().await.unwrap();
+            (report, requests)
+        },
+        server.serve_to_end(&a)
+    );
+    served.unwrap();
+    assert!(
+        server.sent_counts.checkpoint_pages > 4,
+        "{:?}",
+        server.sent_counts
+    );
+    assert_eq!(requests, server.sent_counts.checkpoint_pages.div_ceil(4));
+    assert_eq!(
+        a.checkpoint_offer(
+            b_key.public_key(),
+            &f.credentials(&b_key, f.full()),
+            f.public
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id()
+        .unwrap(),
+        pulled.checkpoint
+    );
+    assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
+}

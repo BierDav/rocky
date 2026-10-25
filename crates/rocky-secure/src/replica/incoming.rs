@@ -86,18 +86,45 @@ impl<A: RowApplication> Inner<A> {
     /// One bounded transaction of `EncryptedReplica::settle`; true when
     /// more frames may be ready.
     pub(super) async fn apply_step(&mut self, time: u64) -> Result<bool, Error> {
-        let (more, failure) = transaction!(self, |inner| {
-            match inner.apply_pending(time, group::GROUP_REQUESTS).await {
-                Ok(more) => Ok((more, None)),
-                Err(error) if retryable(&error) => Err(error),
-                Err(error) => Ok((false, Some(error))),
-            }
-        })?;
-        self.publish_revision().await?;
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(more),
-        }
+        let span = tracing::debug_span!(
+            "apply",
+            frames = tracing::field::Empty,
+            rows = tracing::field::Empty,
+            waiting = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let (rows, frames) = (
+            self.rows_written.load(Ordering::Relaxed),
+            self.applied_frames,
+        );
+        let result = tracing::Instrument::instrument(
+            async {
+                let (more, failure) = transaction!(self, |inner| {
+                    match inner.apply_pending(time, group::GROUP_REQUESTS).await {
+                        Ok(more) => Ok((more, None)),
+                        Err(error) if retryable(&error) => Err(error),
+                        Err(error) => Ok((false, Some(error))),
+                    }
+                })?;
+                self.publish_revision().await?;
+                match failure {
+                    Some(error) => Err(error),
+                    None => Ok(more),
+                }
+            },
+            span.clone(),
+        )
+        .await;
+        span.record(
+            "rows",
+            self.rows_written
+                .load(Ordering::Relaxed)
+                .saturating_sub(rows),
+        );
+        span.record("frames", self.applied_frames - frames);
+        span.record("waiting", self.waits.len() as u64);
+        crate::network::trace::outcome(&span, &result);
+        result
     }
     /// Applies or rejects dependency-ready pending frames inside the caller's
     /// transaction, each application in its own savepoint. A failing
@@ -120,6 +147,7 @@ impl<A: RowApplication> Inner<A> {
                 heads.insert(head(record)?);
             }
             let mut advanced = false;
+            let mut examined = BTreeSet::new();
             while let Some((sequence, hash, scope, author)) = heads.pop_first() {
                 if changed >= limit {
                     return Ok(true);
@@ -133,13 +161,25 @@ impl<A: RowApplication> Inner<A> {
                 else {
                     return Err(denied("missing pending operation"));
                 };
-                if matches!(
-                    Box::pin(self.apply_frame(&frame, time)).await?,
-                    Outcome::Waiting
-                ) {
-                    continue;
+                let id = frame.id()?;
+                examined.insert(id);
+                match Box::pin(self.apply_frame(&frame, time)).await {
+                    Ok(Outcome::Waiting(reason)) => {
+                        self.waits.insert(id, reason);
+                        continue;
+                    }
+                    Ok(_) => {
+                        self.waits.remove(&id);
+                    }
+                    Err(error) => {
+                        if !retryable(&error) {
+                            self.waits.insert(id, WaitReason::Failed);
+                        }
+                        return Err(error);
+                    }
                 }
                 changed += 1;
+                self.applied_frames += 1;
                 advanced = true;
                 let next = collect_rows(self.conn.query(
                     "SELECT sequence,hash,scope,author FROM secure_operations WHERE scope=? AND author=? AND sequence>? AND status='pending' ORDER BY sequence LIMIT 1",
@@ -150,6 +190,12 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             if !advanced {
+                // Every pending head was examined this round.
+                self.waits.retain(|hash, _| examined.contains(hash));
+                #[cfg(test)]
+                if self.waits.len() != examined.len() {
+                    return Err(Error::Corrupt("a pending frame has no wait reason".into()));
+                }
                 Box::pin(self.follow_moves(time)).await?;
                 return Ok(false);
             }
@@ -171,7 +217,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let reach = self.frame_reach(frame)?;
         if !self.frame_schema_ready(frame)? {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::Schema));
         }
         let grants = match if reach == tips::FrameReach::Held {
             self.verify_frame_authority(frame, time)
@@ -188,15 +234,15 @@ impl<A: RowApplication> Inner<A> {
         // Verified checkpoint pages are filling the scope: its operations
         // apply on top once the import ends.
         if self.direct.contains(&extension.scope) {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::DirectImport));
         }
         // An epoch this replica does not hold, later or earlier, waits for its key.
         let Some(key) = self.opening_key(extension.scope, extension.generation) else {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::OpeningKey));
         };
         // Current reader authorization is required even if a revoked key is still in memory.
         if !self.can_read_key(key.scope, &self.local_grants(time).unwrap_or_default()) {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::ReadGrant));
         }
         if reach == tips::FrameReach::Held {
             if self.abandoned_write(frame)? {
@@ -208,11 +254,11 @@ impl<A: RowApplication> Inner<A> {
             .own_chain_ready(&operation.header, &BTreeSet::new())
             .await?
         {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::OwnChain));
         }
         match self.dependencies_ready(frame, &BTreeSet::new()).await {
             Ok(true) => {}
-            Ok(false) => return Ok(Outcome::Waiting),
+            Ok(false) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
             Err(error) => {
                 self.reject(operation.hash).await?;
                 return Ok(Outcome::Rejected(error.to_string()));
@@ -224,7 +270,7 @@ impl<A: RowApplication> Inner<A> {
             frame.body_bytes(),
         );
         let Ok(plaintext) = plaintext else {
-            return Ok(Outcome::Waiting);
+            return Ok(Outcome::Waiting(WaitReason::Undecryptable));
         };
         let payload = self.decode_row_payload(frame, &plaintext);
         if let Ok(payload) = &payload
@@ -253,7 +299,7 @@ impl<A: RowApplication> Inner<A> {
             Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;
                 self.invalidate_context();
-                Ok(Outcome::Waiting)
+                Ok(Outcome::Waiting(WaitReason::Ledger))
             }
             Err(error) if identity::receipts::semantic_refusal(&error) => {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;
@@ -477,7 +523,7 @@ impl<A: RowApplication> Inner<A> {
 pub(super) enum Outcome {
     Applied,
     Rejected(String),
-    Waiting,
+    Waiting(WaitReason),
 }
 
 /// A log's first pending frame: sequence, hash, scope and author.

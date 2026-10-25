@@ -90,8 +90,10 @@ impl<A: RowApplication> Inner<A> {
             .change
             .scope;
         self.ensure_tip_writable(scope.domain)?;
-        self.require_workspace_base(scope.domain).await?;
-        self.ensure_tip_restored().await?;
+        let mut blocked = self.workspace_blockers(scope.domain).await?;
+        blocked.extend(self.dropped_tip_blockers().await?);
+        blocked.extend(self.line_node_blockers()?);
+        blockers::refuse(blocked)?;
         let partition = self
             .app
             .row_partition(&writes[0].change)
@@ -111,15 +113,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let signer = self.node_author.as_ref();
-        // Off the genesis line the original node's log does not continue:
-        // a write there needs this identity's node for the line.
-        if signer.is_none()
-            && let Some((domain, _)) = &self.workspace.followed
-            && let Ok(graph) = self.graph_for(*domain)
-            && graph.line_root(self.workspace.tip).map_err(credential)? != graph.genesis()
-        {
-            return Err(denied("the followed line has no node of this identity yet"));
-        }
         let signing_key = signer.map_or(&self.config.node, |author| &author.key);
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();

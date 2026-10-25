@@ -3715,6 +3715,31 @@ pub async fn dial(
     addresses: &[String],
     protocol: Protocol,
 ) -> Result<Stream, Failure> {
+    let span = tracing::debug_span!(
+        "dial",
+        addresses = addresses.len(),
+        outcome = tracing::field::Empty
+    );
+    let result =
+        tracing::Instrument::instrument(dial_any(transport, addresses, protocol), span.clone())
+            .await;
+    span.record(
+        "outcome",
+        match &result {
+            Ok(_) => "ok",
+            Err(error) => match error.downcast_ref::<ServiceError>() {
+                Some(ServiceError::TimedOut(_)) => "timeout",
+                _ => "unreachable",
+            },
+        },
+    );
+    result
+}
+async fn dial_any(
+    transport: &dyn Transport,
+    addresses: &[String],
+    protocol: Protocol,
+) -> Result<Stream, Failure> {
     let mut failure = None;
     let mut timed_out = false;
     for address in addresses {

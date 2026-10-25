@@ -1582,6 +1582,7 @@ mod checkpoint;
 
 mod admission;
 mod author_payload;
+pub(crate) mod blockers;
 mod bundles;
 mod chains;
 mod compaction;

@@ -104,6 +104,8 @@ pub struct CatchUp {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pushed {
     pub frames: usize,
+    /// Encoded bytes of the frames sent.
+    pub bytes: usize,
     /// The peer is behind this replica's pruned_prefix and must rebootstrap from it.
     pub behind: bool,
     /// The session's byte budget ran low; continue on a new session.
@@ -347,9 +349,31 @@ impl NativeSession {
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
             // The page is received in shared transactions and one flush.
-            for status in replica.receive_migration_all(frames).await {
-                status?;
+            let span = tracing::debug_span!(
+                "page_apply",
+                scope = rocky_core::scope_label(&scope),
+                frames = frames.len(),
+                applied = tracing::field::Empty,
+                outcome = tracing::field::Empty
+            );
+            let statuses = tracing::Instrument::instrument(
+                replica.receive_migration_all(frames),
+                span.clone(),
+            )
+            .await;
+            let mut applied = 0u64;
+            for status in statuses {
+                match status {
+                    Ok(ReceiveStatus::Applied) => applied += 1,
+                    Ok(_) => {}
+                    Err(error) => {
+                        span.record("outcome", error.category());
+                        return Err(error);
+                    }
+                }
             }
+            span.record("applied", applied);
+            span.record("outcome", "ok");
             let frontier = replica.frontier(scope).await?;
             report.lag = frontier.lag_behind(&page.frontier);
             self.send(RowMessage::Held {
@@ -397,6 +421,9 @@ impl NativeSession {
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
+            pushed.bytes = page.frames.iter().fold(pushed.bytes, |bytes, frame| {
+                bytes.saturating_add(frame.weight())
+            });
             self.carry_chains(&mut page.frames).await?;
             self.send(RowMessage::Push {
                 scope,

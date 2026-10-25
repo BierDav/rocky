@@ -66,7 +66,7 @@ async fn author_refused(replica: &Replica) {
     .await
     .unwrap_err();
     assert!(
-        error.to_string().contains("verified seal rebootstrap"),
+        error.to_string().contains("seal rebootstrap (replay="),
         "{error}"
     );
 }

@@ -841,7 +841,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let append = entry
                 .append
                 .ok_or_else(|| Error::Corrupt("staged entry without its append".into()))?;
-            match coordinator.append(log, append).await {
+            match crate::network::trace::coordinated("append", coordinator.append(log, append))
+                .await
+            {
                 Ok(pending) => {
                     self.assign(log, &entry, &pending).await?;
                     entry.pending = Some(pending);
@@ -950,7 +952,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let _ = peers.store(key, &sent).await;
             }
         }
-        let decided = match coordinator.acknowledge(log, pending.clone()).await {
+        let decided = match crate::network::trace::coordinated(
+            "acknowledge",
+            coordinator.acknowledge(log, pending.clone()),
+        )
+        .await
+        {
             Ok(LogResult::Committed { .. }) => Some(Decision::Committed),
             _ => None,
         };
@@ -1113,7 +1120,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         self.domain_log.stored.send_modify(|count| *count += 1);
         let (log, hash) = (entry.log, entry.pending.hash);
-        match coordinator.acknowledge(log, entry.pending).await {
+        match crate::network::trace::coordinated(
+            "acknowledge",
+            coordinator.acknowledge(log, entry.pending),
+        )
+        .await
+        {
             Ok(result) => Ok(result),
             // Not the pending entry: nothing will commit it.
             Err(error) if coordination(error.clone()) != CoordinatedError::Unavailable => {
@@ -1143,11 +1155,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedStatus, CoordinatedError> {
-        let _deciding = self.domain_log.deciding.lock().await;
-        if self.inner.lock().await.log_state(log).await?.0 == 0 {
-            self.hold_sealed_entries(log, coordinator, peers).await?;
-        }
-        self.resolve(log, coordinator, peers).await
+        let span = tracing::debug_span!("coordinated_resolve", outcome = tracing::field::Empty);
+        let result = tracing::Instrument::instrument(
+            async {
+                let _deciding = self.domain_log.deciding.lock().await;
+                if self.inner.lock().await.log_state(log).await?.0 == 0 {
+                    self.hold_sealed_entries(log, coordinator, peers).await?;
+                }
+                self.resolve(log, coordinator, peers).await
+            },
+            span.clone(),
+        )
+        .await;
+        span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+        result
     }
     pub(super) async fn resolve(
         &self,
@@ -1181,7 +1202,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let append = entry
                 .append
                 .ok_or_else(|| Error::Corrupt("staged entry without its append".into()))?;
-            match coordinator.append(log, append).await {
+            match crate::network::trace::coordinated("append", coordinator.append(log, append))
+                .await
+            {
                 Ok(pending) => self.assign(log, &entry, &pending).await?,
                 Err(error) if coordination(error.clone()) == CoordinatedError::Unavailable => {}
                 Err(rocky_core::CoordinationError::Sealed) => {

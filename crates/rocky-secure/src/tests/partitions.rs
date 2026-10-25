@@ -291,6 +291,20 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
             .unwrap()
             .is_empty()
     );
+    // The intent is named as an import, never as missing history.
+    let blockers = replica.blockers().await.unwrap();
+    super::blockers::assert_named(
+        &blockers,
+        &crate::scope_label(&f.scope("B")),
+        |kind| *kind == crate::BlockerKind::Importing,
+        crate::ClearsBy::AnyPeer,
+    );
+    assert!(
+        blockers
+            .iter()
+            .all(|blocker| !matches!(blocker.kind, crate::BlockerKind::SealRebootstrap { .. })),
+        "{blockers:?}"
+    );
     let session = replica
         .session([f.scope("A"), f.scope("B")].into())
         .await

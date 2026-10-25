@@ -2,6 +2,7 @@ mod admission;
 mod apply;
 mod author;
 mod backup;
+mod blockers;
 mod bulk;
 pub use bulk::{MigrationMembership, MigrationStorage};
 pub(super) mod bundle;
@@ -94,8 +95,8 @@ use p2panda_store::operations::LocalOperationStore;
 pub use publication::Publication;
 pub use queries::Describe;
 use rocky_core::{
-    Commitment, ResourceScope, Right, RowApplication, RowChange, RowFields, RowSelection, RowWrite,
-    SqlValue, TipId,
+    Blocker, BlockerKind, ClearsBy, Commitment, ResourceScope, Right, RowApplication, RowChange,
+    RowFields, RowSelection, RowWrite, SqlValue, TipId, WaitReason,
 };
 pub use roles::{
     FrontierLog, Holding, PeerLag, RangePage, ReplicaRole, ReplicaStatus, RoleConfig,
@@ -370,6 +371,12 @@ pub(super) struct Inner<A> {
     /// Scopes the owner imports from a checkpoint: peers do not push their
     /// history, and maintenance waits until the import ends.
     importing: BTreeSet<ResourceScope>,
+    /// Why each pending log head waited when an apply pass last examined it.
+    waits: BTreeMap<Hash, WaitReason>,
+    /// Rows applied frames wrote since open, for apply spans.
+    rows_written: AtomicU64,
+    /// Pending frames apply passes applied since open.
+    applied_frames: u64,
     /// Scopes whose import writes verified pages straight into their rows;
     /// operations for them wait until the import ends.
     direct: BTreeSet<ResourceScope>,
@@ -883,6 +890,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             local_selectors: Default::default(),
             deferred_maintenance: BTreeSet::new(),
             importing: BTreeSet::new(),
+            waits: BTreeMap::new(),
+            rows_written: AtomicU64::new(0),
+            applied_frames: 0,
             direct: BTreeSet::new(),
             notifications,
             frames: watch::channel(()).0,
@@ -1309,10 +1319,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn maintain(&self) {
         let mut inner = self.inner.lock().await;
         let scopes = std::mem::take(&mut inner.deferred_maintenance);
-        if !scopes.is_empty() {
-            inner.maintain(&scopes).await;
-        }
-        inner.checkpoint_if_due().await;
+        let span = tracing::debug_span!("maintain", scopes = scopes.len());
+        tracing::Instrument::instrument(
+            async {
+                if !scopes.is_empty() {
+                    inner.maintain(&scopes).await;
+                }
+                inner.checkpoint_if_due().await;
+            },
+            span,
+        )
+        .await;
     }
     /// Names the scopes the owner is about to import from a checkpoint,
     /// replacing the previous set. A scope with a staged import counts too.

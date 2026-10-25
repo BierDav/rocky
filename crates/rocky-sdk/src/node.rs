@@ -306,6 +306,8 @@ pub(crate) struct Node {
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
+    /// Each peer's last exchange that was not skipped.
+    last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
     /// The coordination service this database is composed with, for its owner.
     service: Option<crate::owner::Service>,
     /// Deposits held as a mailbox, loaded at first use.
@@ -343,6 +345,7 @@ impl Node {
                 .map(|key| PrivateKey::from_bytes(&key).public_key().to_hex())
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
+            last_syncs: Default::default(),
             observations,
             owner: Default::default(),
             replica,
@@ -2863,6 +2866,24 @@ impl Node {
         contact: &Contact,
         attempt: &mut crate::status::Attempt,
     ) -> Result<(bool, sync::Transfer), Failure> {
+        let mut node = peer.to_hex();
+        node.truncate(12);
+        let span = tracing::info_span!("exchange", peer = node, outcome = tracing::field::Empty);
+        let result = tracing::Instrument::instrument(
+            self.exchange_inner(transport, peer, contact, attempt),
+            span.clone(),
+        )
+        .await;
+        span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+        result
+    }
+    async fn exchange_inner(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+        attempt: &mut crate::status::Attempt,
+    ) -> Result<(bool, sync::Transfer), Failure> {
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
@@ -3663,6 +3684,8 @@ pub fn error(error: &Failure) -> Value {
     } else {
         match error.downcast_ref::<Error>() {
             Some(Error::Rejected(_) | Error::Protocol(_)) => ("rejected", false),
+            // Blocked work proceeds once its blockers clear.
+            Some(Error::Blocked(_)) => ("blocked", true),
             Some(Error::Incompatible(_)) => ("unsupported_generation", false),
             Some(Error::Sql(SqlError::Denied)) => ("denied", false),
             Some(Error::Sql(
@@ -3682,7 +3705,11 @@ pub fn error(error: &Failure) -> Value {
             _ => ("storage", true),
         }
     };
-    json!({"code": code, "retryable": retryable, "message": error.to_string()})
+    let mut value = json!({"code": code, "retryable": retryable, "message": error.to_string()});
+    if let Some(Error::Blocked(blockers)) = error.downcast_ref::<Error>() {
+        value["blockers"] = json!(blockers);
+    }
+    value
 }
 /// A coordination service's refusal as a call's error code.
 fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {

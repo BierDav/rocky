@@ -67,6 +67,22 @@ pub enum Action {
         acknowledgment: Vec<u8>,
     },
 }
+impl Action {
+    /// The action's name in diagnostics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Configure { .. } => "configure",
+            Self::Join { .. } => "join",
+            Self::Append { .. } => "append",
+            Self::Acknowledge { .. } => "acknowledge",
+            Self::Resolve { .. } => "resolve",
+            Self::Seal { .. } => "seal",
+            Self::Recover { .. } => "recover",
+            Self::AcknowledgeTerminal { .. } => "acknowledge_terminal",
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pending {
     pub proposer: PublicKey,

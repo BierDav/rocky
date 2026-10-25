@@ -82,3 +82,21 @@
 - Report what passed and any limitations; baseline checks do not prove a working
   storage adapter, desktop app or distributed protocol.
 - Benchmark changes use [their own instructions](benchmarks/engine-comparison/AGENTS.md).
+
+## Licensing
+
+Rocky is source-available, not open source: the
+[PolyForm Noncommercial License 1.0.0](LICENSE) permits noncommercial use and
+forbids commercial use, and the copyright holder sells commercial licenses
+separately. Keep that reachable by accepting contributions only under this
+inbound grant, which contributors make by submitting a change:
+
+> By submitting a contribution, you grant David Emanuel Bieregger a perpetual,
+> worldwide, irrevocable, royalty-free copyright and patent license to use,
+> reproduce, modify, distribute, sublicense and relicense your contribution
+> under any terms, including commercially, and you confirm you have the right
+> to grant it.
+
+Do not add dependencies or copied code whose terms conflict with selling
+commercial licenses. `Required Notice:` lines in [LICENSE](LICENSE) must be
+preserved by redistributors.

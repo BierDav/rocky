@@ -1,4 +1,5 @@
 //! Observable native SDK contract. Bindings are generated from these declarations.
+pub use rocky_core::{Blocker, BlockerKind, ClearsBy, FrameReplay, WaitReason};
 use serde::{Deserialize, Serialize};
 
 mod attempts;
@@ -235,6 +236,9 @@ pub struct KeyEpochStatus {
 pub struct DataStatus {
     pub revision: u64,
     pub generation: GenerationStatus,
+    /// Every reason a scope cannot read, write or import yet.
+    pub blockers: Vec<Blocker>,
+    /// A summary: the bootstrap intent or a staged import remains.
     pub bootstrap_pending: bool,
     pub bootstrap: Option<BootstrapProgress>,
     pub imports: Vec<ScopeImportStatus>,
@@ -294,6 +298,8 @@ pub struct Peer {
     pub attempts: Vec<AttemptObservation>,
     pub last_authenticated_exchange_at_epoch_seconds: Option<u64>,
     pub retry: Option<RetryStatus>,
+    /// The last exchange with this peer that was not skipped.
+    pub last_sync: Option<PeerReconciliation>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayStatus {
@@ -356,9 +362,12 @@ pub struct DatabaseStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {
     pub scope: ScopeStatus,
+    /// Frames received.
     pub pulled: u64,
+    /// Frames sent.
     pub pushed: u64,
-    pub bytes: u64,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
     pub checkpoint: Option<String>,
     pub superseded: Option<u64>,
 }
@@ -373,6 +382,31 @@ pub struct PeerReconciliation {
     /// Always false: peer discovery never upgrades the installed workspace.
     pub upgrade_required: bool,
     pub retry_pending: bool,
+    /// How each scope this exchange reached ended.
+    pub scopes: Vec<ScopeOutcome>,
+    /// Failed attempts of this exchange that timed out, by kind.
+    pub timeouts: Vec<TimeoutCount>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeSyncOutcome {
+    Synced,
+    /// One side's credentials grant no whole-scope access to the other.
+    Refused,
+    /// The peer restores the scope from a checkpoint.
+    PeerImporting,
+    /// The exchange failed while this scope was syncing.
+    Failed,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeOutcome {
+    pub scope: ScopeStatus,
+    pub outcome: ScopeSyncOutcome,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeoutCount {
+    pub kind: String,
+    pub count: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationReport {

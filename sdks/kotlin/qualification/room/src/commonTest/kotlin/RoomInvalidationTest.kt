@@ -31,7 +31,7 @@ class RoomInvalidationTest {
         val observed = flow {
             reads++
             if (reads == 1) emit(listOf("before seal"))
-            if (reads < 3) throw IllegalStateException("SQL error: the workspace waits for a verified seal rebootstrap")
+            if (reads < 3) throw IllegalStateException("SQL error: the workspace waits for 1 blockers: 0a1b2c3d4e5f seal rebootstrap (replay=Peers, listed=0), cleared by any permitted peer")
             emit(listOf("verified seal"))
         }.settledOnRocky().toList()
         assertEquals(listOf(listOf("before seal"), listOf("verified seal")), observed)

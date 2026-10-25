@@ -855,17 +855,28 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
         .await
         .unwrap();
     assert_eq!(reopened.followed_tip().await, dev);
-    assert!(
+    let refusal = super::blockers::refused(
         reopened
             .author(
                 [3; 32],
                 vec![change(f.public, 3, None, Some(f.app().name("Unsaved key")))],
-                vec![]
+                vec![],
             )
-            .await
-            .is_err()
+            .await,
+    );
+    let line_node = |kind: &crate::BlockerKind| *kind == crate::BlockerKind::LineNode;
+    let domain = crate::domain_label(&f.public.domain);
+    super::blockers::assert_named(&refusal, &domain, line_node, crate::ClearsBy::LocalWork);
+    super::blockers::assert_named(
+        &reopened.blockers().await.unwrap(),
+        &domain,
+        line_node,
+        crate::ClearsBy::LocalWork,
     );
     reopened.register_line_node(line).await.unwrap();
+    assert!(
+        super::blockers::named(&reopened.blockers().await.unwrap(), &domain, line_node).is_none()
+    );
     let frame = insert(&f, &reopened, 4, "Dev after restart").await;
     assert_eq!(
         frame.operation().unwrap().header.public_key,

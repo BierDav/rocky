@@ -30,6 +30,9 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The opt-in event sink; Rocky crates themselves install no subscriber.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.22", default-features = false, features = ["registry", "std"] }
 
 textwrap = { version = "0.16", optional = true }
 uniffi_meta = { version = "=0.32.2", optional = true }

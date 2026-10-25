@@ -12,10 +12,21 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import org.example.examples.shopping.data.session.SessionState
 import org.example.examples.shopping.data.session.ShoppingSession
+import rocky.DiagnosticLevel
+import rocky.RockyDiagnostics
 import rocky.RockyEvent
 
-/** Persist only structural metadata: never event payloads, names, invitations or credentials. */
+/**
+ * Persist only structural metadata: never event payloads, names, invitations or credentials. Rocky's own spans,
+ * whose fields are hashes, counts, durations and error categories, are written as they close.
+ */
 fun observeDiagnostics(session: ShoppingSession, scope: CoroutineScope, write: (String, Throwable?) -> Unit): Job = scope.launch {
+    runCatching { RockyDiagnostics.listen(DiagnosticLevel.DEBUG) { write("rocky ${it.render()}", null) } }
+        .onFailure { write("rocky diagnostics unavailable", it) }
+    coroutineContext[Job]?.invokeOnCompletion {
+        runCatching { RockyDiagnostics.listen(DiagnosticLevel.ERROR, null) }
+        write("rocky diagnostics dropped=${RockyDiagnostics.dropped}", null)
+    }
     session.state.collectLatest { state ->
         write(
             "session=${state::class.simpleName}",
@@ -48,7 +59,7 @@ fun observeDiagnostics(session: ShoppingSession, scope: CoroutineScope, write: (
                             if (attempts.put(attempt.id, detail) != detail) write(detail, null)
                         }
                         attempts.keys.retainAll(current.map { it.id }.toSet())
-                        "status revision=${status.data.revision} bootstrap=${status.data.bootstrapPending} attachment=${network.attachment} enabled=${network.networkingEnabled} foreground=${network.foreground} connected=${network.connectedPeerCount} reconciling=${network.reconciling}"
+                        "status revision=${status.data.revision} bootstrap=${status.data.bootstrapPending} blockers=${blockers(status.data.blockers)} attachment=${network.attachment} enabled=${network.networkingEnabled} foreground=${network.foreground} connected=${network.connectedPeerCount} reconciling=${network.reconciling}"
                     }.distinctUntilChanged().catch { write("status observer failed", it) }.collect { write(it, null) }
                 }
                 launch {
@@ -96,3 +107,6 @@ internal fun failureCategory(error: String?): String {
         "budget", "exceeded", "session", "quota", "unexpected", "response", "frame", "signature",
     ).filter { it in words }.joinToString(",").ifEmpty { "unclassified" }
 }
+
+/** Each blocker as its scope label, kind and what clears it. */
+internal fun blockers(blockers: List<rocky.Blocker>): String = blockers.joinToString(",") { "${it.scope}:${it.kind::class.simpleName}:${it.clearsBy::class.simpleName}" }.ifEmpty { "none" }

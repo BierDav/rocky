@@ -455,46 +455,60 @@ impl Transport for Attachment {
         address: &'a str,
         protocol: Protocol,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        let span = tracing::debug_span!("iroh_connect", outcome = tracing::field::Empty);
         Box::pin(async move {
-            if *self.0.closed.borrow() {
-                return Err("the iroh attachment is closed".into());
-            }
-            // An endpoint the OS reclaimed heals on the next dial.
-            if self.endpoint().is_closed() {
-                self.revive().await?;
-            }
-            let address: EndpointAddr = serde_json::from_str(address)?;
-            let key = (address.id, protocol);
-            let cached = self.0.connections.lock().await.get(&key).cloned();
-            if let Some(connection) = cached
-                && connection.close_reason().is_none()
-                && let Ok(Ok(pair)) = tokio::time::timeout(TIMEOUT, connection.open_bi()).await
-            {
-                return Ok(stream(connection, pair));
-            }
-            let dial = |address: EndpointAddr| {
-                let endpoint = self.endpoint();
+            let result = tracing::Instrument::instrument(
                 async move {
-                    tokio::time::timeout(TIMEOUT, endpoint.connect(address, protocol.name())).await
-                }
-            };
-            let dialed = match &self.0.home {
-                Some(home) => home.spawn(dial(address.clone())).await.ok(),
-                None => None,
-            };
-            // Without a home runtime, or once it ended, the caller's drives the dial.
-            let connection = match dialed {
-                Some(dialed) => dialed,
-                None => dial(address).await,
-            }??;
-            let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
-            let mut connections = self.0.connections.lock().await;
-            connections.retain(|_, connection| connection.close_reason().is_none());
-            if connections.len() >= CACHED {
-                connections.clear();
-            }
-            connections.insert(key, connection.clone());
-            Ok(stream(connection, pair))
+                    if *self.0.closed.borrow() {
+                        return Err("the iroh attachment is closed".into());
+                    }
+                    // An endpoint the OS reclaimed heals on the next dial.
+                    if self.endpoint().is_closed() {
+                        self.revive().await?;
+                    }
+                    let address: EndpointAddr = serde_json::from_str(address)?;
+                    let key = (address.id, protocol);
+                    let cached = self.0.connections.lock().await.get(&key).cloned();
+                    if let Some(connection) = cached
+                        && connection.close_reason().is_none()
+                        && let Ok(Ok(pair)) =
+                            tokio::time::timeout(TIMEOUT, connection.open_bi()).await
+                    {
+                        return Ok(stream(connection, pair));
+                    }
+                    let dial = |address: EndpointAddr| {
+                        let endpoint = self.endpoint();
+                        async move {
+                            tokio::time::timeout(
+                                TIMEOUT,
+                                endpoint.connect(address, protocol.name()),
+                            )
+                            .await
+                        }
+                    };
+                    let dialed = match &self.0.home {
+                        Some(home) => home.spawn(dial(address.clone())).await.ok(),
+                        None => None,
+                    };
+                    // Without a home runtime, or once it ended, the caller's drives the dial.
+                    let connection = match dialed {
+                        Some(dialed) => dialed,
+                        None => dial(address).await,
+                    }??;
+                    let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
+                    let mut connections = self.0.connections.lock().await;
+                    connections.retain(|_, connection| connection.close_reason().is_none());
+                    if connections.len() >= CACHED {
+                        connections.clear();
+                    }
+                    connections.insert(key, connection.clone());
+                    Ok(stream(connection, pair))
+                },
+                span.clone(),
+            )
+            .await;
+            span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+            result
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {

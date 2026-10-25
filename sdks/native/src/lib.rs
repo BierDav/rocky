@@ -7,11 +7,15 @@ uniffi::setup_scaffolding!();
 mod database;
 #[cfg(feature = "iroh")]
 mod endpoint;
+mod events;
 mod sql;
 mod status;
 pub use database::{
     NativeDatabase, NativeDatabaseSession, NativeDevelopmentLog, NativeNetwork,
     NativeNetworkService, prepare_device,
+};
+pub use events::{
+    NativeEvent, NativeEventListener, NativeLevel, dropped_events, set_event_listener,
 };
 pub use sql::{
     NativeConnection, NativePage, NativeStatement, NativeTableChange, NativeTableEvents,

@@ -35,6 +35,7 @@ class ShareRecipientTest {
             attempts = emptyList(),
             lastAuthenticatedExchangeAtEpochSeconds = null,
             retry = null,
+            lastSync = null,
             link = PeerLink(LinkState.Closed, null, null, emptyList()),
         )
         val peers = listOf(peer("self", "discovery"), peer("nearby", "discovery"), peer("remote", "handover"), peer("nearby", "discovery"))

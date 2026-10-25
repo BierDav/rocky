@@ -34,6 +34,7 @@ mod placements;
 mod revocations;
 mod rows;
 mod tips;
+pub(crate) mod trace;
 use chains::{ChainMessage, ChainTable};
 use checkpoints::CheckpointMessage;
 use contacts::ContactMessage;
@@ -140,6 +141,28 @@ enum Message {
     Tips(TipMessage),
     Placements(PlacementMessage),
 }
+impl Message {
+    /// The family's name in diagnostics.
+    fn family(&self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledgment",
+            Self::Rows(_) => "rows",
+            Self::Checkpoints(_) => "checkpoints",
+            Self::Frontiers(_) => "frontiers",
+            Self::Existence(_) => "existence",
+            Self::Revocations(_) => "revocations",
+            Self::Holdings(_) => "holdings",
+            Self::Contacts(_) => "contacts",
+            Self::Delivery(_) => "delivery",
+            Self::Chains(_) => "chains",
+            Self::LinkState(_) => "link state",
+            Self::Entries(_) => "entries",
+            Self::HeldChanges(_) => "held changes",
+            Self::Tips(_) => "tips",
+            Self::Placements(_) => "placements",
+        }
+    }
+}
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
         impl From<$family> for Message {
@@ -211,6 +234,12 @@ pub struct NativeSession {
     sent: u64,
     received: u64,
     remaining: usize,
+    /// The session's span; each request it makes is a child.
+    span: tracing::Span,
+    /// The request awaiting its answer.
+    request: Option<trace::Request>,
+    /// Set while this side answers a request.
+    serving: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -396,6 +425,9 @@ impl NativeSession {
             sent: 0,
             received: 0,
             remaining: byte_budget,
+            span: trace::session(0),
+            request: None,
+            serving: false,
         };
         let sent = session
             .exchange_revocations(replica, &hello.credentials, side == Side::Initiator)
@@ -467,30 +499,15 @@ impl NativeSession {
             bytes,
             signature,
         })?;
+        let family = message.family();
         if frame.len() > MAX_SECURE_FRAME {
-            let family = match message {
-                Message::Acknowledged => "acknowledgment",
-                Message::Rows(_) => "rows",
-                Message::Checkpoints(_) => "checkpoints",
-                Message::Frontiers(_) => "frontiers",
-                Message::Existence(_) => "existence",
-                Message::Revocations(_) => "revocations",
-                Message::Holdings(_) => "holdings",
-                Message::Contacts(_) => "contacts",
-                Message::Delivery(_) => "delivery",
-                Message::Chains(_) => "chains",
-                Message::LinkState(_) => "link state",
-                Message::Entries(_) => "entries",
-                Message::HeldChanges(_) => "held changes",
-                Message::Tips(_) => "tips",
-                Message::Placements(_) => "placements",
-            };
             return Err(denied(&format!(
                 "native {family} frame quota: {} exceeds {MAX_SECURE_FRAME} bytes",
                 frame.len()
             )));
         }
-        self.spend(frame.len())?;
+        let length = frame.len();
+        self.spend(length)?;
         match &mut self.stream {
             SessionIo::Channel(channel) => channel.send(frame).await?,
             SessionIo::Native(stream) => write_frame(stream, &frame).await?,
@@ -499,17 +516,41 @@ impl NativeSession {
             .sent
             .checked_add(1)
             .ok_or_else(|| denied("session sequence exhausted"))?;
+        if !self.serving {
+            let channel = self.channel();
+            self.request
+                .get_or_insert_with(|| trace::Request::start(&self.span, channel, family))
+                .sent(length);
+        }
         Ok(())
+    }
+    fn channel(&self) -> u16 {
+        match &self.stream {
+            SessionIo::Channel(channel) => channel.channel(),
+            SessionIo::Native(_) => 0,
+        }
     }
     async fn receive(&mut self) -> Result<Message, Error> {
         self.receive_with_idle(false).await
     }
     async fn receive_with_idle(&mut self, idle: bool) -> Result<Message, Error> {
         let bytes = match &mut self.stream {
-            SessionIo::Channel(channel) if idle => channel.receive_with_idle(true).await?,
-            SessionIo::Channel(channel) => channel.receive().await?,
-            SessionIo::Native(stream) => read_frame_with_idle(stream, idle).await?,
+            SessionIo::Channel(channel) if idle => channel.receive_with_idle(true).await,
+            SessionIo::Channel(channel) => channel.receive().await,
+            SessionIo::Native(stream) => read_frame_with_idle(stream, idle).await,
         };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if let Some(request) = self.request.take() {
+                    request.finish(error.category());
+                }
+                return Err(error);
+            }
+        };
+        if let Some(request) = &mut self.request {
+            request.received(bytes.len());
+        }
         self.spend(bytes.len())?;
         let message: SignedMessage = decode(&bytes)?;
         if message.sequence != self.received
@@ -538,7 +579,12 @@ impl NativeSession {
         loop {
             match self.receive_with_idle(idle).await? {
                 Message::Chains(message) => self.learn_chains(message),
-                message => return Ok(message),
+                message => {
+                    if let Some(request) = self.request.take() {
+                        request.finish("ok");
+                    }
+                    return Ok(message);
+                }
             }
         }
     }
@@ -587,7 +633,13 @@ impl NativeSession {
     ) -> Result<(), Error> {
         // Chains a push carries first are not a request of their own.
         let message = self.answered_request().await?;
-        self.answer(replica, message).await
+        let span = trace::serve(&self.span, self.channel(), message.family());
+        self.serving = true;
+        let result =
+            tracing::Instrument::instrument(self.answer(replica, message), span.clone()).await;
+        self.serving = false;
+        trace::outcome(&span, &result);
+        result
     }
     async fn answer<A: RowApplication>(
         &mut self,

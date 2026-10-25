@@ -73,6 +73,16 @@ async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
     );
     let before = c.seal_rebootstraps(f.public.domain).await.unwrap();
     assert!(before.iter().any(|need| need.scope == f.private));
+    // Named, and refused with it, until a peer that shares the scope serves it.
+    let missing =
+        |kind: &crate::BlockerKind| matches!(kind, crate::BlockerKind::SealRebootstrap { .. });
+    let private = crate::scope_label(&f.private);
+    let blocked = c.blockers().await.unwrap();
+    crate::tests::blockers::assert_named(&blocked, &private, missing, crate::ClearsBy::AnyPeer);
+    let refusal = crate::tests::blockers::refused(
+        c.author(handle(2), insert(&f, 2, "refused"), vec![]).await,
+    );
+    crate::tests::blockers::assert_named(&refusal, &private, missing, crate::ClearsBy::AnyPeer);
     let (mut client, server) = network::link::testing::sessions(
         (&c, keys[1].clone(), c_credentials),
         (&r, keys[2].clone(), r_credentials),
@@ -90,6 +100,12 @@ async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
         serve(server, &r)
     );
     assert_eq!(c.seal_rebootstraps(f.public.domain).await.unwrap(), before);
+    crate::tests::blockers::assert_named(
+        &c.blockers().await.unwrap(),
+        &private,
+        missing,
+        crate::ClearsBy::AnyPeer,
+    );
 }
 /// A private row `writer` authors on the tip it follows.
 async fn private_row(f: &Fixture, writer: &Replica, row: u8) -> EncryptedFrame {

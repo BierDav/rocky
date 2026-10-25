@@ -30,6 +30,28 @@ pub enum CoordinationError {
     /// The tip's log ended with a terminal entry and takes no other.
     Sealed,
 }
+impl CoordinationError {
+    /// A short category for diagnostics.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::CoordinationStateLost => "state_lost",
+            Self::UnknownDomain => "unknown_domain",
+            Self::Denied => "denied",
+            Self::Configuration => "configuration",
+            Self::StaleEpoch => "stale_epoch",
+            Self::StaleHead => "stale_head",
+            Self::InvalidCommitment => "invalid_commitment",
+            Self::RequestConflict => "request_conflict",
+            Self::Corrupt => "corrupt",
+            Self::Retired => "retired",
+            Self::Expired => "expired",
+            Self::Backpressure => "backpressure",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::Sealed => "sealed",
+        }
+    }
+}
 impl std::fmt::Display for CoordinationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")

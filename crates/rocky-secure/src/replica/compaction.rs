@@ -1144,6 +1144,26 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         domain: Scope,
     ) -> Result<(usize, Option<String>), Error> {
+        let span = tracing::debug_span!(
+            "finalize",
+            domain = rocky_core::domain_label(&domain),
+            finalized = tracing::field::Empty,
+            waiting = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let result =
+            tracing::Instrument::instrument(self.finalize_ready_inner(domain), span.clone()).await;
+        if let Ok((count, waiting)) = &result {
+            span.record("finalized", *count as u64);
+            span.record("waiting", waiting.is_some());
+        }
+        crate::network::trace::outcome(&span, &result);
+        result
+    }
+    async fn finalize_ready_inner(
+        &mut self,
+        domain: Scope,
+    ) -> Result<(usize, Option<String>), Error> {
         let mut count = 0;
         if self.schema_switching().await? {
             return Ok((0, Some("the schema switch is unfinished".into())));
@@ -1209,6 +1229,37 @@ impl<A: RowApplication> Inner<A> {
             })?;
             count += 1;
         }
+    }
+    /// Why the next seal of the followed path is not finalized yet.
+    pub(super) async fn finalization_waits(&self, domain: Scope) -> Result<Option<String>, Error> {
+        let finalized = self.finalized(domain).await?;
+        let path = self.path_seals(domain)?;
+        let next = offset(&path, &finalized).map(|start| start + finalized.len());
+        Ok(match next.and_then(|next| path.get(next)) {
+            Some(seal) => {
+                let previous = next
+                    .and_then(|next| next.checked_sub(1))
+                    .and_then(|index| path.get(index))
+                    .cloned();
+                let scopes = self.readiness_scopes(domain).await?;
+                self.seal_waits(domain, seal, previous.as_ref(), &scopes, false)
+                    .await?
+            }
+            None => {
+                let unverified = self.unverified_scopes(domain).await?;
+                match (unverified.first(), finalized.last()) {
+                    (Some(_), Some(last)) => {
+                        let seal = self
+                            .graph_for(domain)?
+                            .seal_by_id(last.seal)
+                            .map_err(credential)?;
+                        self.seal_waits(domain, seal, None, &unverified, false)
+                            .await?
+                    }
+                    _ => None,
+                }
+            }
+        })
     }
     pub(in crate::replica) async fn clear_checkpoints(
         &mut self,
@@ -1762,6 +1813,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// seal that loses after compaction needs a rebootstrap; `keep` trades
     /// storage against that chance.
     pub async fn compact(&self, domain: Scope, keep: usize) -> Result<CompactReport, Error> {
+        let span = tracing::debug_span!(
+            "compact",
+            domain = rocky_core::domain_label(&domain),
+            pruned = tracing::field::Empty,
+            outcome = tracing::field::Empty
+        );
+        let result =
+            tracing::Instrument::instrument(self.compact_inner(domain, keep), span.clone()).await;
+        if let Ok(report) = &result {
+            span.record("pruned", report.pruned);
+        }
+        crate::network::trace::outcome(&span, &result);
+        result
+    }
+    async fn compact_inner(&self, domain: Scope, keep: usize) -> Result<CompactReport, Error> {
         let mut inner = self.inner.lock().await;
         inner.graph_for(domain)?;
         let (_, waiting) = inner.finalize_ready(domain).await?;
@@ -1828,35 +1894,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         inner.graph_for(domain)?;
         let finalized = inner.finalized(domain).await?;
-        let path = inner.path_seals(domain)?;
-        let next = offset(&path, &finalized).map(|start| start + finalized.len());
-        let waiting = match next.and_then(|next| path.get(next)) {
-            Some(seal) => {
-                let previous = next
-                    .and_then(|next| next.checked_sub(1))
-                    .and_then(|index| path.get(index))
-                    .cloned();
-                let scopes = inner.readiness_scopes(domain).await?;
-                inner
-                    .seal_waits(domain, seal, previous.as_ref(), &scopes, false)
-                    .await?
-            }
-            None => {
-                let unverified = inner.unverified_scopes(domain).await?;
-                match (unverified.first(), finalized.last()) {
-                    (Some(_), Some(last)) => {
-                        let seal = inner
-                            .graph_for(domain)?
-                            .seal_by_id(last.seal)
-                            .map_err(credential)?;
-                        inner
-                            .seal_waits(domain, seal, None, &unverified, false)
-                            .await?
-                    }
-                    _ => None,
-                }
-            }
-        };
+        let waiting = inner.finalization_waits(domain).await?;
         let rebootstrap = inner.compaction_lost(domain).await?;
         Ok(CompactionStatus {
             finalized: finalized.last().map(|known| known.seal),

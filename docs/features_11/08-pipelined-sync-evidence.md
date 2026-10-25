@@ -177,3 +177,137 @@ bootstrap, latency-shaping and shopping UI qualification limits above remain.
   did not resolve the overrun, and that experiment was reverted.
 - Final check output is `/tmp/rocky-phase8/resume-verified.log` on the execution
   host. This is not a fully green check or completed phase qualification.
+
+## Phone qualification resumed on 2026-10-25
+
+A fresh three-node LAN run, `pipeline-100000-20261025T181536Z`, uses the
+final native artifacts above, fresh synthetic databases and the isolated
+`org.example.rocky.load100k` package. The installed APK's native library and
+host library were hashed before starting; both match the final hashes above.
+The controller is `/tmp/rocky-phase8/qualification_run.py`. No production code
+or shopping household was changed. Initial host load was 2.63 on 18 cores;
+unrelated host tests subsequently ran, so this is not an isolated comparison.
+
+### Locating the import cost
+
+The earlier five-second samples were expanded to cumulative caller reports
+and resolved against their matching original unstripped ELF. The original
+stripped and unstripped artifacts have identical `.text` addresses, lengths
+and SHA-256 values. In those samples,
+`PublicKey::verify` accounts for 32.75% / 30.94% of sampled cycles and
+`sqlite3_step` for 22.52% / 25.57%. These are CPU samples, not wall-clock
+attribution; caller percentages overlap and must not be added. Reports are
+`/tmp/rocky-phase8/phone{,-late}-children-demangled.txt`.
+
+Code inspection identifies redundant work in the checkpoint path:
+
+- `Origin::from_checkpoint` verifies a creation header when reconstructing an
+  origin (`replica/moves/compact.rs`). `open_page` verifies supplied headers
+  again, or verifies the known header again when a row first references it
+  (`replica/checkpoint/transfer.rs`). `store_page` passes newly supplied headers
+  to `put_creation_header`, which verifies them again (`replica/moves.rs`).
+  The stored header dictionary does not avoid repeat signature checks when
+  the same header is referenced on another page.
+- `stage_checkpoint_page_inner` decrypts and decodes the page while holding
+  the replica lock to discover header references. `open_page` then decrypts
+  and decodes the same page again on a blocking worker.
+- `fetch_pages` overlaps network windows, but awaits the complete verify/store
+  of each page before opening the next. Per-row dictionary, record, stub,
+  index and projection writes remain inside each page transaction.
+
+The desktop member stores 100,000 rows in 766 checkpoint pages with only
+3,126 distinct creation headers/origins. The repeated verification is therefore
+not limited to one check per distinct signed creation header for the import.
+For the item scope specifically, the persisted page cuts contain 765 pages,
+3,125 unique origins and **97,830 distinct-origin occurrences summed across
+pages**. Thus origin reconstruction alone repeats signature verification about
+**31 times per unique header on average**, before the additional header checks.
+These counts were read from the completed desktop member; the small registry
+scope accounts for the remaining page and header. The count report is
+`/tmp/rocky-phase8/pipeline-100000-20261025T181536Z-origin-counts.json`.
+
+A likely optimization boundary is to carry verified, decoded headers through
+page opening and storage and reuse immutable signature results by digest,
+while retaining authority, digest, provenance and page-order checks. This diagnosis has not yet been validated by an optimized build.
+
+### Final-build fresh LAN results
+
+- Issuer author/publication: **115.604 s**; seal: **1.573 s**; checkpoint:
+  **12.167 s**. Desktop B bootstrap: **27.797 s**.
+- Phone bootstrap: **250.719 s**, one explicit pass, with no failed request or
+  timeout in the returned report. The **60 s gate fails by 4.18 times**. All
+  generated values and keys were checked on both joining replicas; all three
+  ended readable and writable.
+- Twenty alternating automatic phone/desktop updates: nearest-rank
+  **p95 197.86 ms**, maximum **1,173.83 ms**. The **1 s p95 gate passes**.
+- Five empty manual phone reconciliations on LAN: **2.666–3.074 s**, with no
+  transferred rows. The replica-size-dependent empty reconciliation cost
+  remains even without relay latency.
+- Public node IDs: desktop A
+  `c7bd0b99ff6f59e0e420195a479b9b09d5f16171e73ae614d218b873921959b0`,
+  desktop B `0ff5679427ab036f5bc11a262dc16906bccd701177c14907dd9418704be46619`,
+  phone `26e98020ea7e37c1ea9f15a13e85245ef9ff40f12cb6f4cdf4d35385c863a0a6`.
+
+New early/late phone samples contain **19,450 / 22,837 samples**, with no lost
+userspace samples (20 / 0 lost kernel samples). Self cycle overhead is
+`pread64` **4.36% / 5.84%**, `pwrite` **4.17% / 3.99%**, and `fsync`
+**3.95% / 3.88%**, consistent with the earlier storage-heavy profile. Native
+symbols in these final-build samples have not been resolved against a matching
+unstripped final ELF; the cumulative symbol attribution above belongs only to
+the earlier matching build.
+
+Read-only `/proc/<pid>/io` observations during the new import show
+**2,479,190,016 bytes of physical writes over 203.747 s**. This is an interval
+within the import, not its total. Physical write accounting had reached
+**2,831,290,368 bytes** at the last sample, while the completed phone directory
+occupied about **162 MB**. These process counters include WAL and other writes
+and do not isolate a particular SQL statement; they establish substantial
+write amplification without attributing all elapsed time to disk.
+
+Artifacts, JSON stage reports, source/member host profiles, phone profiles,
+self-overhead reports and process counters have the run name above as their
+prefix under `/tmp/rocky-phase8`. The 100 ms latency-shaping and shopping UI
+checks remain unverified.
+
+### Full-size relay observation
+
+`pipeline-final-relay-20261025T183106Z` reopened the same three 100k replicas,
+checked their row counts, disabled local/topic discovery and bound all endpoints
+to loopback. The phone therefore required relay transport to reach either
+host. Its relay status reported a connected
+`https://euc1-1.relay.n0.iroh.link./` with no error.
+
+Five empty manual reconciliations took **8.747, 5.456, 9.096, 5.764 and
+11.555 s** wall time (native durations **8.722, 5.432, 8.943, 5.739 and
+11.528 s**). Reports contained no transfer, refusal, waiting scope or timeout;
+all replicas ended readable and writable. The **2 s relay gate is not met on
+this full-size fixture**, despite the earlier small-fixture observation. Initial
+host load was 22.25 on 18 cores; workspace verification overlapped this relay
+run. These are loaded observations, not an isolated latency comparison or an
+attribution of the relay time to one internal operation.
+
+Two preceding attempts did not reach measurement: the first lost its phone
+control connection during reopen, and the second found the local control port
+unavailable. The wireless ADB port-forward list was empty. Restoring only
+`tcp:19401` made the final attempt complete; neither failed attempt is counted
+as a Rocky reconciliation failure. Their logs remain under the corresponding
+`pipeline-final-relay-*` prefixes in `/tmp/rocky-phase8`.
+
+### Investigation verification
+
+Only this evidence document changed; no runtime optimization was implemented.
+`./scripts/lint`, workspace Clippy and `./scripts/commitlint --jj` passed.
+`./scripts/check` passed all **199 unit tests** and all **1,378 integration
+assertions** (1,074 workspace and 304 SDK without defaults). The workspace and
+SDK integration runs took **167.650 s** and **77.927 s**, respectively. The
+workspace integration run started at load 133.3 on 18 cores; slow cases were
+rerun in isolation by the existing budget checker.
+
+The command **exited 1** because the same previously recorded
+`rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+test exceeded its **2 s** budget in both builds: **2.08 s** and **2.30 s** on
+isolated reruns. All its assertions passed. No test, budget or tier was changed.
+The complete check log is `/tmp/rocky-phase8/qualification-check.log`; static
+lint output is `/tmp/rocky-phase8/qualification-lint.log`. Phase 8 remains
+unqualified: the fresh phone bootstrap and full-size relay gates failed, while
+latency shaping and shopping UI checks remain unverified.

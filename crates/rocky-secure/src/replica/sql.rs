@@ -708,9 +708,15 @@ impl<A: RowApplication> SecureSql<A> {
         lease.turn += 1;
         lease.deadline = Instant::now() + self.options.transaction_timeout;
         self.cancelled.store(false, Ordering::Relaxed);
-        let (watched, turn, deadline) = (self.lease.clone(), lease.turn, lease.deadline);
+        // The watcher waits on the runtime's clock; `deadline` bounds the
+        // engine's work by the wall clock.
+        let (watched, turn, timeout) = (
+            self.lease.clone(),
+            lease.turn,
+            self.options.transaction_timeout,
+        );
         tokio::spawn(async move {
-            tokio::time::sleep_until(deadline.into()).await;
+            tokio::time::sleep(timeout).await;
             let mut lease = watched.lock().await;
             if lease.turn == turn && lease.held.take().is_some() {
                 lease.aborted = Some(AbortReason::Timeout);

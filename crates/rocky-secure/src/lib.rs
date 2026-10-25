@@ -9,6 +9,8 @@ pub mod network;
 mod replica;
 mod store;
 mod wire;
+#[cfg(any(test, feature = "qualification"))]
+pub use replica::CrashPoint;
 pub use replica::{
     AuditReport, Buffered, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
     CiphertextPage, CommittedEntry, CompactReport, CompactionStatus, Companion, CoordinatedCommit,

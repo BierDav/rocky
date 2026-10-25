@@ -287,18 +287,21 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
                 .await,
             message,
         );
-        rejected(
-            target
-                .held_frame_page(
-                    peer.public_key(),
-                    &credentials,
-                    f.public,
-                    None,
-                    MAX_SECURE_FRAME,
-                )
-                .await,
-            message,
-        );
+        // Held lookup classifies by the transactional position index and
+        // never loads this live pending frame. Audit still checks its bytes.
+        let held = target
+            .held_frame_page(
+                peer.public_key(),
+                &credentials,
+                f.public,
+                None,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        assert!(held.0.is_empty());
+        assert!(held.1.is_none());
+        assert!(target.audit(f.public).await.is_err());
         assert_eq!(state(&target).await, before);
     }
     // A cold excluded row and a different requested domain also fail before filtering.

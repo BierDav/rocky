@@ -26,6 +26,12 @@ filter = 'test(/::soak_/)'
 priority = 90
 slow-timeout = { period = "60s", terminate-after = 30 }
 
+# The simulation sweep's shards each run dozens of seeded schedules.
+[[profile.default.overrides]]
+filter = 'package(rocky-sdk) & test(/^simulation::tests::sweep_/)'
+priority = 89
+slow-timeout = { period = "60s", terminate-after = 20 }
+
 # The tiers' profiles; scripts/test-tiers judges their budgets from the JUnit
 # reports. The limits here only stop a test that hung or is far over budget.
 [profile.integration]

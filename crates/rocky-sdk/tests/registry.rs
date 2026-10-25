@@ -414,12 +414,24 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     }
 
     // Two issuers renew one device before either hears of the other.
+    for issuer in [&a, &b] {
+        issuer
+            .ok(json!({"type": "sync_start", "enabled": false}))
+            .await;
+    }
+    // The extra issuers above tested range allocation; keep them from
+    // answering the renewal intended for b when a is offline.
+    online(&x, false).await;
+    online(&y, false).await;
+    online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
+    m.ok(json!({"type": "sync_start", "enabled": false})).await;
     let m_node = m.node().await;
     m.ok(json!({"type": "renew"})).await;
     a.ok(json!({"type": "networking_control", "enabled": false}))
         .await;
+    online(&b, true).await;
     m.ok(json!({"type": "renew"})).await;
     a.ok(json!({"type": "networking_control", "enabled": true}))
         .await;

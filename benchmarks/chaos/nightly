@@ -1,0 +1,34 @@
+#!/bin/sh
+# The nightly fuzz: every seed of `nightly-seeds`, each with its schedule log.
+# Fails on any finding, and when the schedules never reached a seal, a
+# bookmark follow and a compaction.
+#
+#   benchmarks/chaos/nightly [OUT]    logs go to OUT (default $TMPDIR/rocky-chaos-nightly)
+set -eu
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+out=${1:-${TMPDIR:-/tmp}/rocky-chaos-nightly}
+mkdir -p "$out"
+read -r first count steps <<RANGE
+$(grep -v '^#' "$here/nightly-seeds")
+RANGE
+cd "$here"
+cargo build --locked
+status=0
+seed=$first
+while [ "$seed" -lt $((first + count)) ]; do
+    CHAOS_LOG=1 CHAOS_ROOT="$out/seed-$seed" ./target/debug/rocky-chaos fuzz "$seed" "$steps" \
+        > "$out/seed-$seed.log" 2>&1 || status=1
+    if grep -q '^FINDING:' "$out/seed-$seed.log"; then
+        echo "nightly: seed $seed has findings" >&2
+        grep '^FINDING:' "$out/seed-$seed.log" >&2
+        status=1
+    fi
+    seed=$((seed + 1))
+done
+for action in ' seal:' ' follow ' ' compact:'; do
+    if ! cat "$out"/seed-*/schedule.log 2>/dev/null | grep -q -- "$action"; then
+        echo "nightly: no schedule reached${action%:}" >&2
+        status=1
+    fi
+done
+exit $status

@@ -293,6 +293,13 @@ impl<A: RowApplication> Inner<A> {
                 return (None, BTreeSet::new(), Vec::new());
             }
         };
+        #[cfg(any(test, feature = "qualification"))]
+        if let Err(error) = self.crash_at(|point| point == super::CrashPoint::GroupAfterCommit) {
+            for (reply, _) in replies {
+                let _ = reply.send(Err(shared(&error)));
+            }
+            return (None, BTreeSet::new(), Vec::new());
+        }
         #[cfg(test)]
         {
             if matches!(self.group_fault, Some(GroupFault::ExitAfterCommit)) {
@@ -465,6 +472,8 @@ impl<A: RowApplication> Inner<A> {
         if unapplied {
             self.group_pass(time, &mut outcome).await?;
         }
+        #[cfg(any(test, feature = "qualification"))]
+        self.crash_at(|point| point == super::CrashPoint::GroupBeforeCommit)?;
         #[cfg(test)]
         match self.group_fault {
             Some(GroupFault::ExitBeforeCommit) => std::process::exit(77),

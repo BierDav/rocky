@@ -927,6 +927,9 @@ async fn real_liveness_gate() -> Result<(), Failure> {
                 );
                 tokio::task::yield_now().await;
             }
+            // Real QUIC needs its ACK timers during reconciliation. Freeze
+            // only the idle interval whose lack of traffic this test checks.
+            tokio::time::pause();
             let before = hub.counts();
             assert!(
                 a.retry_deadline().is_none(),
@@ -979,7 +982,7 @@ async fn real_liveness_gate() -> Result<(), Failure> {
         }))
         .await
 }
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn iroh_liveness_gate() -> Result<(), Failure> {
     real_liveness_gate().await
 }

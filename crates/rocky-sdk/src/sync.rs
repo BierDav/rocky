@@ -77,6 +77,9 @@ pub(crate) struct Transfer {
     pub waiting: Vec<ResourceScope>,
     /// Scopes whose requests failed; other scopes still finish the pass.
     pub failed: Vec<ResourceScope>,
+    /// Scopes whose requests the peer refused as not permitted; they are
+    /// also `refused`.
+    pub denied: Vec<ResourceScope>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
@@ -87,6 +90,9 @@ impl Transfer {
             self.add(scope, moved);
         }
         self.refuse(&other.refused);
+        for scope in other.denied {
+            self.deny(scope);
+        }
         self.wait(&other.waiting);
         for scope in other.held {
             if !self.held.contains(&scope) {
@@ -100,9 +106,15 @@ impl Transfer {
                 if cause.downcast_ref::<rocky_secure::network::RequestRefusal>()
                     == Some(&rocky_secure::network::RequestRefusal::NotPermitted));
         if refused {
-            self.refuse(&[scope]);
+            self.deny(scope);
         } else {
             self.fail(scope);
+        }
+    }
+    fn deny(&mut self, scope: ResourceScope) {
+        self.refuse(&[scope]);
+        if !self.denied.contains(&scope) {
+            self.denied.push(scope);
         }
     }
     fn fail(&mut self, scope: ResourceScope) {

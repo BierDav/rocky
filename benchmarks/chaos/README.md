@@ -16,7 +16,13 @@ cargo build
 ./target/debug/rocky-chaos scenario all            # every scripted scenario
 ./target/debug/rocky-chaos scenario evict_resubscribe revoked_via_stale_peer
 ./target/debug/rocky-chaos fuzz <seed> <steps>     # e.g. fuzz 13 150
+./nightly                                          # the nightly seed range
 ```
+
+The fuzzer also seals, compacts, opens branches and follows bookmarks. The
+nightly job (`.github/workflows/chaos.yml`) runs `nightly` over the range in
+`nightly-seeds`, fails on any finding, and fails when no schedule reached a
+seal, a follow and a compaction.
 
 Data goes to `$CHAOS_ROOT` (default `$TMPDIR/rocky-chaos/<scenario>-<pid>`); each
 node's stderr is kept next to its directory. Lines starting with `FINDING:` are

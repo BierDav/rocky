@@ -420,8 +420,10 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         1
     );
     assert_eq!(titles(&alice.items().await), ["After revocation"]);
-    assert!(bob.call(json!({"type": "sync"})).await.is_err());
+    // A refused link need not carry the signed revocation. Renewal fetches
+    // that statement before checking local sync refusal and revoked reads.
     assert!(bob.call(json!({"type": "renew"})).await.is_err());
+    assert!(bob.call(json!({"type": "sync"})).await.is_err());
     assert!(bob.items().await.is_empty());
 
     // The creator cannot log out; a member can, and purging removes its data.

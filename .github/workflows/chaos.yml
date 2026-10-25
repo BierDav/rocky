@@ -1,0 +1,44 @@
+name: Chaos
+
+# The multi-process fault fuzzer over its stored seed range, nightly; see
+# benchmarks/chaos/README.md. It is its own workspace, outside the baseline.
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ROCKY_CRANELIFT: '0'
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - name: Install the system build dependencies
+        working-directory: source
+        run: ./scripts/ci/install-system-deps
+      - name: Bootstrap Rustup and register its tool paths
+        working-directory: source
+        run: ./scripts/ci/install-rustup
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Run the stored seed range
+        working-directory: source
+        run: benchmarks/chaos/nightly "$RUNNER_TEMP/chaos"
+      - name: Keep the logs and schedules
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-nightly
+          path: |
+            ${{ runner.temp }}/chaos/*.log
+            ${{ runner.temp }}/chaos/*/schedule.log

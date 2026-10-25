@@ -120,7 +120,60 @@ application check and did not alter the user's shopping household.
 - All 12 bootstrap tests passed after replacing the serial-import assumption
   with an exact persisted-pending-set assertion across an offline reopen.
 - The unit tier passed **199 tests** (184 workspace, 15 SDK without defaults).
-- Static lint and workspace Clippy passed. Final full verification is running.
-- The full run reproduced the phase 6 baseline failure
-  `tests::tips::frontiers::headers::excluded_and_other_domain_headers_still_decode_after_warming`
-  (expected rejection “invalid secure frame”, got success). It is not waived.
+- Static lint and workspace Clippy passed. Final combined verification results
+  are recorded below.
+
+## Resumed integration and final runtime check
+
+The implementation was combined with main's deterministic simulation and
+coordinated-outage work. The stored-header regression still expected an empty
+held lookup to decode an unrelated live pending frame. Its assertion now follows
+the transactional position index: that lookup stays empty, while header scan
+oracles and a full audit reject corrupt stored bytes. No admission or production
+validation was removed.
+
+The iroh idle-liveness fixture also froze Tokio time during real QUIC
+reconciliation. Independent lanes can need delayed ACK timers before becoming
+idle. The fixture now allows those timers to run during reconciliation, then
+freezes time for its unchanged no-traffic/no-redial assertions over 60 simulated
+idle seconds. Its five-second worker-settlement bound remains unchanged.
+
+Two consumer fixtures exposed scheduling assumptions on a subsequent full run.
+The revocation fixture now fetches the signed revocation through renewal before
+asserting local sync refusal. The concurrent-renewal fixture disables background
+replication and extra issuers and controls reachability of the two intended
+issuers, so its unknown-device renewal cannot race a relayed enrollment record.
+Both corrected fixtures passed focused checks; security and registry assertions
+remain in place.
+
+Run `pipeline-final-reopen-20261025T173148Z` reopened the same three 100k replicas
+with the final native builds, checked all three row counts, restored automatic
+live links and passed 20 alternating phone/desktop row updates. Nearest-rank
+**p95 was 215.68 ms**, **maximum 278.42 ms**. All three ended readable and writable.
+This verifies reopen and live transfer, not another bootstrap or shopping UI run.
+The starting host load was 90.33 on 18 cores while verification builds ran.
+
+Final native SHA-256 values:
+
+- Android (stripped): `0320810d0bc66577afe940913754301d0cfac947cdd4a640dfa5de4d5d0cfbdf`.
+- macOS: `39996fbc162faa95b400cd50c296d8d29384e827573a6be64f41457276ec7a9b`.
+
+Both native artifacts and the reopen result remain under `/tmp/rocky-phase8` on
+the execution host, independently of the temporary Jujutsu workspace. The
+bootstrap, latency-shaping and shopping UI qualification limits above remain.
+
+## Final combined verification
+
+- `./scripts/lint` and `./scripts/commitlint --jj` passed.
+- `./scripts/check` passed all **199 unit tests** and all **1,378 integration
+  tests** (1,074 workspace and 304 SDK without default features), including the
+  corrected fixtures and deterministic simulation seed set. Integration suite
+  wall time was **252.76 s**, within its **300 s** budget.
+- **The command still exited 1:**
+  `rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+  exceeded its **2 s per-test budget** in both builds. Its best isolated reruns
+  were **2.31 s** and **2.24 s**. All its assertions passed. No budget exception,
+  tier move or weakened assertion was added. Removing a round of fixture syncs
+  did not resolve the overrun, and that experiment was reverted.
+- Final check output is `/tmp/rocky-phase8/resume-verified.log` on the execution
+  host. This is not a fully green check or completed phase qualification.

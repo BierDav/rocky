@@ -105,25 +105,25 @@ struct OpenedPage {
     rows: Vec<(Commitment, PageRow, Materialized)>,
     /// The encoded sets of author bindings the rows name, checked.
     bindings: Vec<Vec<u8>>,
-    headers: Vec<Vec<u8>>,
+    headers: Vec<Arc<crypto::CreationHeader>>,
     authors: stamp_authors::Authors,
     next: Option<Commitment>,
     signature: Signature,
     /// The page's rows as a set of their own.
     delta: Sets,
 }
-/// Opens a page sealed under `key` and verifies it against the staged
+/// Verifies a decoded page against the staged
 /// checkpoint: binding, order and the signer's signature. Pure
 /// computation, run off the replica's thread.
 fn open_page(
     page: CheckpointPage,
-    key: [u8; 32],
+    plain: PagePlain,
     signed: &SignedCheckpoint,
     cursor: Option<Commitment>,
     publisher: [u8; 32],
     known_headers: BTreeMap<Commitment, Vec<u8>>,
+    crypto: &crypto::Cache,
 ) -> Result<OpenedPage, Error> {
-    let plain: PagePlain = decode(&page.rows.open(&key)?)?;
     if plain.checkpoint != page.checkpoint
         || plain.after != page.after
         || plain.next != page.next
@@ -163,6 +163,10 @@ fn open_page(
     for header in &plain.headers {
         available_headers.insert(moves::header_digest(header), header.as_ref());
     }
+    let available_headers: BTreeMap<_, _> = available_headers
+        .into_iter()
+        .map(|(digest, bytes)| Ok((digest, crypto.creation_header(bytes)?)))
+        .collect::<Result<_, Error>>()?;
     let origins: Vec<moves::Origin> = plain
         .origins
         .iter()
@@ -195,7 +199,6 @@ fn open_page(
     }
     let mut headers = BTreeMap::new();
     for header in &plain.headers {
-        crate::wire::verified_header(header)?;
         if headers
             .insert(moves::header_digest(header), false)
             .is_some()
@@ -255,7 +258,6 @@ fn open_page(
                 if moves::header_digest(bytes) != proof.header() {
                     return Err(denied("checkpoint header digest mismatch"));
                 }
-                crate::wire::verified_header(bytes)?;
                 entry.insert(true);
             }
             *headers
@@ -289,8 +291,8 @@ fn open_page(
         headers: plain
             .headers
             .into_iter()
-            .map(|header| header.into_vec())
-            .collect(),
+            .map(|header| crypto.creation_header(&header))
+            .collect::<Result<_, Error>>()?,
         bindings: plain
             .bindings
             .into_iter()
@@ -572,7 +574,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         for header in &page.headers {
-            self.put_creation_header(header).await?;
+            self.put_verified_creation_header(header).await?;
         }
         for set in &page.bindings {
             self.put_bindings(set).await?;
@@ -1225,9 +1227,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .proof
                 .as_ref()
                 .map(|proof| {
-                    proof
-                        .origin()
-                        .checked_checkpoint_bytes(&header_bytes[&proof.header()])
+                    proof.origin().checked_checkpoint_bytes(
+                        inner
+                            .crypto
+                            .creation_header(&header_bytes[&proof.header()])?
+                            .as_ref(),
+                    )
                 })
                 .transpose()?;
             let mut new_authors = BTreeMap::new();
@@ -1549,15 +1554,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
     async fn stage_checkpoint_page_inner(&self, page: CheckpointPage) -> Result<(), Error> {
         let scope = page.scope;
         let (checkpoint, after) = (page.checkpoint, page.after);
-        let (key, signed, cursor, publisher, known_headers) = {
+        let (key, signed, cursor, publisher, crypto) = {
             let inner = self.inner.lock().await;
             let (key, staging) = inner.expected_page(&page).await?;
+            (
+                key,
+                staging.signed,
+                staging.cursor,
+                *inner.config.publisher.as_bytes(),
+                inner.crypto.clone(),
+            )
+        };
+        let (page, plain) = tokio::task::spawn_blocking(move || {
             let plain: PagePlain = decode(&page.rows.open(&key)?)?;
-            let supplied: BTreeSet<_> = plain
-                .headers
-                .iter()
-                .map(|header| moves::header_digest(header))
-                .collect();
+            Ok::<_, Error>((page, plain))
+        })
+        .await
+        .map_err(|_| Error::Closed)??;
+        let supplied: BTreeSet<_> = plain
+            .headers
+            .iter()
+            .map(|header| moves::header_digest(header))
+            .collect();
+        let known_headers = {
+            let inner = self.inner.lock().await;
             let mut known = BTreeMap::new();
             for origin in &plain.origins {
                 let digest = moves::Origin::checkpoint_header(origin)?;
@@ -1565,16 +1585,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     known.insert(digest, inner.stored_creation_header(digest).await?);
                 }
             }
-            (
-                key,
-                staging.signed,
-                staging.cursor,
-                *inner.config.publisher.as_bytes(),
-                known,
-            )
+            known
         };
         let opened = tokio::task::spawn_blocking(move || {
-            open_page(page, key, &signed, cursor, publisher, known_headers)
+            open_page(
+                page,
+                plain,
+                &signed,
+                cursor,
+                publisher,
+                known_headers,
+                &crypto,
+            )
         })
         .await
         .map_err(|_| Error::Closed)??;

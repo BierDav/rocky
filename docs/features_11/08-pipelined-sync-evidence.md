@@ -311,3 +311,127 @@ The complete check log is `/tmp/rocky-phase8/qualification-check.log`; static
 lint output is `/tmp/rocky-phase8/qualification-lint.log`. Phase 8 remains
 unqualified: the fresh phone bootstrap and full-size relay gates failed, while
 latency shaping and shopping UI checks remain unverified.
+
+
+## Checkpoint import optimization (2026-10-25)
+
+Work was isolated in Jujutsu workspace `rocky-sync-opt` under
+`~/AgentWorkspaces`, starting from the qualification evidence above.
+
+- Checkpoint pages are decrypted and decoded once on a blocking worker,
+  outside the replica lock. Stored-header lookup still checks the stored bytes
+  against their digest; ordered storage rechecks the checkpoint and cursor.
+- A per-replica cache retains immutable, verified creation headers, bounded by
+  8,192 entries and 8 MiB of encoded headers. Origins and newly supplied headers
+  reuse that result across pages. Storage accepts the verified header without
+  another signature check, and checkpoint serving reuses it when checking
+  origins. The cache also serves ordinary creation-header storage.
+- Cached results contain no credential authority, revocation decision, local
+  dictionary IDs or transaction state. Current admission and checkpoint checks,
+  page signatures, row commitments, provenance checks and atomic page commits
+  remain. A failed transaction can retain only immutable signature results.
+  No persisted or wire format changed.
+
+A regression imports multiple pages sharing one creation header and checks that
+exactly one header signature was verified. Another warms the cache, rejects a
+changed signed header, accepts its correctly re-signed replacement and refuses
+an unsupported row format even with a valid signature. Existing checkpoint
+corruption, authorization, crash and reopen tests remain applicable.
+
+Measurement artifacts and the temporary probe controllers are under
+`/tmp/rocky-sync-opt`. The host probe uses the existing frozen JVM bindings and
+two processes over LAN with remote address lookup and relays disabled; local
+mDNS remains enabled. Each run copies the
+same sealed 100k source fixture into a new source directory and bootstraps a
+fresh issuer member, checks its count and generated values (except the fixture's
+previously edited `k000001` title), then runs five empty reconciliations.
+The previous native build took **22.193 s**, the first optimized run
+**21.156 s**. Initial host loads were **8.13** and **45.24** on 18 cores, with
+verification/builds overlapping; this pair is preliminary evidence, not an
+isolated speedup claim or a phone/relay qualification. Empty host reconciliations
+were **43.5–45.9 ms** and **50.6–55.9 ms**, respectively.
+
+
+### Paired physical-phone probe
+
+`phone-baseline2` and `phone-optimized` use the same source snapshot and a fresh
+phone directory each time, on the physical Pixel 11 Pro. Each has one desktop
+source and one phone. The phone uses the issuer profile in both runs, unlike
+the preceding three-node qualification with a writer phone. Installed
+baseline Android native SHA-256 was checked against the pulled APK and matched
+`0320810d0bc66577afe940913754301d0cfac947cdd4a640dfa5de4d5d0cfbdf`.
+The optimized APK changes only its native library and retains the frozen
+bindings' ABI checks. Optimized native hashes:
+
+- Android (stripped): `7cc8e5114cad3fad328501c8c3c3ee81bde14a44a5b9a97811d1f548e32cab70`.
+- macOS: `b415cb62440f188f7cc6ae1c035dae6f902bf1a845c611e38510c22cdbb9909e`.
+
+Bootstrap completed in one explicit sync pass in **174.940 s** before and
+**123.396 s** after, an observed **29.5% reduction**. Both checked 100,000 rows
+and generated values with the same exception for the source's edited title.
+Initial host loads were **52.19** and **69.80** on 18 cores; workspace
+builds overlapped both runs. One five-second CPU sample overlapped the optimized
+import. This is a paired observation with load and device variability, not a
+repeated controlled benchmark. The **60 s bootstrap gate remains unmet**. The optimized final reconciliation
+report includes one peer-closed-link attempt followed by a successful reconnect
+and reconciliation; its elapsed time is included.
+
+Five empty phone LAN reconciliations took **1.103–1.335 s** before and
+**1.148–1.262 s** after. On the optimized build, 20 alternating live phone/desktop
+row transfers had nearest-rank **p95 273.12 ms**, maximum **300.87 ms**, including
+control calls and polling. Both replicas ended readable and writable. This
+observes the 1 s one-row gate for this fixture; LAN empty timings do not qualify
+the relay gate.
+
+The optimized phone CPU sample recorded **20,228 samples, zero lost**. Its
+resolved cumulative caller report has `PublicKey::verify` at **3.53%** versus
+**30.94–32.75%** in the previous qualification's samples. `sqlite3_step` is now
+**41.20%**; self overhead includes `pread64` **9.69%**, `pwrite` **5.69%** and
+`fsync` **5.77%**. These are overlapping sampled cycle percentages, not
+wall-clock attribution or a controlled profile pair. Kernel symbol access
+remained restricted. The optimized process's post-bootstrap `/proc/<pid>/io`
+reported **2,888,527,872 physical bytes written**; this process counter includes
+open/join and WAL activity, not just row storage. Remaining storage work is
+substantial. The sample, resolved report and matching unstripped ELF are in
+`/tmp/rocky-sync-opt`.
+
+The first baseline controller connected to the forwarded port before the phone
+listener was ready and received EOF before joining; `phone-baseline` is excluded.
+The successful controllers wait for the listener. No shopping application or
+household was changed. Relay, 100 ms latency-shaping and shopping UI qualification
+were not repeated; their previous unmet or unverified status remains.
+
+
+### Final verification
+
+- `./scripts/lint`, workspace Clippy with warnings denied and
+  `./scripts/commitlint --jj` passed. Release native builds passed for macOS
+  and Android; the frozen consumer bindings opened and exercised both artifacts.
+- The final `./scripts/check`, with `NEXTEST_TEST_THREADS=8` and the shared host
+  Cargo target directory, passed **200 unit tests** and all **1,379 integration
+  assertions** (1,075 workspace and 304 SDK without default features). Workspace
+  and SDK integration runs took **152.845 s** and **78.338 s**; the checker
+  reported **232.45 s**, within the unchanged **300 s** suite budget.
+- **The final command exited 1** on three unchanged **2 s** per-test budgets:
+  `rocky-sdk node::revocation_tests::reopen_completes_each_revocation_secret_boundary`
+  (**2.62 s / 2.22 s** isolated in the two builds);
+  `rocky-sdk::tips races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`
+  (**2.37 s / 3.03 s**); and
+  `rocky-sdk::tips trusted::a_trusted_identity_opens_a_branch_that_devices_on_main_never_see`
+  (**2.22 s** in the SDK build). Assertions passed. Only the tips-race overrun
+  was already recorded above; the other two overruns are also reported here,
+  without attributing them to a cause or claiming a fully green check.
+- An earlier full run failed the new fixture's too-small page allowance and
+  timed out the existing SDK offline-peer liveness test. The fixture now uses
+  the standard 64 KiB allowance; the test build's 16-row page cut still forces
+  multiple pages. Its focused run passed in **0.86 s**, and its final workspace
+  run in **0.67 s**. The offline-peer test passed a fresh isolated run in
+  **0.63 s** and the final two builds in **1.39 s / 1.37 s**; its earlier timeout
+  and failed isolated rerun are retained as an intermittent verification issue.
+  No existing assertion, tier or budget was weakened.
+
+Final check output is `/tmp/rocky-sync-opt/check-final.log`; the earlier run is
+`check.log`, and static lint output is `lint-final.log` in the same directory.
+These artifacts remain outside the temporary workspace. This work improves the
+measured bootstrap but does not complete phase 8 qualification or produce a
+fully green required check.

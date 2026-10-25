@@ -582,3 +582,60 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
     );
     target.audit(l.scope("items")).await.unwrap();
 }
+
+#[tokio::test]
+async fn checkpoint_headers_are_verified_once_across_pages() {
+    let (l, dir, _, source, publication) = candidate(32).await;
+    release(&source, &publication).await;
+    let scope = l.scope("items");
+    let checkpoint = compacted_base(&source, l.publisher(), scope).await;
+    let key = PrivateKey::new();
+    let target = l
+        .open(&dir.path().join("import.db"), &key, 2, None)
+        .await
+        .unwrap();
+    l.follow(
+        &target,
+        l.config(3, &key),
+        3,
+        &all_tip_statements(&source).await,
+    )
+    .await
+    .unwrap();
+    let credentials = l.credentials(3, &key);
+    source
+        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
+        .await
+        .unwrap();
+    target.begin_rebootstrap(checkpoint.clone()).await.unwrap();
+    let before = target.checkpoint_header_verifications().await;
+    let mut after = None;
+    let mut pages = 0;
+    loop {
+        let page = source
+            .checkpoint_page(
+                key.public_key(),
+                &credentials,
+                scope,
+                checkpoint.id().unwrap(),
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        target.stage_checkpoint_page(page).await.unwrap();
+        pages += 1;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(target.checkpoint_header_verifications().await - before, 1);
+    target.finish_rebootstrap(scope).await.unwrap();
+    assert_eq!(
+        target.snapshot(scope).await.unwrap().rows,
+        source.snapshot(scope).await.unwrap().rows
+    );
+    target.audit(scope).await.unwrap();
+}

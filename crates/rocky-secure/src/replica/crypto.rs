@@ -41,11 +41,34 @@ type VerifiedChains =
 #[derive(Default)]
 pub(super) struct Cache {
     opened: std::sync::Mutex<OpenedPayloads>,
+    headers: std::sync::Mutex<CreationHeaders>,
+    #[cfg(test)]
+    pub(super) header_verifications: AtomicU64,
     #[cfg(test)]
     pub(super) opens: AtomicU64,
     chains: std::sync::Mutex<VerifiedChains>,
     #[cfg(test)]
     pub(super) verifications: AtomicU64,
+}
+/// Immutable signature validation only; authority is checked at import/apply.
+pub(in crate::replica) struct CreationHeader {
+    bytes: Vec<u8>,
+    signed: p2panda_core::Header<Extensions>,
+}
+impl CreationHeader {
+    pub(in crate::replica) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub(in crate::replica) fn signed(&self) -> &p2panda_core::Header<Extensions> {
+        &self.signed
+    }
+}
+const CREATION_HEADERS: usize = 8192;
+const CREATION_HEADER_BYTES: usize = 8 * 1024 * 1024;
+#[derive(Default)]
+struct CreationHeaders {
+    entries: BTreeMap<Commitment, Arc<CreationHeader>>,
+    bytes: usize,
 }
 impl<A: RowApplication> Inner<A> {
     pub(super) fn verified_chain(
@@ -60,6 +83,37 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl Cache {
+    pub(in crate::replica) fn creation_header(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Arc<CreationHeader>, Error> {
+        let digest = moves::header_digest(bytes);
+        let mut cache = self
+            .headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(header) = cache.entries.get(&digest) {
+            return Ok(header.clone());
+        }
+        let header = Arc::new(CreationHeader {
+            signed: crate::wire::verified_header(bytes)?,
+            bytes: bytes.to_vec(),
+        });
+        #[cfg(test)]
+        self.header_verifications.fetch_add(1, Ordering::Relaxed);
+        if bytes.len() <= CREATION_HEADER_BYTES {
+            if cache.entries.len() >= CREATION_HEADERS
+                || cache.bytes + bytes.len() > CREATION_HEADER_BYTES
+            {
+                cache.entries.clear();
+                cache.bytes = 0;
+            }
+            cache.bytes += bytes.len();
+            cache.entries.insert(digest, header.clone());
+        }
+        Ok(header)
+    }
+
     fn verify(
         &self,
         chain: &CredentialChain,
@@ -130,6 +184,15 @@ impl<A: RowApplication> Inner<A> {
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
+    pub(crate) async fn checkpoint_header_verifications(&self) -> u64 {
+        self.inner
+            .lock()
+            .await
+            .crypto
+            .header_verifications
+            .load(Ordering::Relaxed)
+    }
+    #[cfg(test)]
     pub(crate) async fn crypto_stats(&self) -> (u64, u64) {
         let inner = self.inner.lock().await;
         (
@@ -184,6 +247,55 @@ impl<A: RowApplication> EncryptedReplica<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_headers_reject_changed_signatures_and_unsupported_formats() {
+        let key = PrivateKey::from_bytes(&[81; 32]);
+        let mut header = p2panda_core::Header {
+            version: 1,
+            public_key: key.public_key(),
+            signature: None,
+            payload_size: 0,
+            payload_hash: None,
+            timestamp: 1,
+            seq_num: 0,
+            backlink: None,
+            previous: vec![],
+            extensions: Extensions {
+                tip: TipId([1; 32]),
+                scope: ResourceScope {
+                    domain: rocky_core::Scope {
+                        mesh: rocky_core::MeshId([1; 16]),
+                        app: rocky_core::AppId([2; 16]),
+                        domain: rocky_core::DomainId([3; 16]),
+                    },
+                    encryption: [4; 32],
+                    table: [5; 32],
+                },
+                generation: rocky_core::KeyEpoch::new(1, &[6; 32]),
+                chain: [7; 32],
+                author: Some(1),
+                author_sequence: 1,
+                row_format: crate::wire::ROW_FORMAT,
+                births: vec![],
+                partition: None,
+                existence: 0,
+            },
+        };
+        header.sign(&key);
+        let cache = Cache::default();
+        let bytes = header.to_bytes();
+        let first = cache.creation_header(&bytes).unwrap();
+        assert!(Arc::ptr_eq(&first, &cache.creation_header(&bytes).unwrap()));
+        header.timestamp += 1;
+        assert!(cache.creation_header(&header.to_bytes()).is_err());
+        header.sign(&key);
+        assert!(cache.creation_header(&header.to_bytes()).is_ok());
+        header.extensions.row_format -= 1;
+        header.sign(&key);
+        assert!(cache.creation_header(&header.to_bytes()).is_err());
+        assert_eq!(cache.header_verifications.load(Ordering::Relaxed), 2);
+    }
+
     #[test]
     fn plaintext_retention_is_bounded_even_for_empty_bodies_and_keeps_the_new_page() {
         let mut cache = OpenedPayloads::default();

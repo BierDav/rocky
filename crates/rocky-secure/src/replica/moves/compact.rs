@@ -65,16 +65,19 @@ impl Origin {
         ) = decode(bytes)?;
         Ok(header.into_array())
     }
-    pub(in crate::replica) fn from_checkpoint(bytes: &[u8], header: &[u8]) -> Result<Self, Error> {
+    pub(in crate::replica) fn from_checkpoint(
+        bytes: &[u8],
+        header: &crypto::CreationHeader,
+    ) -> Result<Self, Error> {
         let (manifest, bindings, digest): (
             serde_bytes::ByteArray<32>,
             serde_bytes::ByteArray<32>,
             serde_bytes::ByteArray<32>,
         ) = decode(bytes)?;
-        if header_digest(header) != digest.into_array() {
+        if header_digest(header.bytes()) != digest.into_array() {
             return Err(denied("checkpoint birth header digest mismatch"));
         }
-        let signed = crate::wire::verified_header(header)?;
+        let signed = header.signed();
         Ok(Self {
             version: 2,
             manifest: manifest.into_array(),
@@ -94,7 +97,7 @@ impl Origin {
     }
     pub(in crate::replica) fn checked_checkpoint_bytes(
         &self,
-        header: &[u8],
+        header: &crypto::CreationHeader,
     ) -> Result<Vec<u8>, Error> {
         let bytes = self.checkpoint_bytes()?;
         if encode(&Self::from_checkpoint(&bytes, header)?)? != encode(self)? {

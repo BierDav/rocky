@@ -428,7 +428,14 @@ impl<A: RowApplication> Inner<A> {
         self.put_bindings(&encode(&proof.bindings)?).await
     }
     pub(super) async fn put_creation_header(&self, header: &[u8]) -> Result<(), Error> {
-        let signed = crate::wire::verified_header(header)?;
+        let header = self.crypto.creation_header(header)?;
+        self.put_verified_creation_header(&header).await
+    }
+    pub(super) async fn put_verified_creation_header(
+        &self,
+        header: &crypto::CreationHeader,
+    ) -> Result<(), Error> {
+        let signed = header.signed();
         if let Some(author) = signed.extensions.author {
             self.keep_stamp_author(signed.extensions.scope.domain, author, signed.public_key)
                 .await?;
@@ -436,7 +443,10 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute(
                 "INSERT INTO secure_creation_headers VALUES(?,?) ON CONFLICT(digest) DO NOTHING",
-                [header_digest(header).to_vec(), header.to_vec()],
+                [
+                    header_digest(header.bytes()).to_vec(),
+                    header.bytes().to_vec(),
+                ],
             )
             .await?;
         Ok(())

@@ -255,28 +255,33 @@ impl SecureDemo {
         target: usize,
         scopes: Vec<ResourceScope>,
     ) -> Result<(), Error> {
-        let mut cursor = None;
-        loop {
-            let (mut target_session, mut source_session, _link) =
-                self.channel(target, source).await?;
-            let serve = async {
-                source_session.serve(self.replica(source)).await?;
-                source_session.close().await
-            };
-            let pull = async {
-                let pulled = target_session
-                    .pull(self.replica(target), scopes.clone(), cursor, 128 * 1024)
-                    .await;
-                target_session.close().await?;
-                pulled
-            };
-            let (serve, pull) = tokio::join!(serve, pull);
-            serve?;
-            cursor = pull?;
-            if cursor.is_none() {
-                return Ok(());
+        for scope in scopes {
+            loop {
+                let (mut target_session, mut source_session, _link) =
+                    self.channel(target, source).await?;
+                let serve = async {
+                    Box::pin(source_session.serve(self.replica(source))).await?;
+                    source_session.close().await
+                };
+                let pull = async {
+                    let pulled =
+                        Box::pin(target_session.catch_up(self.replica(target), scope, 128 * 1024))
+                            .await;
+                    target_session.close().await?;
+                    pulled
+                };
+                let (served, pulled) = tokio::join!(serve, pull);
+                served?;
+                let pulled = pulled?;
+                if pulled.behind {
+                    return Err(Error::Rejected("the demo peer needs a checkpoint".into()));
+                }
+                if !pulled.exhausted {
+                    break;
+                }
             }
         }
+        Ok(())
     }
     /// A request channel `opener` opens on a loopback link to `answerer`,
     /// with the session answering it. Dropping the guard ends the link.

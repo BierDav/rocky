@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 16;
+pub(super) const HANDSHAKE_VERSION: u32 = 17;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -140,7 +140,7 @@ impl std::fmt::Display for Busy {
     }
 }
 impl std::error::Error for Busy {}
-fn timed_out(message: &'static str) -> Error {
+pub(super) fn timed_out(message: &'static str) -> Error {
     Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
 }
 impl Link {
@@ -534,21 +534,28 @@ impl NativeSession {
             let partitions = replica
                 .tuple_proofs(self.peer, &self.credentials, &allowed)
                 .await?;
-            self.send(HoldingMessage::Prove {
-                scopes: allowed,
-                proofs,
-                partitions,
-            })
-            .await?;
-            let HoldingMessage::Proved { scopes: accepted } =
-                self.reply::<HoldingMessage>().await?
-            else {
-                return Err(denied("link holding response"));
-            };
-            if accepted.iter().any(|scope| !batch.contains(scope)) {
-                return Err(denied("link unoffered holding"));
+            for message in holdings::prove_pages(&allowed, &proofs, &partitions)? {
+                let HoldingMessage::Prove { ref scopes, .. } = message else {
+                    return Err(denied("link holding response"));
+                };
+                let requested = scopes.clone();
+                self.send(message).await?;
+                let HoldingMessage::Proved { scopes: accepted } =
+                    self.reply::<HoldingMessage>().await?
+                else {
+                    return Err(denied("link holding response"));
+                };
+                if accepted.iter().any(|scope| !requested.contains(scope))
+                    || accepted
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != accepted.len()
+                {
+                    return Err(denied("link unoffered holding"));
+                }
+                self.offered.extend(accepted);
             }
-            self.offered.extend(accepted);
         }
         self.send(super::Message::Acknowledged).await
     }
@@ -776,7 +783,7 @@ mod tests {
     }
     #[test]
     fn only_current_link_name_and_handshake_label() {
-        // Explicit control close reasons use the current wire name; admission is unchanged.
+        // Transport and handshake each accept one current version.
         assert_eq!(
             rocky_core::net::Protocol::named(b"rocky/link/4"),
             Some(rocky_core::net::Protocol::Link)
@@ -784,7 +791,7 @@ mod tests {
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v16");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v17");
     }
 }
 

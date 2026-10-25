@@ -108,37 +108,25 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
     let ((), served) = tokio::join!(
         async {
             assert!(!c.sync_held_changes(&client, scope, 8192).await.unwrap());
-            assert!(c.pull_page(&client, vec![scope], None, 8192).await.is_err());
+            assert!(c.catch_up(&client, scope, 8192).await.is_err());
             c.close().await.unwrap();
         },
         s.serve_to_end(&server)
     );
-    assert!(
-        served
-            .unwrap_err()
-            .to_string()
-            .contains("peer follows another tip")
-    );
+    served.unwrap();
 }
 
 async fn refusal(client: &Replica, server: &Replica, message: Message) -> (String, u64, u64) {
     let (mut c, mut s) = pair(client, server).await;
     c.send(message).await.unwrap();
     let before = s.sent;
-    let error = s.serve(server).await.unwrap_err().to_string();
+    s.serve_once(server).await.unwrap();
     let messages = s.sent - before;
-    let (closed, (received, count)) = tokio::join!(s.close(), async {
-        let received = c.receive().await;
-        let count = c.received;
-        c.close().await.unwrap();
-        (received, count)
-    });
-    closed.unwrap();
-    assert!(
-        matches!(&received, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof),
-        "{:?}",
-        received.map(|_| ())
-    );
+    let error = c.answered().await.err().expect("refusal").to_string();
+    let count = c.received;
+    let (left, right) = tokio::join!(s.close(), c.close());
+    left.unwrap();
+    right.unwrap();
     (error, messages, count)
 }
 
@@ -148,12 +136,6 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
         logs: Vec::new(),
     };
     vec![
-        RowMessage::Pull {
-            scopes: vec![scope],
-            after: None,
-            quota: 1024,
-        }
-        .into(),
         RowMessage::Range {
             frontier: frontier.clone(),
             after: None,
@@ -270,8 +252,8 @@ async fn transcript_case(custody: bool) {
         let known = refusal(&member, &server, known).await;
         let missing = refusal(&member, &server, missing).await;
         assert_eq!(known, missing);
-        assert!(known.0.contains(HOLDING_DENIED));
-        assert_eq!(known.1, 0);
+        assert!(known.0.contains("request not permitted"));
+        assert_eq!(known.1, 1);
     }
     assert!(
         server
@@ -376,13 +358,9 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
     assert!(matches!(states.as_slice(), [FrontierReply::Refused(_)]));
     let proof = captured[0].1[0].clone();
     c2.send(query(vec![(scope, vec![proof; 5])])).await.unwrap();
-    assert!(
-        s2.serve_once(&server)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains(HOLDING_DENIED)
-    );
+    s2.serve_once(&server).await.unwrap();
+    assert!(matches!(c2.reply::<FrontierMessage>().await,
+        Err(Error::Application(cause)) if cause.downcast_ref::<RequestRefusal>() == Some(&RequestRefusal::NotPermitted)));
 }
 
 #[tokio::test]
@@ -551,7 +529,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
 }
 
 #[tokio::test]
-async fn acknowledgments_cannot_probe_unserved_frame_ids() {
+async fn frontier_acknowledgments_require_proved_custody() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(1);
     let writer = f
@@ -569,74 +547,28 @@ async fn acknowledgments_cannot_probe_unserved_frame_ids() {
         .register_partition(f.scope("customers", 1), f.tuple("customers", 1))
         .await
         .unwrap();
-    let frames = writer
+    writer
         .author_bundle([1; 32], vec![f.write("customers", 1)], vec![])
         .await
         .unwrap();
-    let existing = refusal(
-        &member,
-        &writer,
-        RowMessage::Ack {
-            id: frames[0].id().unwrap(),
-            applied: true,
-        }
-        .into(),
-    )
-    .await;
-    let unknown = refusal(
-        &member,
-        &writer,
-        RowMessage::Ack {
-            id: Hash::new(b"unknown frame"),
-            applied: true,
-        }
-        .into(),
-    )
-    .await;
-    assert_eq!(existing, unknown);
-    assert_eq!(existing.1, 0);
-    // A reader that proves the partition can pull and acknowledge normally.
+    let scope = f.scope("customers", 1);
+    let frontier = member.frontier(scope).await.unwrap();
+    let refused = refusal(&member, &writer, RowMessage::Held { frontier }.into()).await;
+    assert_eq!(refused.1, 1);
+    // A reader that proves the partition receives and acknowledges its frontier.
     f.keys(&member, 1, &["customers"]).await;
     let (mut c, mut s) = pair(&member, &writer).await;
-    let serve = s.serve_to_end(&writer);
-    let ask = async {
-        c.prove_scopes(&member, &[f.scope("customers", 1)])
-            .await
-            .unwrap();
-        c.send(RowMessage::Range {
-            frontier: member.frontier(f.scope("customers", 1)).await.unwrap(),
-            after: None,
-            quota: 16 * 1024,
-        })
-        .await
-        .unwrap();
-        let RowMessage::RangeFrames { page } = c.reply::<RowMessage>().await.unwrap() else {
-            panic!("missing range frames");
-        };
-        assert_eq!(page.frames.len(), 1);
-        c.send(RowMessage::Ack {
-            id: page.frames[0].id().unwrap(),
-            applied: false,
-        })
-        .await
-        .unwrap();
-        c.acknowledged("missing range acknowledgment")
-            .await
-            .unwrap();
-        assert!(
-            c.pull_page(&member, vec![f.scope("customers", 1)], None, 16 * 1024)
-                .await
-                .unwrap()
-                .rebootstrap
-                .is_empty()
+    let (served, ()) = tokio::join!(s.serve_to_end(&writer), async {
+        assert_eq!(
+            c.catch_up(&member, scope, 16 * 1024).await.unwrap().frames,
+            1
         );
         c.close().await.unwrap();
-    };
-    let (served, ()) = tokio::join!(serve, ask);
+    });
     served.unwrap();
     assert_eq!(
-        member.frontier(f.scope("customers", 1)).await.unwrap(),
-        writer.frontier(f.scope("customers", 1)).await.unwrap()
+        member.frontier(scope).await.unwrap(),
+        writer.frontier(scope).await.unwrap()
     );
 }
 
@@ -771,7 +703,37 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
         let known = refusal(&member, &server, known).await;
         let missing = refusal(&member, &server, missing).await;
         assert_eq!(known, missing);
-        assert!(known.0.contains(HOLDING_DENIED));
-        assert_eq!(known.1, 0);
+        assert!(known.0.contains("request not permitted"));
+        assert_eq!(known.1, 1);
     }
+}
+
+#[tokio::test]
+async fn a_refused_scope_does_not_end_the_request_channel() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(1);
+    let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
+    let client = open(&f, root.path(), "client.db", &[Right::Read]).await;
+    f.keys(&server, 1, &["customers"]).await;
+    f.keys(&client, 1, &["customers"]).await;
+    let allowed = f.scope("customers", 1);
+    let refused = f.scope("customers", 2);
+    let (mut c, mut s) = pair(&client, &server).await;
+    let (served, ()) = tokio::join!(s.serve_to_end(&server), async {
+        c.send(RowMessage::Range {
+            frontier: ScopeFrontier {
+                scope: refused,
+                logs: vec![],
+            },
+            after: None,
+            quota: 8192,
+        })
+        .await
+        .unwrap();
+        let error = c.answered().await.err().unwrap();
+        assert!(matches!(error, Error::Application(cause) if cause.is::<RequestRefusal>()));
+        assert!(!c.catch_up(&client, allowed, 8192).await.unwrap().behind);
+        c.close().await.unwrap();
+    });
+    served.unwrap();
 }

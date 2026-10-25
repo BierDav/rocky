@@ -75,12 +75,14 @@ pub(crate) struct Transfer {
     /// Scopes the peer restores from a checkpoint, as it is importing them
     /// or behind this device's pruned prefix: no history was pushed.
     pub waiting: Vec<ResourceScope>,
-    /// The scope that was syncing when the exchange failed.
-    pub failed: Option<ResourceScope>,
+    /// Scopes whose requests failed; other scopes still finish the pass.
+    pub failed: Vec<ResourceScope>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
-        self.failed = other.failed.or(self.failed);
+        for scope in other.failed {
+            self.fail(scope);
+        }
         for (scope, moved) in other.scopes {
             self.add(scope, moved);
         }
@@ -90,6 +92,22 @@ impl Transfer {
             if !self.held.contains(&scope) {
                 self.held.push(scope);
             }
+        }
+    }
+    fn request_failed(&mut self, scope: ResourceScope, error: &Failure) {
+        let refused = matches!(error.downcast_ref::<rocky_secure::Error>(),
+            Some(rocky_secure::Error::Application(cause))
+                if cause.downcast_ref::<rocky_secure::network::RequestRefusal>()
+                    == Some(&rocky_secure::network::RequestRefusal::NotPermitted));
+        if refused {
+            self.refuse(&[scope]);
+        } else {
+            self.fail(scope);
+        }
+    }
+    fn fail(&mut self, scope: ResourceScope) {
+        if !self.failed.contains(&scope) {
+            self.failed.push(scope);
         }
     }
     fn refuse(&mut self, scopes: &[ResourceScope]) {
@@ -145,7 +163,7 @@ pub(crate) async fn reconcile(
             .record_partial(upstream.peer.to_hex(), transfer);
         return Err(error);
     }
-    Ok((false, transfer))
+    Ok((!transfer.failed.is_empty(), transfer))
 }
 /// One scope of a bootstrap: the checkpoint its peer offered and the
 /// stored rows it holds, which progress counts.
@@ -171,129 +189,142 @@ pub(crate) async fn bootstrap(
 ) -> Result<Option<Vec<u8>>, Failure> {
     let saved: serde_json::Value = serde_json::from_slice(&expected)?;
     let intent = saved.get("intent").unwrap_or(&saved).clone();
-    if scopes.is_empty() {
-        return Ok(Some(expected));
-    }
-    let mut planning = match first.take() {
-        Some(session) => session,
-        None => session(replica, upstream).await?,
-    };
-    // A checkpoint exists only after a compaction; a scope the peer offers
-    // none of joins by frames.
-    planning.sync_tip_graph(replica).await?;
-    if !planning.follows_same_tip(replica).await {
-        planning.close().await?;
-        return Ok(None);
-    }
-    let mut offered = planning.offered_rows(replica, scopes).await?;
-    first = Some(planning);
-    for (scope, offer) in scopes.iter().zip(offered.iter_mut()) {
-        if deferred(
-            replica,
-            upstream,
-            *scope,
-            offer.map(|(checkpoint, _)| checkpoint),
-        )
-        .await?
-        {
-            *offer = None;
+    let mut pending = scopes.to_vec();
+    let mut totals: Vec<Planned> = saved
+        .get("totals")
+        .map(|totals| serde_json::from_value(totals.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let mut planned = Vec::new();
+    let mut tips_synced = false;
+    for scope in scopes {
+        let offer = async {
+            let mut planning = match first.take() {
+                Some(session) => session,
+                None => session(replica, upstream).await?,
+            };
+            if !tips_synced {
+                planning.sync_tip_graph(replica).await?;
+                tips_synced = true;
+            }
+            if !planning.follows_same_tip(replica).await {
+                return Ok::<_, Failure>(None);
+            }
+            let offer = planning
+                .offered_rows(replica, &[*scope])
+                .await?
+                .into_iter()
+                .next()
+                .flatten();
+            first = Some(planning);
+            Ok(Some(offer))
+        }
+        .await;
+        match offer {
+            Err(error) => transfer.request_failed(*scope, &error),
+            Ok(None) => {}
+            Ok(Some(offer)) => {
+                if deferred(
+                    replica,
+                    upstream,
+                    *scope,
+                    offer.map(|(checkpoint, _)| checkpoint),
+                )
+                .await?
+                {
+                    continue;
+                }
+                if let Some((checkpoint, rows)) = offer {
+                    let plan = Planned {
+                        scope: *scope,
+                        checkpoint,
+                        rows,
+                    };
+                    totals.retain(|old| old.scope != *scope);
+                    totals.push(plan.clone());
+                    planned.push(plan);
+                } else if replica.rebootstrap_progress(*scope).await?.is_none() {
+                    // The peer has never compacted this scope: it joins by frames.
+                    pending.retain(|known| known != scope);
+                }
+            }
         }
     }
-    let mut totals: Vec<Planned> = match saved.get("totals") {
-        Some(totals) => serde_json::from_value(totals.clone())?,
-        None => Vec::new(),
-    };
-    // A scope this peer does not import from keeps the total it was offered.
-    totals.retain(|planned| {
-        scopes
-            .iter()
-            .zip(&offered)
-            .all(|(scope, offer)| *scope != planned.scope || offer.is_none())
-    });
-    let mut planned: Vec<Planned> = scopes
-        .iter()
-        .zip(&offered)
-        .filter_map(|(scope, offer)| {
-            offer.map(|(checkpoint, rows)| Planned {
-                scope: *scope,
-                checkpoint,
-                rows,
-            })
-        })
-        .collect();
-    planned.sort_by_key(|planned| (planned.rows == 0, planned.rows));
-    totals.extend(planned.iter().cloned());
-    let importable = planned.len();
-    let pending: Vec<ResourceScope> = planned.iter().map(|planned| planned.scope).collect();
-    let mut next = 0;
-    let record = |next: usize, expected: &mut Vec<u8>| -> Result<(), Failure> {
+    planned.sort_by_key(|plan| (plan.rows == 0, plan.rows));
+    let record = |pending: &[ResourceScope], expected: &mut Vec<u8>| -> Result<(), Failure> {
         if std::fs::read(marker)? != *expected {
             return Err("bootstrap authority changed; retry with the new intent".into());
         }
-        let mut next_intent =
-            serde_json::json!({"intent": intent, "pending": &pending[next..], "totals": &totals});
+        let mut next = serde_json::json!({"intent": intent, "pending": pending, "totals": totals});
         if let Some(inviter) = saved.get("inviter") {
-            next_intent["inviter"] = inviter.clone();
+            next["inviter"] = inviter.clone();
         }
-        *expected = serde_json::to_vec(&next_intent)?;
+        *expected = serde_json::to_vec(&next)?;
         rocky_credentials::write_private(marker, expected)?;
         Ok(())
     };
-    record(next, &mut expected)?;
-    let mut imported = false;
-    for _ in 0..SESSIONS {
-        if next == importable {
-            break;
-        }
-        let mut session = match first.take() {
-            Some(session) => session,
-            None => session(replica, upstream).await?,
-        };
-        let scope = pending.get(next).ok_or("missing bootstrap scope")?;
-        let (catch_up, checkpoint) = if imported {
-            (
-                session.sync_scope(replica, *scope, QUOTA).await?.catch_up,
-                None,
-            )
-        } else {
-            let Some(report) = session.bootstrap_scope(replica, *scope, QUOTA).await? else {
+    record(&pending, &mut expected)?;
+    replica
+        .set_importing(pending.iter().copied().collect())
+        .await;
+    for plan in planned {
+        let scope = plan.scope;
+        let imported = async {
+            let mut imported = false;
+            for _ in 0..SESSIONS {
+                let mut session = match first.take() {
+                    Some(session) => session,
+                    None => session(replica, upstream).await?,
+                };
+                let (catch_up, checkpoint) = if imported {
+                    (
+                        session.sync_scope(replica, scope, QUOTA).await?.catch_up,
+                        None,
+                    )
+                } else {
+                    let report = session
+                        .bootstrap_scope(replica, scope, QUOTA)
+                        .await?
+                        .ok_or("the peer withdrew its checkpoint")?;
+                    imported = report.rebootstrap.is_some();
+                    (
+                        report.catch_up,
+                        report.rebootstrap.map(|r| (r.checkpoint, r.superseded)),
+                    )
+                };
+                transfer.add(
+                    scope,
+                    Moved {
+                        pulled: catch_up.frames,
+                        bytes: catch_up.bytes,
+                        checkpoint,
+                        ..Moved::default()
+                    },
+                );
                 session.close().await?;
-                return Ok(None);
-            };
-            imported = report.rebootstrap.is_some();
-            let checkpoint = report
-                .rebootstrap
-                .as_ref()
-                .map(|imported| (imported.checkpoint, imported.superseded));
-            (report.catch_up, checkpoint)
-        };
-        transfer.add(
-            *scope,
-            Moved {
-                pulled: catch_up.frames,
-                bytes: catch_up.bytes,
-                checkpoint,
-                ..Moved::default()
-            },
-        );
-        if !catch_up.exhausted {
-            replica.flush().await?;
-            next += 1;
-            record(next, &mut expected)?;
-            replica
-                .set_importing(pending[next..].iter().copied().collect())
-                .await;
-            imported = false;
+                if !catch_up.exhausted {
+                    replica.flush().await?;
+                    return Ok::<_, Failure>(());
+                }
+            }
+            Err("bootstrap exceeded its session budget; it continues on the next sync".into())
         }
-        session.close().await?;
-    }
-    if next < importable {
-        return Err("bootstrap exceeded its session budget; it continues on the next sync".into());
+        .await;
+        match imported {
+            Ok(()) => {
+                pending.retain(|known| *known != scope);
+                record(&pending, &mut expected)?;
+                replica
+                    .set_importing(pending.iter().copied().collect())
+                    .await;
+            }
+            Err(error) => transfer.request_failed(scope, &error),
+        }
     }
     if let Some(session) = first.take() {
         session.close().await?;
     }
-    Ok((importable == pending.len()).then_some(expected))
+    Ok(pending.is_empty().then_some(expected))
 }
 /// Whether `scope` holds pages of another node's checkpoint than the one
 /// `offered` that should go on with that signer: two peers signing the same
@@ -345,20 +376,67 @@ async fn rows(
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
 ) -> Result<(), Failure> {
+    let mut refresh = true;
+    for scope in scopes {
+        let result = rows_scope(
+            replica,
+            upstream,
+            &[*scope],
+            &progress,
+            transfer,
+            first.take(),
+            refresh,
+        )
+        .await;
+        match result {
+            Ok(session) => {
+                first = Some(session);
+                refresh = false;
+            }
+            Err(error) => {
+                if error.is::<Learned>() {
+                    return Err(error);
+                }
+                transfer.request_failed(*scope, &error);
+                progress(false);
+                refresh = true;
+            }
+        }
+    }
+    if let Some(mut session) = first {
+        session.pull_placements(replica).await?;
+        session.close().await?;
+    }
+    Ok(())
+}
+async fn rows_scope(
+    replica: &EncryptedReplica<TypedRows>,
+    upstream: &Upstream<'_>,
+    scopes: &[ResourceScope],
+    progress: impl Fn(bool),
+    transfer: &mut Transfer,
+    mut first: Option<NativeSession>,
+    refresh: bool,
+) -> Result<NativeSession, Failure> {
     for _ in 0..SESSIONS {
         let mut session = match first.take() {
             Some(session) => session,
             None => session(replica, upstream).await?,
         };
-        session.sync_tip_graph(replica).await?;
+        if refresh {
+            session.sync_tip_graph(replica).await?;
+        }
         // A compacted seal that lost, or a base at another cut, moves to a
         // seal of the followed path before the scopes sync.
-        if !session.rebootstrap_at_seals(replica).await? {
+        if !session.rebootstrap_scopes_at_seals(replica, scopes).await? {
             session.close().await?;
             continue;
         }
         // Seals the application asked to hold, from a peer that keeps them.
-        if !session.pull_wanted_seals(replica).await? {
+        if !session
+            .pull_wanted_seals_for_scopes(replica, scopes)
+            .await?
+        {
             session.close().await?;
             continue;
         }
@@ -381,7 +459,6 @@ async fn rows(
             }
         }
         for scope in &exchange.changed {
-            transfer.failed = Some(*scope);
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session
                 .catch_up_with_state(replica, *scope, QUOTA, true)
@@ -425,7 +502,7 @@ async fn rows(
                                 .map_err(|_| "state retry guard poisoned")?
                                 .entry(key)
                                 .or_default() += 1;
-                            // A failed channel is closed by the link; the next sync retries
+                            // The request channel is retired; the next sync retries
                             // this exact checkpoint, then falls back to frames after three failures.
                             return Err(match result {
                                 Err(error) => error.into(),
@@ -488,19 +565,15 @@ async fn rows(
                 break;
             }
         }
-        transfer.failed = None;
-        // Existence logs of referenced tables, held or not (`docs/runtime/existence-logs.md`).
         if !exhausted {
             for scope in replica.existence_scopes().await? {
-                session.sync_existence(replica, scope).await?;
+                if scopes.contains(&scope) {
+                    session.sync_existence(replica, scope).await?;
+                }
             }
-            // Where a seal's positions in scopes this node cannot hold lie.
-            session.pull_placements(replica).await?;
+            return Ok(session);
         }
         session.close().await?;
-        if !exhausted {
-            return Ok(());
-        }
     }
     Err("sync exceeded its session budget; it continues on the next sync".into())
 }

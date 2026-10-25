@@ -23,6 +23,9 @@ pub enum Packet {
     End {
         generation: u64,
     },
+    Working {
+        generation: u64,
+    },
 }
 impl Packet {
     pub(super) fn validate(&self) -> Result<(), Error> {
@@ -37,7 +40,8 @@ impl Packet {
         match self {
             Self::Open { generation }
             | Self::Data { generation, .. }
-            | Self::End { generation } => *generation,
+            | Self::End { generation }
+            | Self::Working { generation } => *generation,
         }
     }
 }
@@ -58,9 +62,12 @@ struct Slot {
     bytes: Vec<u8>,
     total: usize,
     closed: bool,
+    ended: bool,
+    progress: u64,
 }
 #[derive(Default)]
 struct State {
+    retired_frames: u64,
     next: u64,
     remote: u64,
     reconciling: BTreeMap<bool, u64>,
@@ -169,6 +176,8 @@ impl Channels {
                     bytes: Vec::new(),
                     total: 0,
                     closed: false,
+                    ended: false,
+                    progress: 0,
                 },
             );
             return Ok(Some(self.handle.session(key, generation, receive)?));
@@ -179,6 +188,24 @@ impl Channels {
             .ok_or_else(|| denied("unknown link channel"))?;
         if slot.generation != generation {
             return Err(denied("stale link channel"));
+        }
+        if slot.closed {
+            if matches!(packet, Packet::End { .. }) {
+                state.slots.remove(&key);
+                self.handle.events.send_replace(());
+            } else {
+                state.retired_frames = state.retired_frames.saturating_add(1);
+                tracing::debug!(
+                    channel = key.1,
+                    generation,
+                    retired_frames = state.retired_frames,
+                    "retired_channel_frame"
+                );
+            }
+            return Ok(None);
+        }
+        if slot.ended {
+            return Err(denied("data after link channel end"));
         }
         match packet {
             Packet::Data { bytes, last, .. } => {
@@ -193,22 +220,32 @@ impl Channels {
                 slot.bytes.extend(bytes);
                 self.handle.events.send_replace(());
                 if last {
-                    slot.receive
-                        .as_ref()
-                        .ok_or_else(|| denied("closed link channel"))?
-                        .try_send(std::mem::take(&mut slot.bytes))
-                        .map_err(|_| denied("link channel queue quota"))?;
+                    let Some(receive) = &slot.receive else {
+                        return Err(denied("data after link channel end"));
+                    };
+                    match receive.try_send(std::mem::take(&mut slot.bytes)) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) if !receive.is_closed() => {
+                            return Err(denied("link channel queue quota"));
+                        }
+                        Err(_) => {
+                            slot.closed = true;
+                            slot.receive.take();
+                            state.retired_frames = state.retired_frames.saturating_add(1);
+                        }
+                    }
                 }
+            }
+            Packet::Working { .. } => {
+                slot.progress = slot.progress.saturating_add(1);
+                self.handle.events.send_replace(());
             }
             Packet::End { .. } => {
                 if !slot.bytes.is_empty() {
                     return Err(denied("unfinished link channel message"));
                 }
+                slot.ended = true;
                 slot.receive.take();
-                if slot.closed {
-                    state.slots.remove(&key);
-                    self.handle.events.send_replace(());
-                }
             }
             Packet::Open { .. } => return Err(denied("duplicate link channel")),
         }
@@ -288,6 +325,12 @@ impl Drop for Reconcile {
     }
 }
 impl Handle {
+    pub fn retired_frames(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retired_frames
+    }
     pub fn is_closed(&self) -> bool {
         self.send.is_closed()
     }
@@ -339,7 +382,7 @@ impl Handle {
                 events.borrow_and_update();
                 let drained = {
                     let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-                    state.slots.is_empty() && state.reconciling.is_empty()
+                    state.slots.values().all(|slot| slot.closed) && state.reconciling.is_empty()
                 };
                 if drained {
                     return Ok(());
@@ -478,6 +521,8 @@ impl Handle {
                                 bytes: Vec::new(),
                                 total: 0,
                                 closed: false,
+                                ended: false,
+                                progress: 0,
                             },
                         );
                         Some((key, generation, receive))
@@ -525,7 +570,6 @@ impl Handle {
             binding: admission.binding,
             proved: admission.proved.clone(),
             offered: admission.offered.clone(),
-            served_frames: Default::default(),
             entry: None,
             tip_incoming: Vec::new(),
             contact_requests: 0,
@@ -558,11 +602,56 @@ impl Handle {
         .map_err(|_| denied("link ended"))
     }
 }
+/// Progress is emitted independently of the response builder's session borrow.
+#[derive(Clone)]
+pub(crate) struct Progress {
+    handle: Handle,
+    key: (bool, u16),
+    generation: u64,
+}
+impl Progress {
+    pub(crate) async fn run(&self) -> Result<(), Error> {
+        loop {
+            tokio::time::sleep(WORKING_INTERVAL).await;
+            self.handle
+                .send_frame(
+                    self.key,
+                    Packet::Working {
+                        generation: self.generation,
+                    },
+                )
+                .await?;
+        }
+    }
+}
 impl Io {
+    pub(crate) fn progress(&self) -> Progress {
+        Progress {
+            handle: self.handle.clone(),
+            key: self.key,
+            generation: self.generation,
+        }
+    }
+    pub(crate) fn retire(&mut self) {
+        if !self.closed {
+            let _ = self.handle.send.try_send(Frame {
+                channel: self.key.1,
+                direction: self.key.0,
+                message: Message::Channel(Packet::End {
+                    generation: self.generation,
+                }),
+            });
+            self.mark_closed();
+        }
+    }
+
     pub(crate) fn channel(&self) -> u16 {
         self.key.1
     }
     pub async fn send(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
+        if self.closed {
+            return Err(Error::Io(super::closed_by_peer()));
+        }
         if bytes.is_empty() || bytes.len() > MAX_SECURE_FRAME {
             return Err(denied("link channel message quota"));
         }
@@ -594,9 +683,11 @@ impl Io {
                 .slots
                 .get(&self.key)
                 .filter(|slot| slot.generation == self.generation)
-                .map_or((0, false), |slot| (slot.total, !slot.bytes.is_empty()))
+                .map_or((0, 0, false), |slot| {
+                    (slot.total, slot.progress, !slot.bytes.is_empty())
+                })
         };
-        let (mut covered, started) = received();
+        let (mut covered, mut progress, started) = received();
         let mut deadline = (!idle || started).then(|| tokio::time::Instant::now() + TIMEOUT);
         loop {
             tokio::select! {
@@ -610,13 +701,15 @@ impl Io {
                         None => std::future::pending().await,
                     }
                 } => {
+                    self.retire();
                     return Err(timed_out("link channel read timeout"));
                 }
                 changed = events.changed() => {
                     changed.map_err(|_| Error::Io(super::closed_by_peer()))?;
-                    let (total, _) = received();
+                    let (total, working, _) = received();
                     // A full fragment earns another deadline; trickles and other channels do not.
-                    if total > covered && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT) {
+                    if working > progress || (total > covered && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT)) {
+                        progress = working;
                         covered = total;
                         deadline = Some(tokio::time::Instant::now() + TIMEOUT);
                     }
@@ -670,7 +763,9 @@ impl Io {
             .filter(|slot| slot.generation == self.generation)
         {
             slot.closed = true;
-            if slot.receive.is_none() {
+            slot.receive.take();
+            slot.bytes.clear();
+            if slot.ended {
                 state.slots.remove(&self.key);
                 self.handle.events.send_replace(());
             }
@@ -679,16 +774,7 @@ impl Io {
 }
 impl Drop for Io {
     fn drop(&mut self) {
-        if !self.closed {
-            let _ = self.handle.send.try_send(Frame {
-                channel: self.key.1,
-                direction: self.key.0,
-                message: Message::Channel(Packet::End {
-                    generation: self.generation,
-                }),
-            });
-            self.mark_closed();
-        }
+        self.retire();
     }
 }
 
@@ -736,6 +822,149 @@ mod tests {
             channel,
             direction: true,
             message: Message::Channel(packet),
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_generation_discards_late_fragments_then_reuses_its_slot() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("channel");
+        };
+        assert!(io.receive().await.is_err());
+        channels.handle.drain().await.unwrap();
+        for last in [false, true] {
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![7],
+                        last,
+                    },
+                ))
+                .unwrap();
+        }
+        assert_eq!(channels.handle.retired_frames(), 2);
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        let mut next = channels
+            .accept(frame(2, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 1,
+                    bytes: vec![9],
+                    last: true,
+                },
+            ))
+            .unwrap();
+        let SessionIo::Channel(io) = &mut next.stream else {
+            panic!("channel");
+        };
+        assert_eq!(io.receive().await.unwrap(), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_receiver_retires_its_partial_message() {
+        let channels = channels();
+        let session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![1],
+                    last: false,
+                },
+            ))
+            .unwrap();
+        drop(session);
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![2],
+                    last: true,
+                },
+            ))
+            .unwrap();
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        assert_eq!(channels.handle.retired_frames(), 1);
+        assert!(channels.handle.state.lock().unwrap().slots.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn working_renews_only_its_channel_and_the_request_still_has_a_lifetime_limit() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let work = async {
+            loop {
+                tokio::time::sleep(WORKING_INTERVAL).await;
+                channels
+                    .accept(frame(2, Packet::Working { generation: 0 }))
+                    .unwrap();
+            }
+        };
+        tokio::pin!(work);
+        let result = tokio::select! {
+            result = session.answered() => result,
+            () = &mut work => unreachable!(),
+        };
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("request lifetime timeout")
+        );
+        assert_eq!(start.elapsed(), REQUEST_LIMIT);
+        assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].closed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_response_sends_working_every_four_seconds() {
+        let mut channels = channels();
+        let session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &session.stream else {
+            panic!("channel");
+        };
+        let progress = io.progress();
+        let start = tokio::time::Instant::now();
+        let observed = async {
+            for index in 1..=4 {
+                let frame = channels.outgoing.recv().await.unwrap();
+                assert!(matches!(
+                    frame.message,
+                    Message::Channel(Packet::Working { generation: 0 })
+                ));
+                assert_eq!(start.elapsed(), WORKING_INTERVAL * index);
+            }
+        };
+        tokio::pin!(observed);
+        tokio::select! {
+            () = &mut observed => {},
+            result = progress.run() => panic!("progress ended: {result:?}"),
         }
     }
     #[tokio::test]

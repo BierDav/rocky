@@ -38,6 +38,7 @@ filter = '''
     | (package(rocky-secure) & test(/^replica::coordinated::abandoned::tests::/))
     | (package(rocky-secure) & test(/^network::(holdings|contacts)::tests::/))
     | (package(rocky-secure) & test(/^network::link::integration_tests::/))
+    | (package(rocky-secure) & test(/^network::budgets::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests|tip_tests))::/))

@@ -210,7 +210,7 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
     let (mut server, mut client) = sessions((&bob, &b, &b_chain), (&carol, &c, &c_chain)).await;
     let quota = MAX_SECURE_FRAME / 2;
     let (served, ()) = tokio::join!(server.serve_to_end(&b), async {
-        client.pull(&c, vec![f.public], None, quota).await.unwrap();
+        client.catch_up(&c, f.public, quota).await.unwrap();
         let carried = client.carried_chain_bytes();
         assert!(carried > 0);
         assert_eq!(c.snapshot(f.public).await.unwrap().rows.len(), 1);
@@ -225,7 +225,7 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
         c.learn_revocations(&revoked).await.unwrap();
         // The session already carried her chain and does not send it again;
         // the frame that names it is verified, and refused, all the same.
-        assert!(client.pull(&c, vec![f.public], None, quota).await.is_err());
+        assert!(client.catch_up(&c, f.public, quota).await.is_err());
         assert_eq!(client.carried_chain_bytes(), carried);
         client.close().await.unwrap();
     });

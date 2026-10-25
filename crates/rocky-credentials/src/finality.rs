@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 pub const TERMINAL_ACK_FORMAT: u32 = 1;
 pub const SEAL_FINALITY_FORMAT: u32 = 1;
 /// The coordinator's in-sync cap: no record needs more acknowledgments.
-pub const MAX_FINALITY_ACKS: usize = 32;
+pub const MAX_FINALITY_ACKS: usize = 15;
 /// Largest encoded acknowledgment, its node chain included.
 pub const MAX_TERMINAL_ACK_BYTES: usize = 16 * 1024;
 /// Largest encoded finality record.

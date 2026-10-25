@@ -215,6 +215,10 @@ struct PeerRetry {
     link_retry: crate::scheduling::Retry,
     generation: u64,
 }
+struct SyncFailure {
+    refused: bool,
+    since: Option<u64>,
+}
 struct Reached {
     at: u64,
     error: Option<String>,
@@ -262,6 +266,7 @@ pub(crate) struct Node {
     clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
+    retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
     /// The followed tip the peers' backoff was earned on.
     backoff_tip: std::sync::Mutex<Option<rocky_core::TipId>>,
@@ -293,6 +298,7 @@ pub(crate) struct Node {
         BTreeMap<ResourceScope, (Option<rocky_core::Commitment>, tokio::time::Instant)>,
     >,
     state_failures: std::sync::Mutex<BTreeMap<(ResourceScope, rocky_core::Commitment), u8>>,
+    sync_failures: std::sync::Mutex<BTreeMap<(PublicKey, ResourceScope), SyncFailure>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
     /// Signals that the discovery topics may have changed.
     topics: watch::Sender<u64>,
@@ -363,6 +369,7 @@ impl Node {
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
+            retry_seed: rand::random(),
             retries: std::sync::Mutex::new(BTreeMap::new()),
             backoff_tip: std::sync::Mutex::new(None),
             resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
@@ -383,6 +390,7 @@ impl Node {
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),
             state_failures: Default::default(),
+            sync_failures: Default::default(),
             choices: std::sync::Mutex::new(BTreeMap::new()),
             topics: watch::channel(0).0,
             announcing: AtomicBool::new(false),
@@ -1920,12 +1928,23 @@ impl Node {
             .send_modify(|event| *event = event.wrapping_add(1));
         self.wake_sync();
     }
+    fn peer_retry(&self, peer: PublicKey) -> PeerRetry {
+        let identity = format!(
+            "{}:{peer}",
+            self.node_identity.as_deref().unwrap_or("unavailable")
+        );
+        PeerRetry {
+            retry: crate::scheduling::Retry::seeded(self.retry_seed, identity.as_bytes()),
+            link_retry: crate::scheduling::Retry::seeded(self.retry_seed, identity.as_bytes()),
+            ..PeerRetry::default()
+        }
+    }
     pub(super) fn reset_retry(&self, peer: Option<PublicKey>) {
         let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
         for (node, state) in retries.iter_mut() {
             if peer.is_none_or(|peer| peer == *node) {
-                state.retry.reset();
-                state.link_retry.reset();
+                state.retry.wake();
+                state.link_retry.wake();
                 state.short = false;
                 state.generation = state.generation.wrapping_add(1);
             }
@@ -2266,7 +2285,7 @@ impl Node {
                 .filter_map(|(peer, contact)| {
                     let state = retries.entry(peer).or_insert_with(|| PeerRetry {
                         pending: has_frames,
-                        ..PeerRetry::default()
+                        ..self.peer_retry(peer)
                     });
                     let skip = if !state.retry.ready() {
                         Some(crate::SkipReason::Backoff)
@@ -2472,6 +2491,7 @@ impl Node {
                     match &result {
                         Ok((false, _)) => {
                             state.retry.reset();
+                            state.link_retry.reset();
                             state.pending = false;
                         }
                         Ok((true, _)) => {
@@ -2692,6 +2712,30 @@ impl Node {
             && let Some(partial) = self.observations.partial_transfer(&peer.to_hex())
         {
             transfer.extend(partial);
+        }
+        if let Ok((_, transfer)) = &result {
+            let mut failures = self
+                .sync_failures
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for scope in transfer
+                .held
+                .iter()
+                .chain(transfer.scopes.iter().map(|(scope, _)| scope))
+            {
+                if !transfer.failed.contains(scope) && !transfer.refused.contains(scope) {
+                    failures.retain(|(_, known), _| known != scope);
+                }
+            }
+            for scope in transfer.failed.iter().chain(&transfer.refused) {
+                failures
+                    .entry((peer, *scope))
+                    .and_modify(|failure| failure.refused = transfer.refused.contains(scope))
+                    .or_insert_with(|| SyncFailure {
+                        refused: transfer.refused.contains(scope),
+                        since: now().ok(),
+                    });
+            }
         }
         result
     }
@@ -2924,6 +2968,8 @@ impl Node {
         let _bootstrap = self.bootstrap.lock().await;
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
+        let mut importing = Vec::new();
+        let mut bootstrap_retry = false;
         if marker.exists() {
             self.sync_state.send_replace("bootstrapping");
             let expected = std::fs::read(&marker)?;
@@ -2948,16 +2994,19 @@ impl Node {
                 first.take(),
             )
             .await;
-            self.observations
-                .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
             let completed = match completed {
-                Err(error) => {
-                    let _ = reconcile.close().await;
-                    let _ = upstream.link.drain().await;
-                    return Err(error);
+                Err(_) => {
+                    bootstrap_retry = true;
+                    None
                 }
                 Ok(completed) => completed,
             };
+            if completed.is_none() {
+                bootstrap_retry = true;
+                importing = self
+                    .bootstrap_pending(&serde_json::from_slice(&std::fs::read(&marker)?)?)
+                    .await?;
+            }
             if let Some(completed) = completed {
                 self.replica.flush().await?;
                 if std::fs::read(&marker)? != completed {
@@ -2985,7 +3034,7 @@ impl Node {
         let scopes: Vec<_> = self
             .scopes()
             .into_iter()
-            .filter(|scope| !self.domain().partitioned_table(scope))
+            .filter(|scope| !self.domain().partitioned_table(scope) && !importing.contains(scope))
             .collect();
         let reconciled = sync::reconcile(
             &self.replica,
@@ -3003,6 +3052,8 @@ impl Node {
         .await;
         let (retry, transfer) = match reconciled {
             Err(error) => {
+                self.observations
+                    .record_partial(peer.to_hex(), bootstrapped);
                 let _ = reconcile.close().await;
                 let _ = upstream.link.drain().await;
                 return Err(error);
@@ -3010,11 +3061,17 @@ impl Node {
             Ok(reconciled) => reconciled,
         };
         bootstrapped.extend(transfer);
-        self.observations
-            .record_partial(peer.to_hex(), bootstrapped);
-        reconcile.close().await?;
-        upstream.link.drain().await?;
-        Ok((retry, sync::Transfer::default()))
+        if let Err(error) = reconcile.close().await {
+            self.observations
+                .record_partial(peer.to_hex(), bootstrapped);
+            return Err(error.into());
+        }
+        if let Err(error) = upstream.link.drain().await {
+            self.observations
+                .record_partial(peer.to_hex(), bootstrapped);
+            return Err(error.into());
+        }
+        Ok((retry || bootstrap_retry, bootstrapped))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
     /// and enrollment. Synchronization runs on live links.

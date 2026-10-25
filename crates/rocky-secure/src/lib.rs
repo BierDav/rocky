@@ -46,6 +46,28 @@ use serde::{Serialize, de::DeserializeOwned};
 pub use wire::{EncryptedFrame, EncryptedPackage, PackageKind};
 
 pub const MAX_SECURE_FRAME: usize = 256 * 1024;
+/// Encoded payload budget, leaving room for the signed framing.
+pub(crate) const SECURE_MESSAGE_BYTES: usize = MAX_SECURE_FRAME - 4096;
+/// Counts a prefix by encoded size, including room for family fields and cursors.
+fn page_len<T: Serialize>(items: &[T], limit: usize) -> Result<usize, Error> {
+    let mut bytes = 1024;
+    let mut count = 0;
+    for item in items.iter().take(limit) {
+        let size = encode(item)?.len();
+        if bytes + size > SECURE_MESSAGE_BYTES {
+            if count == 0 {
+                return Err(Error::Quota {
+                    resource: "message item",
+                    limit: SECURE_MESSAGE_BYTES - 1024,
+                });
+            }
+            break;
+        }
+        bytes += size;
+        count += 1;
+    }
+    Ok(count)
+}
 /// Retained protocol artifacts, such as stored coordinated entries. Row
 /// operations are bounded by `RetentionLimits` instead.
 pub const MAX_SECURE_RECORDS: usize = 4096;

@@ -35,7 +35,9 @@ impl Node {
                         loop {
                             tokio::select! {
                                 result = &mut receive => break result?,
-                                Some(result) = requests.next(), if !requests.is_empty() => { result?; }
+                                Some(result) = requests.next(), if !requests.is_empty() => {
+                                    if result.is_err() { self.link_pending(peer); }
+                                }
                             }
                         }
                     };
@@ -79,11 +81,25 @@ impl Node {
                             voids,
                         } if frame.direction != direction => {
                             if requests.len() >= 8 {
-                                return Err("link request queue quota".into());
+                                #[cfg(test)]
+                                service.live.dropped_pushes.fetch_add(1, Ordering::SeqCst);
+                                self.link_pending(peer);
+                                continue;
                             }
                             let handle = opened.channels.handle.clone();
+                            #[cfg(test)]
+                            let gate = service
+                                .live
+                                .push_gate
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .clone();
                             requests.push(Box::pin(async move {
-                                let _publishing = service.live.publishing.lock().await;
+                                #[cfg(test)]
+                                let _permit = match gate {
+                                    Some(gate) => Some(gate.acquire_owned().await?),
+                                    None => None,
+                                };
                                 let (complete, received) = handle
                                     .receive_push(&self.replica, scope, frames, voids)
                                     .await?;
@@ -104,7 +120,8 @@ impl Node {
                                 }
                                 seen.push_back(token);
                                 if requests.len() >= 8 {
-                                    return Err("link request queue quota".into());
+                                    self.link_pending(peer);
+                                    continue;
                                 }
                                 // Handlers may hold the replica while awaiting storage. Poll
                                 // signal work beside them instead of blocking their progress.

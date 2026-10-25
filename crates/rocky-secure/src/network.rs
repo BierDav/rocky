@@ -17,6 +17,8 @@ use tokio::{
     time::timeout,
 };
 
+#[cfg(test)]
+mod budgets;
 mod chains;
 mod checkpoints;
 pub use checkpoints::SealPull;
@@ -48,7 +50,7 @@ use holdings::HoldingMessage;
 use placements::PlacementMessage;
 use revocations::RevocationMessage;
 use rows::RowMessage;
-pub use rows::{CatchUp, Pulled, Pushed, ScopeSync};
+pub use rows::{CatchUp, Pushed, ScopeSync};
 use tips::TipMessage;
 
 /// The stream a session runs over. The transport adds no security the
@@ -56,6 +58,8 @@ use tips::TipMessage;
 pub use rocky_core::net::SessionStream;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const WORKING_INTERVAL: Duration = Duration::from_secs(4);
+const REQUEST_LIMIT: Duration = Duration::from_secs(120);
 const IO_CHUNK: usize = 8 * 1024;
 /// The refusal of a peer the merged revocation set revokes.
 pub const PEER_REVOKED: &str = "the peer is revoked";
@@ -122,9 +126,54 @@ struct SignedMessage {
     bytes: Vec<u8>,
     signature: Signature,
 }
+/// A request failed; the authenticated link remains usable.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RequestRefusal {
+    NotPermitted,
+    Unavailable,
+    OverBudget,
+    Malformed,
+    WrongTip,
+}
+impl std::fmt::Display for RequestRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotPermitted => "request not permitted",
+            Self::Unavailable => "request unavailable",
+            Self::OverBudget => "request over budget",
+            Self::Malformed => "malformed request",
+            Self::WrongTip => "request on wrong tip",
+        })
+    }
+}
+impl std::error::Error for RequestRefusal {}
+impl RequestRefusal {
+    fn of(error: &Error) -> Self {
+        match error {
+            Error::Quota { .. } | Error::Backpressure | Error::Retention { .. } => Self::OverBudget,
+            Error::Conflict | Error::Incompatible(_) => Self::WrongTip,
+            Error::Protocol(_) | Error::Corrupt(_) => Self::Malformed,
+            Error::Rejected(reason) if reason.contains("quota") || reason.contains("budget") => {
+                Self::OverBudget
+            }
+            Error::Rejected(reason)
+                if reason.contains("unexpected")
+                    || reason.contains("invalid")
+                    || reason.contains("outside")
+                    || reason.contains("incomplete") =>
+            {
+                Self::Malformed
+            }
+            Error::Rejected(reason) if reason.contains("tip") => Self::WrongTip,
+            Error::Rejected(_) => Self::NotPermitted,
+            _ => Self::Unavailable,
+        }
+    }
+}
 /// Every message of the session, by family.
 #[derive(Serialize, Deserialize)]
 enum Message {
+    Refused { reason: RequestRefusal },
     Acknowledged,
     Rows(RowMessage),
     Checkpoints(CheckpointMessage),
@@ -145,6 +194,7 @@ impl Message {
     /// The family's name in diagnostics.
     fn family(&self) -> &'static str {
         match self {
+            Self::Refused { .. } => "refusal",
             Self::Acknowledged => "acknowledgment",
             Self::Rows(_) => "rows",
             Self::Checkpoints(_) => "checkpoints",
@@ -223,7 +273,6 @@ pub struct NativeSession {
     binding: Commitment,
     proved: std::collections::BTreeSet<ResourceScope>,
     offered: std::collections::BTreeSet<ResourceScope>,
-    served_frames: std::collections::BTreeMap<Hash, ResourceScope>,
     /// A coordinated entry the peer is sending page by page.
     entry: Option<entries::Receiving>,
     tip_incoming: Vec<crate::TipStatement>,
@@ -415,7 +464,6 @@ impl NativeSession {
             binding: rocky_core::commitment("rocky.holding-session.v1", &binding),
             proved: Default::default(),
             offered: Default::default(),
-            served_frames: Default::default(),
             entry: None,
             tip_incoming: Vec::new(),
             contact_requests: 0,
@@ -508,20 +556,36 @@ impl NativeSession {
         }
         let length = frame.len();
         self.spend(length)?;
-        match &mut self.stream {
-            SessionIo::Channel(channel) => channel.send(frame).await?,
-            SessionIo::Native(stream) => write_frame(stream, &frame).await?,
-        }
-        self.sent = self
-            .sent
-            .checked_add(1)
-            .ok_or_else(|| denied("session sequence exhausted"))?;
         if !self.serving {
             let channel = self.channel();
             self.request
                 .get_or_insert_with(|| trace::Request::start(&self.span, channel, family))
                 .sent(length);
         }
+        let deadline = self.request.as_ref().map_or_else(
+            || tokio::time::Instant::now() + REQUEST_LIMIT,
+            trace::Request::deadline,
+        );
+        let written = tokio::time::timeout_at(deadline, async {
+            match &mut self.stream {
+                SessionIo::Channel(channel) => channel.send(frame).await,
+                SessionIo::Native(stream) => write_frame(stream, &frame).await,
+            }
+        })
+        .await;
+        match written {
+            Ok(result) => result?,
+            Err(_) => {
+                if let SessionIo::Channel(channel) = &mut self.stream {
+                    channel.retire();
+                }
+                return Err(link::timed_out("request lifetime timeout"));
+            }
+        }
+        self.sent = self
+            .sent
+            .checked_add(1)
+            .ok_or_else(|| denied("session sequence exhausted"))?;
         Ok(())
     }
     fn channel(&self) -> u16 {
@@ -569,7 +633,22 @@ impl NativeSession {
     }
     /// The peer's answer; the chains it carries first join the table.
     async fn answered(&mut self) -> Result<Message, Error> {
-        self.answered_with_idle(false).await
+        let deadline = self.request.as_ref().map_or_else(
+            || tokio::time::Instant::now() + REQUEST_LIMIT,
+            trace::Request::deadline,
+        );
+        match tokio::time::timeout_at(deadline, self.answered_with_idle(false)).await {
+            Ok(result) => result,
+            Err(_) => {
+                if let SessionIo::Channel(channel) = &mut self.stream {
+                    channel.retire();
+                }
+                if let Some(request) = self.request.take() {
+                    request.finish("timeout");
+                }
+                Err(link::timed_out("request lifetime timeout"))
+            }
+        }
     }
     // The requester may be applying its previous answer before asking again.
     async fn answered_request(&mut self) -> Result<Message, Error> {
@@ -579,6 +658,12 @@ impl NativeSession {
         loop {
             match self.receive_with_idle(idle).await? {
                 Message::Chains(message) => self.learn_chains(message),
+                Message::Refused { reason } => {
+                    if let Some(request) = self.request.take() {
+                        request.finish("refused");
+                    }
+                    return Err(Error::Application(Box::new(reason)));
+                }
                 message => {
                     if let Some(request) = self.request.take() {
                         request.finish("ok");
@@ -633,12 +718,65 @@ impl NativeSession {
     ) -> Result<(), Error> {
         // Chains a push carries first are not a request of their own.
         let message = self.answered_request().await?;
+        self.respond(replica, message, None, None).await
+    }
+    async fn respond<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        message: Message,
+        deliveries: Option<&dyn Deliveries>,
+        handler: Option<&dyn ContactHandler>,
+    ) -> Result<(), Error> {
         let span = trace::serve(&self.span, self.channel(), message.family());
+        let progress = match &self.stream {
+            SessionIo::Channel(channel) => Some(channel.progress()),
+            SessionIo::Native(_) => None,
+        };
         self.serving = true;
-        let result =
-            tracing::Instrument::instrument(self.answer(replica, message), span.clone()).await;
+        let result = {
+            let answer = async {
+                match (message, deliveries, handler) {
+                    (Message::Contacts(message), _, Some(handler)) => {
+                        self.answer_contact(replica, handler, message).await
+                    }
+                    (Message::Delivery(message), Some(deliveries), _) => {
+                        self.answer_delivery(deliveries, message).await
+                    }
+                    (message, _, _) => self.answer(replica, message).await,
+                }
+            };
+            let work = async {
+                match progress {
+                    Some(progress) => progress.run().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let result = tokio::time::timeout(REQUEST_LIMIT, async {
+                let answer = tracing::Instrument::instrument(answer, span.clone());
+                tokio::pin!(answer, work);
+                tokio::select! {
+                    biased;
+                    result = &mut answer => result,
+                    result = &mut work => result,
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(link::timed_out("request lifetime timeout")));
+            trace::outcome(&span, &result);
+            result
+        };
+        let result = match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.entry = None;
+                self.tip_incoming.clear();
+                self.send(Message::Refused {
+                    reason: RequestRefusal::of(&error),
+                })
+                .await
+            }
+        };
         self.serving = false;
-        trace::outcome(&span, &result);
         result
     }
     async fn answer<A: RowApplication>(

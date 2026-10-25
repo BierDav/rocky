@@ -217,3 +217,65 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
         })
         .await
 }
+
+#[tokio::test]
+async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            add(&a, 1).await?;
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let contact = b
+                .settings
+                .lock()
+                .await
+                .targets()
+                .into_iter()
+                .find(|(node, _)| *node == peer)
+                .ok_or("owner contact")?
+                .1;
+            let service = b.current().ok_or("service")?;
+            let upstream = Upstream {
+                link: b.request_link(&*service.transport, peer, &contact).await?,
+                observations: &b.observations,
+                peer,
+                contacts: None,
+                renew_from: None,
+                state_failures: &b.state_failures,
+                keep: None,
+            };
+            let good = a.app_scopes()[0];
+            let mut bad = good;
+            bad.table = [255; 32];
+            let (_, transfer) =
+                sync::reconcile(&b.replica, &upstream, &[bad, good], |_| {}, None).await?;
+            assert!(transfer.failed.contains(&bad) || transfer.refused.contains(&bad));
+            assert!(!transfer.failed.contains(&good));
+            assert!(
+                transfer
+                    .scopes
+                    .iter()
+                    .any(|(scope, moved)| *scope == good && moved.pulled == 1)
+            );
+            assert!(!upstream.link.is_closed());
+            for node in [&a, &b] {
+                node.detach(None).await;
+            }
+            Ok(())
+        })
+        .await
+}

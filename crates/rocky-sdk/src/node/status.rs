@@ -341,6 +341,23 @@ impl Node {
     pub(super) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {
         use rocky_core::{Blocker, BlockerKind, ClearsBy, domain_label, scope_label};
         let mut blockers = self.replica.blockers().await?;
+        for ((peer, scope), failure) in self
+            .sync_failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            blockers.push(Blocker {
+                scope: scope_label(scope),
+                kind: BlockerKind::SyncRequest {
+                    refused: failure.refused,
+                },
+                clears_by: ClearsBy::Peer {
+                    node: peer.to_hex(),
+                },
+                since: failure.since,
+            });
+        }
         let marker = self.path.with_file_name("bootstrap.json");
         let intent: Value = match std::fs::read(&marker) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -415,7 +432,11 @@ impl Node {
             timeouts: Vec::new(),
         };
         report.timeouts = timeouts(&report.attempts);
-        let partial = self.observations.partial_transfer(&node);
+        let partial = if result.is_err() {
+            self.observations.partial_transfer(&node)
+        } else {
+            None
+        };
         let transfer = match result {
             Ok((retry, transfer)) => {
                 report.retry_pending = *retry;
@@ -447,7 +468,7 @@ impl Node {
                     superseded: moved.checkpoint.map(|(_, rows)| rows),
                 })
                 .collect();
-            report.scopes = scope_outcomes(transfer, result.is_err())
+            report.scopes = scope_outcomes(transfer)
                 .into_iter()
                 .map(|(scope, outcome)| ScopeOutcome {
                     scope: self.observed_scope(scope),
@@ -594,10 +615,7 @@ impl Node {
 }
 
 /// Each scope an exchange reached and how it ended.
-fn scope_outcomes(
-    transfer: &crate::sync::Transfer,
-    failed: bool,
-) -> Vec<(ResourceScope, ScopeSyncOutcome)> {
+fn scope_outcomes(transfer: &crate::sync::Transfer) -> Vec<(ResourceScope, ScopeSyncOutcome)> {
     let mut outcomes: Vec<(ResourceScope, ScopeSyncOutcome)> = Vec::new();
     let mut set = |scope: ResourceScope, outcome: ScopeSyncOutcome| match outcomes
         .iter_mut()
@@ -619,8 +637,8 @@ fn scope_outcomes(
     for scope in &transfer.waiting {
         set(*scope, ScopeSyncOutcome::PeerImporting);
     }
-    if failed && let Some(scope) = transfer.failed {
-        set(scope, ScopeSyncOutcome::Failed);
+    for scope in &transfer.failed {
+        set(*scope, ScopeSyncOutcome::Failed);
     }
     outcomes
 }

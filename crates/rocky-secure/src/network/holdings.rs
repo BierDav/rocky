@@ -9,7 +9,7 @@ pub(crate) struct HoldingProof {
     pub epoch: rocky_core::KeyEpoch,
     pub value: [u8; 16],
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) enum HoldingMessage {
     Prove {
         scopes: Vec<ResourceScope>,
@@ -207,26 +207,27 @@ impl NativeSession {
             let partitions = replica
                 .tuple_proofs(self.peer, &self.credentials, batch)
                 .await?;
-            self.send(HoldingMessage::Prove {
-                scopes: batch.to_vec(),
-                proofs,
-                partitions,
-            })
-            .await?;
-            let HoldingMessage::Proved { scopes: accepted } =
-                self.reply::<HoldingMessage>().await?
-            else {
-                return Err(denied(HOLDING_DENIED));
-            };
-            if accepted.iter().any(|scope| !batch.contains(scope))
-                || accepted.iter().collect::<BTreeSet<_>>().len() != accepted.len()
-            {
-                return Err(denied(HOLDING_DENIED));
-            }
-            let complete = accepted.len() == batch.len();
-            self.offered.extend(accepted);
-            if !complete {
-                return Ok(false);
+            for message in prove_pages(batch, &proofs, &partitions)? {
+                let HoldingMessage::Prove { ref scopes, .. } = message else {
+                    return Err(denied(HOLDING_DENIED));
+                };
+                let requested = scopes.clone();
+                self.send(message).await?;
+                let HoldingMessage::Proved { scopes: accepted } =
+                    self.reply::<HoldingMessage>().await?
+                else {
+                    return Err(denied(HOLDING_DENIED));
+                };
+                if accepted.iter().any(|scope| !requested.contains(scope))
+                    || accepted.iter().collect::<BTreeSet<_>>().len() != accepted.len()
+                {
+                    return Err(denied(HOLDING_DENIED));
+                }
+                let complete = accepted.len() == requested.len();
+                self.offered.extend(accepted);
+                if !complete {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -272,13 +273,6 @@ impl NativeSession {
     ) -> Result<(), Error> {
         let scopes = match message {
             Message::Rows(message) => match message {
-                RowMessage::Pull { scopes, .. } => scopes.clone(),
-                RowMessage::Ack { id, .. } => vec![
-                    *self
-                        .served_frames
-                        .get(id)
-                        .ok_or_else(|| denied(HOLDING_DENIED))?,
-                ],
                 RowMessage::Range { frontier, .. } | RowMessage::Held { frontier } => {
                     vec![frontier.scope]
                 }
@@ -318,6 +312,47 @@ impl NativeSession {
         }
         Ok(())
     }
+}
+
+pub(super) fn prove_pages(
+    scopes: &[ResourceScope],
+    proofs: &[(ResourceScope, Vec<HoldingProof>)],
+    partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+) -> Result<Vec<HoldingMessage>, Error> {
+    let mut result = Vec::new();
+    let mut remaining = scopes;
+    while !remaining.is_empty() {
+        let mut count = remaining.len().min(64);
+        let message = loop {
+            let batch = &remaining[..count];
+            let message = HoldingMessage::Prove {
+                scopes: batch.to_vec(),
+                proofs: proofs
+                    .iter()
+                    .filter(|(scope, _)| batch.contains(scope))
+                    .cloned()
+                    .collect(),
+                partitions: partitions
+                    .iter()
+                    .filter(|(scope, _)| batch.contains(scope))
+                    .cloned()
+                    .collect(),
+            };
+            if encode(&message)?.len() <= SECURE_MESSAGE_BYTES {
+                break message;
+            }
+            if count == 1 {
+                return Err(Error::Quota {
+                    resource: "holding proof",
+                    limit: SECURE_MESSAGE_BYTES,
+                });
+            }
+            count -= 1;
+        };
+        result.push(message);
+        remaining = &remaining[count..];
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -31,6 +31,10 @@ pub(super) struct Registry {
     events: watch::Sender<()>,
     #[cfg(test)]
     pub closing: AtomicU64,
+    #[cfg(test)]
+    pub(super) push_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
+    #[cfg(test)]
+    pub(super) dropped_pushes: AtomicU64,
 }
 impl Default for Registry {
     fn default() -> Self {
@@ -42,6 +46,10 @@ impl Default for Registry {
             events: watch::channel(()).0,
             #[cfg(test)]
             closing: AtomicU64::new(0),
+            #[cfg(test)]
+            push_gate: Default::default(),
+            #[cfg(test)]
+            dropped_pushes: AtomicU64::new(0),
         }
     }
 }
@@ -361,7 +369,8 @@ impl Node {
                         {
                             let mut retries =
                                 node.retries.lock().unwrap_or_else(PoisonError::into_inner);
-                            let state = retries.entry(peer).or_default();
+                            let state =
+                                retries.entry(peer).or_insert_with(|| node.peer_retry(peer));
                             state.link = true;
                             state.link_retry.failed();
                         }
@@ -588,11 +597,11 @@ impl Node {
                 met.remove(&oldest);
             }
             let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-            let state = retries.entry(peer).or_default();
+            let state = retries.entry(peer).or_insert_with(|| self.peer_retry(peer));
             state.link = false;
             state.short = !persistent;
-            state.link_retry.reset();
-            state.retry.reset();
+            state.link_retry.wake();
+            state.retry.wake();
             state.pending |= persistent || dialed;
             if state.pending && (persistent || dialed) {
                 self.link_events.send_replace(());
@@ -614,6 +623,7 @@ impl Node {
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
         tokio::task::spawn_local(async move {
+            let started = tokio::time::Instant::now();
             let _permit = permit;
             let result = node
                 .run_link(&service, opened, close_rx, changed_tx, authority)
@@ -653,7 +663,9 @@ impl Node {
                         last.error = Some(error.to_string());
                     }
                     let mut retries = node.retries.lock().unwrap_or_else(PoisonError::into_inner);
-                    let state = retries.entry(peer).or_default();
+                    let state = retries.entry(peer).or_insert_with(|| node.peer_retry(peer));
+                    state.link_retry.survived(started.elapsed());
+                    state.retry.survived(started.elapsed());
                     state.link = persistent;
                     if persistent {
                         state.link_retry.failed();
@@ -830,9 +842,11 @@ impl Node {
         self.link_events.send_replace(());
     }
     fn link_pending(&self, peer: PublicKey) {
-        self.reset_retry(Some(peer));
         let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-        retries.entry(peer).or_default().pending = true;
+        retries
+            .entry(peer)
+            .or_insert_with(|| self.peer_retry(peer))
+            .pending = true;
         drop(retries);
         self.link_events.send_replace(());
     }

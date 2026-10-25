@@ -211,18 +211,13 @@ async fn a_session_without_an_owner_refuses_delivery() {
         network::link::testing::sessions((&dialing, b, bcred), (&served, a.clone(), acred))
             .await
             .unwrap();
-    let server = async {
-        let result = serving.serve(&served).await;
-        drop(serving);
-        result
+    let client = async {
+        let delivered = session.deliver(&Port::default()).await;
+        session.close().await.unwrap();
+        delivered
     };
-    let client = async { session.deliver(&Port::default()).await };
-    let (served, delivered) = tokio::join!(server, client);
-    assert!(
-        served
-            .unwrap_err()
-            .to_string()
-            .contains("serves no envelope delivery")
-    );
-    assert!(delivered.is_err());
+    let (served, delivered) = tokio::join!(serving.serve_to_end(&served), client);
+    served.unwrap();
+    assert!(matches!(delivered, Err(Error::Application(cause))
+        if cause.downcast_ref::<network::RequestRefusal>() == Some(&network::RequestRefusal::NotPermitted)));
 }

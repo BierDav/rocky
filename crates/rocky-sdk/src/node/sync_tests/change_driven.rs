@@ -267,7 +267,19 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
                 "a local write must preserve peer backoff"
             );
             assert_eq!(rows(&peers[0]).await?, ["1", "2"]);
-            tokio::time::advance(Duration::from_millis(999)).await;
+            let deadline = {
+                let retries = a.retries.lock().unwrap();
+                let state = &retries[&keys[2]];
+                state
+                    .retry
+                    .deadline()
+                    .into_iter()
+                    .chain(state.link_retry.deadline())
+                    .max()
+                    .ok_or("retry deadline")?
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tokio::time::advance(remaining.saturating_sub(Duration::from_millis(1))).await;
             tokio::task::yield_now().await;
             assert_eq!(hub.dials_to("d"), stalled);
             tokio::time::advance(Duration::from_millis(1)).await;
@@ -476,7 +488,9 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
             a.wake_sync();
             until(|| a.retry_deadline().is_some()).await;
             assert_eq!(hub.dials_to("b"), dials);
-            tokio::time::advance(Duration::from_secs(1)).await;
+            let deadline = a.retry_deadline().ok_or("retry deadline")?;
+            tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await;
             hub.wait_dials("b", dials + 1).await;
             start(&a, false).await?;
             a.detach(None).await;

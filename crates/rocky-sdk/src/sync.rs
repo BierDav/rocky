@@ -22,10 +22,6 @@ pub(crate) struct Upstream<'a> {
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
     pub renew_from: Option<rocky_core::Commitment>,
-    /// Failed optional imports in this process, by exact scope and checkpoint.
-    pub state_failures: &'a std::sync::Mutex<
-        std::collections::BTreeMap<(ResourceScope, rocky_core::Commitment), u8>,
-    >,
     /// Whether an active staged import should continue with its original signer.
     pub keep: Option<&'a dyn Fn(ResourceScope, PublicKey, Option<rocky_core::Commitment>) -> bool>,
 }
@@ -40,6 +36,36 @@ impl std::fmt::Display for Learned {
     }
 }
 impl std::error::Error for Learned {}
+
+/// A bootstrap import used up its sessions; the next sync continues it.
+#[derive(Debug)]
+struct Unfinished;
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("bootstrap exceeded its session budget; it continues on the next sync")
+    }
+}
+impl std::error::Error for Unfinished {}
+
+/// Whether a failed import counts toward giving its checkpoint up: a lost
+/// link, a timeout or an unfinished budget says nothing about the checkpoint.
+fn counts_against_import(error: &Failure) -> bool {
+    if error.is::<Unfinished>() || error.is::<Learned>() {
+        return false;
+    }
+    error
+        .downcast_ref::<rocky_secure::Error>()
+        .is_none_or(counts_against_checkpoint)
+}
+fn counts_against_checkpoint(error: &rocky_secure::Error) -> bool {
+    match error {
+        rocky_secure::Error::Io(_) | rocky_secure::Error::Closed => false,
+        rocky_secure::Error::Rejected(reason) => {
+            !reason.starts_with("link ") && !reason.ends_with(" timeout")
+        }
+        _ => true,
+    }
+}
 
 /// What one scope exchanged with a peer during a sync.
 #[derive(Clone, Debug, Default)]
@@ -246,7 +272,13 @@ pub(crate) async fn bootstrap(
                 {
                     continue;
                 }
-                if let Some((checkpoint, rows)) = offer {
+                if let Some((checkpoint, _)) = offer
+                    && replica.import_failures(*scope, checkpoint).await?
+                        >= rocky_secure::IMPORT_ATTEMPTS
+                {
+                    // An import that kept failing falls back to frames.
+                    pending.retain(|known| known != scope);
+                } else if let Some((checkpoint, rows)) = offer {
                     let plan = Planned {
                         scope: *scope,
                         checkpoint,
@@ -255,8 +287,12 @@ pub(crate) async fn bootstrap(
                     totals.retain(|old| old.scope != *scope);
                     totals.push(plan.clone());
                     planned.push(plan);
-                } else if replica.rebootstrap_progress(*scope).await?.is_none() {
-                    // The peer has never compacted this scope: it joins by frames.
+                } else if replica.rebootstrap_progress(*scope).await?.is_none()
+                    && !replica.holds_revoked_frames(*scope).await?
+                {
+                    // The peer has never compacted this scope: it joins by
+                    // frames, unless a revoked author's rows must go with
+                    // an import.
                     pending.retain(|known| known != scope);
                 }
             }
@@ -283,7 +319,7 @@ pub(crate) async fn bootstrap(
     let mut imports = stream::iter(planned.into_iter().map(|plan| {
         let mut first = first.take();
         async move {
-            let scope = plan.scope;
+            let (scope, checkpoint) = (plan.scope, plan.checkpoint);
             let mut moved = Transfer::default();
             let imported = async {
                 let mut imported = false;
@@ -323,14 +359,14 @@ pub(crate) async fn bootstrap(
                         return Ok::<_, Failure>(());
                     }
                 }
-                Err("bootstrap exceeded its session budget; it continues on the next sync".into())
+                Err(Box::new(Unfinished) as Failure)
             }
             .await;
-            (scope, moved, imported)
+            (scope, checkpoint, moved, imported)
         }
     }))
     .buffer_unordered(4);
-    while let Some((scope, moved, imported)) = imports.next().await {
+    while let Some((scope, checkpoint, moved, imported)) = imports.next().await {
         transfer.extend(moved);
         match imported {
             Ok(()) => {
@@ -340,7 +376,12 @@ pub(crate) async fn bootstrap(
                     .set_importing(pending.iter().copied().collect())
                     .await;
             }
-            Err(error) => transfer.request_failed(scope, &error),
+            Err(error) => {
+                if counts_against_import(&error) {
+                    replica.import_failed(scope, checkpoint).await?;
+                }
+                transfer.request_failed(scope, &error);
+            }
         }
     }
     drop(imports);
@@ -482,7 +523,17 @@ async fn rows_scope(
                 }
             }
         }
-        let exchange = session.changed_scopes(replica, scopes).await?;
+        let mut exchange = session.changed_scopes(replica, scopes).await?;
+        // Equal frontiers do not finish an import interrupted at its switch.
+        for scope in scopes {
+            if !exchange.refused.contains(scope)
+                && !exchange.importing.contains(scope)
+                && !exchange.changed.contains(scope)
+                && replica.rebootstrap_progress(*scope).await?.is_some()
+            {
+                exchange.changed.push(*scope);
+            }
+        }
         transfer.refuse(&exchange.refused);
         // An importing peer takes the checkpoint, not this device's history.
         transfer.wait(&exchange.importing);
@@ -496,25 +547,21 @@ async fn rows_scope(
             let mut pulled = session
                 .catch_up_with_state(replica, *scope, QUOTA, true)
                 .await?;
+            // A crash at the switch leaves complete staging even when
+            // frontiers match; resume through the normal bootstrap path.
+            pulled.behind |= replica.rebootstrap_progress(*scope).await?.is_some();
             let mut moved = Moved {
                 pulled: pulled.frames,
                 bytes: pulled.bytes,
                 ..Moved::default()
             };
             if let Some(advice) = pulled.state.take() {
-                let key = (*scope, advice.checkpoint);
-                let failures = upstream
-                    .state_failures
-                    .lock()
-                    .map_err(|_| "state retry guard poisoned")?
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(0);
+                let failures = replica.import_failures(*scope, advice.checkpoint).await?;
                 if deferred(replica, upstream, *scope, Some(advice.checkpoint)).await? {
                     transfer.add(*scope, moved);
                     continue;
                 }
-                if failures < 3 {
+                if failures < rocky_secure::IMPORT_ATTEMPTS {
                     progress(true);
                     match session
                         .bootstrap_advised_scope(replica, *scope, QUOTA, Some(&advice))
@@ -529,14 +576,12 @@ async fn rows_scope(
                                 .map(|imported| (imported.checkpoint, imported.superseded));
                         }
                         result => {
-                            *upstream
-                                .state_failures
-                                .lock()
-                                .map_err(|_| "state retry guard poisoned")?
-                                .entry(key)
-                                .or_default() += 1;
+                            if result.as_ref().err().is_none_or(counts_against_checkpoint) {
+                                replica.import_failed(*scope, advice.checkpoint).await?;
+                            }
                             // The request channel is retired; the next sync retries
-                            // this exact checkpoint, then falls back to frames after three failures.
+                            // this exact checkpoint, then falls back to frames after
+                            // three failures, counted across restarts.
                             return Err(match result {
                                 Err(error) => error.into(),
                                 _ => "the peer withdrew the advised checkpoint".into(),
@@ -596,6 +641,19 @@ async fn rows_scope(
             if pushed.exhausted {
                 exhausted = true;
                 break;
+            }
+        }
+        // History that never arrives by frames, as a revoked author's,
+        // comes with a listed checkpoint once the scopes caught up.
+        if !exhausted {
+            for scope in scopes {
+                if !exchange.refused.contains(scope)
+                    && !deferred(replica, upstream, *scope, None).await?
+                    && !session.replace_with_listed(replica, *scope).await?
+                {
+                    exhausted = true;
+                    break;
+                }
             }
         }
         if !exhausted {

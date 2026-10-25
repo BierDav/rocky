@@ -1594,6 +1594,7 @@ mod group;
 mod kept;
 mod partitions;
 mod placements;
+mod recovery;
 mod revocations;
 #[cfg(unix)]
 mod roles;

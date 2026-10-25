@@ -819,8 +819,9 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// Refuses following `target` onto a seal this node does not hold
-    /// when no replay base lies on its path: the node pulls that seal's
-    /// state from a node that keeps it first.
+    /// when no replay base lies on its path and a scope off it cannot
+    /// rebuild from the frames it holds: the node pulls that seal's state
+    /// from a node that keeps it first.
     async fn require_held_start(&self, domain: Scope, target: TipId) -> Result<(), Error> {
         let graph = self.graph_for(domain)?;
         if target == self.workspace.tip
@@ -838,11 +839,19 @@ impl<A: RowApplication> Inner<A> {
             .map(|seal| seal.id().map_err(credential))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut based = true;
-        for (_, id) in self.domain_scopes(domain).await? {
-            based &= match self.base_seal(id).await? {
+        for (scope, id) in self.domain_scopes(domain).await? {
+            let on_path = match self.base_seal(id).await? {
                 Some(seal) => path.contains(&seal),
                 None => true,
             };
+            // A scope that pruned nothing and released no existence records
+            // replays its own frames at a seal of the new path; another
+            // imports a checkpoint the graph lists at one.
+            based &= on_path
+                || (self.scope_key(scope).is_ok()
+                    && !self.has_pruned_prefix(scope).await?
+                    && !self.existence_released(scope, &path).await?)
+                || !self.listed_at(graph, scope, &path)?.is_empty();
         }
         if based || self.held_seal(domain, start).await?.is_some() {
             return Ok(());
@@ -1131,6 +1140,11 @@ impl<A: RowApplication> Inner<A> {
                 // Metadata is admitted while the unavailable workspace waits
                 // for the target seal; reads and authoring remain gated.
                 continue;
+            }
+            // Seals finalized over a base that leaves name positions inside
+            // it: the rebuild replays from nothing past them.
+            if !kept && let Some(base) = self.checkpoint_record(id, true).await? {
+                self.drop_seal_bounds(id, base.position).await?;
             }
             self.rebuilding_tip = true;
             self.tip_base = kept;

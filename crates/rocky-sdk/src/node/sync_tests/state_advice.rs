@@ -125,16 +125,14 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                 )
                 .await?;
             b.replica.stage_checkpoint_page(page).await?;
-            b.state_failures
-                .lock()
-                .unwrap()
-                .insert((scope, checkpoint), 3);
-            // Other checkpoint and scope failures do not suppress this offer.
-            c.state_failures.lock().unwrap().insert((scope, [0; 32]), 3);
-            c.state_failures
-                .lock()
-                .unwrap()
-                .insert((a.domain().registry(), checkpoint), 3);
+            for _ in 0..rocky_secure::IMPORT_ATTEMPTS {
+                b.replica.import_failed(scope, checkpoint).await?;
+                // Other checkpoint and scope failures do not suppress this offer.
+                c.replica.import_failed(scope, [0; 32]).await?;
+                c.replica
+                    .import_failed(a.domain().registry(), checkpoint)
+                    .await?;
+            }
             for (peer, imported) in [(&b, false), (&c, true)] {
                 let transport = peer.current().ok_or("service")?.transport.clone();
                 let (report, _) = peer.sync(&*transport).await?;
@@ -202,7 +200,6 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                         peer: owner,
                         contacts: None,
                         renew_from: None,
-                        state_failures: &c.state_failures,
                         keep: Some(&keep),
                     };
                     sync::reconcile(&c.replica, &upstream, &[scope], |_| {}, None).await?;
@@ -255,7 +252,6 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
                 peer,
                 contacts: None,
                 renew_from: None,
-                state_failures: &b.state_failures,
                 keep: None,
             };
             let good = a.app_scopes()[0];

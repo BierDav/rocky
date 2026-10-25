@@ -122,8 +122,9 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Applies or rejects dependency-ready pending frames inside the caller's
     /// transaction, each application in its own savepoint. A failing
-    /// application rolls back alone and ends the pass with its error. Returns
-    /// true when `limit` stopped the pass before it settled.
+    /// application rolls back alone and is quarantined: its log waits and
+    /// other logs go on. Only a storage failure ends the pass. Returns true
+    /// when `limit` stopped the pass before it settled.
     ///
     /// Each later frame of a log names the one before as its backlink, so
     /// only a log's first pending frame can be ready: a round examines that
@@ -132,6 +133,9 @@ impl<A: RowApplication> Inner<A> {
     /// round, however many of its frames wait behind it.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {
         let mut changed = 0;
+        let context = self.quarantine_context();
+        let mut quarantined = self.quarantined().await?;
+        let mut skipped = BTreeSet::new();
         loop {
             let mut heads = BTreeSet::new();
             for record in collect_rows(self.conn.query(
@@ -157,7 +161,35 @@ impl<A: RowApplication> Inner<A> {
                 };
                 let id = frame.id()?;
                 examined.insert(id);
-                match Box::pin(self.apply_frame(&frame, time)).await {
+                let held = quarantined.get(&id).copied();
+                if skipped.contains(&id) || held.is_some_and(|held| !held.due(time, context)) {
+                    self.waits.insert(id, WaitReason::Quarantined);
+                    continue;
+                }
+                self.conn.execute("SAVEPOINT quarantine", ()).await?;
+                let outcome = Box::pin(self.apply_frame(&frame, time)).await;
+                let failure = match &outcome {
+                    Ok(Outcome::Waiting(WaitReason::Undecryptable)) => {
+                        Some(quarantine::UNDECRYPTABLE)
+                    }
+                    Err(error) if quarantine::quarantines(error) => Some(error.category()),
+                    _ => None,
+                };
+                if let Some(reason) = failure {
+                    self.conn.execute("ROLLBACK TO quarantine", ()).await?;
+                    self.conn.execute("RELEASE quarantine", ()).await?;
+                    self.invalidate_context();
+                    self.quarantine(id, reason, time, context).await?;
+                    skipped.insert(id);
+                    self.waits.insert(id, WaitReason::Quarantined);
+                    continue;
+                }
+                self.conn.execute("RELEASE quarantine", ()).await?;
+                if held.is_some() {
+                    self.release_quarantine(id).await?;
+                    quarantined.remove(&id);
+                }
+                match outcome {
                     Ok(Outcome::Waiting(reason)) => {
                         self.waits.insert(id, reason);
                         continue;
@@ -209,6 +241,10 @@ impl<A: RowApplication> Inner<A> {
             Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
             _ => {}
         }
+        #[cfg(test)]
+        if self.poisoned.contains(&operation.hash) {
+            return Err(Error::Corrupt("poisoned frame".into()));
+        }
         let reach = self.frame_reach(frame)?;
         if !self.frame_schema_ready(frame)? {
             return Ok(Outcome::Waiting(WaitReason::Schema));
@@ -226,14 +262,18 @@ impl<A: RowApplication> Inner<A> {
         if self.direct.contains(&extension.scope) {
             return Ok(Outcome::Waiting(WaitReason::DirectImport));
         }
-        // An epoch this replica does not hold, later or earlier, waits for its key.
+        // Keyless custody does not owe retries for a key it may not receive.
+        // Current read authorization is also required while an old key is held.
+        if !self.can_read_key(
+            extension.scope,
+            &self.local_grants(time).unwrap_or_default(),
+        ) {
+            return Ok(Outcome::Waiting(WaitReason::ReadGrant));
+        }
+        // An authorized reader waits for an absent earlier or later epoch.
         let Some(key) = self.opening_key(extension.scope, extension.generation) else {
             return Ok(Outcome::Waiting(WaitReason::OpeningKey));
         };
-        // Current reader authorization is required even if a revoked key is still in memory.
-        if !self.can_read_key(key.scope, &self.local_grants(time).unwrap_or_default()) {
-            return Ok(Outcome::Waiting(WaitReason::ReadGrant));
-        }
         if reach == tips::FrameReach::Held
             && let Err(error) = self.verify_frame_authority(frame, time)
         {
@@ -246,12 +286,26 @@ impl<A: RowApplication> Inner<A> {
             }
             return self.hold_closed_frame(frame, time).await;
         }
+        // Every frame of a revoked author is refused, also one whose
+        // dependencies, its author's earlier frames, never apply.
+        if self
+            .config
+            .revocations
+            .revoking(frame.chain()?.credentials())
+            .map_err(credential)?
+            .is_some()
+        {
+            self.reject(operation.hash).await?;
+            return Ok(Outcome::Rejected("the frame's author is revoked".into()));
+        }
         if !self
             .own_chain_ready(&operation.header, &BTreeSet::new())
             .await?
         {
             return Ok(Outcome::Waiting(WaitReason::OwnChain));
         }
+        // The key its header names is held: a frame that does not open
+        // under it is quarantined by the pass, not left waiting.
         let Ok(plaintext) = self.open_payload(frame) else {
             return Ok(Outcome::Waiting(WaitReason::Undecryptable));
         };

@@ -42,6 +42,9 @@ pub enum BlockerKind {
     LineNode,
     /// Received frames wait to apply.
     PendingFrames { reason: WaitReason, count: u64 },
+    /// A frame failed to apply and its log waits behind it; `reason` is the
+    /// failure's category, `count` the frames of those logs.
+    Quarantined { reason: String, count: u64 },
     /// The next seal of the followed path is not finalized yet.
     FinalizationWaiting { reason: String },
 }
@@ -71,6 +74,9 @@ pub enum ClearsBy {
     },
     LocalWork,
     Application,
+    /// No peer this device may reach can serve it yet: a trusted peer must
+    /// list a base for it first.
+    NoPeer,
 }
 
 /// Why a received frame does not apply yet.
@@ -95,6 +101,9 @@ pub enum WaitReason {
     Ledger,
     /// Applying it failed with an error that is not a refusal.
     Failed,
+    /// It is quarantined after a failure; it is retried on change or after
+    /// a backoff.
+    Quarantined,
     /// No apply pass of this process examined it yet.
     Unexamined,
 }
@@ -103,7 +112,9 @@ impl WaitReason {
     pub fn clears_by(self) -> ClearsBy {
         match self {
             Self::Schema | Self::ReadGrant => ClearsBy::Application,
-            Self::Ledger | Self::Failed | Self::Unexamined => ClearsBy::LocalWork,
+            Self::Ledger | Self::Failed | Self::Quarantined | Self::Unexamined => {
+                ClearsBy::LocalWork
+            }
             Self::DirectImport
             | Self::OpeningKey
             | Self::OwnChain
@@ -150,6 +161,9 @@ impl fmt::Display for Blocker {
             BlockerKind::PendingFrames { reason, count } => {
                 format!("{count} pending frames ({reason:?})")
             }
+            BlockerKind::Quarantined { reason, count } => {
+                format!("{count} quarantined frames ({reason})")
+            }
             BlockerKind::FinalizationWaiting { reason } => {
                 format!("finalization waiting ({reason})")
             }
@@ -159,6 +173,7 @@ impl fmt::Display for Blocker {
             ClearsBy::Peer { node } => format!("peer {}", node.get(..12).unwrap_or(node)),
             ClearsBy::LocalWork => "local work".into(),
             ClearsBy::Application => "the application".into(),
+            ClearsBy::NoPeer => return write!(f, "{} {kind}: no peer can serve", self.scope),
         };
         write!(f, "{} {kind}, cleared by {clears}", self.scope)
     }

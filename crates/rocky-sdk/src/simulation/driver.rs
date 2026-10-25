@@ -246,6 +246,7 @@ impl Simulation {
         let report = self.running(node)?.call(json!({"type": "sync"})).await;
         self.synced[node] = true;
         let report = report?;
+
         let peers = report["peers"].as_array().map_or(0, Vec::len);
         let completed = report["peers"]
             .as_array()
@@ -472,8 +473,26 @@ impl Simulation {
         for round in 0..rounds {
             for node in &live {
                 let _ = self.sync(*node).await;
+                let before = self.members[*node]
+                    .running
+                    .as_ref()
+                    .and_then(|running| running.node.upgrade());
+                let tip = match &before {
+                    Some(node) => Some(node.replica.followed_tip().await),
+                    None => None,
+                };
                 let _ = self.follow(*node, "main").await;
+                if let Some(running) = before
+                    && tip != Some(running.replica.followed_tip().await)
+                {
+                    // The first exchange used another tip. Service the new
+                    // one before measuring recovery on the common path.
+                    let _ = self.sync(*node).await;
+                }
             }
+            // Let the autonomous recovery driver's spacing and timer run
+            // on the paused clock, without a new frame or a restart.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             self.safety().await?;
             let mut stuck = self.convergence(&live).await;
             if stuck.count == 0 {

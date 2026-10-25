@@ -165,6 +165,23 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
+    /// Inside the caller's transaction, forgets scope `id`'s seal bounds
+    /// through `position` and their drops.
+    pub(super) async fn drop_seal_bounds(&self, id: i64, position: i64) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "DELETE FROM secure_seal_drops WHERE scope=?1 AND depth IN(SELECT depth FROM secure_seal_bounds WHERE scope=?1 AND position<=?2)",
+                [id, position],
+            )
+            .await?;
+        self.conn
+            .execute(
+                "DELETE FROM secure_seal_bounds WHERE scope=? AND position<=?",
+                [id, position],
+            )
+            .await?;
+        Ok(())
+    }
     /// Whether a scope's state passed a seal: some rows may be absent
     /// because they were dead there.
     pub(super) async fn seal_finalized(&self, scope: ResourceScope) -> Result<bool, Error> {
@@ -1144,6 +1161,14 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         domain: Scope,
     ) -> Result<(usize, Option<String>), Error> {
+        self.finalize_at_most(domain, usize::MAX).await
+    }
+    /// Like `finalize_ready`, but finalizes at most `limit` seals.
+    pub(super) async fn finalize_at_most(
+        &mut self,
+        domain: Scope,
+        limit: usize,
+    ) -> Result<(usize, Option<String>), Error> {
         let span = tracing::debug_span!(
             "finalize",
             domain = rocky_core::domain_label(&domain),
@@ -1152,7 +1177,8 @@ impl<A: RowApplication> Inner<A> {
             outcome = tracing::field::Empty
         );
         let result =
-            tracing::Instrument::instrument(self.finalize_ready_inner(domain), span.clone()).await;
+            tracing::Instrument::instrument(self.finalize_ready_inner(domain, limit), span.clone())
+                .await;
         if let Ok((count, waiting)) = &result {
             span.record("finalized", *count as u64);
             span.record("waiting", waiting.is_some());
@@ -1163,6 +1189,7 @@ impl<A: RowApplication> Inner<A> {
     async fn finalize_ready_inner(
         &mut self,
         domain: Scope,
+        limit: usize,
     ) -> Result<(usize, Option<String>), Error> {
         let mut count = 0;
         if self.schema_switching().await? {
@@ -1178,6 +1205,9 @@ impl<A: RowApplication> Inner<A> {
             transaction!(self, |inner| inner.install_needed_pulled(domain).await)?;
         }
         loop {
+            if count >= limit {
+                return Ok((count, None));
+            }
             if self.compaction_lost(domain).await?.is_some() {
                 return Ok((count, Some("the compacted seal lost a race".into())));
             }
@@ -1229,6 +1259,79 @@ impl<A: RowApplication> Inner<A> {
             })?;
             count += 1;
         }
+    }
+    /// The checkpoints of `scope` the graph lists at seals of the followed
+    /// path from the next one to finalize, newest first, signed by another
+    /// node, when that seal's coverage waits on this scope: history it
+    /// never holds, such as a revoked author's frames or an epoch it is not
+    /// given, comes with one of them. With whether the scope keeps an
+    /// existence log, whose base comes with the import.
+    pub(super) async fn listed_replacements(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(Vec<Commitment>, bool), Error> {
+        let domain = scope.domain;
+        let none = (Vec::new(), false);
+        if self
+            .workspace
+            .followed
+            .as_ref()
+            .map(|(followed, _)| *followed)
+            != Some(domain)
+        {
+            return Ok(none);
+        }
+        let (Some(graph), Some(id)) = (self.graphs.get(&domain), self.find_scope_id(scope).await?)
+        else {
+            return Ok(none);
+        };
+        let path = self.path_seals(domain)?;
+        let finalized = self.finalized(domain).await?;
+        let Some(next) = offset(&path, &finalized).map(|start| start + finalized.len()) else {
+            return Ok(none);
+        };
+        let Some(seal) = path.get(next) else {
+            return Ok(none);
+        };
+        let previous = next.checked_sub(1).and_then(|index| path.get(index));
+        if !self.waits_for_key(scope).await?
+            && self
+                .seal_coverage_waits(domain, seal, previous, &[(scope, Some(id))])
+                .await?
+                .is_none()
+        {
+            return Ok(none);
+        }
+        let seals = path[next..]
+            .iter()
+            .rev()
+            .map(|seal| seal.id().map_err(credential))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            self.listed_at(graph, scope, &seals)?,
+            self.existence_table(scope),
+        ))
+    }
+    /// Whether a frame of `scope` waits for a key epoch this replica lacks.
+    async fn waits_for_key(&self, scope: ResourceScope) -> Result<bool, Error> {
+        let blob = encode(&scope)?;
+        for (hash, reason) in &self.waits {
+            if *reason == WaitReason::OpeningKey
+                && rows(
+                    &self.conn,
+                    &format!(
+                        "SELECT scope FROM secure_operations WHERE hash=x'{}'",
+                        hash.to_hex()
+                    ),
+                )
+                .await?
+                .first()
+                .is_some_and(|record| record.as_slice() == [SqlValue::Blob(blob.clone())])
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     /// Why the next seal of the followed path is not finalized yet.
     pub(super) async fn finalization_waits(&self, domain: Scope) -> Result<Option<String>, Error> {
@@ -1453,6 +1556,20 @@ impl<A: RowApplication> Inner<A> {
         (target, seal): &(Finalized, SignedSeal),
     ) -> Result<(), Error> {
         let at = self.path_index(domain, target.seal)?;
+        // A scope granted after this seal was finalized may have no state
+        // yet. Account for it only after retained history proves its cut.
+        for (scope, id) in self.readiness_scopes(domain).await? {
+            if id.is_none()
+                && self
+                    .seal_waits(domain, seal, None, &[(scope, id)], false)
+                    .await?
+                    .is_none()
+            {
+                transaction!(self, |inner| inner
+                    .finalize_seal_impl(domain, seal, &[(scope, id)], false, true,)
+                    .await)?;
+            }
+        }
         for (scope, id) in self.domain_scopes(domain).await? {
             // A base imported at a later seal stays.
             if let Some(base) = self.base_seal(id).await?
@@ -1531,8 +1648,8 @@ impl<A: RowApplication> Inner<A> {
                 .await;
         }
         let through = bound.unwrap_or(cursor);
-        // No included operations or finalization diff: the earlier seal's
-        // base still describes this scope exactly.
+        // Empty partitions need current coverage even with unchanged rows:
+        // a newly granted reader may never have held the other scopes' frames.
         let reusable = match base {
             Some((_, signed)) => {
                 signed.statement.key_epoch() == Some(self.scope_key(scope)?.0)
@@ -1540,7 +1657,12 @@ impl<A: RowApplication> Inner<A> {
             }
             None => false,
         };
-        if reusable && through == cursor {
+        let empty_partition = base.is_some_and(|(_, signed)| {
+            signed.statement.partition.is_some()
+                && signed.statement.frontier.is_empty()
+                && signed.statement.seal != Some(target.seal)
+        });
+        if reusable && through == cursor && !empty_partition {
             let mut drops = self
                 .conn
                 .query(
@@ -1806,6 +1928,25 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Whether a held scope needs a served replay base, including empty
+    /// concrete partitions learned after the newest seal was finalized.
+    pub async fn unserved_bases(&self, domain: Scope) -> Result<bool, Error> {
+        let mut inner = self.inner.lock().await;
+        inner.graph_for(domain)?;
+        for (scope, _) in inner.readiness_scopes(domain).await? {
+            if inner.served_checkpoint(scope).await?.is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// See `Inner::listed_replacements`.
+    pub async fn listed_replacements(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(Vec<Commitment>, bool), Error> {
+        self.inner.lock().await.listed_replacements(scope).await
+    }
     /// Finalizes every seal of the followed path whose frames this replica
     /// holds, then makes the newest finalized seal that is final, or has at
     /// least `keep` seals after it on the path, the replay base, and

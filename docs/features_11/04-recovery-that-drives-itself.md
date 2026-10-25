@@ -1,6 +1,7 @@
 # 4. Recovery that drives itself
 
-Status: proposed. Owner: `rocky-sdk` node scheduling, sync and bootstrap;
+Status: implemented; qualification incomplete. See the
+[evidence](04-recovery-that-drives-itself-evidence.md). Owner: `rocky-sdk` node scheduling, sync and bootstrap;
 `rocky-secure` apply, rebootstrap, restoration and maintenance. Depends on
 [phase 1](01-see-every-stall.md) and [phase 2](02-deterministic-simulation.md).
 Effort: two to three weeks. Follow the

@@ -643,6 +643,22 @@ impl Node {
         .await
     }
 
+    /// Seals the followed bookmark and makes the seal this node's listed
+    /// base, after a revocation or once writes of an earlier key epoch
+    /// arrived past the last seal: members, which refuse a revoked author's
+    /// frames and get only the current epoch, import those rows with it.
+    pub(super) async fn seal_for_members(&self) -> Result<(), Failure> {
+        let scope = self.domain().scope;
+        if self.replica.followed_bookmark().await.is_none() || self.tip_signer(scope).await.is_err()
+        {
+            return Ok(());
+        }
+        self.seal_followed(scope, false).await?;
+        self.replica.compact(scope, 0).await?;
+        self.sign_existence_bases(scope).await?;
+        self.list_checkpoints(scope).await
+    }
+
     /// The owner recovers the followed tip when no in-sync node of its log
     /// can append: after collecting what reachable devices hold, it seals
     /// the tip with `continue`, abandoning the committed entries nobody
@@ -807,7 +823,7 @@ impl Node {
         if !graph.is_final(seal)? {
             return Ok(());
         }
-        if self.replica.needs_base_at(scope, seal).await? {
+        if status.compacted != Some(seal) || self.replica.needs_base_at(scope, seal).await? {
             self.replica.compact(scope, 0).await?;
         }
         self.sign_existence_bases(scope).await?;

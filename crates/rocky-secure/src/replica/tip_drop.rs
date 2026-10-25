@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_dropped_tip_frames(tip BLOB NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(tip,hash)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_dropped_tip_frames(tip BLOB NOT NULL,hash BLOB NOT NULL,scope BLOB NOT NULL,PRIMARY KEY(tip,hash)) WITHOUT ROWID",
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -194,12 +194,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let count = removed.len() as u64;
         let bytes = removed.values().map(|(size, _, _, _)| size).sum::<i64>();
         transaction!(inner, |inner| {
-            for hash in removed.keys() {
+            for (hash, (_, scope, _, _)) in &removed {
                 inner
                     .conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_dropped_tip_frames VALUES(?,?)",
-                        [encode(&tip)?, hash.clone()],
+                        "INSERT OR IGNORE INTO secure_dropped_tip_frames VALUES(?,?,?)",
+                        [encode(&tip)?, hash.clone(), encode(scope)?],
                     )
                     .await?;
                 for table in [

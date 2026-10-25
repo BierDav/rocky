@@ -78,30 +78,70 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     /// One bounded step of automatic maintenance for the scopes a group
-    /// wrote: continue or start a checkpoint, else prune one batch. The
-    /// group is already committed, so a failure is kept for the status.
+    /// wrote: forget stale pulled states and quarantine records, then
+    /// finalize at most one seal of their domains. The group is already
+    /// committed, so a failure is kept for the status and backs off.
     pub(crate) async fn maintain(&mut self, scopes: &BTreeSet<ResourceScope>) {
-        for scope in scopes {
-            match self.maintain_scope(*scope).await {
-                Ok(true) => {
-                    self.maintenance_error = None;
-                    return;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    self.maintenance_error = Some(error.to_string());
-                    return;
-                }
+        if scopes.is_empty() {
+            return;
+        }
+        let Ok(time) = now() else { return };
+        if self
+            .maintenance_backoff
+            .is_some_and(|(until, _)| time < until)
+        {
+            return;
+        }
+        match self.maintain_domains(scopes).await {
+            Ok(()) => {
+                self.maintenance_error = None;
+                self.maintenance_backoff = None;
+            }
+            Err(error) => {
+                self.maintenance_error = Some(error.to_string());
+                let failures = self.maintenance_backoff.map_or(0, |(_, failures)| failures);
+                let wait = (1u64 << failures.min(6)).min(60);
+                self.maintenance_backoff = Some((time.saturating_add(wait), failures + 1));
             }
         }
     }
-    /// True when a step ran. A scope being imported waits: its own
-    /// checkpoint would only repeat the one it imports.
-    async fn maintain_scope(&mut self, scope: ResourceScope) -> Result<bool, Error> {
-        if self.scope_key(scope).is_err() || self.importing(scope).await? {
-            return Ok(false);
+    async fn maintain_domains(&mut self, scopes: &BTreeSet<ResourceScope>) -> Result<(), Error> {
+        transaction!(self, |inner| inner.forget_stale().await)?;
+        // A scope being imported waits: its own checkpoint would only
+        // repeat the one it imports.
+        let mut domains = BTreeSet::new();
+        for scope in scopes {
+            if self.scope_key(*scope).is_ok() && !self.importing(*scope).await? {
+                domains.insert(scope.domain);
+            }
         }
-        self.graph_for(scope.domain)?;
-        Ok(self.finalize_ready(scope.domain).await?.0 > 0)
+        for domain in domains {
+            self.graph_for(domain)?;
+            if self.finalize_at_most(domain, 1).await?.0 > 0 {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+    /// Inside the caller's transaction: pulled states that no longer pass
+    /// the import checks or that their scope's base already holds, and
+    /// quarantine records of frames that are no longer pending.
+    async fn forget_stale(&mut self) -> Result<(), Error> {
+        self.revalidate_pulled().await?;
+        for record in rows(&self.conn, "SELECT scope,seal FROM secure_pulled").await? {
+            let [SqlValue::Integer(id), SqlValue::Blob(seal)] = record.as_slice() else {
+                return Err(Error::Corrupt("pulled checkpoint".into()));
+            };
+            if self.base_seal(*id).await?.map(|base| base.to_vec()) == Some(seal.clone()) {
+                self.drop_pulled(*id).await?;
+            }
+        }
+        self.conn
+            .execute(
+                "DELETE FROM secure_quarantine WHERE hash NOT IN(SELECT hash FROM secure_operations WHERE status='pending')",
+                (),
+            )
+            .await?;
+        Ok(())
     }
 }

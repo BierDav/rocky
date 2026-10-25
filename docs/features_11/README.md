@@ -1,6 +1,6 @@
 # features_11: sync that keeps going
 
-Status: in progress (2026-10-25). Phase briefs and evidence record implementation
+Status: in progress (2026-10-26). Phase briefs and evidence record implementation
 and outstanding qualification gates.
 The [review](00-reliability-review.md) records what was read and measured;
 the phase briefs below are its response. Sealed-fork security, admission
@@ -89,7 +89,7 @@ never silently relaxed.
   coordinator is unavailable; only a definite refusal aborts.
 - **One current version per format.** Each phase that changes a persisted
   or wire shape moves that format by one at landing (today row 12,
-  checkpoint 17, replica 37, link 18); nothing reads an earlier one.
+  checkpoint 17, replica 38, link 18); nothing reads an earlier one.
 
 ## Phases
 

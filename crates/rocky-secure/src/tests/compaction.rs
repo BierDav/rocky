@@ -281,7 +281,9 @@ async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_al
     let compacted = a.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(compacted.waiting, None);
     assert!(compacted.compacted.is_some());
-    // B finalized both seals on its own but compacted nothing.
+    // Each maintenance step finalizes at most one seal. Finish the path
+    // explicitly for the comparison with a device that compacted it.
+    b.finalize_path(lineage.domain).await.unwrap();
     let status = b.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.finalized, compacted.finalized);
     assert_eq!(status.compacted, None);

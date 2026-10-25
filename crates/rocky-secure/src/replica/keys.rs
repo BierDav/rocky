@@ -48,6 +48,10 @@ impl<A: RowApplication> Inner<A> {
             .keys
             .iter()
             .any(|current| current.scope == key.scope && current.generation == key.generation);
+        if !current {
+            // Members given only the current epoch need a later seal for it.
+            self.earlier_epoch.store(true, Ordering::Relaxed);
+        }
         let sql = if current {
             "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING"
         } else {

@@ -1022,7 +1022,8 @@ mod races {
             member,
             grants: [grants[0].clone(), grants[1].clone()],
         };
-        settle(&house.all()).await;
+        let tip = ok(&house.owner, "status", json!({})).await["tip"].clone();
+        settle_on(&house.all(), &tip, &["before"]).await;
         for device in house.all() {
             assert_eq!(device.titles().await, ["before"]);
         }
@@ -1044,6 +1045,41 @@ mod races {
                 let _ = device.sync().await;
             }
         }
+    }
+    /// Stop once the observable tip and rows converge, with the same
+    /// three-round bound as `settle`.
+    async fn settle_on(devices: &[&Device], tip: &Value, titles: &[&str]) {
+        for _ in 0..3 {
+            for device in devices {
+                let _ = device.sync().await;
+            }
+            let mut ready = true;
+            for device in devices {
+                if ok(device, "status", json!({})).await["tip"] != *tip {
+                    ready = false;
+                    break;
+                }
+                let page = device
+                    .call(json!({"type": "read", "query": {
+                        "sql": "SELECT title FROM items ORDER BY title", "max_rows": 64,
+                    }}))
+                    .await;
+                let rows = page.as_ref().ok().and_then(|page| page["rows"].as_array());
+                let found: Option<Vec<&str>> = rows.map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| row[0]["value"].as_str())
+                        .collect()
+                });
+                if found.as_deref() != Some(titles) {
+                    ready = false;
+                    break;
+                }
+            }
+            if ready {
+                return;
+            }
+        }
+        panic!("devices did not converge on {tip} with {titles:?}");
     }
     fn seal_by_id<'a>(inspection: &'a Value, id: &Value) -> &'a Value {
         inspection["seals"]
@@ -1124,8 +1160,8 @@ mod races {
             ok(&house.trusted[0], "seal", json!({})).await["tip"].clone(),
             ok(&house.trusted[1], "seal", json!({})).await["tip"].clone(),
         ];
-        settle(&house.all()).await;
         let winner = usize::from(continuations[1].as_str() < continuations[0].as_str());
+        settle_on(&house.all(), &continuations[winner], &["before"]).await;
         let next = continuations[1 - winner].clone();
         for device in house.all() {
             assert_eq!(
@@ -1134,7 +1170,12 @@ mod races {
             );
         }
         member.add(2, "on the winner").await;
-        settle(&house.all()).await;
+        settle_on(
+            &house.all(),
+            &continuations[winner],
+            &["before", "on the winner"],
+        )
+        .await;
         assert_eq!(owner.titles().await, ["before", "on the winner"]);
 
         // Revoking the winner's trusted grant leaves its seal and move out of
@@ -1143,7 +1184,7 @@ mod races {
         owner
             .ok(json!({"type": "revoke", "trust": house.grants[winner]["capability"]}))
             .await;
-        settle(&house.all()).await;
+        settle_on(&house.all(), &next, &["before"]).await;
         for device in house.all() {
             let status = ok(device, "status", json!({})).await;
             assert_eq!(status["tip"], next, "{status}");

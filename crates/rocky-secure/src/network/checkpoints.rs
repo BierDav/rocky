@@ -236,35 +236,77 @@ impl NativeSession {
                 &needs.iter().map(|need| need.scope).collect::<Vec<_>>(),
             )
             .await?;
+        // A scope that fails leaves the others to recover; the first
+        // failure is returned once every scope ran.
+        let mut failed = None;
         for need in needs {
-            let scope = need.scope;
-            let shared = shared.contains(&scope)
-                && self.try_scoped_holding(replica, &[scope], false).await?;
-            if !need.listed.is_empty()
-                && shared
-                && let Some(signed) = self.checkpoint_offer(scope).await?
-                && need.listed.contains(&signed.id()?)
-            {
-                if self
-                    .import_within(replica, signed, CHECKPOINT_PAGE)
-                    .await?
-                    .is_none()
-                    || (need.logged && !self.pull_existence_base(replica, scope, None).await?)
-                {
-                    return Ok(false);
+            match self.rebootstrap_need(replica, &shared, need).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(error) => {
+                    failed.get_or_insert(error);
                 }
-                continue;
-            }
-            match need.replay {
-                FrameReplay::Local => replica.replay_at_seals(scope, false).await?,
-                FrameReplay::Peers if shared && self.retains_history(replica, scope).await? => {
-                    replica.replay_at_seals(scope, true).await?
-                }
-                FrameReplay::Peers | FrameReplay::Unavailable => {}
             }
         }
         replica.finish_seal_rebootstrap(domain).await?;
+        failed.map_or(Ok(true), Err)
+    }
+    /// One scope of `rebootstrap_scopes_at_seals`; false once the session's
+    /// budget runs low.
+    async fn rebootstrap_need<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        shared: &[ResourceScope],
+        need: SealRebootstrap,
+    ) -> Result<bool, Error> {
+        let scope = need.scope;
+        let shared =
+            shared.contains(&scope) && self.try_scoped_holding(replica, &[scope], false).await?;
+
+        if !need.listed.is_empty()
+            && shared
+            && let Some(signed) = self.checkpoint_offer(scope).await?
+            && need.listed.contains(&signed.id()?)
+        {
+            return Ok(self
+                .import_within(replica, signed, CHECKPOINT_PAGE)
+                .await?
+                .is_some()
+                && (!need.logged || self.pull_existence_base(replica, scope, None).await?));
+        }
+        match need.replay {
+            FrameReplay::Local => replica.replay_at_seals(scope, false).await?,
+            FrameReplay::Peers if shared && self.retains_history(replica, scope).await? => {
+                replica.replay_at_seals(scope, true).await?
+            }
+            FrameReplay::Peers | FrameReplay::Unavailable => {}
+        }
         Ok(true)
+    }
+    /// Imports the peer's checkpoint of `scope` when the graph lists it at
+    /// a seal of the followed path that the scope cannot finalize from the
+    /// history it caught up: a revoked author's rows, for one, come only so.
+    /// Returns false once the session's budget runs low.
+    pub async fn replace_with_listed<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        let (listed, logged) = replica.listed_replacements(scope).await?;
+        if listed.is_empty() || !self.try_scoped_holding(replica, &[scope], false).await? {
+            return Ok(true);
+        }
+        let Some(signed) = self.checkpoint_offer(scope).await? else {
+            return Ok(true);
+        };
+        if !listed.contains(&signed.id()?) {
+            return Ok(true);
+        }
+        Ok(self
+            .import_within(replica, signed, CHECKPOINT_PAGE)
+            .await?
+            .is_some()
+            && (!logged || self.pull_existence_base(replica, scope, None).await?))
     }
     /// Whether the peer pruned no frame of `scope`.
     async fn retains_history<A: RowApplication>(

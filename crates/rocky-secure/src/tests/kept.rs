@@ -447,12 +447,38 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
     insert(&a, "b", "two").await;
     let second = seal(&lineage, &a).await.id().unwrap();
     sync(&lineage, &a, &b, &keys[1]).await;
+    // A acknowledges custody before B releases bytes.
+    b.admit_peer(
+        keys[0].public_key(),
+        &lineage.credentials(3, &keys[0]),
+        a.followed_tip().await,
+    )
+    .await
+    .unwrap();
+    b.acknowledge_frontier(
+        keys[0].public_key(),
+        &lineage.credentials(3, &keys[0]),
+        &a.frontier(lineage.scope("items")).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    // Pruned history requires the held seal rather than local replay.
+    b.set_retention_policy(
+        lineage.scope("items"),
+        crate::RetentionPolicy {
+            required: BTreeSet::from([rocky_credentials::PeerId::of(keys[0].public_key())]),
+            behind: BTreeSet::new(),
+            copies: 1,
+            window: 0,
+        },
+    )
+    .await
+    .unwrap();
     // B compacts at the latest seal; A keeps both and never compacts past
     // the oldest, so its replay base sits there.
-    assert_eq!(
-        b.compact(lineage.domain, 0).await.unwrap().compacted,
-        Some(second)
-    );
+    let report = b.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(second));
+    assert!(report.pruned > 0, "{report:?}");
     assert_eq!(
         a.compact(lineage.domain, 0).await.unwrap().compacted,
         Some(first)

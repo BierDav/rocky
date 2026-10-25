@@ -50,9 +50,11 @@ mod records;
 mod stamp_authors;
 pub use placements::{MAX_PLACEMENTS, Placement, PlacementPage, PlacementRequest};
 pub(crate) mod publication;
+mod quarantine;
 mod queries;
 mod reads;
 mod rebuild;
+mod recovery;
 mod removal;
 pub use removal::local_row_counts;
 mod restore;
@@ -61,7 +63,9 @@ mod session;
 mod sql;
 mod tip_drop;
 mod tip_observation;
-pub use tip_observation::{PeerScopeFrontier, TipDevice, TipNodeObservation, TipObservation};
+pub use tip_observation::{
+    EarlierEpochWrites, PeerScopeFrontier, TipDevice, TipNodeObservation, TipObservation,
+};
 pub(crate) mod tips;
 pub use tips::{LineNode, TipStatement};
 mod typed;
@@ -110,7 +114,7 @@ pub use roles::{
 use serde::{Deserialize, Serialize};
 pub use session::{SecureSession, SecureTransaction, SessionStatus, UpdateMode};
 pub use sql::{SecureCommit, SecureRows, SecureSql};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -352,6 +356,9 @@ pub(super) struct Inner<A> {
     /// under an earlier value are refused.
     pub(super) authority: u64,
     pub(super) authority_events: watch::Sender<u64>,
+    /// The recovery context after the last call that committed or changed
+    /// keys, grants, schemas or the tip graph; see `quarantine_context`.
+    recovery_events: watch::Sender<i64>,
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
     rebuilding_tip: bool,
@@ -379,6 +386,10 @@ pub(super) struct Inner<A> {
     importing: BTreeSet<ResourceScope>,
     /// Why each pending log head waited when an apply pass last examined it.
     waits: BTreeMap<Hash, WaitReason>,
+    /// A frame of an earlier key epoch than its scope's current one applied
+    /// since the last scan, and the followed tip that scan saw.
+    earlier_epoch: AtomicBool,
+    epochs_scanned: Option<TipId>,
     /// Rows applied frames wrote since open, for apply spans.
     rows_written: AtomicU64,
     /// Pending frames apply passes applied since open.
@@ -407,6 +418,8 @@ pub(super) struct Inner<A> {
     pub(super) limits: RetentionLimits,
     /// The last failure of automatic checkpointing or pruning.
     maintenance_error: Option<String>,
+    /// When maintenance runs again after a failure, and how many failed.
+    maintenance_backoff: Option<(u64, u32)>,
     /// Commit that made each scope's checkpoint current, by scope number.
     verified_at: BTreeMap<i64, u64>,
     /// Peers whose credentials and frontiers are kept whatever the bound.
@@ -457,6 +470,9 @@ pub(super) struct Inner<A> {
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
+    /// Frames whose application fails as their own fault, for quarantine.
+    #[cfg(test)]
+    pub(super) poisoned: BTreeSet<Hash>,
     #[cfg(test)]
     pub(super) group_commits: usize,
     #[cfg(test)]
@@ -575,6 +591,12 @@ async fn flush_guard<'a, A: RowApplication>(
     loop {
         let (flusher, commit) = (inner.flusher.clone(), inner.commit);
         if flusher.durable() >= commit {
+            let context = inner.quarantine_context();
+            inner.recovery_events.send_if_modified(|current| {
+                let changed = *current != context;
+                *current = context;
+                changed
+            });
             return Ok(inner);
         }
         drop(inner);
@@ -670,6 +692,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         checkpoint::ARCHIVE_SCHEMA,
         checkpoint::PULLED_SCHEMA,
         checkpoint::SERVED_SCHEMA,
+        checkpoint::FAILURE_SCHEMA,
         compaction::SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
@@ -679,6 +702,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         publication::SCHEMA,
         bulk::SCHEMA,
         positions::SCHEMA,
+        quarantine::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().map(|sql| (*sql).to_owned()))
@@ -934,6 +958,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             revision: 0,
             authority: 1,
             authority_events: watch::channel(1).0,
+            recovery_events: watch::channel(0).0,
             strict_projection: false,
             rebuilding_tip: false,
             opening_revocations: None,
@@ -945,6 +970,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             deferred_maintenance: BTreeSet::new(),
             importing: BTreeSet::new(),
             waits: BTreeMap::new(),
+            earlier_epoch: AtomicBool::new(false),
+            epochs_scanned: None,
             rows_written: AtomicU64::new(0),
             applied_frames: 0,
             direct: BTreeSet::new(),
@@ -960,6 +987,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             wal_mark: 0,
             limits: RetentionLimits::default(),
             maintenance_error: None,
+            maintenance_backoff: None,
             verified_at: BTreeMap::new(),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
@@ -993,6 +1021,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             group_fault: None,
             #[cfg(test)]
             receive_gate: None,
+            #[cfg(test)]
+            poisoned: BTreeSet::new(),
             #[cfg(test)]
             group_commits: 0,
             #[cfg(test)]
@@ -1184,6 +1214,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Ends authority-bound network links without polling.
     pub async fn observe_authority(&self) -> watch::Receiver<u64> {
         self.inner.lock().await.authority_events.subscribe()
+    }
+    /// Changes when keys, grants, schemas, the tip graph or the followed
+    /// tip changed: what local recovery and quarantined frames depend on.
+    pub async fn observe_recovery(&self) -> watch::Receiver<i64> {
+        self.inner.lock().await.recovery_events.subscribe()
     }
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()

@@ -15,22 +15,22 @@ pub use replica::{
     AuditReport, Buffered, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
     CiphertextPage, CommittedEntry, CompactReport, CompactionStatus, Companion, CoordinatedCommit,
     CoordinatedEntry, CoordinatedError, CoordinatedStatus, CoveredMark, CurrentValue,
-    CustodySummary, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT, EncryptedReplica, EntryPeers,
-    EvictReport, ExistenceBaseAttachment, ExistenceBasePage, ExistenceBasis, ExistenceEvent,
-    ExistencePage, ExistenceRecord, FrameReplay, FrontierLog, GenerationStatus, HeldChange,
-    HeldField, HeldKind, HeldRow, HeldSeal, Holding, InstalledTipSchema, KeptSeals, KeyMaterial,
-    LineNode, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS,
-    MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_PLACEMENTS,
-    MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, MigrationMembership,
-    MigrationStorage, PLAN_ROWS, PeerFuture, PeerLag, PeerScopeFrontier, PendingSchema, Placement,
-    PlacementPage, PlacementRequest, ProjectionPlan, PruneBlock, PruneReport, PrunedPage,
-    Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, Refusal, RemotePage,
-    ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig,
-    SchemaStage, ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit,
-    SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
-    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, Slot,
-    StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement,
-    UpdateMode, entry_hash, installed_tip_schema,
+    CustodySummary, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT, EarlierEpochWrites,
+    EncryptedReplica, EntryPeers, EvictReport, ExistenceBaseAttachment, ExistenceBasePage,
+    ExistenceBasis, ExistenceEvent, ExistencePage, ExistenceRecord, FrameReplay, FrontierLog,
+    GenerationStatus, HeldChange, HeldField, HeldKind, HeldRow, HeldSeal, Holding,
+    InstalledTipSchema, KeptSeals, KeyMaterial, LineNode, LogPosition, MAX_BUNDLE_BYTES,
+    MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS,
+    MAX_EXISTENCE_PAGE, MAX_PLACEMENTS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS,
+    MAX_UNCONFIGURED_PEERS, MigrationMembership, MigrationStorage, PLAN_ROWS, PeerFuture, PeerLag,
+    PeerScopeFrontier, PendingSchema, Placement, PlacementPage, PlacementRequest, ProjectionPlan,
+    PruneBlock, PruneReport, PrunedPage, Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport,
+    ReceiveStatus, Refusal, RemotePage, ReplicaRole, ReplicaStatus, RetentionLimits,
+    RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier, ScopeStatus,
+    SealRebootstrap, SealViews, SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession,
+    SecureSnapshot, SecureSql, SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint,
+    SignedVoid, Slot, StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation,
+    TipObservation, TipStatement, UpdateMode, entry_hash, installed_tip_schema,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 /// The credential types live in `rocky-credentials`; these are the same types.
@@ -163,6 +163,7 @@ fn apply_allowed() -> bool {
 #[cfg(test)]
 mod tests;
 
+pub use replica::checkpoint::IMPORT_ATTEMPTS;
 #[doc(hidden)]
 pub use replica::last_in_place_switch_changes;
 pub use replica::{check_replica_format, local_row_counts};

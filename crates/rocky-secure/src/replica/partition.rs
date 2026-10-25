@@ -256,8 +256,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("own-id partition requires an insert grant"));
         }
-        if let Some(seal) = inner.path_seals(scope.domain)?.last() {
-            let frontier = encode(&seal.statement.frontier)?;
+        if inner.graphs.contains_key(&scope.domain) {
+            // Known positions predate this unused own identity, including
+            // those a later checkpoint will summarize before the first seal.
+            let frontier = encode(&inner.seal_frontier(scope.domain, false).await?)?;
             let logical = typed.rows.schema();
             let address = logical
                 .group_address(typed.domain, name, &[SqlValue::Integer(identity.integer())])
@@ -316,8 +318,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .collect::<Result<Vec<_>, Error>>()?;
             transaction!(inner, |inner| {
                 for scope in scopes.iter().copied() {
-                    // The unused own identity and rows referencing it did not exist at an earlier seal.
-                    // A repeated preparation must preserve any state already materialized.
+                    // A repeated preparation preserves materialized state.
                     if inner.find_scope_id(scope).await?.is_none() {
                         let id = inner.scope_id(scope).await?;
                         inner

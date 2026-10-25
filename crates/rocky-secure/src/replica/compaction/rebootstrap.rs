@@ -29,7 +29,7 @@ impl<A: RowApplication> Inner<A> {
             .and_then(|record| record.signed)
             .and_then(|signed| signed.statement.seal))
     }
-    fn owns_key(&self, key: PublicKey) -> bool {
+    pub(in crate::replica) fn owns_key(&self, key: PublicKey) -> bool {
         key == self.config.node.public_key()
             || self
                 .credential_signer
@@ -67,6 +67,24 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
     ) -> Result<(), Error> {
         blockers::refuse(self.workspace_blockers(domain).await?)
+    }
+    /// The checkpoints of `scope` another node signed that the graph lists
+    /// at `seals`, in their order.
+    pub(in crate::replica) fn listed_at<'a>(
+        &self,
+        graph: &rocky_credentials::TipGraph,
+        scope: ResourceScope,
+        seals: impl IntoIterator<Item = &'a Commitment>,
+    ) -> Result<Vec<Commitment>, Error> {
+        let mut listed = Vec::new();
+        for seal in seals {
+            for record in graph.checkpoints_at(*seal).map_err(credential)? {
+                if record.statement.table == scope && !self.owns_key(record.statement.signer) {
+                    listed.push(record.statement.checkpoint);
+                }
+            }
+        }
+        Ok(listed)
     }
     pub(in crate::replica) async fn seal_rebootstraps(
         &self,
@@ -114,24 +132,15 @@ impl<A: RowApplication> Inner<A> {
             if !needed {
                 continue;
             }
-            let mut listed = Vec::new();
-            for seal in path.iter().rev() {
-                for record in graph.checkpoints_at(*seal).map_err(credential)? {
-                    if record.statement.table == scope && !self.owns_key(record.statement.signer) {
-                        listed.push(record.statement.checkpoint);
-                    }
-                }
-            }
+            let listed = self.listed_at(graph, scope, path.iter().rev())?;
             let logged = self.existence_table(scope);
-            let released = logged
-                && self
-                    .existence_base(scope)
-                    .await?
-                    .and_then(|base| base.seal())
-                    .is_some_and(|seal| !path.contains(&seal));
+            let released = self
+                .existence_released(scope, &path.iter().copied().collect())
+                .await?;
             if unknown && !missing && !pruned && base.is_none_or(|seal| path.contains(&seal)) {
                 continue;
             }
+
             let replay = match (released, pruned || missing) {
                 (true, _) => FrameReplay::Unavailable,
                 (false, false) => FrameReplay::Local,
@@ -145,6 +154,20 @@ impl<A: RowApplication> Inner<A> {
             });
         }
         Ok(needs)
+    }
+    /// Whether `scope`'s existence records were folded at a seal outside
+    /// `path`: only a checkpoint with a signed existence base replaces them.
+    pub(in crate::replica) async fn existence_released(
+        &self,
+        scope: ResourceScope,
+        path: &BTreeSet<Commitment>,
+    ) -> Result<bool, Error> {
+        Ok(self.existence_table(scope)
+            && self
+                .existence_base(scope)
+                .await?
+                .and_then(|base| base.seal())
+                .is_some_and(|seal| !path.contains(&seal)))
     }
     /// Inside the caller's transaction, drops scope `id`'s replay base so
     /// its rows are rebuilt from frames. With `reset`, its applied state goes

@@ -111,12 +111,15 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
 }
 
 #[test]
-fn reopen_completes_each_revocation_secret_boundary() -> Result<(), Failure> {
+fn reopen_completes_each_revocation_reader_secret_boundary() -> Result<(), Failure> {
+    use fault::Stage;
+    reopen_at_revocation_boundaries(&[(Stage::Begun, 0), (Stage::Key, 0), (Stage::Key, 1)])
+}
+
+#[test]
+fn reopen_completes_each_revocation_partition_secret_boundary() -> Result<(), Failure> {
     use fault::Stage;
     reopen_at_revocation_boundaries(&[
-        (Stage::Begun, 0),
-        (Stage::Key, 0),
-        (Stage::Key, 1),
         (Stage::Key, 2),
         (Stage::Key, 3),
         (Stage::Key, 4),

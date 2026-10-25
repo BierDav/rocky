@@ -8,6 +8,7 @@ mod held;
 mod live_links;
 mod mesh;
 mod partition;
+mod recovery;
 mod registry;
 mod schema_publication;
 mod schemas;
@@ -297,7 +298,6 @@ pub(crate) struct Node {
     import_sources: std::sync::Mutex<
         BTreeMap<ResourceScope, (Option<rocky_core::Commitment>, tokio::time::Instant)>,
     >,
-    state_failures: std::sync::Mutex<BTreeMap<(ResourceScope, rocky_core::Commitment), u8>>,
     sync_failures: std::sync::Mutex<BTreeMap<(PublicKey, ResourceScope), SyncFailure>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
     /// Signals that the discovery topics may have changed.
@@ -389,7 +389,6 @@ impl Node {
             learned: AtomicBool::new(false),
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),
-            state_failures: Default::default(),
             sync_failures: Default::default(),
             choices: std::sync::Mutex::new(BTreeMap::new()),
             topics: watch::channel(0).0,
@@ -1608,6 +1607,17 @@ impl Node {
         self.forget_readers().await;
         // Rotated first: the statement refuses the device even if this fails.
         Box::pin(self.complete_revocation()).await?;
+        // Members no longer accept the revoked author's frames, nor open
+        // the earlier epoch's; a checkpoint at a seal after them carries
+        // those rows instead.
+        if !matches!(target, crate::enrollment::Revoke::Trust(_))
+            && let Err(error) = self.seal_for_members().await
+        {
+            self.activity.record(
+                "revocation_seal_failed",
+                json!({"error": error.to_string()}),
+            );
+        }
         Ok(json!({
             "statement": HEXLOWER.encode(&rotation.statement.id()?),
             "revocations": status,
@@ -1705,7 +1715,9 @@ impl Node {
         }
         self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
-        if !epochs_only && settings.lacks(&renewed.revocations)? {
+        // A member restores newly revoked authors by checkpoint, however it
+        // learned of them.
+        if (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)? {
             rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
         }
         if epochs_only {
@@ -2186,8 +2198,10 @@ impl Node {
         }
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace("syncing");
-        // Finality records reach peers in this pass's graph exchange.
+        // Finality records and member seals reach peers in this pass's
+        // graph exchange.
         self.finalize_seals().await;
+        self.publish_for_members().await;
         self.close_migrations().await?;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         let saved = self.settings.lock().await.clone();
@@ -2233,9 +2247,10 @@ impl Node {
             }
         }
         let renewable = member || !settings.issuers.is_empty();
-        // A served session brought statements: renew for the rotated keys
-        // before moving rows.
-        if renewable && self.learned.load(Ordering::SeqCst) {
+        // A served session brought statements, or frames wait for a key
+        // epoch this device lacks, as after a restart that forgot the
+        // statements were new: renew for the rotated keys before moving rows.
+        if renewable && (self.learned.load(Ordering::SeqCst) || self.awaits_key_epoch().await) {
             let _ = self.renew(Some(transport), true, None, true).await;
             if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
@@ -2338,20 +2353,31 @@ impl Node {
             loop {
                 let width = if local_first && first_batch { 1 } else { 4 };
                 first_batch = false;
-                let batch: Vec<_> = remaining.by_ref().take(width).collect();
+                let mut batch: Vec<_> = remaining.by_ref().take(width).collect();
                 if batch.is_empty() {
                     break;
                 }
                 if !needed.is_empty() && needed.iter().all(|scope| covered.contains(scope)) {
+                    // Coverage by others never stands in for the one
+                    // exchange a joined device owes its inviter.
+                    let inviter = self.awaited_inviter();
                     let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
-                    for (peer, _, _) in batch.into_iter().chain(remaining) {
-                        choices.insert(peer, "covered");
+                    let mut owed = Vec::new();
+                    for target in batch.into_iter().chain(remaining.by_ref()) {
+                        if Some(target.0) == inviter {
+                            owed.push(target);
+                            continue;
+                        }
+                        choices.insert(target.0, "covered");
                         Self::add_peer_report(
                             report,
-                            Self::skipped_peer(peer.to_hex(), crate::SkipReason::Covered),
+                            Self::skipped_peer(target.0.to_hex(), crate::SkipReason::Covered),
                         );
                     }
-                    break;
+                    if owed.is_empty() {
+                        break;
+                    }
+                    batch = owed;
                 }
                 let attempts = stream::iter(batch)
                     .map(|(peer, contact, generation)| async move {
@@ -2634,6 +2660,30 @@ impl Node {
             })
             .collect())
     }
+    /// Whether received frames wait for a key epoch this device lacks.
+    async fn awaits_key_epoch(&self) -> bool {
+        self.replica.blockers().await.is_ok_and(|blockers| {
+            blockers.iter().any(|blocker| {
+                matches!(
+                    blocker.kind,
+                    rocky_core::BlockerKind::PendingFrames {
+                        reason: rocky_core::WaitReason::OpeningKey,
+                        ..
+                    }
+                )
+            })
+        })
+    }
+    /// The inviter a joined device still owes one exchange, if any.
+    fn awaited_inviter(&self) -> Option<PublicKey> {
+        let bytes = std::fs::read(self.path.with_file_name("bootstrap.json")).ok()?;
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()?
+            .get("inviter")?
+            .as_str()?
+            .parse()
+            .ok()
+    }
     /// The intent to keep instead of clearing a completed `intent` with
     /// `peer`: a joined device waits for one exchange with its inviter, which
     /// holds the envelopes shared with it after enrollment, unless revoked.
@@ -2745,7 +2795,41 @@ impl Node {
                     });
             }
         }
+        if let Ok((retry, transfer)) = &mut result
+            && !*retry
+        {
+            *retry = self.owes_retry(peer, transfer).await;
+        }
         result
+    }
+    /// Whether another exchange with `peer` is owed: a blocker that this
+    /// peer or any permitted peer clears remains for a scope the peer
+    /// served, or for the domain whose scopes it served. The backoff spaces
+    /// the retries.
+    async fn owes_retry(&self, peer: PublicKey, transfer: &sync::Transfer) -> bool {
+        use rocky_core::{ClearsBy, domain_label, scope_label};
+        let Ok(blockers) = self.blockers().await else {
+            return false;
+        };
+        let served: std::collections::BTreeSet<String> = transfer
+            .held
+            .iter()
+            .chain(transfer.scopes.iter().map(|(scope, _)| scope))
+            .filter(|scope| !transfer.refused.contains(scope))
+            .map(scope_label)
+            .collect();
+        let domain = domain_label(&self.domain().scope);
+        let node = peer.to_hex();
+        blockers.iter().any(|blocker| {
+            let clears = match &blocker.clears_by {
+                ClearsBy::AnyPeer => true,
+                ClearsBy::Peer { node: by } => *by == node,
+                ClearsBy::LocalWork | ClearsBy::Application | ClearsBy::NoPeer => false,
+            };
+            clears
+                && (served.contains(&blocker.scope)
+                    || (blocker.scope == domain && !served.is_empty()))
+        })
     }
     async fn reconcile_observed(
         &self,
@@ -2958,7 +3042,6 @@ impl Node {
                 false => None,
             },
             keep: Some(&keep),
-            state_failures: &self.state_failures,
         };
         let reconcile = upstream.link.begin_reconcile().await?;
         // Envelopes first, on the exchange's first session: a list a
@@ -3058,6 +3141,9 @@ impl Node {
             first,
         )
         .await;
+        // Draining waits for the peer's reverse exchange, which may need
+        // this node's import slot through another peer. Release it first.
+        drop(_bootstrap);
         let (retry, transfer) = match reconciled {
             Err(error) => {
                 self.observations

@@ -182,7 +182,6 @@ async fn enable(node: &Node) -> Result<(), Failure> {
         .wait_for(|status| status["token"] != before && status["state"] == "connected")
         .await?;
     assert_eq!(statuses.borrow()["state"], "connected");
-    assert_eq!(statuses.borrow()["retry"], false);
     Ok(())
 }
 
@@ -218,6 +217,8 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
         a.configure(|settings| settings.add_peer(&a.vault, &contact)).await?;
         enable(&a).await?;
         enable(&b).await?;
+        assert_eq!(a.sync_status.borrow()["retry"], false);
+        assert_eq!(b.sync_status.borrow()["retry"], false);
         while !a.current().is_some_and(|service| service.live.len() == 1)
             || !b.current().is_some_and(|service| service.live.len() == 1)
             || *a.worker_running.borrow()
@@ -384,6 +385,11 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
                     .wait_for(|status| status["token"] != before && status["state"] == "connected"),
             )
             .await??;
+            assert_eq!(
+                statuses.borrow()["retry"],
+                false,
+                "keyless custody owes no key retry"
+            );
             for node in [&a, &relay, &b] {
                 node.detach(None).await;
             }

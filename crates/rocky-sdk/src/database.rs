@@ -1427,6 +1427,7 @@ async fn run(
     let mut tasks = tokio::task::JoinSet::new();
     let mut shutdown = None;
     let settling = tokio::task::spawn_local(settle_commits(replica.clone()));
+    let recovering = tokio::task::spawn_local(node.clone().drive_recovery());
     while let Some(command) = input.recv().await {
         let node = node.clone();
         match command {
@@ -1531,6 +1532,8 @@ async fn run(
         }
         while tasks.try_join_next().is_some() {}
     }
+    recovering.abort();
+    let _ = recovering.await;
     node.end_sessions(None);
     // Open transactions roll back and cursors end before the file closes.
     connections.close(None);

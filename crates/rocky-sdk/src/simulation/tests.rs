@@ -23,8 +23,9 @@ fn sweep(seed: u64) -> Scenario {
         rounds: 5,
     }
 }
-/// Seeds that do not converge yet, until recovery drives itself (phase 4),
-/// with the classes of what blocks them. Safety failures are never listed.
+/// Seeds that do not converge, with the classes of what blocks them.
+/// Recovery drives itself, so it stays empty; safety failures are never
+/// listed.
 const KNOWN_LIVENESS: &[(u64, &[&str])] = &[];
 
 async fn simulate(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
@@ -39,19 +40,22 @@ fn classes(report: &Report) -> Vec<String> {
         .flat_map(|stuck| stuck.classes.iter().cloned())
         .collect()
 }
+/// The seed's entry in `KNOWN_LIVENESS`; empty for one that converges.
+fn known(seed: u64) -> Vec<String> {
+    KNOWN_LIVENESS
+        .iter()
+        .find(|(known, _)| *known == seed)
+        .map(|(_, classes)| classes.iter().map(|class| class.to_string()).collect())
+        .unwrap_or_default()
+}
 /// Fails on a safety violation, and on a liveness result that differs from
 /// the seed's entry in `KNOWN_LIVENESS`, so the list stays exact.
 async fn integration(seed: u64) -> Result<(), Failure> {
     let report = simulate(seed, INTEGRATION).await?;
     assert!(report.safety.is_none(), "{}", report.dump());
-    let known: Vec<String> = KNOWN_LIVENESS
-        .iter()
-        .find(|(known, _)| *known == seed)
-        .map(|(_, classes)| classes.iter().map(|class| class.to_string()).collect())
-        .unwrap_or_default();
     assert_eq!(
         classes(&report),
-        known,
+        known(seed),
         "liveness changed for {}",
         report.dump()
     );
@@ -102,8 +106,9 @@ fn sweep_range() -> std::ops::Range<u64> {
 }
 #[cfg(feature = "iroh")]
 const SHARDS: u64 = 16;
-/// One shard of the sweep: fails on any safety violation and reports each
-/// seed that does not converge with what blocks it.
+/// One shard of the sweep: fails on any safety violation and on a seed
+/// whose healing result differs from `KNOWN_LIVENESS`, listing each with
+/// what blocks it.
 #[cfg(feature = "iroh")]
 async fn shard(shard: u64) -> Result<(), Failure> {
     let mut unsafe_seeds = Vec::new();
@@ -116,7 +121,7 @@ async fn shard(shard: u64) -> Result<(), Failure> {
         if report.safety.is_some() {
             println!("{}", report.dump());
             unsafe_seeds.push(seed);
-        } else if report.liveness.is_some() {
+        } else if classes(&report) != known(seed) {
             stuck.entry(classes(&report)).or_default().push(seed);
         }
     }
@@ -128,6 +133,7 @@ async fn shard(shard: u64) -> Result<(), Failure> {
         unsafe_seeds.is_empty(),
         "safety failed for seeds {unsafe_seeds:?}"
     );
+    assert!(stuck.is_empty(), "liveness changed for seeds {stuck:?}");
     Ok(())
 }
 macro_rules! shards {
@@ -251,8 +257,9 @@ fn masked(safety: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-/// Shrinks the schedule of `ROCKY_SIM_SEED`'s safety failure: drops steps
-/// one at a time while the same violation still happens, then prints it.
+/// Shrinks the schedule of `ROCKY_SIM_SEED`'s failure, a safety violation
+/// or what keeps it from converging: drops steps one at a time while the
+/// same failure still happens, then prints it.
 #[tokio::test(start_paused = true)]
 #[ignore = "shrinks one failing seed on request"]
 async fn shrink() -> Result<(), Failure> {
@@ -262,10 +269,16 @@ async fn shrink() -> Result<(), Failure> {
         let report = tokio::task::LocalSet::new()
             .run_until(driver::run_steps(seed, scenario, steps))
             .await?;
-        Ok::<_, Failure>(report.safety.map(|safety| masked(&safety)))
+        Ok::<_, Failure>(match &report.safety {
+            Some(safety) => Some(masked(safety)),
+            None => report
+                .liveness
+                .as_ref()
+                .map(|_| format!("liveness {:?}", classes(&report))),
+        })
     };
     let mut steps = super::schedule::plan(seed, scenario);
-    let violation = run(steps.clone()).await?.ok_or("the seed is safe")?;
+    let violation = run(steps.clone()).await?.ok_or("the seed converges")?;
     let mut shrunk = true;
     while shrunk {
         shrunk = false;

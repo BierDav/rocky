@@ -37,6 +37,18 @@ pub struct TipNodeObservation {
     pub kept_seals: Option<Vec<Commitment>>,
 }
 
+/// Where a signer's writes of an earlier key epoch stand for members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EarlierEpochWrites {
+    /// A seal and a served base at it cover each.
+    Covered,
+    /// One lies past the followed tip's seal: a seal must follow.
+    Unsealed,
+    /// One is sealed, but past the base its scope serves: a base at a
+    /// later seal must replace it.
+    Unbased,
+}
+
 impl<A: RowApplication> Inner<A> {
     /// Every locally held operation and void header of the domain. A scan
     /// of headers, never of rows; explicit developer calls only.
@@ -173,6 +185,99 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
         self.inner.lock().await.seal_frontier(scope, close).await
     }
+    /// Where writes visible in the followed tip, under an earlier key epoch
+    /// than their scope's current one, stand: members given only the
+    /// current epoch get their rows with a checkpoint at a later seal, never
+    /// by opening the frame. Scans only after such a frame applied or the
+    /// followed tip moved, and again until they are covered.
+    pub async fn earlier_epoch_writes(&self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
+        let mut inner = self.inner.lock().await;
+        if !inner.earlier_epoch_due() {
+            return Ok(EarlierEpochWrites::Covered);
+        }
+        let found = inner.scan_earlier_epochs(scope).await?;
+        inner
+            .earlier_epoch
+            .store(found != EarlierEpochWrites::Covered, Ordering::Relaxed);
+        inner.epochs_scanned = Some(inner.workspace.tip);
+        Ok(found)
+    }
+    /// Whether `unsealed_earlier_epochs` would scan.
+    pub async fn earlier_epoch_due(&self) -> bool {
+        self.inner.lock().await.earlier_epoch_due()
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    fn earlier_epoch_due(&self) -> bool {
+        self.earlier_epoch.load(Ordering::Relaxed)
+            || self.epochs_scanned != Some(self.workspace.tip)
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    async fn scan_earlier_epochs(&mut self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
+        let graph = self.scope_graph(scope)?;
+        let sealed = match graph.seal(self.workspace.tip).map_err(credential)? {
+            Some(seal) => seal.statement.frontier.clone(),
+            None => Inner::<A>::tip_parent(&graph, self.workspace.tip)?
+                .map(|(_, frontier)| frontier)
+                .unwrap_or_default(),
+        };
+        let covers = |frontier: &[AuthorMark], header: &Extensions, author: u32| {
+            frontier
+                .iter()
+                .any(|mark| mark.author == author && header.author_sequence <= mark.sequence)
+        };
+        // The frontier of the seal each served base sits at.
+        let mut bases = BTreeMap::new();
+        let mut found = EarlierEpochWrites::Covered;
+        for header in self.domain_headers(scope).await? {
+            let Some(author) = header.author else {
+                continue;
+            };
+            let current = self
+                .config
+                .keys
+                .iter()
+                .find(|key| key.scope == header.scope)
+                .map(|key| key.generation);
+            if current.is_none_or(|current| header.generation >= current)
+                || !self.visible_header(&graph, &header)?
+            {
+                continue;
+            }
+            if !covers(&sealed, &header, author) {
+                return Ok(EarlierEpochWrites::Unsealed);
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) = bases.entry(header.scope) {
+                let frontier = match self.served_checkpoint(header.scope).await? {
+                    Some((_, signed)) => match signed.statement.seal {
+                        Some(seal) => Some(
+                            graph
+                                .seal_by_id(seal)
+                                .map_err(credential)?
+                                .statement
+                                .frontier
+                                .clone(),
+                        ),
+                        None => None,
+                    },
+                    None => None,
+                };
+                entry.insert(frontier);
+            }
+            if let Some(Some(base)) = bases.get(&header.scope)
+                && !covers(base, &header, author)
+            {
+                found = EarlierEpochWrites::Unbased;
+            }
+        }
+        Ok(found)
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn tip_observation(&self, scope: Scope) -> Result<TipObservation, Error> {
         let inner = self.inner.lock().await;
         let graph = inner.scope_graph(scope)?;

@@ -995,7 +995,7 @@ impl<A: RowApplication> Inner<A> {
 
     /// The checkpoint this replica can serve: verified and signed under the
     /// current policy.
-    pub(super) async fn served_checkpoint(
+    pub(in crate::replica) async fn served_checkpoint(
         &mut self,
         scope: ResourceScope,
     ) -> Result<Option<(i64, SignedCheckpoint)>, Error> {
@@ -1804,7 +1804,15 @@ impl<A: RowApplication> Inner<A> {
         // Whether the base it replaces left the followed path, before
         // anything about it changes.
         let off_path = self.base_off_path(scope, id).await?;
+        self.forget_import_failures(scope).await?;
         self.clear_seal_anchor(id).await?;
+        // Operations apply again at later positions over the new base:
+        // bounds of seals finalized before name positions that are gone.
+        for table in ["secure_seal_bounds", "secure_seal_drops"] {
+            self.conn
+                .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
+                .await?;
+        }
         let statement = signed.statement.clone();
         if self.graphs.contains_key(&scope.domain) && statement.seal.is_none() {
             return Err(denied(
@@ -2005,6 +2013,25 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt(
                     "an applied birth has no admission evidence".into(),
                 ));
+            }
+            // Already admitted operations on another branch stay replayable
+            // when returning there; this import must not reject them.
+            if self.frame_reach(&frame)? == tips::FrameReach::Unfollowed {
+                let operation = frame.operation_ref()?;
+                self.note_applied(id, operation).await?;
+                self.note_row_positions(id, &frame, &self.row_payload(&frame)?)
+                    .await?;
+                self.conn
+                    .execute(
+                        "UPDATE secure_operations SET status='applied' WHERE hash=?",
+                        [hash.as_bytes().to_vec()],
+                    )
+                    .await?;
+                let (rows, tombstones, digest, applied) = self.scope_state(id).await?;
+                self.store_scope_state(id, rows, tombstones, &digest, applied + 1)
+                    .await?;
+                report.reapplied.push(hash);
+                continue;
             }
             match self.apply_frame(&frame, time).await? {
                 incoming::Outcome::Applied => match self.consumed(hash).await? {

@@ -65,6 +65,9 @@ impl<A: RowApplication> Inner<A> {
                 },
                 match need.replay {
                     FrameReplay::Local => ClearsBy::LocalWork,
+                    // Only a listed checkpoint replaces released existence
+                    // records; a trusted peer holding one lists it first.
+                    FrameReplay::Unavailable if need.listed.is_empty() => ClearsBy::NoPeer,
                     FrameReplay::Peers | FrameReplay::Unavailable => ClearsBy::AnyPeer,
                 },
             ));
@@ -162,12 +165,14 @@ impl<A: RowApplication> Inner<A> {
             Vec::new()
         })
     }
-    /// Pending frames by scope and the reason their log heads wait.
+    /// Pending frames by scope and the reason their log heads wait; a
+    /// quarantined head names its failure instead.
     async fn pending_blockers(&self) -> Result<Vec<Blocker>, Error> {
         let mut counts: BTreeMap<(String, WaitReason), u64> = BTreeMap::new();
+        let mut quarantined: BTreeMap<(String, String), u64> = BTreeMap::new();
         for record in rows(
             &self.conn,
-            "SELECT o.scope,o.hash,h.n FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence",
+            "SELECT o.scope,o.hash,h.n,q.reason FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence LEFT JOIN secure_quarantine q ON q.hash=o.hash",
         )
         .await?
         {
@@ -175,10 +180,18 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(scope),
                 SqlValue::Blob(hash),
                 SqlValue::Integer(count),
+                failure,
             ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("pending operation".into()));
             };
+            if let SqlValue::Text(reason) = failure {
+                let scope: ResourceScope = decode(scope)?;
+                *quarantined
+                    .entry((scope_label(&scope), reason.clone()))
+                    .or_default() += *count as u64;
+                continue;
+            }
             let scope: ResourceScope = decode(scope)?;
             let hash = Hash::from_bytes(
                 hash.as_slice()
@@ -192,6 +205,7 @@ impl<A: RowApplication> Inner<A> {
                 .unwrap_or(WaitReason::Unexamined);
             *counts.entry((scope_label(&scope), reason)).or_default() += *count as u64;
         }
+        let undecryptable = |reason: &str| reason == super::quarantine::UNDECRYPTABLE;
         Ok(counts
             .into_iter()
             .map(|((scope, reason), count)| {
@@ -201,6 +215,16 @@ impl<A: RowApplication> Inner<A> {
                     reason.clears_by(),
                 )
             })
+            .chain(quarantined.into_iter().map(|((scope, reason), count)| {
+                // Another copy of the key or the frame comes from a peer; any
+                // other failure is retried here as what it depends on changes.
+                let clears_by = if undecryptable(&reason) {
+                    ClearsBy::AnyPeer
+                } else {
+                    ClearsBy::LocalWork
+                };
+                blocker(scope, BlockerKind::Quarantined { reason, count }, clears_by)
+            }))
             .collect())
     }
     /// Imports in progress and eviction guards, scope by scope.

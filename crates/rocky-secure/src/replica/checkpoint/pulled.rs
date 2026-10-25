@@ -394,7 +394,11 @@ impl<A: RowApplication> Inner<A> {
             }
             Err(error) => return Err(error),
         }
-        self.clear_staging(id).await?;
+        // Another import's staged pages are its own; the pulled state waits
+        // until that import ends.
+        if self.staging(id).await?.is_some() {
+            return Ok(PulledInstall::Deferred);
+        }
         for (staged, kept) in KEPT {
             self.conn
                 .execute(
@@ -432,6 +436,8 @@ pub(in crate::replica) enum PulledInstall {
     Installed,
     /// It no longer passes the import checks and was dropped.
     Refused,
+    /// Another import is staged for the scope; the pulled state stays.
+    Deferred,
 }
 /// Whether `error` refuses a statement, rather than reporting corruption
 /// or a failure to read it.

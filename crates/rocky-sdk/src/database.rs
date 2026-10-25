@@ -50,7 +50,7 @@ pub struct Opened {
     pub network: Option<NetworkService>,
 }
 
-enum Install {
+pub(crate) enum Install {
     Create {
         ttl: u64,
     },
@@ -78,6 +78,9 @@ struct Setup {
     install: Install,
     coordination: Option<Coordination>,
     confirmation: Option<String>,
+    /// Where a hosted database hands out its node.
+    #[cfg(test)]
+    expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
 enum Command {
     Call {
@@ -105,6 +108,31 @@ enum Command {
 }
 /// The scope and the network service a database opened with.
 type Greeting = Result<(String, Option<u64>), Failure>;
+/// Where `run` reports how opening went: to the opener blocked on the
+/// database's thread, or to a hosting task that awaits it.
+enum Hello {
+    Thread(std::sync::mpsc::SyncSender<Greeting>),
+    #[cfg(test)]
+    Task(std::sync::Mutex<Option<oneshot::Sender<Greeting>>>),
+}
+impl Hello {
+    fn send(&self, greeting: Greeting) -> Result<(), Failure> {
+        match self {
+            Self::Thread(sender) => sender
+                .send(greeting)
+                .map_err(|_| "database opener abandoned")?,
+            #[cfg(test)]
+            Self::Task(sender) => sender
+                .lock()
+                .map_err(|_| "greeting poisoned")?
+                .take()
+                .ok_or("greeted twice")?
+                .send(greeting)
+                .map_err(|_| "database opener abandoned")?,
+        }
+        Ok(())
+    }
+}
 
 struct Shared {
     input: mpsc::Sender<Command>,
@@ -131,7 +159,24 @@ impl Shared {
 pub struct Database {
     shared: Arc<Shared>,
     scope: String,
-    thread: Mutex<Option<JoinHandle<()>>>,
+    worker: Mutex<Option<Worker>>,
+}
+/// What serves a database: its own thread, or in a simulation a task on
+/// the caller's thread.
+enum Worker {
+    Thread(JoinHandle<()>),
+    #[cfg(test)]
+    Task(tokio::task::JoinHandle<()>),
+}
+impl Worker {
+    async fn join(self) -> Result<(), Failure> {
+        match self {
+            Self::Thread(thread) => thread.join().map_err(|_| "database thread failed")?,
+            #[cfg(test)]
+            Self::Task(task) => task.await.map_err(|_| "database task failed")?,
+        }
+        Ok(())
+    }
 }
 impl Database {
     /// Creates a domain in an empty directory, owned by this node's
@@ -260,24 +305,10 @@ impl Database {
         install: Install,
         confirmation: Option<String>,
     ) -> Result<Opened, Failure> {
-        let directory = open.directory.to_path_buf();
-        if let Install::Join { invitation } = &install {
-            crate::enrollment::Invite::parse(invitation)?;
-        }
-        let setup = Setup {
-            schema: Schema::parse(open.schema)?,
-            secrets: open
-                .secrets
-                .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
-            identity: open.identity,
-            directory,
-            install,
-            coordination: open.coordination,
-            confirmation,
-        };
-        let network = open.network;
+        let (setup, network) = Self::setup(open, install, confirmation)?;
         let (input, receiver) = mpsc::channel(32);
         let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
+        let hello = Hello::Thread(hello);
         let thread = std::thread::Builder::new()
             .name("rocky-sdk".into())
             .spawn(move || {
@@ -296,7 +327,39 @@ impl Database {
                     let _ = hello.send(Err(error));
                 }
             })?;
-        match greeting.recv().map_err(|_| "database failed to start")? {
+        let greeting = greeting.recv().map_err(|_| "database failed to start")?;
+        Self::opened(greeting, input, Worker::Thread(thread))
+    }
+    fn setup(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+    ) -> Result<(Setup, Option<Network>), Failure> {
+        let directory = open.directory.to_path_buf();
+        if let Install::Join { invitation } = &install {
+            crate::enrollment::Invite::parse(invitation)?;
+        }
+        let setup = Setup {
+            schema: Schema::parse(open.schema)?,
+            secrets: open
+                .secrets
+                .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
+            identity: open.identity,
+            directory,
+            install,
+            coordination: open.coordination,
+            confirmation,
+            #[cfg(test)]
+            expose: None,
+        };
+        Ok((setup, open.network))
+    }
+    fn opened(
+        greeting: Greeting,
+        input: mpsc::Sender<Command>,
+        worker: Worker,
+    ) -> Result<Opened, Failure> {
+        match greeting {
             Ok((scope, network)) => {
                 let shared = Arc::new(Shared {
                     input,
@@ -309,12 +372,17 @@ impl Database {
                     database: Arc::new(Self {
                         shared,
                         scope,
-                        thread: Mutex::new(Some(thread)),
+                        worker: Mutex::new(Some(worker)),
                     }),
                 })
             }
             Err(error) => {
-                let _ = thread.join();
+                match worker {
+                    Worker::Thread(thread) => drop(thread.join()),
+                    // The task ends with the error it sent.
+                    #[cfg(test)]
+                    Worker::Task(_) => {}
+                }
                 Err(error)
             }
         }
@@ -387,16 +455,62 @@ impl Database {
     /// closes the file. Admitted calls finish first. Closing again does
     /// nothing.
     pub async fn close(&self) -> Result<(), Failure> {
-        let mut thread = self.thread.lock().await;
-        if let Some(worker) = thread.take() {
+        let mut worker = self.worker.lock().await;
+        if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
             let result = self.shared.request(Command::Close).await;
-            worker.join().map_err(|_| "database thread failed")?;
+            worker.join().await?;
             if let Ok(result) = result {
                 result.map_err(|message| -> Failure { message.into() })?;
             }
         }
         Ok(())
+    }
+}
+
+/// A database a simulation serves on its own thread, and its node.
+#[cfg(test)]
+pub(crate) struct Hosted {
+    pub(crate) opened: Opened,
+    /// Upgrade only for a check; a held node outlives a crash.
+    pub(crate) node: std::sync::Weak<Node>,
+}
+#[cfg(test)]
+impl Database {
+    /// Serves the database on a `LocalSet` of the calling task's thread
+    /// instead of its own thread, so a paused clock and one thread drive
+    /// every node of a simulation. Call it inside a `LocalSet`.
+    pub(crate) async fn host(open: Open<'_>, install: Install) -> Result<Hosted, Failure> {
+        let (mut setup, network) = Self::setup(open, install, None)?;
+        let (expose, exposed) = std::sync::mpsc::channel();
+        setup.expose = Some(expose);
+        let (input, receiver) = mpsc::channel(32);
+        let (hello, greeting) = oneshot::channel();
+        let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
+        let task = tokio::task::spawn_local(async move {
+            let local = tokio::task::LocalSet::new();
+            let result = local.run_until(run(setup, network, receiver, &hello)).await;
+            if let Err(error) = result {
+                let _ = hello.send(Err(error));
+            }
+        });
+        let greeting = greeting
+            .await
+            .unwrap_or_else(|_| Err("database failed to start".into()));
+        let opened = Self::opened(greeting, input, Worker::Task(task))?;
+        let node = exposed
+            .try_recv()
+            .map_err(|_| "the database exposed no node")?;
+        Ok(Hosted { opened, node })
+    }
+    /// Ends a hosted database at once: its tasks are dropped mid-step, as
+    /// a process death would stop them; nothing flushes or closes first.
+    pub(crate) async fn crash(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
+        if let Some(Worker::Task(task)) = self.worker.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -1068,7 +1182,7 @@ async fn run(
     setup: Setup,
     network: Option<Network>,
     mut input: mpsc::Receiver<Command>,
-    hello: &std::sync::mpsc::SyncSender<Greeting>,
+    hello: &Hello,
 ) -> Result<(), Failure> {
     let directory = setup.directory.clone();
     if matches!(setup.install, Install::Installed) && directory.join("identity.json").exists() {
@@ -1271,6 +1385,10 @@ async fn run(
             .with_service(service)
             .with_declared(setup.schema.clone()),
     );
+    #[cfg(test)]
+    if let Some(expose) = &setup.expose {
+        let _ = expose.send(Arc::downgrade(&node));
+    }
     node.coordinate(log);
     if let Err(error) = async {
         node.restore_line_signers().await?;

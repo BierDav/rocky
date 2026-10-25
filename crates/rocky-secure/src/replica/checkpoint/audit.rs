@@ -237,6 +237,16 @@ impl<A: RowApplication> Inner<A> {
             return Ok((None, 0));
         };
         let record = self.checkpoint_record(id, true).await?;
+        // A base signed off the followed path, such as one imported while
+        // the owner followed a branch, is replaced by a rebootstrap before
+        // the rows are this path's: its blockers answer instead.
+        if let Some(signed) = record.as_ref().and_then(|record| record.signed.as_ref())
+            && self
+                .path_fields_to(scope.domain, signed.statement.tip, self.workspace.tip)
+                .is_err()
+        {
+            super::super::blockers::refuse(self.readable_blockers(scope).await?)?;
+        }
         let (signed, cursor, mut sets, ledger) = match record {
             Some(record) => {
                 let signed = self.verify_record(scope, &record)?;

@@ -1,7 +1,9 @@
 # 2. Deterministic simulation
 
-Status: proposed. Owner: `rocky-sdk` integration tests and the in-memory
-transport; `benchmarks/chaos` for the multi-process sweep. Depends on
+Status: implemented 2026-10-25; liveness is reported until phase 4, see
+the [evidence](02-deterministic-simulation-evidence.md). Owner: `rocky-sdk`
+integration tests and the in-memory transport; `benchmarks/chaos` for the
+multi-process sweep. Depends on
 [phase 1](01-see-every-stall.md) for blockers as the progress measure.
 Effort: one to two weeks. Follow the
 [execution contract](README.md#agent-execution-contract).

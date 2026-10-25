@@ -21,6 +21,8 @@ mod schema;
 mod secrets;
 mod self_enrollment;
 mod service;
+#[cfg(test)]
+mod simulation;
 mod status;
 mod sync;
 #[cfg(test)]

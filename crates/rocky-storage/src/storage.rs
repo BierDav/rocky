@@ -71,7 +71,7 @@ pub enum Error {
     },
     /// A SQL session call failed; see `Error::sql_certainty`.
     Sql(crate::sql::SqlError),
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "qualification"))]
     InjectedFailure,
 }
 impl Error {
@@ -97,7 +97,7 @@ impl Error {
             Self::Closed => "closed",
             Self::Rollback { .. } => "rollback",
             Self::Sql(_) => "sql",
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "test-support", feature = "qualification"))]
             Self::InjectedFailure => "injected",
         }
     }
@@ -181,7 +181,7 @@ impl std::fmt::Display for Error {
             Self::Rollback { cause, rollback } => {
                 write!(f, "{cause}; rollback failed: {rollback}; replica stopped")
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "test-support", feature = "qualification"))]
             Self::InjectedFailure => write!(f, "injected pre-commit failure"),
         }
     }

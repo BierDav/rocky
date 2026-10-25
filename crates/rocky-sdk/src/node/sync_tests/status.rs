@@ -148,3 +148,35 @@ async fn a_short_exchange_and_a_failed_peer_do_not_become_a_connection_verdict()
         }))
         .await
 }
+
+/// A writer holds no issuer registry; the owner's sync with it leaves no
+/// blocker, since that scope was never the writer's to serve.
+#[tokio::test(start_paused = true)]
+async fn a_scope_the_peer_does_not_share_is_not_a_blocker() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let profile = Profile::Writer {
+                scopes: ["items".into()].into(),
+            };
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, profile))).await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            let report: crate::ReconciliationReport =
+                serde_json::from_value(a.sync(&*transport(&a).await?).await?.0)?;
+            assert!(!report.peers[0].refused.is_empty(), "{report:?}");
+            let blockers = a.blockers().await?;
+            assert!(
+                !blockers.iter().any(|blocker| matches!(
+                    blocker.kind,
+                    rocky_core::BlockerKind::SyncRequest { .. }
+                )),
+                "{blockers:?}"
+            );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}

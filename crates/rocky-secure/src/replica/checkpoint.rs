@@ -741,8 +741,10 @@ impl<A: RowApplication> Inner<A> {
             ),
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "qualification"))]
     pub(crate) fn fault(&mut self, stage: Stage) -> Result<(), Error> {
+        self.crash_at(|point| point.stage() == Some(stage))?;
+        #[cfg(test)]
         if let Some((at, skip)) = &mut self.stage_fault
             && *at == stage
         {
@@ -757,7 +759,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qualification")))]
     pub(crate) fn fault(&mut self, _stage: Stage) -> Result<(), Error> {
         Ok(())
     }
@@ -1269,12 +1271,21 @@ impl<A: RowApplication> Inner<A> {
             };
             let frame = self.chained_frame(header.clone(), body.clone()).await?;
             let operation = frame.operation_ref()?;
-            // A frame of another line, such as a branch this device left, is
+            // A frame of another line, such as a branch this device left,
+            // or of an ancestor tip past the seal the path leaves it at, is
             // no part of the target's state.
-            if !self.replay_eligible(status, operation, self.rebuilding_tip)?
-                || (self.graphs.contains_key(&scope.domain)
-                    && !self.on_path(scope.domain, operation.header.extensions.tip, target)?)
-            {
+            let e = &operation.header.extensions;
+            let visible = match self.graphs.get(&scope.domain) {
+                Some(graph) => self.visible_frame(
+                    graph,
+                    e.tip,
+                    e.author.ok_or_else(|| denied("node author missing"))?,
+                    e.author_sequence,
+                    target,
+                )?,
+                None => true,
+            };
+            if !self.replay_eligible(status, operation, self.rebuilding_tip)? || !visible {
                 last = Some(*position);
                 continue;
             }

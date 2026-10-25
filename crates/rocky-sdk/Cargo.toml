@@ -38,6 +38,8 @@ rocky-iroh = { workspace = true, features = ["test-utils"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 tokio = { version = "1", features = ["test-util"] }
 rocky-coordinator.workspace = true
+# The simulation crashes replicas at named points.
+rocky-secure = { workspace = true, features = ["qualification"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "3"
 tracing-subscriber.workspace = true

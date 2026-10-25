@@ -12,6 +12,10 @@ mod compaction;
 pub use compaction::{CompactReport, CompactionStatus, FrameReplay, SealRebootstrap};
 mod constraints;
 mod coordinated;
+#[cfg(any(test, feature = "qualification"))]
+mod crash;
+#[cfg(any(test, feature = "qualification"))]
+pub use crash::CrashPoint;
 mod evict;
 mod existence;
 mod frontiers;
@@ -413,6 +417,10 @@ pub(super) struct Inner<A> {
     pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
+    #[cfg(any(test, feature = "qualification"))]
+    crash: Option<CrashPoint>,
+    #[cfg(any(test, feature = "qualification"))]
+    crashed: Option<CrashPoint>,
     /// Fails publication after this step: 1 journaled, 2 committed at
     /// the coordinator, 3 inside the admission transaction.
     #[cfg(test)]
@@ -912,6 +920,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             peer_tips: BTreeMap::new(),
             #[cfg(test)]
             stage_fault: None,
+            #[cfg(any(test, feature = "qualification"))]
+            crash: None,
+            #[cfg(any(test, feature = "qualification"))]
+            crashed: None,
             #[cfg(test)]
             #[cfg(test)]
             publication_fault: None,

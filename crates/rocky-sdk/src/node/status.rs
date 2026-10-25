@@ -338,7 +338,7 @@ impl Node {
 impl Node {
     /// The replica's blockers and the bootstrap intent's: scopes it still
     /// imports and the inviter a joined device waits for.
-    pub(super) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {
+    pub(crate) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {
         use rocky_core::{Blocker, BlockerKind, ClearsBy, domain_label, scope_label};
         let mut blockers = self.replica.blockers().await?;
         for ((peer, scope), failure) in self

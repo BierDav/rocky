@@ -139,6 +139,13 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
     for i in 0..300 {
         world.acked.insert(format!("seed{i}"));
     }
+    // Seals, branches and compaction work on the owner's `main` bookmark.
+    for action in ["create", "follow"] {
+        issuer
+            .call(json!({"type":"tips","action":action,"name":"main"}))
+            .await
+            .map_err(|e| format!("tips {action}: {e}"))?;
+    }
     for l in 0..2 {
         let id = issuer
             .add_list(&format!("seedlist{l}"))
@@ -194,7 +201,10 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
             86..=87 => op_prune(&mut world).await,
             88..=91 => op_hostile(&mut world).await,
             92..=95 => op_share_partial(&mut world).await,
-            _ => op_sync(&mut world).await,
+            96 => op_seal(&mut world).await,
+            97 => op_compact(&mut world).await,
+            98 => op_branch(&mut world, step).await,
+            _ => op_follow(&mut world).await,
         };
         let line = format!("[{step}] {}", result.unwrap_or_else(|e| format!("ERR {e}")));
         if std::env::var("CHAOS_VERBOSE").is_ok() {
@@ -486,6 +496,65 @@ async fn op_prune(world: &mut World) -> Result<String, String> {
     ))
 }
 
+async fn op_seal(world: &mut World) -> Result<String, String> {
+    let issuer = world.issuer().ok_or("no live issuer")?;
+    let r = issuer.call(json!({"type":"tips","action":"seal"})).await;
+    Ok(format!("{} seal: {}", issuer.name, short(&r.map(|s| s["tip"].clone()))))
+}
+
+async fn op_compact(world: &mut World) -> Result<String, String> {
+    let issuer = world.issuer().ok_or("no live issuer")?;
+    let r = issuer.call(json!({"type":"tips","action":"compact"})).await;
+    Ok(format!("{} compact: {}", issuer.name, short(&r.map(|s| s["pruned"].clone()))))
+}
+
+/// Opens a tip at the newest seal and follows a new bookmark there.
+async fn op_branch(world: &mut World, step: usize) -> Result<String, String> {
+    let issuer = world.issuer().ok_or("no live issuer")?;
+    let name = format!("dev{step}");
+    let r = async {
+        let inspection = issuer.call(json!({"type":"tips","action":"inspect"})).await?;
+        let seal = inspection["seals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rfind(|seal| seal["canonical"] == true)
+            .map(|seal| seal["id"].clone())
+            .ok_or("no seal")?;
+        let tip = issuer
+            .call(json!({"type":"tips","action":"open","seal":seal,"minimum_in_sync":1}))
+            .await?["tip"]
+            .clone();
+        issuer.call(json!({"type":"tips","action":"create","name":name,"tip":tip})).await?;
+        issuer.call(json!({"type":"tips","action":"follow","name":name})).await
+    }
+    .await;
+    Ok(format!("{} branch {name}: {}", issuer.name, short(&r.err())))
+}
+
+/// Follows `main` or the newest branch on any live node: leaving or
+/// joining a bookmark.
+async fn op_follow(world: &mut World) -> Result<String, String> {
+    let i = world.pick_alive().ok_or("none alive")?;
+    let node = world.members[i].slot.n().clone();
+    let name = match world.rng.gen_range(0..2) {
+        0 => node
+            .call(json!({"type":"tips","action":"inspect"}))
+            .await
+            .ok()
+            .and_then(|inspection| {
+                inspection["bookmarks"]
+                    .as_array()
+                    .and_then(|marks| marks.last().cloned())
+            })
+            .and_then(|mark| mark["name"].as_str().map(String::from))
+            .unwrap_or_else(|| "main".into()),
+        _ => "main".into(),
+    };
+    let r = node.call(json!({"type":"tips","action":"follow","name":name})).await;
+    Ok(format!("{} follow {name}: {}", node.name, short(&r.err())))
+}
+
 async fn op_hostile(world: &mut World) -> Result<String, String> {
     const SQL: &[&str] = &[
         "BEGIN",
@@ -546,6 +615,7 @@ async fn heal_and_check(world: &mut World, root: &std::path::Path) -> Result<(),
             json!({"type":"networking_control","enabled":true}),
             json!({"type":"network_foreground"}),
             json!({"type":"sync_start","enabled":true}),
+            json!({"type":"tips","action":"follow","name":"main"}),
         ] {
             if let Err(e) = n.call_for(call.clone(), Duration::from_secs(30)).await {
                 println!("  heal {} {}: {}", n.name, call["type"], short(&e));

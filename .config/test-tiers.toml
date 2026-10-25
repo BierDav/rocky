@@ -42,7 +42,7 @@ filter = '''
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests|tip_tests))::/))
-    | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node)::/))
+    | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node|simulation)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
     | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))
@@ -74,9 +74,12 @@ filter = '''
 suite = "15m"
 # Owner-authorized 2026-10-21: run the full migration in both builds outside
 # the combined suite clock. Its assertions and existing 600 s timeout remain.
+# features_11 phase 2 records the simulation sweep's exemption: its shards run
+# 1,000 seeds in 10.5 min on 16 shards, 18 cores (2026-10-25), in the workspace build only.
 suite-exempt-filter = '''
-    binary_id(=rocky-sdk::migrations)
-    & test(=a_migration_of_100000_rows_converges_on_every_member)
+    (binary_id(=rocky-sdk::migrations)
+    & test(=a_migration_of_100000_rows_converges_on_every_member))
+    | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
 '''
 filter = '''
     (package(rocky-secure) & test(/positions_10000/))
@@ -85,6 +88,7 @@ filter = '''
     | (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
     | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
     | test(/::soak_/)
+    | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
     | (binary_id(rocky-coordinator) & (
           test(=raft_store::tests::openraft_storage_contract)

@@ -1,10 +1,13 @@
 //! An in-process transport for tests and deterministic faults: named
 //! nodes on a hub joined by bounded pipes. The hub counts what is asked of
-//! it and injects stalls, disconnects and backpressure.
+//! it and injects stalls, disconnects and backpressure, and per link the
+//! seeded faults of [`LinkFaults`].
+mod faults;
 use super::{
     BoxFuture, Connector, Discovery, Failure, Found, LOCAL_PATH, PathState, Protocol, Stream,
     TOPIC_PATH, Transport,
 };
+pub use faults::{Draws, LinkFaults};
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
@@ -12,7 +15,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -42,8 +45,8 @@ pub struct Hub {
     peer_dials: Mutex<HashMap<String, usize>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
     link_messages: Mutex<HashMap<String, usize>>,
-    /// Open link pipes by their two nodes, for `sever_links`.
-    links: Mutex<Vec<([String; 2], std::sync::Weak<Severed>)>>,
+    /// Open pipes by their two nodes, for `sever_links` and `set_down`.
+    links: Mutex<Vec<OpenPipe>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
     /// At the cut, hold the stream instead of disconnecting it.
@@ -55,6 +58,16 @@ pub struct Hub {
     pub discovery: AtomicBool,
     /// Who announces under which topics, and where each node hears of it.
     announced: Mutex<HashMap<String, Announcement>>,
+    /// Where every fault draw starts.
+    seed: u64,
+    /// Faults by the sorted names of a link's two nodes.
+    faults: Mutex<HashMap<[String; 2], LinkFaults>>,
+    /// Links that refuse dials until healed.
+    down: Mutex<HashSet<[String; 2]>>,
+    /// Streams dialed so far per direction and protocol.
+    ordinals: Mutex<HashMap<(String, String, Protocol), u64>>,
+    /// One line per stream opened or refused and per fault injected.
+    events: Mutex<Vec<String>>,
 }
 struct Announcement {
     node: [u8; 32],
@@ -62,6 +75,7 @@ struct Announcement {
     found: mpsc::Sender<Found>,
 }
 type Tap = Arc<Mutex<Vec<u8>>>;
+type OpenPipe = ([String; 2], Protocol, std::sync::Weak<Severed>);
 impl Default for Hub {
     fn default() -> Self {
         Self {
@@ -85,10 +99,90 @@ impl Default for Hub {
             transcripts: Mutex::default(),
             discovery: AtomicBool::new(false),
             announced: Mutex::default(),
+            seed: 0,
+            faults: Mutex::default(),
+            down: Mutex::default(),
+            ordinals: Mutex::default(),
+            events: Mutex::default(),
         }
     }
 }
+fn pair(a: &str, b: &str) -> [String; 2] {
+    let mut pair = [a.to_owned(), b.to_owned()];
+    pair.sort();
+    pair
+}
 impl Hub {
+    /// A hub whose link faults draw from `seed`.
+    pub fn seeded(seed: u64) -> Self {
+        Self {
+            seed,
+            ..Self::default()
+        }
+    }
+    /// Faults of later streams between `a` and `b`, both ways.
+    pub fn set_faults(&self, a: &str, b: &str, faults: LinkFaults) {
+        self.faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pair(a, b), faults);
+    }
+    /// While down, dials between `a` and `b` are refused; going down
+    /// fails their open streams.
+    pub fn set_down(&self, a: &str, b: &str, down: bool) {
+        let link = pair(a, b);
+        let changed = {
+            let mut links = self.down.lock().unwrap_or_else(PoisonError::into_inner);
+            if down {
+                links.insert(link.clone())
+            } else {
+                links.remove(&link)
+            }
+        };
+        if changed {
+            self.event(format!(
+                "{} {} {}",
+                if down { "down" } else { "up" },
+                link[0],
+                link[1]
+            ));
+        }
+        if down {
+            self.sever(|nodes, _| *nodes == link);
+        }
+    }
+    pub fn is_down(&self, a: &str, b: &str) -> bool {
+        self.down
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&pair(a, b))
+    }
+    /// What the hub opened, refused and injected so far, one line each.
+    pub fn events(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+    fn event(&self, line: String) {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(line);
+    }
+    fn sever(&self, matches: impl Fn(&[String; 2], Protocol) -> bool) {
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        links.retain(|(nodes, protocol, severed)| {
+            let Some(severed) = severed.upgrade() else {
+                return false;
+            };
+            if matches(nodes, *protocol) {
+                severed.sever();
+                return false;
+            }
+            true
+        });
+    }
     /// Complete length-prefixed link messages written by this node, including its handshake.
     pub fn link_messages(&self, node: &str) -> usize {
         self.link_messages
@@ -233,16 +327,8 @@ impl Hub {
     /// Fails the open link streams of `node`, as a transport's idle timeout
     /// ends a connection to a vanished peer. Later links are unaffected.
     pub fn sever_links(&self, node: &str) {
-        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
-        links.retain(|(nodes, severed)| {
-            let Some(severed) = severed.upgrade() else {
-                return false;
-            };
-            if nodes.iter().any(|name| name == node) {
-                severed.sever();
-                return false;
-            }
-            true
+        self.sever(|nodes, protocol| {
+            protocol == Protocol::Link && nodes.iter().any(|name| name == node)
         });
     }
     /// Breaks every stream once `bytes` more have been written across the
@@ -292,8 +378,34 @@ impl Hub {
 struct Severed {
     set: AtomicBool,
     wakers: Mutex<Vec<Waker>>,
+    /// The seeded cut: bytes both ends may still carry together.
+    budget: Mutex<Option<usize>>,
 }
 impl Severed {
+    fn with_budget(budget: Option<usize>) -> Self {
+        Self {
+            budget: Mutex::new(budget),
+            ..Self::default()
+        }
+    }
+    /// How many of `wanted` bytes may cross before the seeded cut.
+    fn allow(&self, wanted: usize) -> usize {
+        self.budget
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map_or(wanted, |left| wanted.min(left))
+    }
+    /// Spends `carried` bytes; true once that reaches the cut.
+    fn carry(&self, carried: usize) -> bool {
+        let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *budget {
+            Some(left) => {
+                *left = left.saturating_sub(carried);
+                *left == 0
+            }
+            None => false,
+        }
+    }
     fn sever(&self) {
         self.set.store(true, Ordering::SeqCst);
         for waker in self
@@ -361,6 +473,14 @@ struct Pipe {
     taps: Vec<Tap>,
     from: String,
     protocol: Protocol,
+    faults: LinkFaults,
+    draws: Draws,
+    /// The stream in the hub's events.
+    label: String,
+    /// The drawn wait before the current write crosses.
+    delay: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// The current write already waited.
+    paced: bool,
 }
 fn cut() -> std::io::Error {
     std::io::ErrorKind::ConnectionReset.into()
@@ -385,11 +505,34 @@ impl AsyncWrite for Pipe {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         self.severed.check(cx)?;
+        if !self.paced && self.faults.delays() {
+            let faults = self.faults;
+            let (delay, stalled) = self.draws.delay(&faults, buf.len());
+            if stalled {
+                self.hub
+                    .event(format!("stall {} {}us", self.label, delay.as_micros()));
+            }
+            self.delay = (!delay.is_zero()).then(|| Box::pin(tokio::time::sleep(delay)));
+            self.paced = true;
+        }
+        if let Some(delay) = &mut self.delay {
+            ready!(delay.as_mut().poll(cx));
+            self.delay = None;
+        }
         let Some(allowed) = self.hub.allow(buf.len()) else {
             return self.hub.blocked(cx).map_ok(|()| 0);
         };
+        let allowed = self.severed.allow(allowed);
+        if allowed == 0 && !buf.is_empty() {
+            return Poll::Ready(Err(cut()));
+        }
         let written = Pin::new(&mut self.io).poll_write(cx, &buf[..allowed]);
         if let Poll::Ready(Ok(written)) = &written {
+            self.paced = false;
+            if self.severed.carry(*written) {
+                self.hub.event(format!("cut {}", self.label));
+                self.severed.sever();
+            }
             self.hub.spend(*written);
             if self.protocol == Protocol::Link {
                 let complete = self.messages.record(&buf[..*written]);
@@ -564,6 +707,35 @@ impl Transport for Node {
             {
                 std::future::pending::<()>().await;
             }
+            let ordinal = {
+                let mut ordinals = self.hub.ordinals.lock().map_err(|_| "hub poisoned")?;
+                let next = ordinals
+                    .entry((self.name.clone(), address.into(), protocol))
+                    .or_default();
+                *next += 1;
+                *next - 1
+            };
+            let label = format!("{}>{} {protocol:?} #{ordinal}", self.name, address);
+            if self.hub.is_down(&self.name, address) {
+                self.hub.event(format!("unreachable {label}"));
+                return Err("unreachable".into());
+            }
+            let faults = self
+                .hub
+                .faults
+                .lock()
+                .map_err(|_| "hub poisoned")?
+                .get(&pair(&self.name, address))
+                .copied()
+                .unwrap_or_default();
+            let mut draws = Draws::stream(self.hub.seed, &self.name, address, protocol, ordinal);
+            if draws.chance(faults.refusals) {
+                self.hub.event(format!("refuse {label}"));
+                return Err("refused".into());
+            }
+            let budget = draws
+                .chance(faults.cuts)
+                .then(|| draws.below(faults.cut_within as u64) as usize + 1);
             let (listener, listening) = self
                 .hub
                 .listeners
@@ -584,14 +756,13 @@ impl Transport for Node {
                 .map_err(|_| "hub poisoned")?
                 .entry((self.name.clone(), address.into(), protocol))
                 .or_default() += 1;
-            let severed = Arc::new(Severed::default());
-            if protocol == Protocol::Link {
-                self.hub.links.lock().map_err(|_| "hub poisoned")?.push((
-                    [self.name.clone(), address.into()],
-                    Arc::downgrade(&severed),
-                ));
-            }
-            let pipe = |io, from: &str| Pipe {
+            let severed = Arc::new(Severed::with_budget(budget));
+            self.hub.links.lock().map_err(|_| "hub poisoned")?.push((
+                pair(&self.name, address),
+                protocol,
+                Arc::downgrade(&severed),
+            ));
+            let mut pipe = |io, from: &str| Pipe {
                 messages: Default::default(),
                 severed: severed.clone(),
                 io: Stream::new(io),
@@ -599,11 +770,21 @@ impl Transport for Node {
                 taps: taps.clone(),
                 from: from.into(),
                 protocol,
+                faults,
+                draws: draws.fork(),
+                label: format!("{label} {from}"),
+                delay: None,
+                paced: false,
             };
+            let (near, far) = (pipe(near, &self.name), pipe(far, address));
             listener
-                .try_send((protocol, Stream::new(pipe(far, address))))
+                .try_send((protocol, Stream::new(far)))
                 .map_err(|_| "unreachable or busy")?;
-            Ok(Stream::new(pipe(near, &self.name)))
+            self.hub.event(match budget {
+                Some(bytes) => format!("open {label} cut at {bytes}"),
+                None => format!("open {label}"),
+            });
+            Ok(Stream::new(near))
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<Inbound>> {
@@ -642,6 +823,11 @@ impl Wrapped {
             taps: vec![],
             from: self.name.clone(),
             protocol,
+            faults: LinkFaults::default(),
+            draws: Draws::new(0),
+            label: self.name.clone(),
+            delay: None,
+            paced: false,
         };
         match paths {
             Some(paths) => Stream::with_paths(pipe, paths),

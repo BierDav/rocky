@@ -24,7 +24,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(ledger);
         }
         let records = collect_rows(self.conn.query(
-            "SELECT b.author,b.signer,MAX(b.sequence),p.tip FROM secure_birth_positions b JOIN secure_applied a ON a.position=b.position JOIN secure_operations o ON o.hash=a.hash JOIN secure_position_sources p ON p.hash=a.hash AND p.kind=0 WHERE b.scope=? AND b.position>? AND b.position<=? AND o.status='applied' GROUP BY b.author,b.signer,p.tip",
+            "SELECT b.author,b.signer,MAX(b.sequence),p.tip,p.author,MAX(p.sequence) FROM secure_birth_positions b JOIN secure_applied a ON a.position=b.position JOIN secure_operations o ON o.hash=a.hash JOIN secure_position_sources p ON p.hash=a.hash AND p.kind=0 WHERE b.scope=? AND b.position>? AND b.position<=? AND o.status='applied' GROUP BY b.author,b.signer,p.tip,p.author,p.sequence",
             [id, after, through],
         ).await?).await?;
         for record in records {
@@ -33,12 +33,24 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(signer),
                 SqlValue::Integer(sequence),
                 SqlValue::Blob(tip),
+                SqlValue::Integer(frame_author),
+                SqlValue::Integer(frame_sequence),
             ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("birth position prefix".into()));
             };
-            if self.graphs.contains_key(&scope.domain)
-                && !self.on_path(scope.domain, TipId(checkpoint::row_of(tip)?), target)?
+            // As replay sees it: a frame written on an ancestor tip past
+            // the seal the path leaves it at is not in the target's state.
+            if let Some(graph) = self.graphs.get(&scope.domain)
+                && !self.visible_frame(
+                    graph,
+                    TipId(checkpoint::row_of(tip)?),
+                    u32::try_from(*frame_author)
+                        .map_err(|_| Error::Corrupt("birth position frame author".into()))?,
+                    u64::try_from(*frame_sequence)
+                        .map_err(|_| Error::Corrupt("birth position frame sequence".into()))?,
+                    target,
+                )?
             {
                 continue;
             }
@@ -56,7 +68,12 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Integer(author), SqlValue::Blob(signer), SqlValue::Integer(sequence), SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else { return Err(Error::Corrupt("held birth position".into())) };
             let frame = self.chained_frame(header.clone(), body.clone()).await?;
             let operation = frame.operation_ref()?;
-            if !self.replay_eligible("held", operation, false)? || (self.graphs.contains_key(&scope.domain) && !self.on_path(scope.domain,operation.header.extensions.tip,target)?) { continue; }
+            let e = &operation.header.extensions;
+            let visible = match self.graphs.get(&scope.domain) {
+                Some(graph) => self.visible_frame(graph, e.tip, e.author.ok_or_else(|| Error::Corrupt("held frame author".into()))?, e.author_sequence, target)?,
+                None => true,
+            };
+            if !self.replay_eligible("held", operation, false)? || !visible { continue; }
             ledger.merge(checkpoint::IdentityMark {
                 author: u32::try_from(*author).map_err(|_| Error::Corrupt("birth position author".into()))?,
                 signer: checkpoint::key_of(signer)?,

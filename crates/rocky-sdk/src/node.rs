@@ -471,7 +471,7 @@ impl Node {
         )
     }
     /// Every granted scope, the registry's included: what sync covers.
-    fn scopes(&self) -> Vec<ResourceScope> {
+    pub(crate) fn scopes(&self) -> Vec<ResourceScope> {
         self.granted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2718,21 +2718,29 @@ impl Node {
                 .sync_failures
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            let unanswered =
+                |scope| transfer.failed.contains(scope) || transfer.denied.contains(scope);
             for scope in transfer
                 .held
                 .iter()
                 .chain(transfer.scopes.iter().map(|(scope, _)| scope))
             {
-                if !transfer.failed.contains(scope) && !transfer.refused.contains(scope) {
+                if !unanswered(scope) {
                     failures.retain(|(_, known), _| known != scope);
                 }
             }
-            for scope in transfer.failed.iter().chain(&transfer.refused) {
+            // A scope the peer does not share was never its to serve.
+            for scope in &transfer.refused {
+                if !unanswered(scope) {
+                    failures.remove(&(peer, *scope));
+                }
+            }
+            for scope in transfer.failed.iter().chain(&transfer.denied) {
                 failures
                     .entry((peer, *scope))
-                    .and_modify(|failure| failure.refused = transfer.refused.contains(scope))
+                    .and_modify(|failure| failure.refused = transfer.denied.contains(scope))
                     .or_insert_with(|| SyncFailure {
-                        refused: transfer.refused.contains(scope),
+                        refused: transfer.denied.contains(scope),
                         since: now().ok(),
                     });
             }

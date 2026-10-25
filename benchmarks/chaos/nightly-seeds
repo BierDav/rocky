@@ -1,0 +1,2 @@
+# The nightly fuzz range: first seed, seed count, steps per seed.
+1 8 120

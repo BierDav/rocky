@@ -1045,8 +1045,10 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Result<BTreeSet<_>, _>>()?;
         // A compacted seal off the new path cannot be undone: the rows wait
         // for a rebootstrap at a seal of the path, unless states pulled at
-        // seals of the path replace every base that left it.
-        if self.compaction_lost(domain).await?.is_some() {
+        // seals of the path replace every base that left it. Scopes whose
+        // base stays on the path are rebuilt below like any other.
+        let lost = self.compaction_lost(domain).await?.is_some();
+        if lost {
             let mut installed = false;
             for (scope, id) in self.domain_scopes(domain).await? {
                 if self.base_off_path(scope, id).await?
@@ -1063,14 +1065,15 @@ impl<A: RowApplication> Inner<A> {
             if installed {
                 Box::pin(self.settle_seal_rebootstrap(domain)).await?;
             }
-            self.reseed_domain_ledgers(domain).await?;
-            return Ok(());
         }
         // A kept seal the new path passes: scopes start from its rows.
         let rewind = self.rewind_seal(domain).await?;
         #[cfg(test)]
         let rewind = rewind.filter(|_| !self.rebuild_switches);
         for (scope, id) in self.domain_scopes(domain).await? {
+            if lost && self.base_off_path(scope, id).await? {
+                continue;
+            }
             // Restoring a kept seal's rows replays only what followed it.
             // Without the kept state's identity evidence it rebuilds instead.
             if let Some(rewind) = &rewind

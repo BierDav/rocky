@@ -2,8 +2,7 @@ name: Release
 
 # Publishes a versioned release to the packages and releases of the hosting
 # forge, GitHub or Gitea: nightly when shipped code changed, or a manually
-# chosen channel. The version is computed from Conventional Commits; see
-# docs/releasing.md.
+# chosen channel. The version is computed from Conventional Commits.
 
 on:
   schedule:
@@ -20,6 +19,10 @@ on:
           - stable
           - nightly
         default: alpha
+      skip_checks:
+        description: Skip waiting for push checks and running the release check suite
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -85,7 +88,7 @@ jobs:
 
       # Only the core check job gates versioning; auxiliary jobs may keep running.
       - name: Wait for the checks of this commit
-        if: steps.changes.outputs.release == 'true'
+        if: steps.changes.outputs.release == 'true' && !inputs.skip_checks
         run: |
           set -euo pipefail
           api() {
@@ -159,15 +162,19 @@ jobs:
   check:
     name: Checks
     needs: version
-    if: needs.version.outputs.release == 'true'
+    if: needs.version.outputs.release == 'true' && !inputs.skip_checks
     uses: ./.github/workflows/check.yml
     with:
       release: true
 
   image:
     name: Image ${{ matrix.image }} ${{ matrix.arch }}
-    # After the checks, so an image of a failing commit is never pushed.
+    # A manual release can explicitly bypass the check gate.
     needs: [version, check]
+    if: >-
+      !cancelled() && needs.version.result == 'success' &&
+      needs.version.outputs.release == 'true' &&
+      (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -269,6 +276,9 @@ jobs:
   image-manifest:
     name: Publish the ${{ matrix.image }} manifest
     needs: [version, image]
+    if: >-
+      !cancelled() && needs.version.result == 'success' &&
+      needs.version.outputs.release == 'true' && needs.image.result == 'success'
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 15
     permissions:
@@ -538,6 +548,10 @@ jobs:
     name: iOS and JVM SDK
     # After `jvm`: the JVM jar carries every platform's native library.
     needs: [version, check, jvm]
+    if: >-
+      !cancelled() && needs.version.result == 'success' &&
+      needs.version.outputs.release == 'true' && needs.jvm.result == 'success' &&
+      (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: macos-latest
     timeout-minutes: 45
     env:
@@ -601,6 +615,12 @@ jobs:
   publish:
     name: Publish
     needs: [version, check, image-manifest, jvm, android, ios]
+    if: >-
+      !cancelled() && needs.version.result == 'success' &&
+      needs.version.outputs.release == 'true' &&
+      needs.image-manifest.result == 'success' && needs.jvm.result == 'success' &&
+      needs.android.result == 'success' && needs.ios.result == 'success' &&
+      (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 20

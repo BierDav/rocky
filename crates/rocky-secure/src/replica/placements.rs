@@ -182,24 +182,19 @@ impl<A: RowApplication> Inner<A> {
         let mut headers = BTreeSet::new();
         let mut chains = BTreeMap::new();
         let mut candidates = Vec::new();
-        for record in rows(
-            &self.conn,
-            "SELECT header,body FROM secure_operations UNION ALL SELECT header,X'' FROM secure_voids",
-        )
-        .await?
+        for (header, has_body) in self
+            .headers_at(domain, request.author, request.from, request.to)
+            .await?
         {
-            let [SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else {
-                return Err(Error::Corrupt("placement header".into()));
-            };
-            let decoded: p2panda_core::Header<Extensions> = decode(header)?;
+            let decoded: p2panda_core::Header<Extensions> = decode(&header)?;
             let e = &decoded.extensions;
             if e.scope.domain != domain
                 || e.author != Some(request.author)
                 || !(request.from..=request.to).contains(&e.author_sequence)
             {
-                continue;
+                return Err(Error::Corrupt("indexed placement source".into()));
             }
-            candidates.push((decoded, header.clone(), !body.is_empty()));
+            candidates.push((decoded, header, has_body));
         }
         // A short byte-bounded page must place the earliest missing positions first.
         candidates.sort_by(|a, b| {
@@ -394,6 +389,51 @@ impl<A: RowApplication> Inner<A> {
             .remove(&(domain, author, e.author_sequence));
         Ok(true)
     }
+    /// The retained operation and void headers of `author` in `domain` from
+    /// `from` through `to`, and whether each has a body, found through the
+    /// position index without reading a body.
+    async fn headers_at(
+        &self,
+        domain: Scope,
+        author: u32,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(Vec<u8>, bool)>, Error> {
+        let mut headers = Vec::new();
+        let scopes = collect_rows(
+            self.conn
+                .query(
+                    "SELECT DISTINCT scope FROM secure_position_ranges WHERE author=? AND kind<2",
+                    [i64::from(author)],
+                )
+                .await?,
+        )
+        .await?;
+        for scope in scopes {
+            let [SqlValue::Blob(scope)] = scope.as_slice() else {
+                return Err(Error::Corrupt("position scope".into()));
+            };
+            if decode::<ResourceScope>(scope)?.domain != domain {
+                continue;
+            }
+            let found = collect_rows(self.conn.query(
+                "SELECT o.header,length(o.body)>0 FROM secure_position_sources p JOIN secure_operations o ON o.hash=p.hash WHERE p.scope=?1 AND p.author=?2 AND p.sequence BETWEEN ?3 AND ?4 AND p.kind=0 UNION ALL SELECT v.header,0 FROM secure_position_sources p JOIN secure_voids v ON v.hash=p.hash WHERE p.scope=?1 AND p.author=?2 AND p.sequence BETWEEN ?3 AND ?4 AND p.kind=1",
+                bindings(vec![
+                    SqlValue::Blob(scope.clone()),
+                    SqlValue::Integer(i64::from(author)),
+                    SqlValue::Integer(i64::try_from(from).map_err(|_| denied("placement sequence"))?),
+                    SqlValue::Integer(i64::try_from(to).map_err(|_| denied("placement sequence"))?),
+                ]),
+            ).await?).await?;
+            for record in found {
+                let [SqlValue::Blob(header), SqlValue::Integer(body)] = record.as_slice() else {
+                    return Err(Error::Corrupt("placement header".into()));
+                };
+                headers.push((header.clone(), *body != 0));
+            }
+        }
+        Ok(headers)
+    }
     /// Prefers a conflicting retained header when the incoming placement is known.
     async fn header_at(
         &self,
@@ -419,16 +459,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Some(decode(bytes)?));
         }
         let mut known = None;
-        for record in rows(
-            &self.conn,
-            "SELECT header FROM secure_operations UNION ALL SELECT header FROM secure_voids",
-        )
-        .await?
-        {
-            let [SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(Error::Corrupt("frame header".into()));
-            };
-            let header: p2panda_core::Header<Extensions> = decode(bytes)?;
+        for (bytes, _) in self.headers_at(domain, author, sequence, sequence).await? {
+            let header: p2panda_core::Header<Extensions> = decode(&bytes)?;
             let e = &header.extensions;
             // An equal match must not hide evidence of another signed header.
             if e.scope.domain == domain

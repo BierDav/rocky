@@ -1422,6 +1422,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(flusher.durable())
     }
+    /// Before the last handle closes the file: refreshes the planner's
+    /// statistics where SQLite finds them stale. Best effort.
+    pub async fn optimize(&self) {
+        let inner = self.inner.lock().await;
+        let _ = inner.conn.execute("PRAGMA optimize", ()).await;
+    }
     /// Runs the maintenance buffered SQL commits left for later: one bounded
     /// checkpoint or pruning step for the scopes they wrote, and a WAL
     /// checkpoint when one is due. A commit acknowledged `Flushed` runs its
@@ -1920,6 +1926,14 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         row: Commitment,
     ) -> Result<Option<Materialized>, Error> {
+        Ok(self.stored_row(scope, row).await?.map(|(_, record)| record))
+    }
+    /// The stored record of `row`, as bytes and decoded.
+    async fn stored_row(
+        &self,
+        scope: ResourceScope,
+        row: Commitment,
+    ) -> Result<Option<(Vec<u8>, Materialized)>, Error> {
         let mut result = self
             .conn
             .query(
@@ -1928,7 +1942,11 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         match result.next().await? {
-            Some(row) => Ok(Some(self.decode_record(&row.get::<Vec<u8>>(0)?).await?)),
+            Some(row) => {
+                let bytes = row.get::<Vec<u8>>(0)?;
+                let record = self.decode_record(&bytes).await?;
+                Ok(Some((bytes, record)))
+            }
             None => Ok(None),
         }
     }
@@ -2146,6 +2164,12 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
         if rows(conn, read).await? != vec![vec![SqlValue::Integer(0)]] {
             return Err(Error::Incompatible(format!("{read} is not 0")));
         }
+    }
+    for (name, value) in [
+        ("cache_size", group::CACHE_KIB),
+        ("journal_size_limit", group::WAL_CHECKPOINT_BYTES as i64),
+    ] {
+        rows(conn, &format!("PRAGMA {name}={value}")).await?;
     }
     Ok(())
 }

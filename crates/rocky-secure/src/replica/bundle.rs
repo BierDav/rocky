@@ -569,7 +569,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
                 actual.extend(
                     rows.iter()
-                        .map(|(change, _)| change.clone())
+                        .map(|(change, ..)| change.clone())
                         .filter(apply::changes),
                 );
                 let key = self.member_key(&frame.operation_ref()?.header.extensions)?;

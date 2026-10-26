@@ -1371,7 +1371,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         for table in [
             "secure_checkpoints",
-            "secure_checkpoint_rows",
+            "secure_checkpoint_base",
             "secure_checkpoint_overlay",
             "secure_checkpoint_scratch",
             "secure_checkpoint_pages",
@@ -1751,7 +1751,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // The overlay becomes the base rows.
         for sql in [
-            "DELETE FROM secure_checkpoint_rows WHERE scope=?1 AND row IN (SELECT row FROM secure_checkpoint_overlay WHERE scope=?1)",
+            "DELETE FROM secure_checkpoint_base WHERE scope=?1 AND row IN (SELECT row FROM secure_checkpoint_overlay WHERE scope=?1)",
             "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_checkpoint_overlay WHERE scope=?1 AND fields<>X''",
             "DELETE FROM secure_checkpoint_overlay WHERE scope=?1",
         ] {

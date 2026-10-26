@@ -33,7 +33,8 @@ impl<A: RowApplication> Inner<A> {
                         ],
                     )
                     .await?;
-                self.index_row_key(&encode(&scope)?, &row, new).await?;
+                self.index_row_key(&encode(&scope)?, &row, None, new)
+                    .await?;
             }
             None => {
                 if let Some(old) = &old_bytes {

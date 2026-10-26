@@ -586,3 +586,70 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
     );
     assert_eq!(source.snapshot(f.public).await.unwrap().rows.len(), 10);
 }
+
+/// Statements the target prepares to apply ordinary updates: one frame of
+/// 32 updated rows, then a frame updating one row.
+#[tokio::test]
+async fn an_ordinary_update_applies_in_few_statements_per_row() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (PrivateKey::new(), PrivateKey::new());
+    let config = f.config(&b, f.full(), &[f.public]);
+    let credentials = config.credentials.clone();
+    let source = EncryptedReplica::open(
+        dir.path().join("a.db"),
+        f.app(),
+        f.config(&a, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let target = EncryptedReplica::open(dir.path().join("b.db"), f.app(), config)
+        .await
+        .unwrap();
+    let rows = 1..=32;
+    let name = |text: &str| Some(f.app().name(text));
+    let created = rows
+        .clone()
+        .map(|row| change(f.public, row, None, name("first")));
+    source
+        .author([1; 32], created.collect(), vec![])
+        .await
+        .unwrap();
+    let page = source
+        .transfer_page(
+            b.public_key(),
+            &credentials,
+            &[f.public],
+            None,
+            MAX_SECURE_FRAME,
+        )
+        .await
+        .unwrap();
+    for frame in page.frames {
+        target.receive(frame).await.unwrap();
+    }
+    let updated = rows.map(|row| change(f.public, row, name("first"), name("second")));
+    let many = source
+        .author([2; 32], updated.collect(), vec![])
+        .await
+        .unwrap();
+    let one = source
+        .author(
+            [3; 32],
+            vec![change(f.public, 1, name("second"), name("third"))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for (frame, rows) in [(many, 32), (one, 1)] {
+        let before = crate::sqlite::statements();
+        target.receive(frame).await.unwrap();
+        counts.push((crate::sqlite::statements() - before) as f64 / rows as f64);
+    }
+    println!(
+        "P09 statements_per_row many={} one={}",
+        counts[0], counts[1]
+    );
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 32);
+}

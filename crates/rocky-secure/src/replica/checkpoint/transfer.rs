@@ -675,7 +675,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             if staging.direct {
-                self.index_row_key(&blob, row, record).await?;
+                self.index_row_key(&blob, row, None, record).await?;
             }
         }
         for (direct, stubs) in [(false, &fresh), (true, &creations)] {
@@ -842,7 +842,7 @@ impl<A: RowApplication> Inner<A> {
         for sql in [
             "DELETE FROM secure_applied WHERE scope=?",
             "DELETE FROM secure_logs WHERE scope=?",
-            "DELETE FROM secure_checkpoint_rows WHERE scope=?",
+            "DELETE FROM secure_checkpoint_base WHERE scope=?",
             "DELETE FROM secure_stubs WHERE scope=?",
         ] {
             self.conn.execute(sql, [id]).await?;
@@ -1895,6 +1895,9 @@ impl<A: RowApplication> Inner<A> {
                         bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                     )
                     .await?;
+                if direct {
+                    self.conn.execute(SHARE_BASE, [id]).await?;
+                }
                 Ok(())
             })
             .await?;
@@ -1925,7 +1928,7 @@ impl<A: RowApplication> Inner<A> {
         }
         if !direct {
             for sql in [
-                "DELETE FROM secure_checkpoint_rows WHERE scope=?",
+                "DELETE FROM secure_checkpoint_base WHERE scope=?",
                 "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
             ] {
                 self.conn.execute(sql, [id]).await?;

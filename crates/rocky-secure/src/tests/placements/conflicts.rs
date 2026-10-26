@@ -88,6 +88,9 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
         )
         .await
         .unwrap();
+    crate::replica::positions::insert(&inner.conn, &other, 1, false, true)
+        .await
+        .unwrap();
     drop(inner);
     let before = unchanged_state(replica).await;
     let inner = replica.inner.lock().await;
@@ -194,6 +197,9 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
                 SqlValue::Blob(vec![0xff]),
             ]),
         )
+        .await
+        .unwrap();
+    crate::replica::positions::insert(&inner.conn, &other, 1, false, true)
         .await
         .unwrap();
     assert!(

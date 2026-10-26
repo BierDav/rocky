@@ -22,9 +22,11 @@ pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[12],
     "CREATE TABLE IF NOT EXISTS secure_author_sequences(node BLOB PRIMARY KEY,sequence INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_node_authors(node BLOB PRIMARY KEY,number INTEGER NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_row_keys(scope BLOB NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    // `key` is a 16-byte digest of the business key, keyed by the interned
+    // scope id; lookups confirm the full key from the row.
+    "CREATE TABLE IF NOT EXISTS secure_row_keys(scope INTEGER NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_row_keys_key ON secure_row_keys(scope,key,row)",
-    "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=OLD.scope) AND row=OLD.row; END",
+    "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=OLD.scope AND row=OLD.row; END",
 ];
 
 #[derive(Clone)]
@@ -214,8 +216,8 @@ impl<A: RowApplication> Inner<A> {
         let mut winner: Option<Materialized> = None;
         loop {
             let chunk = collect_rows(self.conn.query(
-                "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
-                [encode(&scope)?, key.to_vec(), cursor.clone()],
+                "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=(SELECT id FROM secure_scope_state WHERE scope=?) AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
+                [encode(&scope)?, key_digest(&key), cursor.clone()],
             ).await?).await?;
             for row in &chunk {
                 let [SqlValue::Blob(id), SqlValue::Blob(bytes)] = row.as_slice() else {
@@ -238,20 +240,24 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
+    /// Indexes `record` stored at `row`. `old`, the record it replaced when
+    /// known, spares the move removal of a row that was not marked.
     pub(super) async fn index_row_key(
         &self,
         scope: &[u8],
         row: &[u8],
+        old: Option<&Materialized>,
         record: &Materialized,
     ) -> Result<(), Error> {
-        if record.moved_from.is_some() && !record.deleted {
+        let marked = |record: &Materialized| record.moved_from.is_some() && !record.deleted;
+        if marked(record) {
             self.conn
                 .execute(
                     "INSERT OR IGNORE INTO secure_move_rows VALUES(?,?)",
                     [scope.to_vec(), row.to_vec()],
                 )
                 .await?;
-        } else {
+        } else if old.is_none_or(marked) {
             self.conn
                 .execute(
                     "DELETE FROM secure_move_rows WHERE scope=? AND row=?",
@@ -260,12 +266,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
 
-        let key = record
-            .key
-            .map(|key| key.to_vec())
-            .unwrap_or_else(|| row.to_vec());
+        let key = key_digest(record.key.as_ref().map_or(row, |key| key.as_slice()));
         self.conn.execute(
-            "INSERT INTO secure_row_keys VALUES(?,?,?) ON CONFLICT(scope,row) DO UPDATE SET key=excluded.key",
+            "INSERT INTO secure_row_keys VALUES((SELECT id FROM secure_scope_state WHERE scope=?),?,?) ON CONFLICT(scope,row) DO UPDATE SET key=excluded.key",
             [scope.to_vec(), row.to_vec(), key],
         ).await?;
         Ok(())
@@ -273,14 +276,15 @@ impl<A: RowApplication> Inner<A> {
     /// Backfills the derived index after open or a bulk restore, in bounded pages.
     pub(super) async fn index_row_keys(&self) -> Result<(), Error> {
         // A key cursor, so no page scans the rows an earlier one indexed.
-        let mut after = (Vec::new(), Vec::new());
+        let mut after = (0, Vec::new());
         loop {
             let chunk = collect_rows(self.conn.query(
-                "SELECT r.scope,r.row,r.fields FROM secure_row_records r LEFT JOIN secure_row_keys k ON k.scope=r.scope AND k.row=r.row WHERE k.row IS NULL AND (r.scope,r.row)>(?,?) ORDER BY r.scope,r.row LIMIT 256",
-                bindings(vec![SqlValue::Blob(after.0.clone()), SqlValue::Blob(after.1.clone())]),
+                "SELECT r.scope,s.scope,r.row,r.fields FROM secure_rows r JOIN secure_scope_state s ON s.id=r.scope LEFT JOIN secure_row_keys k ON k.scope=r.scope AND k.row=r.row WHERE k.row IS NULL AND (r.scope,r.row)>(?,?) ORDER BY r.scope,r.row LIMIT 256",
+                bindings(vec![SqlValue::Integer(after.0), SqlValue::Blob(after.1.clone())]),
             ).await?).await?;
             for row in &chunk {
                 let [
+                    SqlValue::Integer(id),
                     SqlValue::Blob(scope),
                     SqlValue::Blob(row),
                     SqlValue::Blob(bytes),
@@ -288,9 +292,9 @@ impl<A: RowApplication> Inner<A> {
                 else {
                     return Err(Error::Corrupt("incarnation index row".into()));
                 };
-                self.index_row_key(scope, row, &self.decode_record(bytes).await?)
+                self.index_row_key(scope, row, None, &self.decode_record(bytes).await?)
                     .await?;
-                after = (scope.clone(), row.clone());
+                after = (*id, row.clone());
             }
             if chunk.len() < 256 {
                 return Ok(());
@@ -1059,6 +1063,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .collect()
             })
     }
+}
+
+/// The lookup digest `secure_row_keys` holds for a business key.
+pub(super) fn key_digest(key: &[u8]) -> Vec<u8> {
+    key[..key.len().min(16)].to_vec()
 }
 
 #[cfg(test)]

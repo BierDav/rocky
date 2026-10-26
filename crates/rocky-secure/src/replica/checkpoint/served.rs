@@ -5,7 +5,7 @@ use super::*;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_served(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,signed BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_served_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    "CREATE TABLE IF NOT EXISTS secure_served_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
 ];
 
 /// Where a served checkpoint's rows are.

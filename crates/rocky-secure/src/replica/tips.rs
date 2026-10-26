@@ -1159,7 +1159,7 @@ impl<A: RowApplication> Inner<A> {
             }
             for table in [
                 "secure_checkpoints",
-                "secure_checkpoint_rows",
+                "secure_checkpoint_base",
                 "secure_checkpoint_overlay",
                 "secure_checkpoint_scratch",
             ] {

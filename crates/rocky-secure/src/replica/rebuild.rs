@@ -138,6 +138,7 @@ impl<A: RowApplication> Inner<A> {
                     bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                 )
                 .await?;
+            self.conn.execute(checkpoint::SHARE_BASE, [id]).await?;
             Ok(())
         })
         .await?;

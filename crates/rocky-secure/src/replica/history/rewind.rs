@@ -419,7 +419,7 @@ impl<A: RowApplication> Inner<A> {
                                 [blob.clone(), row.clone(), new.clone()],
                             )
                             .await?;
-                        self.index_row_key(&blob, &row, &self.decode_record(new).await?)
+                        self.index_row_key(&blob, &row, None, &self.decode_record(new).await?)
                             .await?;
                     }
                     (None, None) => continue,

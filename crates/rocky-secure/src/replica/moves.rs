@@ -581,7 +581,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_move_rows(scope BLOB NOT NULL,row BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_consumed(hash BLOB PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_followed(original BLOB NOT NULL,scope BLOB NOT NULL,field BLOB NOT NULL,PRIMARY KEY(original,scope,field)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_creation_headers(digest BLOB PRIMARY KEY,header BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_creation_headers(digest BLOB NOT NULL UNIQUE,header BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_author_bindings(digest BLOB PRIMARY KEY,bindings BLOB NOT NULL) WITHOUT ROWID",
 ];
 /// The moved rows each commit follows. `CROSS JOIN` keeps the few marked

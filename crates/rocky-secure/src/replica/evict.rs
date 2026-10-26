@@ -128,7 +128,7 @@ impl<A: RowApplication> Inner<A> {
             let mut rows = 0;
             if let Some(id) = id {
                 for table in [
-                    "secure_checkpoint_rows",
+                    "secure_checkpoint_base",
                     "secure_checkpoint_overlay",
                     "secure_checkpoint_scratch",
                     "secure_rebootstrap_rows",

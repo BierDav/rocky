@@ -55,19 +55,30 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,pruned_prefix INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,position INTEGER NOT NULL,sets BLOB NOT NULL,signed BLOB NOT NULL,PRIMARY KEY(scope,sequence))",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    // The replay base. `fields` is NULL while the stored row holds the same
+    // record: a base row is kept once, and the stored row's change or
+    // removal first copies it here. Read and insert through the view.
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_base(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE VIEW IF NOT EXISTS secure_checkpoint_rows AS SELECT b.scope,b.row,coalesce(b.fields,r.fields) AS fields FROM secure_checkpoint_base b LEFT JOIN secure_rows r ON b.fields IS NULL AND r.scope=b.scope AND r.row=b.row",
+    "CREATE TRIGGER IF NOT EXISTS secure_checkpoint_rows_insert INSTEAD OF INSERT ON secure_checkpoint_rows BEGIN INSERT INTO secure_checkpoint_base VALUES(NEW.scope,NEW.row,CASE WHEN NEW.fields IS (SELECT fields FROM secure_rows WHERE scope=NEW.scope AND row=NEW.row) THEN NULL ELSE NEW.fields END); END",
+    "CREATE TRIGGER IF NOT EXISTS secure_checkpoint_base_update BEFORE UPDATE OF fields ON secure_rows BEGIN UPDATE secure_checkpoint_base SET fields=OLD.fields WHERE scope=OLD.scope AND row=OLD.row AND fields IS NULL; END",
+    "CREATE TRIGGER IF NOT EXISTS secure_checkpoint_base_delete BEFORE DELETE ON secure_rows BEGIN UPDATE secure_checkpoint_base SET fields=OLD.fields WHERE scope=OLD.scope AND row=OLD.row AND fields IS NULL; END",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL,direct INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_page_headers(scope INTEGER NOT NULL,view INTEGER NOT NULL,header BLOB NOT NULL,first_row BLOB NOT NULL,PRIMARY KEY(scope,view,header)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_handles_hash ON secure_handles(hash)",
     "CREATE INDEX IF NOT EXISTS secure_ack_hash ON secure_ack(hash)",
 ];
+
+/// Shares the base rows of scope `?1` that equal their stored rows again,
+/// after a bulk rewrite of the stored rows copied them out.
+pub(super) const SHARE_BASE: &str = "UPDATE secure_checkpoint_base SET fields=NULL WHERE scope=?1 AND fields=(SELECT fields FROM secure_rows r WHERE r.scope=?1 AND r.row=secure_checkpoint_base.row)";
 
 /// Applied operations replayed, or pruned, per bounded step.
 #[cfg(not(test))]
@@ -769,17 +780,23 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn find_scope_id(&self, scope: ResourceScope) -> Result<Option<i64>, Error> {
+        let blob = encode(&scope)?;
+        if let Some(id) = self.cached_scope_id(&blob) {
+            return Ok(Some(id));
+        }
         let mut result = self
             .conn
             .query(
                 "SELECT id FROM secure_scope_state WHERE scope=?",
-                [encode(&scope)?],
+                [blob.clone()],
             )
             .await?;
-        Ok(match result.next().await? {
-            Some(row) => Some(row.get::<i64>(0)?),
-            None => None,
-        })
+        let Some(row) = result.next().await? else {
+            return Ok(None);
+        };
+        let id = row.get::<i64>(0)?;
+        self.cache_scope_id(blob, id);
+        Ok(Some(id))
     }
     /// The scope's number, assigned inside the caller's write transaction.
     pub(super) async fn scope_id(&self, scope: ResourceScope) -> Result<i64, Error> {
@@ -1262,6 +1279,7 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         let mut last = None;
         let finalized = self.seal_finalized(scope).await?;
+        let mut paths = HashMap::new();
         for record in records {
             let [
                 SqlValue::Integer(position),
@@ -1281,13 +1299,18 @@ impl<A: RowApplication> Inner<A> {
             // no part of the target's state.
             let e = &operation.header.extensions;
             let visible = match self.graphs.get(&scope.domain) {
-                Some(graph) => self.visible_frame(
-                    graph,
-                    e.tip,
-                    e.author.ok_or_else(|| denied("node author missing"))?,
-                    e.author_sequence,
-                    target,
-                )?,
+                Some(graph) => {
+                    let path = match paths.entry(e.tip) {
+                        std::collections::hash_map::Entry::Occupied(path) => path.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(Self::frame_path(graph, e.tip, target)?)
+                        }
+                    };
+                    path.admits(
+                        e.author.ok_or_else(|| denied("node author missing"))?,
+                        e.author_sequence,
+                    )?
+                }
                 None => true,
             };
             if !self.replay_eligible(status, operation, self.rebuilding_tip)? || !visible {

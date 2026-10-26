@@ -1,6 +1,7 @@
 # 9. A lighter replica
 
-Status: proposed. Owner: `rocky-secure` row records, identity, checkpoints,
+Status: partially implemented; issuer time gate open. See the
+[evidence](09-lighter-replica-evidence.md). Owner: `rocky-secure` row records, identity, checkpoints,
 placements and held refresh; `rocky-storage` connection settings. Depends on
 [phase 4](04-recovery-that-drives-itself.md), so the replica format moves
 once after it. Effort: two to three weeks. Follow the

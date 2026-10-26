@@ -1122,15 +1122,17 @@ impl<A: RowApplication> SecureSql<A> {
                     .map_err(capture_error)?
                     .ok_or_else(|| capture_error("missing visible incarnation identity".into()))?;
                 let held = collect_rows(inner.conn.query(
-                    "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
-                    [encode(&scope)?, row.to_vec()],
+                    "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=(SELECT id FROM secure_scope_state WHERE scope=?) AND k.key=?",
+                    [encode(&scope)?, super::identity::key_digest(&row)],
                 ).await?).await?;
                 for held in held {
                     let [SqlValue::Blob(stored), SqlValue::Blob(bytes)] = held.as_slice() else {
                         return Err(Error::Corrupt("SQL deleted incarnation".into()));
                     };
                     let record = inner.decode_record(bytes).await?;
-                    if record.deleted {
+                    if record.deleted
+                        || record.key.unwrap_or(super::checkpoint::row_of(stored)?) != row
+                    {
                         continue;
                     }
                     let candidate = RowChange {

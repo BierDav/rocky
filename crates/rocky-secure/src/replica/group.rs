@@ -11,10 +11,22 @@ use tokio::sync::oneshot::{self, error::TryRecvError};
 pub(super) const GROUP_REQUESTS: usize = 64;
 /// Request bytes per group; a single larger request still forms its own group.
 pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
-/// WAL size that triggers a passive checkpoint between groups.
-pub(super) const WAL_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
+/// WAL size that triggers a passive checkpoint between groups, and the
+/// size a reset WAL is cut back to.
+pub(super) const WAL_CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
 /// WAL size that triggers a truncating checkpoint between groups.
 pub(super) const WAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+/// Longest wait of a truncating checkpoint for readers of the old log.
+const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// Free pages past which, and at most how many, one step returns to the file
+/// system after a commit.
+const RECLAIM_PAGES: i64 = 1024;
+const RECLAIM_STEP: i64 = 4096;
+/// The page cache, negative as SQLite counts KiB.
+#[cfg(target_os = "android")]
+pub(super) const CACHE_KIB: i64 = -8 * 1024;
+#[cfg(not(target_os = "android"))]
+pub(super) const CACHE_KIB: i64 = -32 * 1024;
 
 pub(super) enum Work {
     Author {
@@ -604,6 +616,7 @@ impl<A: RowApplication> Inner<A> {
     /// Best effort: the commit already succeeded, so a failure waits for the
     /// next transaction.
     pub(crate) async fn checkpoint_if_due(&mut self) {
+        self.reclaim_free_pages().await;
         let size = std::fs::metadata(&self.wal).map_or(0, |metadata| metadata.len());
         let truncate = size >= self.wal_limits.1;
         if !truncate && (size < self.wal_limits.0 || size <= self.wal_mark) {
@@ -614,7 +627,20 @@ impl<A: RowApplication> Inner<A> {
         } else {
             "PRAGMA wal_checkpoint(PASSIVE)"
         };
-        if let Ok(result) = rows(&self.conn, sql).await {
+        let waits = truncate
+            && self
+                .conn
+                .connection()
+                .set_busy_timeout(TRUNCATE_WAIT)
+                .is_ok();
+        let checkpoint = rows(&self.conn, sql).await;
+        if waits {
+            let _ = self
+                .conn
+                .connection()
+                .set_busy_timeout(std::time::Duration::ZERO);
+        }
+        if let Ok(result) = checkpoint {
             let complete = matches!(
                 result.first().map(Vec::as_slice),
                 Some([SqlValue::Integer(0), SqlValue::Integer(log), SqlValue::Integer(done)])
@@ -625,6 +651,21 @@ impl<A: RowApplication> Inner<A> {
             {
                 self.checkpoints += 1;
             }
+        }
+    }
+    /// Compaction and pruning free pages; between commits, one bounded
+    /// incremental vacuum step gives them back to the file system.
+    async fn reclaim_free_pages(&self) {
+        let free = rows(&self.conn, "PRAGMA freelist_count").await;
+        if let Ok(free) = free
+            && let Some([SqlValue::Integer(free)]) = free.first().map(Vec::as_slice)
+            && *free >= RECLAIM_PAGES
+        {
+            let _ = rows(
+                &self.conn,
+                &format!("PRAGMA incremental_vacuum({RECLAIM_STEP})"),
+            )
+            .await;
         }
     }
 }

@@ -22,14 +22,22 @@ impl<A: RowApplication> Inner<A> {
             .transpose()
             .map_err(Error::Corrupt)?;
         let records = collect_rows(self.conn.query(
-            "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
-            [encode(&scope)?, key.to_vec()],
+            "SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
+            bindings(vec![SqlValue::Integer(id), SqlValue::Blob(identity::key_digest(&key))]),
         ).await?).await?;
         for record in records {
             let [SqlValue::Blob(row), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("seal candidate".into()));
             };
             let record = self.decode_record(bytes).await?;
+            if record
+                .key
+                .as_ref()
+                .map_or(row.as_slice(), |key| key.as_slice())
+                != key.as_slice()
+            {
+                continue;
+            }
             let differs = record.deleted
                 || fields.as_ref().is_none_or(|fields| {
                     fields

@@ -394,7 +394,7 @@ impl<A: RowApplication> Inner<A> {
             .filter(|write| {
                 materialized
                     .iter()
-                    .any(|(change, _)| change.row == write.change.row)
+                    .any(|(change, ..)| change.row == write.change.row)
             })
             .cloned()
             .collect();

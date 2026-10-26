@@ -11,18 +11,34 @@ impl<A: RowApplication> Inner<A> {
         target: TipId,
     ) -> Result<identity::IdentityLedger, Error> {
         let base = self.checkpoint_record(id, true).await?;
-        let (after, mut ledger) = match base {
-            Some(base) => (
+        let base_position = base.as_ref().map_or(0, |base| base.position);
+        // Births only accumulate: a later replay step extends the last ledger.
+        let cached = self
+            .tip_frontiers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replay_ledger
+            .take()
+            .filter(|cached| {
+                (cached.id, cached.target, cached.base) == (id, target, base_position)
+                    && cached.through <= through
+            });
+        let (after, mut ledger) = match (cached, base) {
+            (Some(cached), _) => (cached.through, cached.ledger),
+            (None, Some(base)) => (
                 base.position,
                 identity::IdentityLedger::based(
                     &self.verify_record(scope, &base)?.statement.identities,
                 )?,
             ),
-            None => (0, identity::IdentityLedger::default()),
+            (None, None) => (0, identity::IdentityLedger::default()),
         };
         if !self.tables.contains(&scope.table) {
             return Ok(ledger);
         }
+        // The walk depends only on the frame's tip, and each signer recurs.
+        let mut paths = HashMap::new();
+        let mut signers = HashMap::new();
         let records = collect_rows(self.conn.query(
             "SELECT b.author,b.signer,MAX(b.sequence),p.tip,p.author,MAX(p.sequence) FROM secure_birth_positions b JOIN secure_applied a ON a.position=b.position JOIN secure_operations o ON o.hash=a.hash JOIN secure_position_sources p ON p.hash=a.hash AND p.kind=0 WHERE b.scope=? AND b.position>? AND b.position<=? AND o.status='applied' GROUP BY b.author,b.signer,p.tip,p.author,p.sequence",
             [id, after, through],
@@ -41,23 +57,35 @@ impl<A: RowApplication> Inner<A> {
             };
             // As replay sees it: a frame written on an ancestor tip past
             // the seal the path leaves it at is not in the target's state.
-            if let Some(graph) = self.graphs.get(&scope.domain)
-                && !self.visible_frame(
-                    graph,
-                    TipId(checkpoint::row_of(tip)?),
+            if let Some(graph) = self.graphs.get(&scope.domain) {
+                let source = TipId(checkpoint::row_of(tip)?);
+                let path = match paths.entry(source) {
+                    std::collections::hash_map::Entry::Occupied(path) => path.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(Self::frame_path(graph, source, target)?)
+                    }
+                };
+                if !path.admits(
                     u32::try_from(*frame_author)
                         .map_err(|_| Error::Corrupt("birth position frame author".into()))?,
                     u64::try_from(*frame_sequence)
                         .map_err(|_| Error::Corrupt("birth position frame sequence".into()))?,
-                    target,
-                )?
-            {
-                continue;
+                )? {
+                    continue;
+                }
             }
+            let signer = match signers.get(signer) {
+                Some(key) => *key,
+                None => {
+                    let key = checkpoint::key_of(signer)?;
+                    signers.insert(signer.clone(), key);
+                    key
+                }
+            };
             ledger.merge(checkpoint::IdentityMark {
                 author: u32::try_from(*author)
                     .map_err(|_| Error::Corrupt("birth position author".into()))?,
-                signer: checkpoint::key_of(signer)?,
+                signer,
                 sequence: u32::try_from(*sequence)
                     .map_err(|_| Error::Corrupt("birth position sequence".into()))?,
             })?;
@@ -80,6 +108,16 @@ impl<A: RowApplication> Inner<A> {
                 sequence: u32::try_from(*sequence).map_err(|_| Error::Corrupt("birth position sequence".into()))?,
             })?;
         }
+        self.tip_frontiers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replay_ledger = Some(frontiers::ReplayLedger {
+            id,
+            target,
+            base: base_position,
+            through,
+            ledger: ledger.clone(),
+        });
         Ok(ledger)
     }
 }

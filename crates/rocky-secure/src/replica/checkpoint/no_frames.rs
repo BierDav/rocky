@@ -392,7 +392,7 @@ impl<A: RowApplication> Inner<A> {
             let installed = kind == "installed";
             let tables: &[&str] = match installed {
                 true => &[
-                    "secure_checkpoint_rows",
+                    "secure_checkpoint_base",
                     "secure_checkpoint_pages",
                     "secure_checkpoint_stubs",
                 ],

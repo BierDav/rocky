@@ -64,6 +64,11 @@ impl DatabaseOwner {
         check_file_format(path).await?;
         let connection = owner.connect()?;
         if !std::fs::metadata(path).is_ok_and(|file| file.len() > 0) {
+            // Only an empty file takes `auto_vacuum`; maintenance reclaims
+            // free pages in bounded steps.
+            connection
+                .execute("PRAGMA auto_vacuum=INCREMENTAL", ())
+                .await?;
             connection
                 .execute(format!("PRAGMA application_id={FILE_FORMAT}"), ())
                 .await?;

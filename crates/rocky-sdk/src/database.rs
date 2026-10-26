@@ -1548,6 +1548,7 @@ async fn run(
     let _ = settling.await;
     // Dropping the last handle closes the file.
     let mut result = replica.flush().await.map(drop).map_err(|e| e.to_string());
+    replica.optimize().await;
     drop(replica);
     if purge && result.is_ok() {
         result = purge_directory(&directory).map_err(|e| e.to_string());

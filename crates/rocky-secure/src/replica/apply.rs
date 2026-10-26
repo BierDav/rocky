@@ -2,8 +2,11 @@ use super::*;
 use identity::receipts;
 use std::borrow::Cow;
 
+/// A merged write, its record and the stored row it read, if any: bytes
+/// and decoded record.
+pub(super) type MergedRow = (RowChange, Materialized, Option<(Vec<u8>, Materialized)>);
 pub(super) struct Materialization<'p> {
-    pub rows: Vec<(RowChange, Materialized)>,
+    pub rows: Vec<MergedRow>,
     pub admission: Admission,
     pub payload: Cow<'p, RowPayload>,
 }
@@ -41,7 +44,7 @@ impl<A: RowApplication> Inner<A> {
         writes: &[RowWrite],
         grants: &[rocky_core::ResourceGrant],
         opened_payload: Option<&RowPayload>,
-    ) -> Result<(Vec<(RowChange, Materialized)>, Admission), Error> {
+    ) -> Result<(Vec<MergedRow>, Admission), Error> {
         let Materialization {
             rows, admission, ..
         } = self
@@ -190,7 +193,8 @@ impl<A: RowApplication> Inner<A> {
             for (ordinal, write) in &current {
                 let change = &write.change;
                 let carried = payload.carried(&change.row);
-                let current = self.row(scope, self.storage_row(change)?).await?;
+                let stored = self.stored_row(scope, self.storage_row(change)?).await?;
+                let current = stored.as_ref().map(|(_, record)| record.clone());
                 let birth = match change.before {
                     None => self
                         .app
@@ -389,13 +393,13 @@ impl<A: RowApplication> Inner<A> {
                     Class::Observe(observation) => observations.push(observation),
                     Class::Created(..) | Class::Exact | Class::Plain => {}
                 }
-                result.push((actual, record));
+                result.push((actual, record, stored));
             }
             self.app
                 .validate_changes(
                     &result
                         .iter()
-                        .map(|(change, _)| change.clone())
+                        .map(|(change, ..)| change.clone())
                         .filter(changes)
                         .collect::<Vec<_>>(),
                 )
@@ -487,7 +491,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn write_materialized(
         &self,
         frame: &EncryptedFrame,
-        materialized: Vec<(RowChange, Materialized)>,
+        materialized: Vec<MergedRow>,
         admission: Admission,
         opened_payload: Option<&RowPayload>,
     ) -> Result<(), Error> {
@@ -551,7 +555,7 @@ impl<A: RowApplication> Inner<A> {
         let mut sets = checkpoint::Sets::new();
         (sets.rows, sets.tombstones, sets.digest) = (rows, tombstones, digest);
         let mut projections = Vec::new();
-        for (change, record) in materialized {
+        for (change, record, stored) in materialized {
             let row = match record.identity {
                 Some(id) => rocky_core::commitment("rocky.row-incarnation.v2", &id.to_le_bytes()),
                 None => change.row,
@@ -573,17 +577,7 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             }
-            let mut old = self
-                .conn
-                .query(
-                    "SELECT fields FROM secure_row_records WHERE scope=? AND row=?",
-                    [encode(&change.scope)?, row.to_vec()],
-                )
-                .await?;
-            let old = match old.next().await? {
-                Some(row) => Some(row.get::<Vec<u8>>(0)?),
-                None => None,
-            };
+            let (old, old_record) = stored.unzip();
             // The record names its proof's bindings by digest.
             if let Some(proof) = payload
                 .carried(&change.row)
@@ -602,10 +596,9 @@ impl<A: RowApplication> Inner<A> {
                     [encode(&change.scope)?, row.to_vec(), new],
                 )
                 .await?;
-            self.index_row_key(&encode(&change.scope)?, &row, &record)
+            self.index_row_key(&encode(&change.scope)?, &row, old_record.as_ref(), &record)
                 .await?;
-            let old: Option<Materialized> = self.optional_record(old.as_deref()).await?;
-            projections.push((change.scope, old, record));
+            projections.push((change.scope, old_record, record));
         }
         for (scope, old, record) in projections {
             self.project(scope, old.as_ref(), &record).await?;

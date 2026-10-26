@@ -682,11 +682,13 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
         );
     }
     let mut table_size_checks = Vec::new();
-    {
+    for (role, directory) in [("issuer", &a_dir), ("member", &b_dir)] {
         let db = rusqlite::Connection::open_with_flags(
-            b_dir.join("rocky.sqlite"),
+            directory.join("rocky.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
+        let free: i64 = db.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        eprintln!("DBSTAT rows={large} {role} free_pages={free}");
         let mut statement=db.prepare("SELECT name,sum(pgsize),sum(payload),count(*) FROM dbstat GROUP BY name ORDER BY sum(pgsize) DESC,name")?;
         for row in statement.query_map([], |row| {
             Ok((
@@ -698,9 +700,9 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
         })? {
             let (name, bytes, payload, pages) = row?;
             eprintln!(
-                "DBSTAT rows={large} member table={name} bytes={bytes} payload={payload} pages={pages}"
+                "DBSTAT rows={large} {role} table={name} bytes={bytes} payload={payload} pages={pages}"
             );
-            if large == LARGE {
+            if large == LARGE && role == "member" {
                 let limit = match name.as_str() {
                     "secure_rows" => Some(30_000_000),
                     "secure_operations" => Some(100_000_000),

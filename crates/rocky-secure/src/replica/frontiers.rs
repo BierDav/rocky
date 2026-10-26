@@ -5,6 +5,17 @@ use super::*;
 pub(super) struct Frontiers {
     generation: u64,
     entries: HashMap<ResourceScope, (u64, TipId, ScopeFrontier)>,
+    /// The last row replay ledger, extended as a replay advances.
+    pub(super) replay_ledger: Option<ReplayLedger>,
+}
+/// A row replay ledger of scope number `id` towards `target` from the base
+/// at `base` through `through`.
+pub(super) struct ReplayLedger {
+    pub(super) id: i64,
+    pub(super) target: TipId,
+    pub(super) base: i64,
+    pub(super) through: i64,
+    pub(super) ledger: identity::IdentityLedger,
 }
 
 impl<A> Inner<A> {
@@ -15,6 +26,7 @@ impl<A> Inner<A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.generation = cache.generation.wrapping_add(1);
         cache.entries.clear();
+        cache.replay_ledger = None;
     }
     /// Also used after rollback and after restoring an earlier in-memory context.
     pub(crate) fn invalidate_context(&self) {

@@ -32,14 +32,19 @@ use tokio::sync::mpsc;
 /// Queue bytes one group may hold. With `RuntimeOptions::group_commit` this
 /// bounds the work and memory between two commits.
 pub(crate) const MAX_GROUP_BYTES: usize = 4 * crate::MAX_FRAME_BYTES;
-/// Default of `RuntimeOptions::checkpoint_frames`: WAL frames (64 MiB at
+/// Default of `RuntimeOptions::checkpoint_frames`: WAL frames (32 MiB at
 /// 4 KiB pages) after which the writer runs a passive checkpoint between
 /// groups. A mutation logs tens of KiB, so a 4 MiB bound halved buffered
 /// throughput. A checkpoint holds the writer for 25 to 160 ms, longer as
 /// the file grows, so a larger bound trades WAL size for fewer stalls.
-pub(crate) const CHECKPOINT_FRAMES: u32 = 16_384;
+pub(crate) const CHECKPOINT_FRAMES: u32 = 8_192;
 /// Bytes the WAL file is cut back to whenever a checkpoint resets it.
 const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
+/// The writer's page cache, negative as SQLite counts KiB.
+#[cfg(target_os = "android")]
+const WRITER_CACHE_KIB: i64 = -8 * 1024;
+#[cfg(not(target_os = "android"))]
+const WRITER_CACHE_KIB: i64 = -32 * 1024;
 /// Longest wait of a resetting checkpoint for readers of the old log.
 const RESET_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -287,6 +292,11 @@ pub(crate) async fn configure(
         ),
         // The writer checkpoints between groups instead; see `Writer::checkpoint`.
         ("wal_autocheckpoint", "0".to_string(), SqlValue::Integer(0)),
+        (
+            "cache_size",
+            WRITER_CACHE_KIB.to_string(),
+            SqlValue::Integer(WRITER_CACHE_KIB),
+        ),
         (
             "journal_size_limit",
             WAL_SIZE_LIMIT.to_string(),
@@ -1118,6 +1128,7 @@ where
         if let Some(file) = self.file.take() {
             // A reader still holding the log would keep it from being reset.
             file.pool.close();
+            let _ = file.conn.execute("PRAGMA optimize", ()).await;
             let _ = file
                 .conn
                 .execute("PRAGMA wal_checkpoint(TRUNCATE)", ())

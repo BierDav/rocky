@@ -28,6 +28,8 @@ pub(super) struct Dictionary {
     origin_ids: HashMap<Vec<u8>, i64>,
     shape_ids: BTreeMap<Vec<Commitment>, i64>,
     shapes: HashMap<i64, Vec<Commitment>>,
+    /// Interned scope ids by encoded scope; ids are never reassigned.
+    scope_ids: HashMap<Vec<u8>, i64>,
 }
 
 type Field = (i64, Option<serde_bytes::ByteBuf>, Option<usize>);
@@ -66,6 +68,12 @@ impl<A> Inner<A> {
         self.record_dictionary
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub(super) fn cached_scope_id(&self, scope: &[u8]) -> Option<i64> {
+        self.dictionary().scope_ids.get(scope).copied()
+    }
+    pub(super) fn cache_scope_id(&self, scope: Vec<u8>, id: i64) {
+        self.dictionary().scope_ids.insert(scope, id);
     }
 }
 

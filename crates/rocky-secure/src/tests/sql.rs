@@ -2216,8 +2216,8 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
             "both incarnations share the business key"
         );
         let plan = collect_rows(inner.conn.query(
-            "EXPLAIN QUERY PLAN SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_row_records r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
-            [encode(&fixture.items).unwrap(), vec![0; 32], Vec::new()],
+            "EXPLAIN QUERY PLAN SELECT r.row,r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=(SELECT id FROM secure_scope_state WHERE scope=?) AND k.key=? AND k.row>? ORDER BY k.row LIMIT 256",
+            [encode(&fixture.items).unwrap(), vec![0; 16], Vec::new()],
         ).await.unwrap()).await.unwrap();
         assert!(plan.iter().any(|row| row.iter().any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("secure_row_keys_key") && detail.contains("scope=? AND key=? AND row>?")))), "{plan:?}");
     }

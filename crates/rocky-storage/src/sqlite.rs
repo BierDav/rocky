@@ -267,6 +267,7 @@ impl Connection {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?)?;
+        connection.rows("PRAGMA mmap_size=67108864", ())?;
         // SQLite loads the file's schema lazily. Do that during connection
         // setup, before a bounded application snapshot starts its deadline.
         connection.rows("SELECT name FROM sqlite_schema LIMIT 0", ())?;
@@ -277,7 +278,7 @@ impl Connection {
         Self::configure(rusqlite::Connection::open_in_memory()?)
     }
     fn configure(raw: rusqlite::Connection) -> Result<Self> {
-        raw.set_prepared_statement_cache_capacity(128);
+        raw.set_prepared_statement_cache_capacity(512);
         // Busy files are retried by whole transactions with bounded backoff.
         raw.busy_timeout(std::time::Duration::ZERO)?;
         let gate: std::sync::Arc<Mutex<crate::capture::Gate>> = Default::default();
@@ -566,6 +567,8 @@ impl Connection {
     ) -> Result<()> {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
+        #[cfg(any(test, feature = "test-support"))]
+        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
         let columns = statement.column_count();
         let mut rows = statement.query(rusqlite::params_from_iter(params))?;
         let mut values = Vec::with_capacity(columns);
@@ -674,6 +677,8 @@ impl Connection {
     ) -> Result<Page> {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
+        #[cfg(any(test, feature = "test-support"))]
+        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
         let columns = statement.column_count();
         let mut page = Page {
             rows: Vec::new(),
@@ -714,6 +719,8 @@ impl Connection {
     fn run(&self, sql: &str, params: Vec<Value>) -> Result<(VecDeque<Row>, u64)> {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
+        #[cfg(any(test, feature = "test-support"))]
+        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
         let columns = statement.column_count();
         let mut result = VecDeque::new();
         let mut rows = statement.query(rusqlite::params_from_iter(params))?;
@@ -766,6 +773,15 @@ thread_local! {
 }
 pub fn wal_frames() -> i64 {
     WAL_FRAMES.with(Cell::get)
+}
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static STATEMENTS: Cell<u64> = const { Cell::new(0) };
+}
+/// Statements prepared on this thread, for tests that count them per row.
+#[cfg(any(test, feature = "test-support"))]
+pub fn statements() -> u64 {
+    STATEMENTS.with(Cell::get)
 }
 
 #[cfg(test)]

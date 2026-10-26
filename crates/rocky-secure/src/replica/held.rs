@@ -1181,7 +1181,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// write, each with the current values of the fields it writes.
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         let mut inner = self.inner.lock().await;
-        transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
+        transaction!(inner, |inner| inner.refresh_closed_held(now()?, None).await)?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.held_changes().await
     }

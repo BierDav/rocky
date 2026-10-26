@@ -982,15 +982,20 @@ impl<A: RowApplication> SecureSql<A> {
         #[cfg(feature = "qualification")]
         qualification_kill("after");
         inner.note_commit().await;
-        inner.publish_revision().await?;
         let scopes = committed
             .frames
             .iter()
             .map(EncryptedFrame::scope)
             .collect::<Result<BTreeSet<_>, _>>()?;
-        if self.options.acknowledge == CommitClass::Flushed
-            || matches!(commit, Kind::Coordinated(_))
-        {
+        let flushed = self.options.acknowledge == CommitClass::Flushed
+            || matches!(commit, Kind::Coordinated(_));
+        if !flushed {
+            // Queue before announcing the revision, so the maintenance driver
+            // cannot miss the work when it wakes for this commit.
+            inner.deferred_maintenance.extend(scopes.iter().copied());
+        }
+        inner.publish_revision().await?;
+        if flushed {
             // The frames may leave the device.
             let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
             drop(held);
@@ -998,11 +1003,6 @@ impl<A: RowApplication> SecureSql<A> {
             let mut inner = self.session.replica.inner.lock().await;
             inner.maintain(&scopes).await;
             inner.checkpoint_if_due().await;
-        } else {
-            // Buffered frames leave only through a call that flushes first,
-            // such as a transfer page; `EncryptedReplica::maintain` runs the
-            // maintenance step after this commit answered.
-            inner.deferred_maintenance.extend(scopes);
         }
         rows.committed = Some(committed);
         Ok(rows)

@@ -3063,6 +3063,9 @@ impl Node {
         let mut bootstrap_retry = false;
         if marker.exists() {
             self.sync_state.send_replace("bootstrapping");
+            // An ancestor checkpoint needs its verified schema before import;
+            // learning it after this exchange would back off a usable peer.
+            self.acquire_schemas(transport).await?;
             let expected = std::fs::read(&marker)?;
             let pending = self
                 .bootstrap_pending(&serde_json::from_slice(&expected)?)

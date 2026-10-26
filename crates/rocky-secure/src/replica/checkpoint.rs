@@ -80,6 +80,15 @@ pub(crate) const SCHEMA: &[&str] = &[
 /// after a bulk rewrite of the stored rows copied them out.
 pub(super) const SHARE_BASE: &str = "UPDATE secure_checkpoint_base SET fields=NULL WHERE scope=?1 AND fields=(SELECT fields FROM secure_rows r WHERE r.scope=?1 AND r.row=secure_checkpoint_base.row)";
 
+// Walk applied positions before testing row membership, so LIMIT bounds the work.
+pub(crate) const ROW_REPLAY_SQL: &str = "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=?1 AND a.position>?2 AND a.position<=?3 AND EXISTS(SELECT 1 FROM secure_row_positions p JOIN secure_finalization_rows r ON r.scope=p.scope AND r.row=p.row WHERE p.position=a.position AND p.scope=a.scope) ORDER BY a.position LIMIT ?4";
+
+pub(crate) fn seal_drop_rows(missing: &str) -> String {
+    format!(
+        "SELECT r.row,r.fields FROM secure_rows r WHERE r.scope=(SELECT id FROM secure_scope_state WHERE scope=?1) AND r.scope=?4 AND r.row>?2 AND (r.live=0 OR EXISTS(SELECT 1 FROM secure_seal_candidates c WHERE c.scope=r.scope AND c.row=r.row) OR EXISTS(SELECT 1 FROM secure_scope_shapes s WHERE s.scope=r.scope AND s.shape=r.shape AND ({missing}))) ORDER BY r.row LIMIT ?3"
+    )
+}
+
 /// Applied operations replayed, or pruned, per bounded step.
 #[cfg(not(test))]
 pub(super) const STEP_OPERATIONS: usize = 64;
@@ -561,15 +570,45 @@ impl Sets {
         old: Option<&[u8]>,
         new: &[u8],
     ) -> Result<(), Error> {
-        if let Some(old) = old {
+        let old = old
+            .map(|bytes| Ok::<_, Error>((bytes, decode::<Materialized>(bytes)?.deleted)))
+            .transpose()?;
+        self.replace_encoded(row, old, (new, decode::<Materialized>(new)?.deleted));
+        Ok(())
+    }
+    /// Canonical records and their already decoded tombstone flags.
+    pub(super) fn replace_encoded(
+        &mut self,
+        row: &Commitment,
+        old: Option<(&[u8], bool)>,
+        new: (&[u8], bool),
+    ) {
+        if let Some((bytes, deleted)) = old {
             self.digest
-                .remove(ROW_LABEL, &[row.as_slice(), old].concat());
+                .remove(ROW_LABEL, &[row.as_slice(), bytes].concat());
             self.rows -= 1;
-            self.tombstones -= u64::from(decode::<Materialized>(old)?.deleted);
+            self.tombstones -= u64::from(deleted);
         }
-        self.digest.add(ROW_LABEL, &[row.as_slice(), new].concat());
+        self.digest
+            .add(ROW_LABEL, &[row.as_slice(), new.0].concat());
         self.rows += 1;
-        self.tombstones += u64::from(decode::<Materialized>(new)?.deleted);
+        self.tombstones += u64::from(new.1);
+    }
+    pub(super) fn replace_materialized(
+        &mut self,
+        row: &Commitment,
+        old: Option<&Materialized>,
+        new: &Materialized,
+    ) -> Result<(), Error> {
+        let old = old
+            .map(|record| Ok::<_, Error>((encode(record)?, record.deleted)))
+            .transpose()?;
+        self.replace_encoded(
+            row,
+            old.as_ref()
+                .map(|(bytes, deleted)| (bytes.as_slice(), *deleted)),
+            (&encode(new)?, new.deleted),
+        );
         Ok(())
     }
     /// Removes one stored row record.
@@ -613,6 +652,7 @@ pub(super) fn handle_item(handle: &[u8], input: &[u8], hash: &[u8]) -> Vec<u8> {
 
 /// A scope's replay base: through which applied position, its set state
 /// and statement.
+#[derive(Clone)]
 pub(super) struct Record {
     pub position: i64,
     pub sets: Sets,
@@ -1127,6 +1167,12 @@ impl<A: RowApplication> Inner<A> {
         scope: i64,
         verified: bool,
     ) -> Result<Option<Record>, Error> {
+        if let Some(record) = self
+            .metadata
+            .with(|cache| cache.checkpoints.get(&scope).cloned())
+        {
+            return Ok(record);
+        }
         let mut result = self
             .conn
             .query(
@@ -1134,14 +1180,18 @@ impl<A: RowApplication> Inner<A> {
                 [scope],
             )
             .await?;
-        let Some(row) = result.next().await? else {
-            return Ok(None);
+        let record = match result.next().await? {
+            Some(row) => Some(Record {
+                position: row.get::<i64>(0)?,
+                sets: Sets::from_bytes(&row.get::<Vec<u8>>(1)?)?,
+                signed: Some(self.decoded_checkpoint((scope, verified), row.get::<Vec<u8>>(2)?)?),
+            }),
+            None => None,
         };
-        Ok(Some(Record {
-            position: row.get::<i64>(0)?,
-            sets: Sets::from_bytes(&row.get::<Vec<u8>>(1)?)?,
-            signed: Some(self.decoded_checkpoint((scope, verified), row.get::<Vec<u8>>(2)?)?),
-        }))
+        self.metadata.with(|cache| {
+            cache.checkpoints.insert(scope, record.clone());
+        });
+        Ok(record)
     }
     /// Decodes a stored statement once; maintenance reads it in every step.
     fn decoded_checkpoint(
@@ -1263,7 +1313,7 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .query(
                     if mode == ReplayMode::Rows {
-                        "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=?1 AND a.position IN(SELECT p.position FROM secure_finalization_rows r JOIN secure_row_positions p ON p.scope=r.scope AND p.row=r.row WHERE r.scope=?1 AND p.position>?2 AND p.position<=?3) ORDER BY a.position LIMIT ?4"
+                        ROW_REPLAY_SQL
                     } else {
                         "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT ?"
                     },
@@ -1535,6 +1585,10 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 created |= current.is_none();
+                let prior = current
+                    .as_ref()
+                    .map(|record| Ok::<_, Error>((encode(record)?, record.deleted)))
+                    .transpose()?;
                 let (_, mut record) = apply::merge_row(
                     &write,
                     current,
@@ -1612,8 +1666,13 @@ impl<A: RowApplication> Inner<A> {
                     }
                     ReplayMode::Check => self.encode_existing_record(&record).await?,
                 };
-                sets.replace_stored(self, &row, old.as_deref(), &new)
-                    .await?;
+                sets.replace_encoded(
+                    &row,
+                    prior
+                        .as_ref()
+                        .map(|(bytes, deleted)| (bytes.as_slice(), *deleted)),
+                    (&encode(&record)?, record.deleted),
+                );
                 self.conn
                     .execute(
                         format!("INSERT OR REPLACE INTO {} VALUES(?,?,?)", overlay.table()),

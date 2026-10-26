@@ -583,3 +583,41 @@ impl<C> Record<C> {
         Ok(record)
     }
 }
+
+#[cfg(test)]
+impl<A: RowApplication> Inner<A> {
+    pub(crate) async fn fixed_100000_row_digest(
+        &self,
+        domain: rocky_core::Scope,
+    ) -> Result<Commitment, Error> {
+        let field = self.definition.fields[0].id;
+        let signer = self.config.node.public_key();
+        self.keep_stamp_author(domain, 1, signer).await?;
+        let mut sets = checkpoint::Sets::new();
+        for index in 0..100_000_u64 {
+            let row = rocky_core::commitment("rocky.phase9.fixture-row", &index.to_le_bytes());
+            let stamp = Stamp {
+                clock: 1_700_000_000_000_000 + index,
+                author: 1,
+                sequence: index + 1,
+            };
+            let record = Materialized {
+                proof: None,
+                moved_from: None,
+                fields: BTreeMap::from([(field, format!("item {index:06}").into_bytes())]),
+                stamps: BTreeMap::from([(field, stamp.clone())]),
+                authors: BTreeMap::from([(1, signer)]),
+                deleted: false,
+                creation: Hash::new(b"rocky.phase9.fixture-creation"),
+                identity: None,
+                key: Some(row),
+                created: Some(stamp),
+            };
+            let stored = self.encode_record(&record).await?;
+            let canonical = self.canonical_record(&stored).await?;
+            assert_eq!(canonical, encode(&record)?);
+            sets.replace(&row, None, &canonical)?;
+        }
+        Ok(sets.rows_summary().digest)
+    }
+}

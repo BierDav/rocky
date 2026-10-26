@@ -2469,3 +2469,36 @@ async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
     );
     drop(writer);
 }
+
+#[tokio::test]
+async fn ordinary_sql_commits_do_not_restart_held_history_scans() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &dir.path().join("held-sql.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let session = sql(&replica, &[t.items]).await;
+    insert(&session, "INSERT INTO items VALUES('a','first',0)", vec![])
+        .await
+        .unwrap();
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    session.run("BEGIN", vec![]).await.unwrap();
+    session
+        .run("UPDATE items SET title='second' WHERE key='a'", vec![])
+        .await
+        .unwrap();
+    session.run("COMMIT", vec![]).await.unwrap();
+    crate::sqlite::trace_statements(true);
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    let statements = crate::sqlite::trace_statements(false);
+    assert!(
+        !statements
+            .iter()
+            .any(|sql| sql.starts_with("SELECT o.hash,p.scope"))
+    );
+}

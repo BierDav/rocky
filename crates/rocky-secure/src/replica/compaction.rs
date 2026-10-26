@@ -544,6 +544,9 @@ impl<A: RowApplication> Inner<A> {
         };
         let blob = encode(&scope)?;
         let id = self.scope_id(scope).await?;
+        if indexed && table.is_some() && !self.has_indexed_seal_drops(scope, tip, id).await? {
+            return Ok(Vec::new());
+        }
         let (missing, shape_fields) = if indexed {
             self.seal_shape_predicate(scope, tip, 5)?
         } else {
@@ -551,9 +554,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let sql = if indexed {
             if table.is_some() {
-                format!(
-                    "SELECT row,fields FROM secure_rows WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?1) AND row>?2 AND row IN (SELECT row FROM secure_rows WHERE scope=?4 AND live=0 UNION SELECT row FROM secure_seal_candidates WHERE scope=?4 UNION SELECT row FROM secure_rows WHERE scope=?4 AND shape IN (SELECT s.shape FROM secure_scope_shapes s WHERE s.scope=?4 AND ({missing}))) ORDER BY row LIMIT ?3"
-                )
+                checkpoint::seal_drop_rows(&missing)
             } else {
                 "SELECT row,fields FROM secure_rows WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?1) AND row>?2 AND live=0 ORDER BY row LIMIT ?3".into()
             }

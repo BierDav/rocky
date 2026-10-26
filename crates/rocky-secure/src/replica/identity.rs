@@ -240,8 +240,8 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Indexes `record` stored at `row`. `old`, the record it replaced when
-    /// known, spares the move removal of a row that was not marked.
+    /// Indexes `record` stored at `row`; a known `old` avoids rewriting
+    /// unchanged move and natural-key entries.
     pub(super) async fn index_row_key(
         &self,
         scope: &[u8],
@@ -266,7 +266,11 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
 
-        let key = key_digest(record.key.as_ref().map_or(row, |key| key.as_slice()));
+        let key = record.key.as_ref().map_or(row, |key| key.as_slice());
+        if old.is_some_and(|old| old.key.as_ref().map_or(row, |key| key.as_slice()) == key) {
+            return Ok(());
+        }
+        let key = key_digest(key);
         self.conn.execute(
             "INSERT INTO secure_row_keys VALUES((SELECT id FROM secure_scope_state WHERE scope=?),?,?) ON CONFLICT(scope,row) DO UPDATE SET key=excluded.key",
             [scope.to_vec(), row.to_vec(), key],

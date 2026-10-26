@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage::rows;
+use rocky_core::SqlValue;
 use std::collections::BTreeMap;
 
 #[tokio::test]
@@ -606,6 +607,18 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
     let target = EncryptedReplica::open(dir.path().join("b.db"), f.app(), config)
         .await
         .unwrap();
+    let uncached = EncryptedReplica::open(
+        dir.path().join("uncached.db"),
+        f.app(),
+        f.config(&b, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    uncached
+        .inner
+        .lock()
+        .await
+        .disable_metadata_cache_for_test();
     let rows = 1..=32;
     let name = |text: &str| Some(f.app().name(text));
     let created = rows
@@ -626,6 +639,7 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
         .await
         .unwrap();
     for frame in page.frames {
+        uncached.receive(frame.clone()).await.unwrap();
         target.receive(frame).await.unwrap();
     }
     let updated = rows.map(|row| change(f.public, row, name("first"), name("second")));
@@ -642,14 +656,278 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
         .await
         .unwrap();
     let mut counts = Vec::new();
+    let mut baseline = Vec::new();
     for (frame, rows) in [(many, 32), (one, 1)] {
         let before = crate::sqlite::statements();
+        uncached.receive(frame.clone()).await.unwrap();
+        baseline.push((crate::sqlite::statements() - before) as f64 / rows as f64);
+        let before = crate::sqlite::statements();
+        crate::sqlite::trace_statements(true);
         target.receive(frame).await.unwrap();
+        let statements = crate::sqlite::trace_statements(false);
+        if rows == 1 && std::env::var_os("ROCKY_TRACE_RECEIVE").is_some() {
+            for sql in &statements {
+                println!("P09_RECEIVE_SQL {sql}");
+            }
+        }
+        assert!(
+            !statements
+                .iter()
+                .any(|sql| sql.starts_with("INSERT INTO secure_row_keys")),
+            "an ordinary update rewrote an unchanged key index"
+        );
+        for table in ["secure_subscriptions", "secure_roles", "secure_checkpoints"] {
+            let reads = statements
+                .iter()
+                .filter(|sql| sql.starts_with("SELECT") && sql.contains(table))
+                .count();
+            assert!(reads <= 1, "{table}: {reads} metadata reads");
+        }
         counts.push((crate::sqlite::statements() - before) as f64 / rows as f64);
     }
     println!(
-        "P09 statements_per_row many={} one={}",
-        counts[0], counts[1]
+        "P09 statements_per_row many={} one={} uncached_many={} uncached_one={}",
+        counts[0], counts[1], baseline[0], baseline[1]
     );
-    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 32);
+    assert!(counts[0] <= 8.0, "{counts:?}");
+    assert!(
+        counts
+            .iter()
+            .zip(&baseline)
+            .all(|(cached, direct)| cached < direct)
+    );
+    assert_eq!(
+        target.snapshot(f.public).await.unwrap().rows,
+        uncached.snapshot(f.public).await.unwrap().rows
+    );
+}
+
+/// A fixed row/clock/signer corpus also run against the pre-phase replica.
+#[tokio::test]
+async fn lthash_100000_matches_phase_start() {
+    let f = Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32]));
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::from_bytes(&[42; 32]);
+    let replica = EncryptedReplica::open(
+        dir.path().join("digest.db"),
+        f.app(),
+        f.config(&node, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let inner = replica.inner.lock().await;
+    inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    let digest = inner
+        .fixed_100000_row_digest(f.public.domain)
+        .await
+        .unwrap();
+    inner.conn.execute("ROLLBACK", ()).await.unwrap();
+    // Measured with this same corpus on d1d5eb13, before phase 9.
+    assert_eq!(
+        digest,
+        [
+            0xc8, 0x84, 0x90, 0x67, 0x7c, 0xc3, 0xbf, 0xa8, 0x21, 0x2b, 0x1c, 0x99, 0xe9, 0xc4,
+            0x3d, 0xef, 0x1f, 0x80, 0x49, 0xd6, 0x33, 0x56, 0x36, 0x53, 0x13, 0x83, 0xed, 0xad,
+            0x55, 0x44, 0xe3, 0x89,
+        ]
+    );
+    println!("P09 fixed_100000_lthash={digest:02x?}");
+}
+
+#[tokio::test]
+async fn frame_metadata_observes_writes_and_rollback() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = EncryptedReplica::open(
+        dir.path().join("cache.db"),
+        f.app(),
+        f.config(&PrivateKey::new(), f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let inner = replica.inner.lock().await;
+    let role = inner.role().await.unwrap();
+    let holding = inner.holding(f.public).await.unwrap();
+    let before = crate::sqlite::statements();
+    assert_eq!(inner.role().await.unwrap(), role);
+    assert_eq!(inner.holding(f.public).await.unwrap(), holding);
+    assert_eq!(crate::sqlite::statements(), before);
+    inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    inner.conn.execute(
+        "INSERT INTO secure_subscriptions VALUES(?,'evicted') ON CONFLICT(scope) DO UPDATE SET state=excluded.state",
+        [encode(&f.public).unwrap()],
+    ).await.unwrap();
+    assert_eq!(
+        inner.holding(f.public).await.unwrap(),
+        Some(super::super::replica::roles::Holding::Evicted)
+    );
+    let changed = super::super::replica::roles::RoleConfig {
+        role: super::super::replica::roles::ReplicaRole::Partial,
+        ..Default::default()
+    };
+    inner.conn.execute(
+        "INSERT INTO secure_roles VALUES(1,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",
+        [encode(&changed).unwrap()],
+    ).await.unwrap();
+    assert_eq!(inner.role().await.unwrap(), changed);
+    inner.conn.execute("ROLLBACK", ()).await.unwrap();
+    inner.invalidate_context();
+    assert_eq!(inner.role().await.unwrap(), role);
+    assert_eq!(inner.holding(f.public).await.unwrap(), holding);
+}
+
+#[tokio::test]
+async fn an_unchanged_held_refresh_does_not_scan_history() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = EncryptedReplica::open(
+        dir.path().join("held.db"),
+        f.app(),
+        f.config(&PrivateKey::new(), f.full(), &[f.public, f.private]),
+    )
+    .await
+    .unwrap();
+    replica
+        .author(
+            [1; 32],
+            vec![change(f.public, 1, None, Some(f.app().name("one")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    replica
+        .author(
+            [99; 32],
+            vec![change(f.private, 1, None, Some(f.app().salary("100")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    let before = crate::sqlite::statements();
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    let empty = crate::sqlite::statements() - before;
+    for index in 2..=10 {
+        replica
+            .author(
+                [index; 32],
+                vec![change(f.public, index, None, Some(f.app().name("more")))],
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+    let before = crate::sqlite::statements();
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    assert_eq!(crate::sqlite::statements() - before, empty);
+    replica.evict_key(f.private).await;
+    crate::sqlite::trace_statements(true);
+    assert!(replica.held_changes().await.unwrap().is_empty());
+    let statements = crate::sqlite::trace_statements(false);
+    assert_eq!(
+        statements
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT o.hash,p.scope"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn selected_row_replay_does_not_materialize_the_remaining_history() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE secure_operations(hash INTEGER PRIMARY KEY,header BLOB,body BLOB,status TEXT);
+        CREATE TABLE secure_applied(position INTEGER PRIMARY KEY,scope INTEGER,hash INTEGER);
+        CREATE INDEX applied_scope ON secure_applied(scope,position);
+        CREATE TABLE secure_row_positions(scope INTEGER,row INTEGER,position INTEGER,PRIMARY KEY(scope,row,position)) WITHOUT ROWID;
+        CREATE INDEX row_position_operations ON secure_row_positions(position,scope,row);
+        CREATE TABLE secure_finalization_rows(scope INTEGER,row INTEGER,PRIMARY KEY(scope,row)) WITHOUT ROWID;
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+        INSERT INTO secure_applied SELECT i,1,i FROM n;
+        INSERT INTO secure_operations SELECT hash,X'01',X'02','applied' FROM secure_applied WHERE hash<>4;
+        INSERT INTO secure_row_positions SELECT scope,position,position FROM secure_applied;
+        INSERT INTO secure_finalization_rows SELECT scope,position FROM secure_applied;").unwrap();
+    let mut query = db
+        .prepare(crate::replica::checkpoint::ROW_REPLAY_SQL)
+        .unwrap();
+    let result: Vec<(i64, Option<Vec<u8>>)> = query
+        .query_map([1, 0, 10000, 8], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        result.iter().map(|row| row.0).collect::<Vec<_>>(),
+        (1..=8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        result[3].1, None,
+        "missing operation bodies must remain visible to corruption checks"
+    );
+    let steps = query.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(
+        steps < 2000,
+        "a page of eight operations took {steps} VM steps"
+    );
+}
+
+#[test]
+fn seal_drop_pages_do_not_materialize_the_remaining_candidates() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE secure_scope_state(id INTEGER PRIMARY KEY,scope BLOB UNIQUE);
+        INSERT INTO secure_scope_state VALUES(1,X'01');
+        CREATE TABLE secure_rows(scope INTEGER,row INTEGER,fields BLOB,live INTEGER,shape INTEGER,PRIMARY KEY(scope,row)) WITHOUT ROWID;
+        CREATE TABLE secure_seal_candidates(scope INTEGER,row INTEGER,PRIMARY KEY(scope,row)) WITHOUT ROWID;
+        CREATE TABLE secure_scope_shapes(scope INTEGER,shape INTEGER,PRIMARY KEY(scope,shape)) WITHOUT ROWID;
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+        INSERT INTO secure_rows SELECT 1,i,X'01',i<>4,CASE WHEN i=8 THEN 2 ELSE 1 END FROM n;
+        INSERT INTO secure_seal_candidates SELECT scope,row FROM secure_rows WHERE row NOT IN(4,8);
+        INSERT INTO secure_scope_shapes VALUES(1,1),(1,2);").unwrap();
+    let sql = crate::replica::checkpoint::seal_drop_rows("s.shape=2");
+    let mut query = db.prepare(&sql).unwrap();
+    let result: Vec<i64> = query
+        .query_map(rusqlite::params![vec![1u8], 0, 8, 1], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(result, (1..=8).collect::<Vec<_>>());
+    let steps = query.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(steps < 2000, "eight candidates took {steps} VM steps");
+}
+
+#[tokio::test]
+async fn the_writer_bounds_both_main_and_temporary_page_caches() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = EncryptedReplica::open(
+        dir.path().join("cache.db"),
+        f.app(),
+        f.config(&PrivateKey::new(), f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let inner = replica.inner.lock().await;
+    let mut caches = Vec::new();
+    for schema in ["main", "temp"] {
+        let result = rows(&inner.conn, &format!("PRAGMA {schema}.cache_size"))
+            .await
+            .unwrap();
+        let [row] = result.as_slice() else {
+            panic!("missing {schema} cache setting")
+        };
+        let [SqlValue::Integer(kib)] = row.as_slice() else {
+            panic!("invalid {schema} cache setting")
+        };
+        assert!(*kib < 0, "{schema} cache must be explicitly bounded in KiB");
+        caches.push(*kib);
+    }
+    let budget = if cfg!(target_os = "android") {
+        8192
+    } else {
+        32768
+    };
+    assert_eq!(caches.iter().sum::<i64>(), -budget);
+    assert_eq!(
+        rows(&inner.conn, "PRAGMA temp_store").await.unwrap(),
+        vec![vec![SqlValue::Integer(0)]]
+    );
 }

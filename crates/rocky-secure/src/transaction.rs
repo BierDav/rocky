@@ -71,6 +71,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Option<Result<T, Error>> {
         if result.is_err() {
             self.invalidate_context();
+            self.invalidate_held_refresh();
         }
         match result {
             Err(error) if retryable(&error) => {

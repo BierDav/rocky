@@ -462,8 +462,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+            source/sdks/uniffi/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/uniffi/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
 
@@ -536,8 +536,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+            source/sdks/uniffi/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/uniffi/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -585,7 +585,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: source/sdks/native -> target
+          workspaces: source/sdks/uniffi -> target
           shared-key: ios
 
       # The Linux native library for the JVM jar; this job builds the macOS one.

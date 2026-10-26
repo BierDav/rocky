@@ -852,3 +852,82 @@ unit/integration result is claimed for this experiment.
 The evidence entry was integrated back into `lqnpvvoy`; workspace
 `sync-quota` and its directory were removed. Earlier checkpoint optimizations
 and the independent recovery and lighter-replica workspaces were preserved.
+
+
+## Checkpoint row-index batching experiment (2026-10-27)
+
+Jujutsu workspace `pipelined-perf` under `~/AgentWorkspaces` started from
+working change `wuxmrmrs` (`19d49e85`), including its pending Rust SDK work.
+Artifacts are retained in `/tmp/rocky-pipelined-perf-20261027` independently
+of that workspace.
+
+The starting hypothesis used the historical matching phone sample above, with
+`sqlite3_step` at 41.20% of sampled cycles; it is not a profile of the current
+v39 build. Inspection found two more index
+statements per directly imported row: row-key upsert and move-marker
+maintenance. The candidate batched those updates within the existing page
+transaction and memoized the serving page's first-reference header lookups.
+It preserved authority, signatures, row validation, page ordering, commit
+boundaries, durability settings and all persisted/wire formats.
+
+### Host measurements
+
+A temporary release-mode probe expanded the existing checkpoint import
+fixture to 100,000 rows. Its test page cap matched production's 256 rows;
+its source capture allowance and transaction timeout were explicitly enlarged
+for fixture creation only. The probe timed serving and page staging, plus total transfer through the final
+switch, excluding source creation. Every run compared all source/target
+rows through paginated reads and passed a full audit. These are in-process
+host observations without network latency, using fresh equivalent logical
+fixtures with newly generated identities, not device or end-to-end sync gates.
+
+| Order | Build | Pages | Serving | Page staging | Transfer and final switch |
+| --- | --- | --- | --- | --- | --- |
+| First pair, 1 | Baseline | 765 | 2.578 s | 6.322 s | 10.175 s |
+| First pair, 2 | Candidate | 766 | 2.470 s | 7.516 s | 11.252 s |
+| Reverse pair, 1 | Candidate | 766 | 2.473 s | 7.495 s | 11.253 s |
+| Reverse pair, 2 | Baseline | 766 | 2.568 s | 6.303 s | 10.148 s |
+
+No verification build overlapped these four runs. A five-second macOS sample
+on the first baseline captured source fixture creation, outside its timed
+transfer interval; it is saved as `baseline.sample` and is not an import
+profile. Starting host loads for the reverse pair were 8.28 and 3.36 on
+18 cores. The small serving decrease did not offset the import regression:
+the candidate was approximately **11% slower overall** and **19% slower in
+page staging** in both orderings. This does not demonstrate a path toward
+halving phone bootstrap time.
+
+**The candidate was discarded.** No runtime or regression-test edit is
+retained. The experimental patch, probe source snapshots, release binaries
+and logs remain in the artifact directory. All temporary capture, timeout,
+page-size and instrumentation edits were removed; normal tests and budgets
+remain unchanged. The candidate release probes passed their data and audit
+checks. A new rollback assertion initially selected an authoring-only fault
+hook and failed to inject an import error; its corrected checkpoint-hook
+version is saved in the experimental patch but was not rerun before rejection.
+This is not a claim that the discarded candidate passed all required checks.
+
+### Qualification limits
+
+The connected physical Pixel was discovered, but the saved device fixture
+uses `rocky.encrypted-replica.v37`; current source requires v39. That fixture
+was inspected read-only and neither migrated nor opened with the candidate.
+No new phone, relay, 100 ms latency-shaping or three-device shopping UI run
+was made. Those gates remain unverified by this experiment; phase 8 remains
+unqualified. The shopping household was untouched.
+
+Final retained changes consist only of this evidence entry, squashed into
+`wuxmrmrs` while preserving its existing SDK edits. Comparison against the
+starting working tree confirms that only this evidence file changed.
+Jujutsu workspace `pipelined-perf` and its directory were removed; the
+independent lighter-replica workspace was preserved.
+
+`./scripts/lint`, `./scripts/commitlint --jj` and workspace Clippy with warnings
+denied passed on the retained source. The final `./scripts/check` exited 0:
+all **203 unit tests** and **1,419 integration tests** passed (1,104 workspace
+and 315 SDK without default features). Integration runs took **154.929 s**
+and **81.755 s**; the checker reported **237.76 s**, within the unchanged
+**300 s** suite budget. Its isolated slow-case reruns also passed their
+unchanged per-test budgets. Final check output is `check-final.log` in the
+artifact directory. This green source check does not qualify any device,
+relay or latency-shaping performance gate.

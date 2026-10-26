@@ -62,7 +62,7 @@ kotlin {
         if (name == "iosSimulatorArm64") {
             // Standalone simulator executables need an app identity for Keychain access.
             binaries.withType<TestExecutable>().configureEach {
-                linkerOpts("-sectcreate", "__TEXT", "__entitlements", repositoryRoot.file("sdks/native/qualification/keychain-entitlements.plist").asFile.path)
+                linkerOpts("-sectcreate", "__TEXT", "__entitlements", repositoryRoot.file("sdks/uniffi/qualification/keychain-entitlements.plist").asFile.path)
             }
         }
     }

@@ -456,8 +456,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+            source/sdks/uniffi/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/uniffi/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
 
@@ -546,8 +546,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+            source/sdks/uniffi/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/uniffi/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
 
@@ -619,8 +619,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+            source/sdks/uniffi/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/uniffi/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
 
   ios:
     if: ${{ !inputs.release }}
@@ -690,12 +690,12 @@ jobs:
         run: |
           ./scripts/ci/test-profile "$SOURCE_TREE"
           # This cache scans the native workspace rather than its parent config.
-          mkdir -p sdks/native/.cargo
-          printf '# CI source tree: %s\n' "$SOURCE_TREE" > sdks/native/.cargo/config.toml
+          mkdir -p sdks/uniffi/.cargo
+          printf '# CI source tree: %s\n' "$SOURCE_TREE" > sdks/uniffi/.cargo/config.toml
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ env.ROCKY_CI_SOURCE || 'source' }}/sdks/native -> target
+          workspaces: ${{ env.ROCKY_CI_SOURCE || 'source' }}/sdks/uniffi -> target
           shared-key: ios
           # Preserve the host's rustup executable; it is not a cargo-installed tool.
           cache-bin: false
@@ -712,8 +712,8 @@ jobs:
           set -euo pipefail
           mkdir -p local/phase17-evidence
           ./scripts/ci/ios-simulator
-          ./sdks/native/check-ios 2>&1 | tee local/phase17-evidence/matrix.log
-          ./sdks/native/qualify-ios-binding 2>&1 | tee local/phase17-evidence/callbacks.log
+          ./sdks/uniffi/check-ios 2>&1 | tee local/phase17-evidence/matrix.log
+          ./sdks/uniffi/qualify-ios-binding 2>&1 | tee local/phase17-evidence/callbacks.log
           sdks/kotlin/gradlew -p sdks/kotlin compileKotlinIosArm64
           # The simulator runtime carries the fault injection the lifecycle probes use.
           sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test 2>&1 | tee local/phase17-evidence/sdk.log
@@ -724,7 +724,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p local/phase18-evidence
-          ./sdks/native/qualify-ios-lifecycle 2>&1 | tee local/phase18-evidence/lifecycle.log
+          ./sdks/uniffi/qualify-ios-lifecycle 2>&1 | tee local/phase18-evidence/lifecycle.log
           sdks/kotlin/gradlew -p sdks/kotlin packageIos 2>&1 | tee local/phase18-evidence/package.log
           sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage 2>&1 | tee local/phase18-evidence/consumer.log
 
@@ -733,7 +733,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p local/phase15-evidence
-          ./sdks/native/qualify-ios-discovery 2>&1 | tee local/phase15-evidence/discovery.log
+          ./sdks/uniffi/qualify-ios-discovery 2>&1 | tee local/phase15-evidence/discovery.log
 
       - name: Save Phase 15 evidence
         if: always()

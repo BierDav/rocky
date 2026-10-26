@@ -17,11 +17,13 @@ fun Project.rustSources(): List<Any> = listOf(
     "vendor",
     "crates",
     "sdks/native/Cargo.toml",
-    "sdks/native/build.rs",
-    "sdks/native/Cargo.lock",
-    "sdks/native/uniffi.toml",
-    "sdks/native/askama.toml",
     "sdks/native/src",
+    "sdks/uniffi/Cargo.toml",
+    "sdks/uniffi/build.rs",
+    "sdks/uniffi/Cargo.lock",
+    "sdks/uniffi/uniffi.toml",
+    "sdks/uniffi/askama.toml",
+    "sdks/uniffi/src",
 ).map { repositoryRoot.file(it) }
 
 /** A Cargo task over [rustSources]; Cargo itself decides what to rebuild. */
@@ -56,8 +58,8 @@ abstract class GenerateBindings : CargoTask() {
     @TaskAction
     fun generate() {
         val host = hostPlatform()
-        cargo("build", "--manifest-path", "sdks/native/Cargo.toml", "--locked", "--features", "bindgen")
-        val target = root / "sdks/native/target/debug"
+        cargo("build", "--manifest-path", "sdks/uniffi/Cargo.toml", "--locked", "--features", "bindgen")
+        val target = root / "sdks/uniffi/target/debug"
         val generated = recreate(common.get().asFile.toPath())
         run(
             listOf((target / "rocky-bindgen${host.executableSuffix}").pathString, "generate-native", (target / host.library).pathString, generated.pathString),
@@ -88,11 +90,11 @@ abstract class BuildIosLibrary : CargoTask() {
     fun build() {
         val features = if (qualification.get()) arrayOf("--features", "qualification") else emptyArray()
         cargo(
-            "build", "--manifest-path", "sdks/native/Cargo.toml", "--lib", "--locked", "--target", target.get(), *features,
+            "build", "--manifest-path", "sdks/uniffi/Cargo.toml", "--lib", "--locked", "--target", target.get(), *features,
             environment = mapOf("IPHONEOS_DEPLOYMENT_TARGET" to IOS_DEPLOYMENT_TARGET),
         )
         val output = recreate(library.get().asFile.toPath())
-        (root / "sdks/native/target" / target.get() / "debug/librocky_uniffi.a").copyTo(output / "librocky_uniffi.a")
+        (root / "sdks/uniffi/target" / target.get() / "debug/librocky_uniffi.a").copyTo(output / "librocky_uniffi.a")
     }
 
     companion object {

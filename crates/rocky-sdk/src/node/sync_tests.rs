@@ -517,6 +517,7 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         let connections = Registry::default();
         let options = ConnectionOptions {
             read_only: false,
+            durability: crate::Durability::Buffered,
             profile: Some(Profile::Room284),
             transaction_timeout: Some(Duration::from_secs(1)),
             binding: None,

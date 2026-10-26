@@ -48,12 +48,21 @@ pub enum Binding {
     /// its tip starts from. It is resolved when the connection opens.
     Bookmark(String),
 }
+/// What a successful commit acknowledges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Durability {
+    /// Locally committed; the background flush makes it durable before sync sends it.
+    Buffered,
+    /// Wait for the local durability flush before returning success.
+    Flushed,
+}
 /// What a connection is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionOptions {
     /// A reader steps snapshot cursors and refuses writes. `PRAGMA
     /// query_only` switches the kind outside a transaction.
     pub read_only: bool,
+    pub durability: Durability,
     /// Answers this ORM's housekeeping statements; without it they are
     /// denied like any pragma.
     pub profile: Option<Profile>,
@@ -67,7 +76,10 @@ impl ConnectionOptions {
     fn sql(&self) -> rocky_secure::SqlOptions {
         // A driver never hands frames out: sync flushes before it sends them.
         let mut options = rocky_secure::SqlOptions {
-            acknowledge: rocky_secure::CommitClass::Buffered,
+            acknowledge: match self.durability {
+                Durability::Buffered => rocky_secure::CommitClass::Buffered,
+                Durability::Flushed => rocky_secure::CommitClass::Flushed,
+            },
             ..Default::default()
         };
         if let Some(timeout) = self.transaction_timeout {

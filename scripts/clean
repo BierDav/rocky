@@ -20,7 +20,7 @@ esac
 # The root workspace and the standalone native bindings workspace have their
 # own target directories.
 cargo clean
-[ -f sdks/native/Cargo.toml ] && cargo clean --manifest-path sdks/native/Cargo.toml
+[ -f sdks/uniffi/Cargo.toml ] && cargo clean --manifest-path sdks/uniffi/Cargo.toml
 
 # Gradle, Kotlin/Native and Amper output under the SDK and shopping example.
 find sdks/kotlin examples/shoppinglist-app \

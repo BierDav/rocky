@@ -7,6 +7,7 @@ use crate::{
 use std::sync::Arc;
 
 /// The network a service uses and who owns it.
+#[derive(Clone)]
 pub enum Network {
     /// Rocky starts the transport and closes it with the service.
     Owned(Arc<dyn Connector>),

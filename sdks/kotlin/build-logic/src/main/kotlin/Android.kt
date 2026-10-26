@@ -57,13 +57,13 @@ object Android {
             environment["AR_$target"] = (bin / "llvm-ar").pathString
             run(
                 listOf(
-                    rustup, "run", toolchain, "cargo", "build", "--manifest-path", "sdks/native/Cargo.toml",
+                    rustup, "run", toolchain, "cargo", "build", "--manifest-path", "sdks/uniffi/Cargo.toml",
                     "--locked", "--release", "--target", abi.rustTarget,
                 ),
                 repository,
                 environment,
             )
-            val built = repository / "sdks/native/target" / abi.rustTarget / "release/librocky_uniffi.so"
+            val built = repository / "sdks/uniffi/target" / abi.rustTarget / "release/librocky_uniffi.so"
             val stripped = (output / abi.name / "librocky_uniffi.so").createParentDirectories()
             run(listOf((bin / "llvm-strip").pathString, "--strip-unneeded", "-o", stripped.pathString, built.pathString), repository)
         }

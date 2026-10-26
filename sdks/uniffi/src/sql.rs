@@ -107,6 +107,7 @@ impl NativeDatabase {
     ) -> Result<Arc<NativeConnection>, NativeError> {
         let options = ConnectionOptions {
             read_only,
+            durability: rocky_sdk::Durability::Buffered,
             profile: profile
                 .map(|name| name.parse())
                 .transpose()

@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/*", "examples/*", "benchmarks/runtime-scaling"]
-exclude = ["benchmarks/engine-comparison", "benchmarks/engine-scale",  "examples/shoppinglist-app", "sdks/native", "vendor/apple-libc", "vendor/netdev", "vendor/netwatch"]
+members = ["crates/*", "sdks/native", "examples/*", "benchmarks/runtime-scaling"]
+exclude = ["benchmarks/engine-comparison", "benchmarks/engine-scale",  "examples/shoppinglist-app", "sdks/uniffi", "vendor/apple-libc", "vendor/netdev", "vendor/netwatch"]
 resolver = "3"
 
 [workspace.package]

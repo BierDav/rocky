@@ -13,11 +13,11 @@ xcrun --sdk iphonesimulator --show-sdk-path >/dev/null
 export IPHONEOS_DEPLOYMENT_TARGET=13.0
 failed=0
 for target in aarch64-apple-ios aarch64-apple-ios-sim; do
-    if ! cargo build --manifest-path sdks/native/Cargo.toml --lib --target "$target" --no-default-features --locked; then
+    if ! cargo build --manifest-path sdks/uniffi/Cargo.toml --lib --target "$target" --no-default-features --locked; then
         echo "check-ios: $target without iroh failed" >&2
         failed=1
     fi
-    if ! cargo build --manifest-path sdks/native/Cargo.toml --lib --target "$target" --locked; then
+    if ! cargo build --manifest-path sdks/uniffi/Cargo.toml --lib --target "$target" --locked; then
         echo "check-ios: $target with iroh failed" >&2
         failed=1
     fi

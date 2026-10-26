@@ -93,7 +93,11 @@ enum Command {
     Attach(Network, oneshot::Sender<Result<u64, Failure>>),
     Detach(u64, oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), String>>),
-    Connect(ConnectionOptions, oneshot::Sender<Result<u64, Failure>>),
+    Connect(
+        ConnectionOptions,
+        Arc<Shared>,
+        oneshot::Sender<Result<Connection, Failure>>,
+    ),
     Sql {
         connection: u64,
         call: connection::Call,
@@ -136,6 +140,7 @@ impl Hello {
 
 struct Shared {
     input: mpsc::Sender<Command>,
+    cleanup: mpsc::UnboundedSender<Command>,
     budget: Semaphore,
     closed: AtomicBool,
     sessions: AtomicU64,
@@ -307,6 +312,7 @@ impl Database {
     ) -> Result<Opened, Failure> {
         let (setup, network) = Self::setup(open, install, confirmation)?;
         let (input, receiver) = mpsc::channel(32);
+        let (cleanup, cleanups) = mpsc::unbounded_channel();
         let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
         let hello = Hello::Thread(hello);
         let thread = std::thread::Builder::new()
@@ -321,14 +327,15 @@ impl Database {
                         .enable_all()
                         .build()?;
                     let local = tokio::task::LocalSet::new();
-                    runtime.block_on(local.run_until(run(setup, network, receiver, &hello)))
+                    runtime
+                        .block_on(local.run_until(run(setup, network, receiver, cleanups, &hello)))
                 })();
                 if let Err(error) = result {
                     let _ = hello.send(Err(error));
                 }
             })?;
         let greeting = greeting.recv().map_err(|_| "database failed to start")?;
-        Self::opened(greeting, input, Worker::Thread(thread))
+        Self::opened(greeting, input, cleanup, Worker::Thread(thread))
     }
     fn setup(
         open: Open<'_>,
@@ -357,12 +364,14 @@ impl Database {
     fn opened(
         greeting: Greeting,
         input: mpsc::Sender<Command>,
+        cleanup: mpsc::UnboundedSender<Command>,
         worker: Worker,
     ) -> Result<Opened, Failure> {
         match greeting {
             Ok((scope, network)) => {
                 let shared = Arc::new(Shared {
                     input,
+                    cleanup,
                     budget: Semaphore::new(128),
                     closed: AtomicBool::new(false),
                     sessions: AtomicU64::new(1),
@@ -428,16 +437,9 @@ impl Database {
     /// session, a reader steps snapshot cursors. See
     /// `docs/runtime/sql-driver.md`.
     pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
-        let id = self
-            .shared
-            .request(|reply| Command::Connect(options, reply))
-            .await??;
-        Ok(Connection {
-            shared: self.shared.clone(),
-            id,
-            statements: AtomicU64::new(1),
-            closed: AtomicBool::new(false),
-        })
+        self.shared
+            .request(|reply| Command::Connect(options, self.shared.clone(), reply))
+            .await?
     }
     /// Committed changes of `tables`, or of every table. Register before
     /// reading what the changes invalidate.
@@ -485,11 +487,14 @@ impl Database {
         let (expose, exposed) = std::sync::mpsc::channel();
         setup.expose = Some(expose);
         let (input, receiver) = mpsc::channel(32);
+        let (cleanup, cleanups) = mpsc::unbounded_channel();
         let (hello, greeting) = oneshot::channel();
         let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
         let task = tokio::task::spawn_local(async move {
             let local = tokio::task::LocalSet::new();
-            let result = local.run_until(run(setup, network, receiver, &hello)).await;
+            let result = local
+                .run_until(run(setup, network, receiver, cleanups, &hello))
+                .await;
             if let Err(error) = result {
                 let _ = hello.send(Err(error));
             }
@@ -497,7 +502,7 @@ impl Database {
         let greeting = greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()));
-        let opened = Self::opened(greeting, input, Worker::Task(task))?;
+        let opened = Self::opened(greeting, input, cleanup, Worker::Task(task))?;
         let node = exposed
             .try_recv()
             .map_err(|_| "the database exposed no node")?;
@@ -571,6 +576,13 @@ impl Connection {
             _ => Err(connection::failure(connection::code::MISUSE, "no page")),
         }
     }
+    pub(crate) fn discard(&self, statement: u64) {
+        let _ = self.shared.cleanup.send(Command::Sql {
+            connection: self.id,
+            call: connection::Call::Finish { statement },
+            reply: oneshot::channel().0,
+        });
+    }
     /// Drops the rest of `statement`'s result.
     pub async fn finish(&self, statement: u64) -> Result<(), SqlFailure> {
         self.call(connection::Call::Finish { statement })
@@ -599,8 +611,8 @@ impl Drop for Connection {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
                 .shared
-                .input
-                .try_send(Command::Disconnect(self.id, oneshot::channel().0));
+                .cleanup
+                .send(Command::Disconnect(self.id, oneshot::channel().0));
         }
     }
 }
@@ -613,7 +625,7 @@ pub struct Session {
     closed: Arc<AtomicBool>,
 }
 impl Session {
-    async fn request(&self, request: Value) -> Result<Value, Failure> {
+    pub(crate) async fn request(&self, request: Value) -> Result<Value, Failure> {
         let call = json!({"version":1,"scope":serde_json::from_str::<Value>(&self.scope)?,"request":request});
         let response: Value = serde_json::from_str(&self.call(call.to_string()).await?)?;
         if response["status"] != "ok" {
@@ -803,8 +815,8 @@ impl Drop for Session {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
                 .shared
-                .input
-                .try_send(Command::End(self.id, oneshot::channel().0));
+                .cleanup
+                .send(Command::End(self.id, oneshot::channel().0));
         }
     }
 }
@@ -1182,6 +1194,7 @@ async fn run(
     setup: Setup,
     network: Option<Network>,
     mut input: mpsc::Receiver<Command>,
+    mut cleanups: mpsc::UnboundedReceiver<Command>,
     hello: &Hello,
 ) -> Result<(), Failure> {
     let directory = setup.directory.clone();
@@ -1428,7 +1441,11 @@ async fn run(
     let mut shutdown = None;
     let settling = tokio::task::spawn_local(settle_commits(replica.clone()));
     let recovering = tokio::task::spawn_local(node.clone().drive_recovery());
-    while let Some(command) = input.recv().await {
+    loop {
+        let command = tokio::select! {
+            command = input.recv() => match command { Some(command) => command, None => break },
+            Some(command) = cleanups.recv() => command,
+        };
         let node = node.clone();
         match command {
             Command::Call {
@@ -1490,10 +1507,20 @@ async fn run(
                 shutdown = Some(reply);
                 break;
             }
-            Command::Connect(options, reply) => {
+            Command::Connect(options, shared, reply) => {
                 let connections = connections.clone();
                 tasks.spawn_local(async move {
-                    let _ = reply.send(connections.connect(node, options).await);
+                    let result = connections
+                        .connect(node, options)
+                        .await
+                        .map(|id| Connection {
+                            shared,
+                            id,
+                            statements: AtomicU64::new(1),
+                            closed: AtomicBool::new(false),
+                        });
+                    // The reply owns the handle, so dropping an unread reply also disconnects.
+                    let _ = reply.send(result);
                 });
             }
             Command::Sql {
@@ -1503,7 +1530,19 @@ async fn run(
             } => match connections.get(connection) {
                 Ok(state) => {
                     tasks.spawn_local(async move {
-                        let _ = reply.send(connection::serve(state, call).await);
+                        let statement = match &call {
+                            connection::Call::Execute { statement, .. }
+                            | connection::Call::Next { statement } => Some(*statement),
+                            _ => None,
+                        };
+                        let result = connection::serve(state.clone(), call).await;
+                        if reply.send(result).is_err()
+                            && let Some(statement) = statement
+                        {
+                            let _ =
+                                connection::serve(state, connection::Call::Finish { statement })
+                                    .await;
+                        }
                     });
                 }
                 Err(error) => drop(reply.send(Err(connection::sql_failure(error)))),
@@ -1607,6 +1646,31 @@ async fn dispatch(bytes: &[u8], client: Result<Arc<Client>, Failure>, node: &Nod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_connection_reply_cleans_up_with_a_full_request_queue() -> Result<(), Failure> {
+        let (input, _requests) = mpsc::channel(1);
+        input.try_send(Command::Disconnect(99, oneshot::channel().0))?;
+        let (cleanup, mut cleanups) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            input,
+            cleanup,
+            budget: Semaphore::new(1),
+            closed: AtomicBool::new(false),
+            sessions: AtomicU64::new(1),
+        });
+        let connection = Connection {
+            shared,
+            id: 7,
+            statements: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
+        };
+        let (reply, unread) = oneshot::channel::<Result<Connection, Failure>>();
+        assert!(reply.send(Ok(connection)).is_ok());
+        drop(unread);
+        assert!(matches!(cleanups.try_recv()?, Command::Disconnect(7, _)));
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {

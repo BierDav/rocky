@@ -2,7 +2,7 @@
 # Kotlin formatting and lint rules from .editorconfig.
 tools=ktlint
 # Build output is generated code.
-patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts sdks/native/qualification/discovery/**/*.kt sdks/native/qualification/discovery/**/*.kts !**/build/** !**/target/** !local/**'
+patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts sdks/uniffi/qualification/discovery/**/*.kt sdks/uniffi/qualification/discovery/**/*.kts !**/build/** !**/target/** !local/**'
 
 # ktlint expands the patterns itself.
 # shellcheck disable=SC2086

@@ -32,8 +32,8 @@ def main():
     environment = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target"), IPHONEOS_DEPLOYMENT_TARGET="13.0")
     run("host", "cargo", "build", "--manifest-path", str(manifest), "--locked", environment=environment)
     if args.bindgen is None:
-        run("bindgen", "cargo", "build", "--manifest-path", "sdks/native/Cargo.toml", "--features", "bindgen", "--bin", "rocky-bindgen", "--locked")
-    bindgen = args.bindgen or ROOT / "sdks/native/target/debug/rocky-bindgen"
+        run("bindgen", "cargo", "build", "--manifest-path", "sdks/uniffi/Cargo.toml", "--features", "bindgen", "--bin", "rocky-bindgen", "--locked")
+    bindgen = args.bindgen or ROOT / "sdks/uniffi/target/debug/rocky-bindgen"
     generated = OUT / "generated"
     run("generate", str(bindgen), "generate", "--library", str(ROOT / "target/debug/librocky_discovery_probe.dylib"), "--language", "swift", "--language", "kotlin", "--out-dir", str(generated))
     run("ios-rust", "cargo", "build", "--manifest-path", str(manifest), "--target", "aarch64-apple-ios", "--locked", environment=environment)

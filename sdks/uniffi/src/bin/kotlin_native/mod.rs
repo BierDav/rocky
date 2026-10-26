@@ -78,7 +78,7 @@ kotlin_target_version = "2.4.20"
         format: false,
         languages: vec![uniffi_bindgen::bindings::TargetLanguage::Kotlin],
         metadata_no_deps: true,
-        config_override: Some("sdks/native/uniffi.toml".into()),
+        config_override: Some("sdks/uniffi/uniffi.toml".into()),
         ..Default::default()
     })?;
     jna::adapt(&jna_dir.join("rocky/internal/native/rocky_uniffi.kt"), ci)?;

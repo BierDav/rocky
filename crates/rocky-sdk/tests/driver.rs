@@ -126,12 +126,14 @@ fn text(value: &str) -> SqlValue {
 }
 const WRITER: ConnectionOptions = ConnectionOptions {
     read_only: false,
+    durability: rocky_sdk::Durability::Buffered,
     profile: None,
     transaction_timeout: None,
     binding: None,
 };
 const READER: ConnectionOptions = ConnectionOptions {
     read_only: true,
+    durability: rocky_sdk::Durability::Buffered,
     profile: None,
     transaction_timeout: None,
     binding: None,
@@ -774,6 +776,7 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
     let reader = database
         .connect(ConnectionOptions {
             read_only: true,
+            durability: rocky_sdk::Durability::Buffered,
             ..room.clone()
         })
         .await?;

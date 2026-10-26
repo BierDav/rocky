@@ -6,7 +6,7 @@ die() { echo "build-desktop: $*" >&2; exit 1; }
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
 PATH="$root/local/bin:$PATH"
-out=${1:-$root/sdks/native/target/desktop-natives}
+out=${1:-$root/sdks/uniffi/target/desktop-natives}
 mkdir -p "$out"
 out=$(CDPATH='' cd -- "$out" && pwd)
 [ $# -eq 0 ] || shift
@@ -41,10 +41,10 @@ for target do
             export "CC_${cc_target}=$compiler-gcc"
             export "AR_${cc_target}=$compiler-ar"
         fi
-        cargo build --manifest-path sdks/native/Cargo.toml --locked --lib --target "$target"
+        cargo build --manifest-path sdks/uniffi/Cargo.toml --locked --lib --target "$target"
     )
     mkdir -p "$out/$prefix"
-    cp "${CARGO_TARGET_DIR:-$root/sdks/native/target}/$target/debug/$library" "$out/$prefix/$library"
+    cp "${CARGO_TARGET_DIR:-$root/sdks/uniffi/target}/$target/debug/$library" "$out/$prefix/$library"
     if [ -n "$compiler" ]; then
         "$compiler-strip" --strip-debug "$out/$prefix/$library"
     else

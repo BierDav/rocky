@@ -7,7 +7,8 @@ the phase briefs below are its response. Sealed-fork security, admission
 and atomicity contracts remain unchanged. Source code and tests define
 current behavior.
 
-The parallel application API work is recorded in [Kotlin SDK evidence](sdk-api-evidence.md).
+The parallel application API work is recorded in [Kotlin SDK evidence](sdk-api-evidence.md)
+and [Rust SDK evidence](rust-sdk-evidence.md).
 
 ## Destination
 

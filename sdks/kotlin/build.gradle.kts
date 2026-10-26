@@ -29,7 +29,7 @@ tasks.register<QualifyIosPackage>("qualifyIosPackage") {
     packaged.set(packageIos.flatMap { it.output })
     consumer.set(layout.projectDirectory.dir("qualification/packaged-ios"))
     gradlew.set(layout.projectDirectory.file("gradlew"))
-    entitlements.set(repositoryRoot.file("sdks/native/qualification/keychain-entitlements.plist"))
+    entitlements.set(repositoryRoot.file("sdks/uniffi/qualification/keychain-entitlements.plist"))
     version.set(rockyVersion)
     javaHome.set(providers.systemProperty("java.home"))
     developerDirectory.set(providers.environmentVariable("DEVELOPER_DIR"))

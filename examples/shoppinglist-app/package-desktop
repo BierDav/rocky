@@ -24,9 +24,9 @@ die() {
 app=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$app"
 
-natives=${ROCKY_DESKTOP_NATIVES:-$app/../../sdks/native/target/desktop-natives}
+natives=${ROCKY_DESKTOP_NATIVES:-$app/../../sdks/uniffi/target/desktop-natives}
 if [ -z "${ROCKY_DESKTOP_NATIVES:-}" ]; then
-    "$app/../../sdks/native/build-desktop" "$natives"
+    "$app/../../sdks/uniffi/build-desktop" "$natives"
 fi
 for resource in darwin-aarch64/librocky_uniffi.dylib darwin-x86-64/librocky_uniffi.dylib \
     linux-x86-64/librocky_uniffi.so linux-aarch64/librocky_uniffi.so win32-x86-64/rocky_uniffi.dll; do

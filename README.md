@@ -13,7 +13,15 @@ module declarations and tests to navigate the implementation.
 ./scripts/check
 ```
 
-Rust crates live in `crates/`, language bindings in `sdks/`, applications
+The Rust application SDK is the `rocky` crate in `sdks/native`; Kotlin uses
+the same SDK through the binding adapter in `sdks/uniffi`. Try it with:
+
+```sh
+cargo run -p rocky --example notes -- ./local/notes --create
+cargo run -p rocky --example notes -- ./local/notes
+```
+
+Rust implementation crates live in `crates/`, SDKs in `sdks/`, applications
 in `examples/` and performance probes in `benchmarks/`.
 
 Source-available under the [PolyForm Noncommercial License

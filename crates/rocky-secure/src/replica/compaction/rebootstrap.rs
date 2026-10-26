@@ -61,12 +61,24 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         blockers::refuse(self.readable_blockers(scope).await?)
     }
-    /// Authoring admission in `domain`; see `workspace_blockers`.
-    pub(in crate::replica) async fn require_workspace_base(
+    /// What every scope of `domain` needs; see `domain_blockers`. A
+    /// refusal also names what holds back `scopes`, which the caller may
+    /// write.
+    pub(in crate::replica) async fn require_domain_ready(
         &self,
         domain: Scope,
+        scopes: impl IntoIterator<Item = ResourceScope>,
     ) -> Result<(), Error> {
-        blockers::refuse(self.workspace_blockers(domain).await?)
+        let mut blocked = self.domain_blockers(domain).await?;
+        if blocked.is_empty() {
+            return Ok(());
+        }
+        for scope in scopes {
+            blocked.extend(self.scope_blockers(scope).await?);
+        }
+        blocked.sort();
+        blocked.dedup();
+        blockers::refuse(blocked)
     }
     /// The checkpoints of `scope` another node signed that the graph lists
     /// at `seals`, in their order.

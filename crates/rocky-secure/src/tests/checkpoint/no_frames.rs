@@ -80,9 +80,23 @@ async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
     let blocked = c.blockers().await.unwrap();
     crate::tests::blockers::assert_named(&blocked, &private, missing, crate::ClearsBy::AnyPeer);
     let refusal = crate::tests::blockers::refused(
-        c.author(handle(2), insert(&f, 2, "refused"), vec![]).await,
+        c.author(
+            handle(2),
+            vec![crate::tests::change(
+                f.private,
+                2,
+                None,
+                Some(f.app().salary("refused")),
+            )],
+            vec![],
+        )
+        .await,
     );
     crate::tests::blockers::assert_named(&refusal, &private, missing, crate::ClearsBy::AnyPeer);
+    // The public scope it holds writes meanwhile.
+    c.author(handle(3), insert(&f, 3, "public"), vec![])
+        .await
+        .unwrap();
     let (mut client, server) = network::link::testing::sessions(
         (&c, keys[1].clone(), c_credentials),
         (&r, keys[2].clone(), r_credentials),

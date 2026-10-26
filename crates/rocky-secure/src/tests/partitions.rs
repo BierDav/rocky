@@ -1320,3 +1320,76 @@ async fn an_unproved_partition_requires_custody_without_disclosing_its_header_or
         vec![SqlValue::Blob(encode(&f.tuple("A")).unwrap())]
     );
 }
+
+#[tokio::test]
+async fn sixty_four_partitions_derive_readiness_once_and_parse_each_statement_once() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new();
+    let writer = f
+        .open(
+            &root.path().join("writer.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    let names: Vec<String> = (1..=64).map(|index| format!("p{index:02}")).collect();
+    for (index, name) in names.iter().enumerate() {
+        f.key(&writer, name, [index as u8 + 1; 32]).await;
+    }
+    let bundle = |first: u32| {
+        names
+            .iter()
+            .zip(first..)
+            .map(|(name, sequence)| f.write(name, sequence, 1))
+            .collect::<Vec<_>>()
+    };
+    // The first bundle materializes each partition's state.
+    writer
+        .author_bundle([1; 32], bundle(1), vec![])
+        .await
+        .unwrap();
+    let derivations = || async { writer.inner.lock().await.readiness.derivations() };
+    let before = derivations().await;
+    writer
+        .author_bundle([2; 32], bundle(65), vec![])
+        .await
+        .unwrap();
+    assert_eq!(derivations().await - before, 1);
+
+    let sql = writer
+        .session(names.iter().map(|name| f.scope(name)).collect())
+        .await
+        .unwrap()
+        .sql(crate::sql::SqlOptions::default())
+        .await
+        .unwrap();
+    let count = "SELECT count(*) FROM items WHERE row_kind=0";
+    let before = derivations().await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    let parses = rocky_storage::parsed::parses();
+    assert_eq!(
+        sql.run(count, vec![]).await.unwrap().rows,
+        vec![vec![SqlValue::Integer(128)]]
+    );
+    let first = rocky_storage::parsed::parses();
+    assert!(first > parses);
+    for _ in 0..3 {
+        sql.run(count, vec![]).await.unwrap();
+    }
+    // Repeating a statement parses nothing; readiness is derived once.
+    assert_eq!(rocky_storage::parsed::parses(), first);
+    sql.run("ROLLBACK", vec![]).await.unwrap();
+    assert_eq!(derivations().await - before, 1);
+    // Reads outside a transaction derive at most once until the state moves.
+    let before = derivations().await;
+    for name in &names {
+        sql.run(
+            "SELECT count(*) FROM items WHERE list=?",
+            vec![SqlValue::Text(name.clone())],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(derivations().await - before <= 1);
+}

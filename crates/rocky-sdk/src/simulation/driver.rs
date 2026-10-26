@@ -17,6 +17,9 @@ pub(super) struct Report {
     pub(super) safety: Option<String>,
     /// What still blocked convergence after the liveness rounds.
     pub(super) liveness: Option<Stuck>,
+    /// Writes accepted while another scope of the domain waited for a
+    /// rebootstrap or an import, which a domain-wide gate refused.
+    pub(super) scope_local: usize,
 }
 impl Report {
     /// The seed, its steps and what failed, for a failure message.
@@ -44,6 +47,7 @@ struct Simulation {
     members: Vec<Member>,
     /// Members that ran a sync pass since they last opened.
     synced: Vec<bool>,
+    scope_local: usize,
 }
 
 /// Runs `seed` on a current-thread runtime with a paused clock; call it
@@ -64,12 +68,14 @@ pub(super) async fn run_steps(
             .map(|node| Member::new(root.path(), &node_name(node)))
             .collect(),
         synced: vec![false; scenario.nodes],
+        scope_local: 0,
     };
     let mut report = Report {
         seed,
         steps: Vec::new(),
         safety: None,
         liveness: None,
+        scope_local: 0,
     };
     simulation.setup().await?;
     for (index, action) in steps.into_iter().enumerate() {
@@ -97,6 +103,7 @@ pub(super) async fn run_steps(
         Ok(stuck) => report.liveness = stuck,
         Err(violation) => report.safety = Some(format!("while healing: {violation}")),
     }
+    report.scope_local = simulation.scope_local;
     simulation.stop().await;
     Ok(report)
 }
@@ -129,7 +136,9 @@ impl Simulation {
         match action {
             Action::Write(node) => {
                 let key = format!("w{index}");
+                let elsewhere = self.waits_elsewhere(*node).await;
                 self.running(*node)?.write(&key, index as u64).await?;
+                self.scope_local += usize::from(elsewhere);
                 Ok("written".into())
             }
             Action::Sync(node) => self.sync(*node).await,
@@ -222,9 +231,11 @@ impl Simulation {
                 Ok("shared".into())
             }
             Action::WritePart(node, list) => {
+                let elsewhere = self.waits_elsewhere(*node).await;
                 self.running(*node)?
                     .write_part(list, &format!("p{index}"), index as u64)
                     .await?;
+                self.scope_local += usize::from(elsewhere);
                 Ok("written".into())
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
@@ -241,6 +252,29 @@ impl Simulation {
                 Ok("revoked".into())
             }
         }
+    }
+    /// Whether a scope of `node` waits for a rebootstrap or an unsealed
+    /// import: a write that succeeds then is accepted by a scope-local gate.
+    async fn waits_elsewhere(&self, node: usize) -> bool {
+        let Some(running) = self.members[node]
+            .running
+            .as_ref()
+            .and_then(|running| running.node.upgrade())
+        else {
+            return false;
+        };
+        running
+            .blockers()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|blocker| {
+                matches!(
+                    blocker.kind,
+                    BlockerKind::SealRebootstrap { .. }
+                        | BlockerKind::StagedImport { sealed: false, .. }
+                )
+            })
     }
     async fn sync(&mut self, node: usize) -> Result<String, Failure> {
         let report = self.running(node)?.call(json!({"type": "sync"})).await;
@@ -496,7 +530,7 @@ impl Simulation {
             self.safety().await?;
             let mut stuck = self.convergence(&live).await;
             if stuck.count == 0 {
-                return Ok(None);
+                return self.audited(&live).await.map(|()| None);
             }
             stuck.described = format!("after round {round}: {}", stuck.described);
             if last.as_ref().is_some_and(|last| stuck.count > last.count) {
@@ -506,6 +540,30 @@ impl Simulation {
             last = Some(stuck);
         }
         Ok(last)
+    }
+    /// Once converged nothing blocks, so every scope on every node audits,
+    /// also those written while another scope waited.
+    async fn audited(&self, live: &[usize]) -> Result<(), String> {
+        for node in live {
+            let member = &self.members[*node];
+            let Some(running) = member
+                .running
+                .as_ref()
+                .and_then(|running| running.node.upgrade())
+            else {
+                continue;
+            };
+            for scope in running.scopes() {
+                if let Err(error) = running.replica.audit(scope).await {
+                    return Err(format!(
+                        "{} audit of {} after healing: {error}",
+                        member.name,
+                        rocky_core::scope_label(&scope)
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
     /// How far from converged: blockers, bootstrap markers and differing
     /// tables.

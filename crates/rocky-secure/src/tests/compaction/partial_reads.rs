@@ -1,4 +1,4 @@
-//! Reads need only the scopes they read; authoring and finality need the
+//! Reads and writes need only the scopes they touch; finality needs the
 //! whole domain. A missing scope is refused, never read as empty.
 use super::*;
 use crate::{Companion, MAX_SNAPSHOT_ROWS};
@@ -57,10 +57,11 @@ async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
     .unwrap();
     (rows, replica.stored_and_memory_revision().await)
 }
+/// Authoring in the waiting `tags` scope is refused.
 async fn author_refused(replica: &Replica) {
     let error = identity_insert(
         &session(replica).await,
-        "INSERT INTO items(key,title) VALUES(?,?)",
+        "INSERT INTO tags(key,label) VALUES(?,?)",
         vec![text("w"), text("refused")],
     )
     .await
@@ -109,7 +110,7 @@ async fn scoped(lineage: &Lineage, j: &Replica) {
 }
 
 #[tokio::test]
-async fn a_verified_scope_reads_while_an_unbegun_one_waits_and_authoring_stays_blocked() {
+async fn a_verified_scope_reads_and_writes_while_an_unbegun_one_waits() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let keys = [PrivateKey::new(), PrivateKey::new()];
@@ -120,6 +121,8 @@ async fn a_verified_scope_reads_while_an_unbegun_one_waits_and_authoring_stays_b
     drop(j);
     let j = open(&lineage, &dir, "j", &keys[1]).await;
     scoped(&lineage, &j).await;
+    insert(&j, "z", "authored while tags waits").await;
+    assert_eq!(titles(&j).await.len(), 3);
 }
 
 /// A direct import in progress: its verified pages show, incomplete.

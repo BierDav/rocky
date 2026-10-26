@@ -78,7 +78,11 @@ impl Clone for ReadState {
     }
 }
 impl ReadState {
-    fn statement(&self, sql: &str, params: &[SqlValue]) -> Result<String, Error> {
+    fn statement(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<rocky_storage::partition_sql::Checked, Error> {
         rocky_storage::partition_sql::check_with_views(sql, params, &self.rules, &self.views)
             .map_err(|error| Error::Sql(error.into()))
     }
@@ -362,8 +366,8 @@ impl<A: RowApplication> SecureSql<A> {
     ) -> Result<SnapshotCursor, Error> {
         let readiness = self.reads.snapshot()?;
         let checked = readiness.statement(sql, &params)?;
-        let analyzed = self.read_statement(&checked)?;
-        self.open_cursor(analyzed.sql, params, &analyzed.tables, limits)
+        let analyzed = self.read_statement(&checked.sql)?;
+        self.open_cursor(analyzed.sql, checked.params, &analyzed.tables, limits)
             .await
     }
     /// Opens a snapshot for a read transaction of several statements. It
@@ -383,7 +387,7 @@ impl<A: RowApplication> SecureSql<A> {
     ) -> Result<SnapshotRows, Error> {
         let readiness = self.reads.snapshot()?;
         let checked = readiness.statement(sql, &params)?;
-        let analyzed = self.read_statement(&checked)?;
+        let analyzed = self.read_statement(&checked.sql)?;
         if analyzed.tables.iter().any(|name| name.contains('@')) {
             return Err(Error::Sql(SqlError::Unsupported(
                 "name history in a statement of its own, outside a read transaction".into(),
@@ -391,7 +395,7 @@ impl<A: RowApplication> SecureSql<A> {
         }
         readiness.available(&analyzed.tables)?;
         snapshot
-            .run(analyzed.sql, params, self.options.result_bytes)
+            .run(analyzed.sql, checked.params, self.options.result_bytes)
             .await
     }
     fn read_statement(&self, sql: &str) -> Result<crate::statement::Analyzed, Error> {

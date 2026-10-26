@@ -113,11 +113,14 @@ const SHARDS: u64 = 16;
 async fn shard(shard: u64) -> Result<(), Failure> {
     let mut unsafe_seeds = Vec::new();
     let mut stuck = std::collections::BTreeMap::<Vec<String>, Vec<u64>>::new();
-    let mut ran = 0;
+    let (mut ran, mut scope_local) = (0, Vec::new());
     let started = std::time::Instant::now();
     for seed in sweep_range().filter(|seed| seed % SHARDS == shard) {
         let report = simulate(seed, sweep(seed)).await?;
         ran += 1;
+        if report.scope_local > 0 {
+            scope_local.push((seed, report.scope_local));
+        }
         if report.safety.is_some() {
             println!("{}", report.dump());
             unsafe_seeds.push(seed);
@@ -126,6 +129,7 @@ async fn shard(shard: u64) -> Result<(), Failure> {
         }
     }
     println!("shard {shard}: {ran} seeds in {:?}", started.elapsed());
+    println!("  writes a scope-local gate accepted (seed, writes): {scope_local:?}");
     for (classes, seeds) in &stuck {
         println!("  {} not converged {classes:?}: {seeds:?}", seeds.len());
     }

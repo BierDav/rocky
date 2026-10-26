@@ -312,6 +312,9 @@ pub(super) struct Inner<A> {
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
     /// Frontiers of committed history; invalidated before ordinary write attempts.
     tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
+    /// Blockers per domain; invalidated with the frontiers, after commits
+    /// and by writes to the state they derive from.
+    pub(crate) readiness: blockers::Readiness,
     stamp_authors: stamp_authors::Cache,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
@@ -910,6 +913,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             copy: Default::default(),
         });
+        let readiness = blockers::Readiness::new(&conn)?;
         let mut inner = Inner {
             _owner: owner,
             conn,
@@ -920,6 +924,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             crypto: Default::default(),
             decoded_checkpoints: Default::default(),
             tip_frontiers: Default::default(),
+            readiness,
             record_dictionary: Default::default(),
             stamp_authors: Default::default(),
             author_sets: Default::default(),
@@ -2052,6 +2057,7 @@ impl<A: RowApplication> Inner<A> {
             }
             _ => self.commit += 1,
         }
+        self.readiness.invalidate();
         self.refresh_readers().await;
     }
     #[cfg(test)]

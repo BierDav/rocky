@@ -654,6 +654,7 @@ impl TypedApp {
                     &schema.views,
                 )
                 .map_err(failed)?
+                .sql
                 .into(),
                 values: Vec::new(),
                 key: Vec::new(),

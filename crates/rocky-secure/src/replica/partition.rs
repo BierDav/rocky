@@ -333,7 +333,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                             .await?;
                     }
                 }
-                inner.require_workspace_base(scope.domain).await
+                inner
+                    .require_domain_ready(scope.domain, scopes.iter().copied())
+                    .await?;
+                let mut blocked = Vec::new();
+                for scope in &scopes {
+                    blocked.extend(inner.scope_blockers(*scope).await?);
+                }
+                blockers::refuse(blocked)
             })?;
             inner = flush_guard(inner, &self.inner).await?;
             inner.publish_revision().await?;
@@ -438,12 +445,12 @@ impl<A: RowApplication> Inner<A> {
         if !covers || self.role().await?.role != ReplicaRole::Full {
             return Ok(false);
         }
+        let readiness = self.readiness(typed.domain).await?;
         for scope in self.partitions.keys().filter(|scope| scope.table == table) {
-            self.require_scope_readable(*scope).await?;
             if !self.holds(*scope).await?
                 || !self.can_read_key(*scope, &self.local_grants(now()?)?)
                 || !self.config.keys.iter().any(|key| key.scope == *scope)
-                || self.has_pending(*scope).await?
+                || self.partition_waits(&readiness, *scope).await?
             {
                 return Ok(false);
             }
@@ -452,6 +459,16 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
+    /// A held partition whose rows are not all here yet.
+    async fn partition_waits(
+        &self,
+        readiness: &blockers::DomainReadiness,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        Ok(self.has_pending(scope).await?
+            || self.restoring(scope).await?
+            || !self.readable_in(readiness, scope).await?.is_empty())
+    }
     pub(super) async fn partition_rules(
         &self,
         referenced: Option<&BTreeSet<String>>,
@@ -489,16 +506,17 @@ impl<A: RowApplication> Inner<A> {
                         rocky_storage::partition_sql::TablePartitions {
                             columns: Vec::new(),
                             complete: status.readable.contains(&projected.scope),
-                            unavailable: false,
                             held: Vec::new(),
+                            waiting: Vec::new(),
                             support: true,
                         },
                     );
                 }
                 continue;
             }
+            let readiness = self.readiness(typed.domain).await?;
             let mut held = Vec::new();
-            let mut unavailable = false;
+            let mut waiting = Vec::new();
             let mut complete = self.table_complete(projected.table.id).await?;
             for (scope, tuple) in self.partitions.iter().filter(|(scope, _)| {
                 scope.table == projected.table.id && scope.domain == typed.domain
@@ -507,27 +525,28 @@ impl<A: RowApplication> Inner<A> {
                     complete = false;
                     continue;
                 }
-                if self.has_pending(*scope).await? || self.restoring(*scope).await? {
-                    unavailable = true;
-                    continue;
+                let values = logical
+                    .partition_by
+                    .iter()
+                    .map(|name| {
+                        let column = logical
+                            .column(name)
+                            .ok_or_else(|| denied("unknown partition column"))?;
+                        tuple
+                            .values()
+                            .get(&typed.rows.schema().field_id(logical, column))
+                            .ok_or_else(|| denied("missing partition column"))?
+                            .value()
+                            .map_err(|error| denied(&error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                // Only this partition's own state holds it back.
+                if self.partition_waits(&readiness, *scope).await? {
+                    complete = false;
+                    waiting.push(values);
+                } else {
+                    held.push(values);
                 }
-                held.push(
-                    logical
-                        .partition_by
-                        .iter()
-                        .map(|name| {
-                            let column = logical
-                                .column(name)
-                                .ok_or_else(|| denied("unknown partition column"))?;
-                            tuple
-                                .values()
-                                .get(&typed.rows.schema().field_id(logical, column))
-                                .ok_or_else(|| denied("missing partition column"))?
-                                .value()
-                                .map_err(|error| denied(&error.to_string()))
-                        })
-                        .collect::<Result<Vec<_>, Error>>()?,
-                );
             }
             rules.insert(
                 logical.sql_name.to_ascii_lowercase(),
@@ -549,8 +568,8 @@ impl<A: RowApplication> Inner<A> {
                         })
                         .collect::<Result<Vec<_>, Error>>()?,
                     complete,
-                    unavailable,
                     held,
+                    waiting,
                     support: false,
                 },
             );
@@ -562,38 +581,37 @@ impl<A: RowApplication> Inner<A> {
         sql: &str,
         params: &[SqlValue],
         status: &SessionStatus,
-    ) -> Result<String, Error> {
-        let Some(typed) = &self.workspace.typed else {
-            return Ok(sql.into());
+    ) -> Result<rocky_storage::partition_sql::Checked, Error> {
+        let unchanged = || rocky_storage::partition_sql::Checked {
+            sql: sql.into(),
+            params: params.to_vec(),
         };
-        let support: Vec<&str> = typed
-            .rows
-            .schema()
+        let Some(typed) = &self.workspace.typed else {
+            return Ok(unchanged());
+        };
+        let schema = typed.rows.schema();
+        let support: Vec<&str> = schema
             .support_tables()
             .into_iter()
             .map(|table| table.sql_name.as_str())
             .collect();
-        if typed.rows.schema().views.is_empty()
-            && typed.rows.schema().tables.iter().all(|table| {
+        if schema.views.is_empty()
+            && schema.tables.iter().all(|table| {
                 table.partition_by.is_empty() && !support.contains(&table.sql_name.as_str())
             })
         {
-            return Ok(sql.into());
+            return Ok(unchanged());
         }
-        let referenced =
-            rocky_storage::partition_sql::referenced_tables(sql, &typed.rows.schema().views)
-                .map_err(|error| Error::Sql(error.into()))?;
-        let rules = self.partition_rules(Some(&referenced), status).await?;
-        if rules.is_empty() && typed.rows.schema().views.is_empty() {
-            return Ok(sql.into());
+        let refused = |error: rocky_storage::partition_sql::Refusal| Error::Sql(error.into());
+        let prepared =
+            rocky_storage::partition_sql::prepare(sql, &schema.views).map_err(refused)?;
+        let rules = self
+            .partition_rules(Some(prepared.tables()), status)
+            .await?;
+        if rules.is_empty() && schema.views.is_empty() {
+            return Ok(unchanged());
         }
-        rocky_storage::partition_sql::check_with_views(
-            sql,
-            params,
-            &rules,
-            &typed.rows.schema().views,
-        )
-        .map_err(|error| Error::Sql(error.into()))
+        prepared.check(params, &rules).map_err(refused)
     }
 }
 

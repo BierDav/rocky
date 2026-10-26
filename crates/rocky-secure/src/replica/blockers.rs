@@ -20,12 +20,175 @@ pub(super) fn refuse(blockers: Vec<Blocker>) -> Result<(), Error> {
     }
 }
 
+/// The stored state blockers derive from, apart from the per-frame tables
+/// a transaction boundary covers: a change to any of them, even inside one
+/// transaction, makes cached readiness stale. Readiness reads only which
+/// scopes have state, so `secure_scope_state`'s per-frame updates do not
+/// count.
+const STATE_TABLES: &[&str] = &[
+    "secure_rebootstrap",
+    "secure_compaction_lost",
+    "secure_finalized",
+    "secure_seal_anchors",
+    "secure_seal_bounds",
+    "secure_checkpoints",
+    "secure_existence_base",
+    "secure_subscriptions",
+    "secure_roles",
+    "secure_evicted_logs",
+    "secure_seal_drops",
+    "secure_partitions",
+    "secure_followed_tip",
+];
+
+/// One domain's blockers: those every scope shares, kept domain-wide by the
+/// phase 7 inventory (`docs/features_11/07-scope-local-gates-evidence.md`),
+/// and each scope's own.
+#[derive(Default)]
+pub(super) struct DomainReadiness {
+    domain: Vec<Blocker>,
+    scopes: BTreeMap<ResourceScope, Vec<Blocker>>,
+}
+impl DomainReadiness {
+    fn add(&mut self, scope: ResourceScope, blocker: Blocker) {
+        self.scopes.entry(scope).or_default().push(blocker);
+    }
+    /// The domain's blockers and `scope`'s own.
+    fn of(&self, scope: ResourceScope) -> Vec<Blocker> {
+        let mut blockers = self.domain.clone();
+        blockers.extend(self.scopes.get(&scope).into_iter().flatten().cloned());
+        blockers
+    }
+    fn all(&self) -> Vec<Blocker> {
+        let mut blockers = self.domain.clone();
+        blockers.extend(self.scopes.values().flatten().cloned());
+        blockers
+    }
+}
+
+/// Derived readiness per domain, valid for one generation, one count of
+/// state-table writes and one context (tip, authority, graph, custody).
+pub(crate) struct Readiness {
+    writes: Arc<crate::sqlite::Writes>,
+    cache: std::sync::Mutex<ReadinessCache>,
+}
+#[derive(Default)]
+struct ReadinessCache {
+    generation: u64,
+    domains: BTreeMap<Scope, (u64, u64, Commitment, Arc<DomainReadiness>)>,
+    #[cfg(test)]
+    derivations: u64,
+}
+impl Readiness {
+    pub(super) fn new(conn: &ScopedConnection) -> Result<Self, Error> {
+        let names = conn.names();
+        let physical = |table: &'static str| names.physical(table).unwrap_or(table).to_owned();
+        let tables = STATE_TABLES
+            .iter()
+            .map(|table| (physical(table), true))
+            .chain([(physical("secure_scope_state"), false)]);
+        Ok(Self {
+            writes: conn.connection().watch_writes(tables)?,
+            cache: Default::default(),
+        })
+    }
+    fn cache(&self) -> std::sync::MutexGuard<'_, ReadinessCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    /// Before a write attempt, after a commit and after a rollback.
+    pub(super) fn invalidate(&self) {
+        let mut cache = self.cache();
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.domains.clear();
+    }
+    fn get(&self, domain: Scope, context: Commitment) -> Option<Arc<DomainReadiness>> {
+        let cache = self.cache();
+        let writes = self.writes.count();
+        cache
+            .domains
+            .get(&domain)
+            .filter(|(generation, seen, known, _)| {
+                *generation == cache.generation && *seen == writes && *known == context
+            })
+            .map(|(.., readiness)| readiness.clone())
+    }
+    /// Keeps `readiness`, derived since `writes` state-table writes, unless
+    /// a write or an invalidation happened meanwhile.
+    fn put(
+        &self,
+        domain: Scope,
+        (generation, writes): (u64, u64),
+        context: Commitment,
+        readiness: Arc<DomainReadiness>,
+    ) {
+        let mut cache = self.cache();
+        #[cfg(test)]
+        {
+            cache.derivations += 1;
+        }
+        if cache.generation == generation && self.writes.count() == writes {
+            cache
+                .domains
+                .insert(domain, (generation, writes, context, readiness));
+        }
+    }
+    fn mark(&self) -> (u64, u64) {
+        (self.cache().generation, self.writes.count())
+    }
+    #[cfg(test)]
+    pub(crate) fn derivations(&self) -> u64 {
+        self.cache().derivations
+    }
+}
+
 impl<A: RowApplication> Inner<A> {
-    /// What holds back authoring anywhere in `domain`: an import outside a
-    /// seal, a lost compaction, and every scope whose base must move to a
-    /// seal of the followed path.
-    pub(super) async fn workspace_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
-        let mut blockers = Vec::new();
+    /// What the cached readiness of `domain` depends on besides stored state.
+    fn readiness_context(&self, domain: Scope) -> Result<Commitment, Error> {
+        let custody: Vec<_> = self
+            .custody_scopes(now()?)?
+            .into_iter()
+            .filter(|scope| scope.domain == domain)
+            .collect();
+        let counts = self.graphs.get(&domain).map(|graph| {
+            [
+                graph.seals.len(),
+                graph.openings.len(),
+                graph.moves.len(),
+                graph.finalities.len(),
+                graph.checkpoints.len(),
+                graph.revoked.len(),
+            ]
+        });
+        Ok(rocky_core::commitment(
+            "rocky.readiness-context.v1",
+            &encode(&(
+                self.authority,
+                self.manifest,
+                self.workspace.tip,
+                &self.workspace.followed,
+                counts,
+                custody,
+            ))?,
+        ))
+    }
+    /// The blockers of `domain`, derived once per change of what they read.
+    pub(super) async fn readiness(&self, domain: Scope) -> Result<Arc<DomainReadiness>, Error> {
+        let context = self.readiness_context(domain)?;
+        if let Some(readiness) = self.readiness.get(domain, context) {
+            return Ok(readiness);
+        }
+        let mark = self.readiness.mark();
+        let readiness = Arc::new(self.derive_readiness(domain).await?);
+        self.readiness.put(domain, mark, context, readiness.clone());
+        Ok(readiness)
+    }
+    /// An import outside a seal and a base that must move to a seal of the
+    /// followed path hold back their own scope; a lost compaction holds
+    /// back the whole domain.
+    async fn derive_readiness(&self, domain: Scope) -> Result<DomainReadiness, Error> {
+        let mut readiness = DomainReadiness::default();
         if self.graphs.contains_key(&domain) {
             // An evicted scope reads as unavailable; its own log returning
             // holds back only authoring.
@@ -33,20 +196,23 @@ impl<A: RowApplication> Inner<A> {
                 if let Some(staging) = self.staging(id).await?
                     && staging.signed.statement.seal.is_none()
                 {
-                    blockers.push(blocker(
-                        scope_label(&scope),
-                        BlockerKind::StagedImport {
-                            sealed: false,
-                            pages_complete: staging.complete,
-                        },
-                        ClearsBy::AnyPeer,
-                    ));
+                    readiness.add(
+                        scope,
+                        blocker(
+                            scope_label(&scope),
+                            BlockerKind::StagedImport {
+                                sealed: false,
+                                pages_complete: staging.complete,
+                            },
+                            ClearsBy::AnyPeer,
+                        ),
+                    );
                 }
             }
         }
         let needs = self.seal_rebootstraps(domain).await?;
         if self.compaction_lost(domain).await?.is_some() {
-            blockers.push(blocker(
+            readiness.domain.push(blocker(
                 domain_label(&domain),
                 BlockerKind::LostCompaction,
                 if needs.is_empty() {
@@ -57,47 +223,63 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         for need in needs {
-            blockers.push(blocker(
-                scope_label(&need.scope),
-                BlockerKind::SealRebootstrap {
-                    replay: need.replay,
-                    listed: need.listed.len() as u64,
-                },
-                match need.replay {
-                    FrameReplay::Local => ClearsBy::LocalWork,
-                    // Only a listed checkpoint replaces released existence
-                    // records; a trusted peer holding one lists it first.
-                    FrameReplay::Unavailable if need.listed.is_empty() => ClearsBy::NoPeer,
-                    FrameReplay::Peers | FrameReplay::Unavailable => ClearsBy::AnyPeer,
-                },
-            ));
+            readiness.add(
+                need.scope,
+                blocker(
+                    scope_label(&need.scope),
+                    BlockerKind::SealRebootstrap {
+                        replay: need.replay,
+                        listed: need.listed.len() as u64,
+                    },
+                    match need.replay {
+                        FrameReplay::Local => ClearsBy::LocalWork,
+                        // Only a listed checkpoint replaces released existence
+                        // records; a trusted peer holding one lists it first.
+                        FrameReplay::Unavailable if need.listed.is_empty() => ClearsBy::NoPeer,
+                        FrameReplay::Peers | FrameReplay::Unavailable => ClearsBy::AnyPeer,
+                    },
+                ),
+            );
         }
-        Ok(blockers)
+        Ok(readiness)
     }
-    /// What holds back reading `scope`: the workspace-wide blockers, then
-    /// only this scope's own state. A scope another scope's rebootstrap
-    /// waits for stays readable; one that waits itself reads only the
-    /// verified pages of a direct import.
+    /// Every readiness blocker of `domain`, for diagnostics.
+    pub(super) async fn workspace_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
+        Ok(self.readiness(domain).await?.all())
+    }
+    /// What holds back every scope of `domain`.
+    pub(super) async fn domain_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
+        Ok(self.readiness(domain).await?.domain.clone())
+    }
+    /// What holds back authoring in `scope`: its domain's blockers and its own.
+    pub(super) async fn scope_blockers(&self, scope: ResourceScope) -> Result<Vec<Blocker>, Error> {
+        Ok(self.readiness(scope.domain).await?.of(scope))
+    }
+    /// What holds back reading `scope`: as for authoring, except that a
+    /// scope that waits for a rebootstrap reads the verified pages of a
+    /// direct import.
     pub(super) async fn readable_blockers(
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<Blocker>, Error> {
-        let label = scope_label(&scope);
-        let mut blockers = self.workspace_blockers(scope.domain).await?;
-        let mut direct = None;
-        let mut kept = Vec::with_capacity(blockers.len());
-        for blocker in blockers.drain(..) {
-            if matches!(blocker.kind, BlockerKind::SealRebootstrap { .. }) {
-                if blocker.scope != label {
-                    continue;
-                }
-                if *direct.get_or_insert(self.authenticated_direct_import(scope).await?) {
-                    continue;
-                }
-            }
-            kept.push(blocker);
+        let readiness = self.readiness(scope.domain).await?;
+        self.readable_in(&readiness, scope).await
+    }
+    /// `readable_blockers` from `scope`'s domain readiness.
+    pub(super) async fn readable_in(
+        &self,
+        readiness: &DomainReadiness,
+        scope: ResourceScope,
+    ) -> Result<Vec<Blocker>, Error> {
+        let mut blockers = readiness.of(scope);
+        if blockers
+            .iter()
+            .any(|blocker| matches!(blocker.kind, BlockerKind::SealRebootstrap { .. }))
+            && self.authenticated_direct_import(scope).await?
+        {
+            blockers.retain(|blocker| !matches!(blocker.kind, BlockerKind::SealRebootstrap { .. }));
         }
-        Ok(kept)
+        Ok(blockers)
     }
     /// Frames of a dropped tip on the followed tip's ancestry that are not
     /// back yet: authoring waits for them.

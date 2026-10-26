@@ -27,6 +27,8 @@ impl<A> Inner<A> {
         cache.generation = cache.generation.wrapping_add(1);
         cache.entries.clear();
         cache.replay_ledger = None;
+        drop(cache);
+        self.readiness.invalidate();
     }
     /// Also used after rollback and after restoring an earlier in-memory context.
     pub(crate) fn invalidate_context(&self) {

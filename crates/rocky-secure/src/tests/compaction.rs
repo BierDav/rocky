@@ -987,6 +987,7 @@ mod readiness;
 mod receipts;
 mod replay_scope;
 mod returning;
+mod scope_local;
 mod staged_switches;
 
 mod restoration;

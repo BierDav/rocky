@@ -1,9 +1,10 @@
 //! Completeness proofs for each resolved SQL table reference.
 use rocky_core::{KeyColumn, PartitionValue, SqlValue};
-use sqlparser::{ast::*, dialect::SQLiteDialect, parser::Parser};
+use sqlparser::ast::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::ControlFlow,
+    sync::Arc,
 };
 
 #[derive(Clone)]
@@ -15,9 +16,11 @@ pub struct PartitionColumn {
 pub struct TablePartitions {
     pub columns: Vec<PartitionColumn>,
     pub complete: bool,
-    pub unavailable: bool,
     /// Values in partition declaration order; only readable, held scopes.
     pub held: Vec<Vec<SqlValue>>,
+    /// Held partitions whose rows are not all here: a read that may reach
+    /// one is refused as incomplete, never answered as absence.
+    pub waiting: Vec<Vec<SqlValue>>,
     /// The table may hold puppets or a virtual row (`docs/runtime/existence-logs.md`): every
     /// read is filtered to real rows, complete or not.
     pub support: bool,
@@ -67,12 +70,17 @@ impl std::fmt::Display for Refusal {
     }
 }
 fn parse(sql: &str) -> Result<Statement, String> {
-    let mut statements =
-        Parser::parse_sql(&SQLiteDialect {}, sql).map_err(|error| error.to_string())?;
-    if statements.len() != 1 {
-        return Err("one statement required".into());
+    match &*crate::parsed::parse(sql)? {
+        [statement] => Ok(statement.clone()),
+        _ => Err("one statement required".into()),
     }
-    Ok(statements.remove(0))
+}
+/// A checked statement and its parameters: the caller's, then the values
+/// of the held partitions a partial read is filtered to.
+#[derive(Debug)]
+pub struct Checked {
+    pub sql: String,
+    pub params: Vec<SqlValue>,
 }
 fn table(factor: &TableFactor) -> Option<(String, String)> {
     let TableFactor::Table { name, alias, .. } = factor else {
@@ -118,12 +126,16 @@ struct Bindings<'a> {
     params: &'a [SqlValue],
     placeholders: BTreeMap<(u64, u64), String>,
     values: BTreeMap<(u64, u64), SqlValue>,
+    /// The number of each anonymous `?`.
+    numbers: BTreeMap<(u64, u64), usize>,
 }
 impl Bindings<'_> {
-    fn bind(&mut self) -> Result<(), String> {
+    /// Binds each placeholder; returns the highest parameter number.
+    fn bind(&mut self) -> Result<usize, String> {
         let mut next = 0usize;
         for (span, name) in &self.placeholders {
             let index = if name == "?" {
+                self.numbers.insert(*span, next + 1);
                 next + 1
             } else {
                 name.strip_prefix('?')
@@ -138,7 +150,7 @@ impl Bindings<'_> {
                 self.values.insert(*span, param.clone());
             }
         }
-        Ok(())
+        Ok(next)
     }
 }
 impl Visitor for Bindings<'_> {
@@ -324,12 +336,6 @@ impl Checker<'_> {
             let Some(rule) = self.tables.get(name) else {
                 continue;
             };
-            if rule.unavailable {
-                return Err(Refusal::Unavailable {
-                    table: name.clone(),
-                    reason: crate::sql::Unavailable::Incomplete,
-                });
-            }
             if rule.complete || (rule.columns.is_empty() && !rule.support) {
                 continue;
             }
@@ -348,14 +354,19 @@ impl Checker<'_> {
                 }
             }
             propagate(&mut effective);
-            if effective
+            // Real rows only: the filter hides rows of partitions not held.
+            let real = effective
                 .values
                 .get(&(alias.clone(), "row_kind".into()))
-                .is_some_and(|values| values == &[SqlValue::Integer(0)])
-            {
-                continue;
-            }
+                .is_some_and(|values| values == &[SqlValue::Integer(0)]);
+            let incomplete = || Refusal::Unavailable {
+                table: name.clone(),
+                reason: crate::sql::Unavailable::Incomplete,
+            };
             if rule.columns.is_empty() {
+                if real {
+                    continue;
+                }
                 return Err(format!(
                     "{name}: a table this device does not hold needs row_kind = 0"
                 )
@@ -363,7 +374,23 @@ impl Checker<'_> {
             }
             let mut tuples = vec![Vec::new()];
             for column in &rule.columns {
-                let values=effective.values.get(&(alias.clone(),column.name.to_ascii_lowercase())).ok_or_else(|| format!("{name}: a partial table needs held partition equality/IN or row_kind = 0"))?;
+                let Some(values) = effective
+                    .values
+                    .get(&(alias.clone(), column.name.to_ascii_lowercase()))
+                else {
+                    // Every partition may be read: one that waits refuses it.
+                    if !rule.waiting.is_empty() {
+                        return Err(incomplete());
+                    }
+                    if real {
+                        tuples.clear();
+                        break;
+                    }
+                    return Err(format!(
+                        "{name}: a partial table needs held partition equality/IN or row_kind = 0"
+                    )
+                    .into());
+                };
                 if tuples.len().saturating_mul(values.len()) > 4096 {
                     return Err("partition proof quota".into());
                 }
@@ -377,18 +404,24 @@ impl Checker<'_> {
                 }
                 tuples = next;
             }
-            let held = rule
-                .held
-                .iter()
-                .map(|tuple| {
-                    rule.columns
-                        .iter()
-                        .zip(tuple)
-                        .map(|(column, value)| normalize(column, value))
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if tuples.iter().any(|tuple| !held.contains(tuple)) {
+            let normalized = |tuples: &[Vec<SqlValue>]| {
+                tuples
+                    .iter()
+                    .map(|tuple| {
+                        rule.columns
+                            .iter()
+                            .zip(tuple)
+                            .map(|(column, value)| normalize(column, value))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            let waiting = normalized(&rule.waiting)?;
+            if tuples.iter().any(|tuple| waiting.contains(tuple)) {
+                return Err(incomplete());
+            }
+            let held = normalized(&rule.held)?;
+            if !real && tuples.iter().any(|tuple| !held.contains(tuple)) {
                 return Err(Refusal::Unavailable {
                     table: name.clone(),
                     reason: crate::sql::Unavailable::NotHeld,
@@ -481,42 +514,138 @@ impl Visitor for Checker<'_> {
         ControlFlow::Continue(())
     }
 }
-/// Checks every query block separately. The returned statement filters partial reads to held scopes.
-pub fn check(
+/// A statement with its views expanded, and the tables it may reference.
+pub struct Prepared {
+    statement: Statement,
+    tables: BTreeSet<String>,
+}
+impl Prepared {
+    /// Conservative table references, after expanding views, for loading
+    /// only the readiness proofs a statement can use. CTE names may also be
+    /// returned.
+    pub fn tables(&self) -> &BTreeSet<String> {
+        &self.tables
+    }
+    /// Checks every query block separately. The returned statement filters
+    /// partial reads to held scopes, whose values it binds after `params`.
+    pub fn check(
+        &self,
+        params: &[SqlValue],
+        tables: &BTreeMap<String, TablePartitions>,
+    ) -> Result<Checked, Refusal> {
+        let mut statement = self.statement.clone();
+        let mut bindings = Bindings {
+            params,
+            placeholders: BTreeMap::new(),
+            values: BTreeMap::new(),
+            numbers: BTreeMap::new(),
+        };
+        if let ControlFlow::Break(error) = statement.visit(&mut bindings) {
+            return Err(error.into());
+        }
+        let used = bindings.bind()?;
+        let mut checker = Checker {
+            tables,
+            bindings: &bindings,
+        };
+        if let ControlFlow::Break(error) = statement.visit(&mut checker) {
+            return Err(error);
+        }
+        let mut filter = Filter {
+            tables,
+            reads: Vec::new(),
+            numbers: &bindings.numbers,
+            params: params.to_vec(),
+        };
+        if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut filter) {
+            return Err(error.into());
+        }
+        if filter.params.len() > params.len() && used != params.len() {
+            return Err(format!(
+                "the statement uses {used} parameters, {} were given",
+                params.len()
+            )
+            .into());
+        }
+        Ok(Checked {
+            sql: statement.to_string(),
+            params: filter.params,
+        })
+    }
+}
+/// Expands `sql`'s views. Statements and their expansions are prepared
+/// once while they stay in use.
+pub fn prepare(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Arc<Prepared>, Refusal> {
+    let key = prepared_key(sql, views);
+    if let Some((text, prepared)) = PREPARED.get(&key)
+        && *text == *sql
+    {
+        return Ok(prepared);
+    }
+    let (mut statement, expanded) = expand_views(sql, views)?;
+    if expanded {
+        // Spans identify placeholders and reads: an expanded statement
+        // takes them from its own text.
+        statement = parse(&statement.to_string())?;
+    }
+    struct References(BTreeSet<String>);
+    impl Visitor for References {
+        type Break = ();
+        fn pre_visit_relation(&mut self, name: &ObjectName) -> ControlFlow<()> {
+            if let Some(ObjectNamePart::Identifier(name)) = name.0.last() {
+                self.0.insert(name.value.to_ascii_lowercase());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut references = References(BTreeSet::new());
+    let _ = statement.visit(&mut references);
+    let prepared = Arc::new(Prepared {
+        statement,
+        tables: references.0,
+    });
+    if sql.len() <= crate::parsed::CACHED_BYTES {
+        PREPARED.put(key, (sql.into(), prepared.clone()));
+    }
+    Ok(prepared)
+}
+/// Prepared statements by a digest of their text and views; a hit is
+/// compared with the text.
+static PREPARED: crate::parsed::Recent<u64, (Arc<str>, Arc<Prepared>)> =
+    crate::parsed::Recent::new();
+fn prepared_key(sql: &str, views: &[rocky_core::LogicalView]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sql.hash(&mut hasher);
+    for view in views {
+        (&view.name, &view.create_sql).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+#[cfg(test)]
+fn check(
     sql: &str,
     params: &[SqlValue],
     tables: &BTreeMap<String, TablePartitions>,
 ) -> Result<String, Refusal> {
-    let mut statement = parse(sql)?;
-    let mut bindings = Bindings {
-        params,
-        placeholders: BTreeMap::new(),
-        values: BTreeMap::new(),
-    };
-    if let ControlFlow::Break(error) = statement.visit(&mut bindings) {
-        return Err(error.into());
+    let checked = prepare(sql, &[])?.check(params, tables)?;
+    Ok(inline(&checked))
+}
+/// The checked statement with its parameters written in, for tests that
+/// run it.
+#[cfg(test)]
+fn inline(checked: &Checked) -> String {
+    let mut sql = checked.sql.clone();
+    for (index, value) in checked.params.iter().enumerate().rev() {
+        sql = sql.replace(&format!("?{}", index + 1), &literal(value));
     }
-    bindings.bind()?;
-    let mut checker = Checker {
-        tables,
-        bindings: &bindings,
-    };
-    if let ControlFlow::Break(error) = statement.visit(&mut checker) {
-        return Err(error);
-    }
-    let mut filter = Filter {
-        tables,
-        reads: Vec::new(),
-    };
-    if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut filter) {
-        return Err(error.into());
-    }
-    Ok(statement.to_string())
+    sql
 }
 
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
+#[cfg(test)]
 fn literal(value: &SqlValue) -> String {
     match value {
         SqlValue::Null => "NULL".into(),
@@ -532,8 +661,10 @@ fn literal(value: &SqlValue) -> String {
         ),
     }
 }
-fn held_filter(rule: &TablePartitions, alias: Option<&str>) -> String {
-    let partitions = held_partitions(rule, alias);
+/// Real rows of the held partitions; their values bind as parameters
+/// after `params`, so the text depends only on how many there are.
+fn held_filter(rule: &TablePartitions, alias: Option<&str>, params: &mut Vec<SqlValue>) -> String {
+    let partitions = held_partitions(rule, alias, params);
     if !rule.support {
         return partitions;
     }
@@ -547,7 +678,11 @@ fn held_filter(rule: &TablePartitions, alias: Option<&str>) -> String {
         format!("{kind} = 0 AND {partitions}")
     }
 }
-fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
+fn held_partitions(
+    rule: &TablePartitions,
+    alias: Option<&str>,
+    params: &mut Vec<SqlValue>,
+) -> String {
     if rule.held.is_empty() || rule.columns.is_empty() {
         return "0".into();
     }
@@ -563,7 +698,14 @@ fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
         .held
         .iter()
         .map(|tuple| {
-            let values = tuple.iter().map(literal).collect::<Vec<_>>().join(",");
+            let values = tuple
+                .iter()
+                .map(|value| {
+                    params.push(value.clone());
+                    format!("?{}", params.len())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             if names.len() > 1 {
                 format!("({values})")
             } else {
@@ -579,8 +721,15 @@ fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
     };
     format!("{names} IN ({values})")
 }
-fn filter_expr(rule: &TablePartitions, alias: Option<&str>) -> Result<Expr, String> {
-    let Statement::Query(query) = parse(&format!("SELECT 1 WHERE {}", held_filter(rule, alias)))?
+fn filter_expr(
+    rule: &TablePartitions,
+    alias: Option<&str>,
+    params: &mut Vec<SqlValue>,
+) -> Result<Expr, String> {
+    let Statement::Query(query) = parse(&format!(
+        "SELECT 1 WHERE {}",
+        held_filter(rule, alias, params)
+    ))?
     else {
         return Err("partition filter".into());
     };
@@ -602,6 +751,9 @@ fn append(selection: &mut Option<Expr>, filter: Expr) {
 struct Filter<'a> {
     tables: &'a BTreeMap<String, TablePartitions>,
     reads: Vec<(u64, u64)>,
+    numbers: &'a BTreeMap<(u64, u64), usize>,
+    /// The caller's parameters, then the held values of each filter.
+    params: Vec<SqlValue>,
 }
 impl Filter<'_> {
     fn read_factor(&mut self, factor: &TableFactor) {
@@ -639,6 +791,20 @@ impl Filter<'_> {
 }
 impl VisitorMut for Filter<'_> {
     type Break = String;
+    /// Numbers each anonymous `?`, so the parameters a filter adds keep
+    /// their places wherever it is inserted.
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<String> {
+        if let Expr::Value(value) = expr
+            && let Value::Placeholder(name) = &mut value.value
+            && name == "?"
+            && let Some(number) = self
+                .numbers
+                .get(&(value.span.start.line, value.span.start.column))
+        {
+            *name = format!("?{number}");
+        }
+        ControlFlow::Continue(())
+    }
     fn pre_visit_query(&mut self, query: &mut Query) -> ControlFlow<String> {
         self.body(&query.body);
         ControlFlow::Continue(())
@@ -670,7 +836,7 @@ impl VisitorMut for Filter<'_> {
         let query = match parse(&format!(
             "SELECT * FROM {} WHERE {}",
             quoted(&name),
-            held_filter(rule, None)
+            held_filter(rule, None, &mut self.params)
         )) {
             Ok(Statement::Query(query)) => query,
             _ => return ControlFlow::Break("partition filter".into()),
@@ -714,7 +880,7 @@ impl VisitorMut for Filter<'_> {
         if let Some(((name, alias), selection)) = target
             && let Some(rule) = self.tables.get(&name).filter(|rule| rule.filtered())
         {
-            match filter_expr(rule, Some(&alias)) {
+            match filter_expr(rule, Some(&alias), &mut self.params) {
                 Ok(filter) => append(selection, filter),
                 Err(error) => return ControlFlow::Break(error),
             }
@@ -728,32 +894,15 @@ pub fn check_with_views(
     params: &[SqlValue],
     tables: &BTreeMap<String, TablePartitions>,
     views: &[rocky_core::LogicalView],
-) -> Result<String, Refusal> {
-    check(&expand_views(sql, views)?.to_string(), params, tables)
+) -> Result<Checked, Refusal> {
+    prepare(sql, views)?.check(params, tables)
 }
 
-/// Conservative table references, after expanding views, for loading only the
-/// readiness proofs a statement can use. CTE names may also be returned.
-pub fn referenced_tables(
+/// The statement with its views expanded, and whether it named any.
+fn expand_views(
     sql: &str,
     views: &[rocky_core::LogicalView],
-) -> Result<BTreeSet<String>, Refusal> {
-    struct References(BTreeSet<String>);
-    impl Visitor for References {
-        type Break = ();
-        fn pre_visit_relation(&mut self, name: &ObjectName) -> ControlFlow<()> {
-            if let Some(ObjectNamePart::Identifier(name)) = name.0.last() {
-                self.0.insert(name.value.to_ascii_lowercase());
-            }
-            ControlFlow::Continue(())
-        }
-    }
-    let mut references = References(BTreeSet::new());
-    let _ = expand_views(sql, views)?.visit(&mut references);
-    Ok(references.0)
-}
-
-fn expand_views(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Statement, Refusal> {
+) -> Result<(Statement, bool), Refusal> {
     struct Expand<'a> {
         views: &'a [rocky_core::LogicalView],
         changed: bool,
@@ -797,7 +946,7 @@ fn expand_views(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Statemen
         }
     }
     let mut statement = parse(sql)?;
-    for _ in 0..16 {
+    for round in 0..16 {
         let mut expand = Expand {
             views,
             changed: false,
@@ -806,7 +955,7 @@ fn expand_views(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Statemen
             return Err(error.into());
         }
         if !expand.changed {
-            return Ok(statement);
+            return Ok((statement, round > 0));
         }
     }
     Err("view expansion cycle or depth quota".into())
@@ -834,14 +983,17 @@ mod tests {
             "DELETE FROM metadata WHERE EXISTS(SELECT 1 FROM outer_items)",
         ] {
             assert_eq!(
-                referenced_tables(sql, &views).unwrap(),
+                prepare(sql, &views).unwrap().tables().clone(),
                 ["items".into(), "metadata".into()].into(),
                 "{sql}"
             );
         }
-        assert!(referenced_tables("SELECT 1", &views).unwrap().is_empty());
+        assert!(prepare("SELECT 1", &views).unwrap().tables().is_empty());
         assert_eq!(
-            referenced_tables("SELECT * FROM metadata", &views).unwrap(),
+            prepare("SELECT * FROM metadata", &views)
+                .unwrap()
+                .tables()
+                .clone(),
             ["metadata".into()].into()
         );
     }
@@ -858,8 +1010,8 @@ mod tests {
                     },
                 }],
                 complete: false,
-                unavailable: false,
                 held: vec![vec![SqlValue::Text("A".into())]],
+                waiting: Vec::new(),
                 support: false,
             },
         )]
@@ -958,6 +1110,87 @@ mod tests {
             (10, None)
         );
     }
+    #[test]
+    fn only_a_waiting_partition_a_read_may_reach_is_incomplete() {
+        let mut rules = rules();
+        rules.get_mut("items").unwrap().waiting = vec![vec![SqlValue::Text("B".into())]];
+        let incomplete = |sql: &str| {
+            matches!(
+                check(sql, &[], &rules),
+                Err(Refusal::Unavailable {
+                    reason: crate::sql::Unavailable::Incomplete,
+                    ..
+                })
+            )
+        };
+        check("SELECT * FROM items WHERE list='A'", &[], &rules).unwrap();
+        for sql in [
+            "SELECT * FROM items WHERE list='b'",
+            "SELECT * FROM items WHERE list IN ('A','B')",
+            "SELECT SUM(amount) FROM items WHERE row_kind=0",
+        ] {
+            assert!(incomplete(sql), "{sql}");
+        }
+        // A partition neither held nor waiting is not here at all.
+        assert!(check("SELECT * FROM items WHERE list='C'", &[], &rules).is_err());
+        assert!(!incomplete("SELECT * FROM items WHERE list='C'"));
+    }
+    #[test]
+    fn held_values_bind_after_the_callers_parameters_and_keep_the_text_stable() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE items(list TEXT,amount INTEGER,row_kind INTEGER); INSERT INTO items VALUES('A',10,0),('B',20,0);").unwrap();
+        let sql = "SELECT ? + SUM(amount) FROM items WHERE row_kind=0 AND amount>?";
+        let checked = check_with_views(
+            sql,
+            &[SqlValue::Integer(1), SqlValue::Integer(5)],
+            &rules(),
+            &[],
+        )
+        .unwrap();
+        assert!(!checked.sql.contains("'A'"), "{}", checked.sql);
+        assert_eq!(
+            checked.params,
+            [1, 5]
+                .map(SqlValue::Integer)
+                .into_iter()
+                .chain([SqlValue::Text("A".into())])
+                .collect::<Vec<_>>()
+        );
+        let params: Vec<rusqlite::types::Value> = checked
+            .params
+            .iter()
+            .map(|value| match value {
+                SqlValue::Integer(value) => (*value).into(),
+                SqlValue::Text(value) => value.clone().into(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            conn.query_row(&checked.sql, rusqlite::params_from_iter(params), |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            11
+        );
+        // Another held set of the same size reads the same text.
+        let mut other = rules();
+        other.get_mut("items").unwrap().held = vec![vec![SqlValue::Text("B".into())]];
+        let again = check_with_views(
+            sql,
+            &[SqlValue::Integer(1), SqlValue::Integer(5)],
+            &other,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(again.sql, checked.sql);
+        assert!(Arc::ptr_eq(
+            &prepare(sql, &[]).unwrap(),
+            &prepare(sql, &[]).unwrap()
+        ));
+        // Too few parameters for a filtered statement is refused, not padded.
+        assert!(check_with_views(sql, &[SqlValue::Integer(1)], &rules(), &[]).is_err());
+    }
     /// `customers` may hold support rows: unheld by `partial`, fully held
     /// otherwise.
     fn support(complete: bool) -> BTreeMap<String, TablePartitions> {
@@ -966,8 +1199,8 @@ mod tests {
             TablePartitions {
                 columns: Vec::new(),
                 complete,
-                unavailable: false,
                 held: Vec::new(),
+                waiting: Vec::new(),
                 support: true,
             },
         )]
@@ -1023,6 +1256,7 @@ mod tests {
         }
         let read = |sql: &str, rules: &BTreeMap<String, TablePartitions>| {
             let sql = check_with_views(sql, &[], rules, &views)
+                .map(|checked| inline(&checked))
                 .unwrap_or_else(|error| panic!("{sql}: {error}"));
             let mut statement = conn.prepare(&sql).unwrap();
             let width = statement.column_count();
@@ -1070,7 +1304,7 @@ mod tests {
             assert!(check_with_views(sql, &[], &held, &views).is_err(), "{sql}");
         }
         for sql in ["UPDATE customers SET name='x'", "DELETE FROM customers"] {
-            let sql = check_with_views(sql, &[], &held, &views).unwrap();
+            let sql = check_with_views(sql, &[], &held, &views).unwrap().sql;
             assert!(sql.contains("row_kind"), "{sql}");
             conn.execute(&sql, []).unwrap();
         }

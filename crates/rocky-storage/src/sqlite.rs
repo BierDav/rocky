@@ -197,11 +197,37 @@ impl Rows {
     }
 }
 
-/// The row hook's two consumers: checkpoint digests and session capture.
+/// The row hook's consumers: checkpoint digests, session capture and
+/// watched-table counts.
 #[derive(Clone)]
 struct Hooks {
     tracker: std::sync::Arc<Mutex<crate::digest::Tracker>>,
     capture: std::sync::Arc<Mutex<crate::capture::Sink>>,
+    writes: std::sync::Arc<Writes>,
+}
+/// Counts row changes to watched tables of `main`, so a cache derived from
+/// them can tell it is stale, also inside one transaction.
+#[derive(Default)]
+pub struct Writes {
+    /// Each table, and whether an update counts or only rows added or
+    /// removed.
+    tables: std::sync::RwLock<Vec<(String, bool)>>,
+    count: std::sync::atomic::AtomicU64,
+}
+impl Writes {
+    /// Changes so far; it only grows.
+    pub fn count(&self) -> u64 {
+        self.count.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn observe(&self, table: &str, update: bool) {
+        if self.tables.read().is_ok_and(|tables| {
+            tables
+                .iter()
+                .any(|(watched, updates)| watched == table && (*updates || !update))
+        }) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
 }
 /// What a session statement observes of its own earlier statements. The
 /// runtime's protocol writes share the connection and must not show here.
@@ -305,6 +331,20 @@ impl Connection {
     pub fn capture(&self) -> Result<std::sync::Arc<Mutex<crate::capture::Sink>>> {
         Ok(self.hooks()?.capture)
     }
+    /// Adds physical `tables` to the watched set and returns its counter;
+    /// each table counts updates too, or only rows added or removed.
+    pub fn watch_writes(
+        &self,
+        tables: impl IntoIterator<Item = (String, bool)>,
+    ) -> Result<std::sync::Arc<Writes>> {
+        let writes = self.hooks()?.writes;
+        writes
+            .tables
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(tables);
+        Ok(writes)
+    }
     /// One hook per connection: it reads a changed row once and hands it to
     /// the digest tracker and to the capture sink.
     fn hooks(&self) -> Result<Hooks> {
@@ -315,10 +355,16 @@ impl Connection {
         let hooks = Hooks {
             tracker: Default::default(),
             capture: Default::default(),
+            writes: Default::default(),
         };
         let shared = hooks.clone();
         self.raw()?.preupdate_hook(Some(
             move |_, database: &str, table: &str, case: &PreUpdateCase| {
+                if database == "main" {
+                    shared
+                        .writes
+                        .observe(table, matches!(case, PreUpdateCase::Update { .. }));
+                }
                 let (Ok(mut tracker), Ok(mut capture)) =
                     (shared.tracker.lock(), shared.capture.lock())
                 else {

@@ -6,8 +6,6 @@ use sqlparser::ast::{
     Expr, FromTable, ObjectName, ObjectNamePart, Query, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TableFactor, TableObject, Visit, Visitor,
 };
-use sqlparser::dialect::SQLiteDialect;
-use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
@@ -410,13 +408,13 @@ fn analyze_with(
     if sql.len() > MAX_STATEMENT_BYTES {
         return unsupported("statement length");
     }
-    let statements = match Parser::parse_sql(&SQLiteDialect {}, sql) {
+    let statements = match crate::parsed::parse(sql) {
         Ok(statements) => statements,
         // A schema, pragma or attachment statement is denied in any spelling.
         Err(_) if forbidden(sql) => return denied("schema, pragma or attachment statement"),
-        Err(error) => return unsupported(error.to_string()),
+        Err(error) => return unsupported(error),
     };
-    let statement = match statements.as_slice() {
+    let statement = match &*statements {
         [statement] => statement,
         [] => return unsupported("empty statement"),
         _ => return unsupported("one statement per call"),

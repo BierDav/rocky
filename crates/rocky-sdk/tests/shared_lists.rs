@@ -256,19 +256,16 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
     writer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
-    let error = writer
+    // The prepared list's own scope writes.
+    let list = writer
         .insert(
             "lists",
             None,
-            "INSERT INTO lists(id,title) VALUES(?,'Refused')",
+            "INSERT INTO lists(id,title) VALUES(?,'Prepared')",
         )
-        .await
-        .expect_err("the unrelated member still needs a verified state");
-    assert!(
-        error.to_string().contains("seal rebootstrap (replay="),
-        "{error}"
-    );
-    // Status names the same blockers, with what clears them.
+        .await?;
+    // The unrelated member still needs a verified state: status names it,
+    // with what clears it, and a write there is refused with it.
     let status = writer.call(json!({"type":"status"})).await?;
     let rebootstraps: Vec<&Value> = status["data"]["blockers"]
         .as_array()
@@ -277,6 +274,18 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
         .filter(|blocker| blocker["kind"]["type"] == "seal_rebootstrap")
         .collect();
     assert!(!rebootstraps.is_empty(), "{status}");
+    let error = writer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(list,id,title) VALUES({list},?,'Refused')"),
+        )
+        .await
+        .expect_err("the unrelated member still needs a verified state");
+    assert!(
+        error.to_string().contains("seal rebootstrap (replay="),
+        "{error}"
+    );
     for blocker in rebootstraps {
         assert_eq!(blocker["clears_by"]["type"], "any_peer", "{blocker}");
         let scope = blocker["scope"].as_str().ok_or("scope")?;

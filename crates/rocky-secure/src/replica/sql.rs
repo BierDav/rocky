@@ -597,7 +597,7 @@ impl<A: RowApplication> SecureSql<A> {
                             .await?
                     }
                 };
-                let sql = checked.as_str();
+                let (sql, params) = (checked.sql.as_str(), checked.params);
                 // A read of a table whose rows are not all here is refused,
                 // never answered as absence.
                 if let Ok(analyzed) = crate::statement::analyze(sql, |_| None)
@@ -659,8 +659,19 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = self.session.replica.inner.clone().lock_owned().await;
         inner.invalidate_frontiers();
         admit(&inner, &self.session)?;
-        for scope in &self.session.status.scopes {
-            inner.require_workspace_base(scope.domain).await?;
+        // Each written scope's own blockers refuse its frames at commit.
+        let domains: BTreeSet<_> = self
+            .session
+            .status
+            .scopes
+            .iter()
+            .map(|scope| scope.domain)
+            .collect();
+        for domain in domains {
+            let writable = self.session.status.writable.iter().copied();
+            inner
+                .require_domain_ready(domain, writable.filter(|scope| scope.domain == domain))
+                .await?;
         }
         inner.untouch();
         let typed = inner

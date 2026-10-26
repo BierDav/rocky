@@ -1,7 +1,8 @@
 # 7. Scope-local gates
 
-Status: proposed. Owner: `rocky-secure` readiness, partition authorization
-and SQL sessions. Depends on [phase 1](01-see-every-stall.md),
+Status: implemented; shopping-app profile not verified. See the
+[evidence](07-scope-local-gates-evidence.md). Owner: `rocky-secure`
+readiness, partition authorization and SQL sessions. Depends on [phase 1](01-see-every-stall.md),
 [phase 2](02-deterministic-simulation.md) and
 [phase 4](04-recovery-that-drives-itself.md). Effort: two weeks. Follow the
 [execution contract](README.md#agent-execution-contract).

@@ -17,7 +17,7 @@ runs:
       uses: actions/github-script@v7
       with:
         script: |
-          for (const name of ['ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_RUNTIME_TOKEN']) {
+          for (const name of ['ACTIONS_CACHE_SERVICE_V2', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_RUNTIME_TOKEN']) {
             if (process.env[name]) core.exportVariable(name, process.env[name]);
           }
           core.exportVariable('SCCACHE_GHA_ENABLED', 'true');

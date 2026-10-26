@@ -21,6 +21,7 @@ impl Node {
             self.wake_sync();
         }
         recovered?;
+        self.complete_pending_follow().await?;
         self.blockers().await
     }
     /// In a sync pass, before the exchanges: a signer seals for members
@@ -90,7 +91,8 @@ impl Node {
             };
             let local = blockers
                 .iter()
-                .any(|blocker| blocker.clears_by == ClearsBy::LocalWork);
+                .any(|blocker| blocker.clears_by == ClearsBy::LocalWork)
+                || self.settings.lock().await.pending_follow.is_some();
             let tick = tokio::time::sleep(TICK);
             tokio::pin!(tick);
             loop {
@@ -105,7 +107,9 @@ impl Node {
                     changed = wakes.changed() => if changed.is_err() { return },
                     () = &mut tick, if local => break,
                 }
-                if !self.blockers().await.unwrap_or_default().is_empty() {
+                if self.settings.lock().await.pending_follow.is_some()
+                    || !self.blockers().await.unwrap_or_default().is_empty()
+                {
                     break;
                 }
             }

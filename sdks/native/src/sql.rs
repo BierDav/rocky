@@ -87,6 +87,7 @@ impl From<rocky_sdk::Page> for NativePage {
 fn sql(error: SqlFailure) -> NativeError {
     NativeError::Sql {
         code: error.code,
+        retryable: error.retryable,
         detail: error.message,
     }
 }

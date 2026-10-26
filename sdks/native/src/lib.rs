@@ -34,7 +34,11 @@ pub enum NativeError {
     },
     /// A statement failed; `code` is SQLite's result code.
     #[error("Error code: {code}, message: {detail}")]
-    Sql { code: i32, detail: String },
+    Sql {
+        code: i32,
+        retryable: bool,
+        detail: String,
+    },
 }
 pub(crate) fn failure(error: Box<dyn std::error::Error + Send + Sync>) -> NativeError {
     if let Some(required) = error.downcast_ref::<rocky_sdk::RolloutConfirmationRequired>() {

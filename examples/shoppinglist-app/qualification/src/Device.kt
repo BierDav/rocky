@@ -51,6 +51,34 @@ private fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.content
 private fun JsonObject.long(name: String) = getValue(name).jsonPrimitive.long
 private fun JsonObject.longOrNull(name: String) = get(name)?.jsonPrimitive?.longOrNull
 
+private fun GenerationStatus.qualificationJson(): JsonObject = buildJsonObject {
+    put("manifest", manifest)
+    putJsonObject("current") { put("schema", current.schema.toLong()) }
+    put(
+        "pending",
+        pending?.let { generation ->
+            buildJsonObject {
+                put("tip", generation.tip)
+                put("manifest", generation.manifest)
+            }
+        } ?: JsonNull,
+    )
+    put("application", application.name.lowercase())
+    put("waiting_for_issuer", waitingForIssuer)
+}
+
+private fun RetentionStatus.qualificationJson(): JsonObject = buildJsonObject {
+    putJsonObject("policy") {
+        put("required", JsonArray(policy.required.sorted().map(::JsonPrimitive)))
+        put("behind", JsonArray(policy.behind.sorted().map(::JsonPrimitive)))
+        put("copies", policy.copies)
+        put("window", policy.window)
+    }
+    put("covered", covered)
+    put("uncovered", uncovered)
+    put("maintenance_error", maintenanceError)
+}
+
 private class DeviceProcess {
     private var file: File? = null
     private var runtime: RockyDatabase? = null
@@ -75,7 +103,7 @@ private class DeviceProcess {
         return buildJsonObject {
             put("node", opened.session().node)
             put("issuer", opened.isIssuer)
-            put("generation", opened.generation())
+            put("generation", opened.generation().qualificationJson())
         }
     }
 
@@ -135,7 +163,7 @@ private class DeviceProcess {
                 JsonPrimitive(database.write { nextId("categories", list).also { execute("INSERT INTO categories(list, name, id) VALUES(?, ?, ?)", list, request.text("name"), it) } })
             }
 
-            "generation" -> database.generation()
+            "generation" -> database.generation().qualificationJson()
 
             "inspect" -> JsonPrimitive(database.tips.inspect().toString())
 
@@ -160,7 +188,7 @@ private class DeviceProcess {
                 }
             }
 
-            "retention" -> database.retention(request.text("collection"), maintain = request["maintain"]?.jsonPrimitive?.boolean ?: false)
+            "retention" -> database.retention(request.text("collection"), maintain = request["maintain"]?.jsonPrimitive?.boolean ?: false).qualificationJson()
 
             "seal" -> JsonPrimitive(tips().seal().tip)
 

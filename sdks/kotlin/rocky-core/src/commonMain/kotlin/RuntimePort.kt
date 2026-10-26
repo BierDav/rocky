@@ -33,7 +33,7 @@ interface SqlWrite {
 }
 
 /** A single-use `rocky://join/…` URI. It carries the issuer's routes, the invitation secret and the profile it grants. */
-data class PairingInvitation(val uri: String, val expiresAtEpochSeconds: Long, val profile: GrantProfile, val sequence: Long)
+data class PairingInvitation(val uri: String, val expiresAtEpochSeconds: Long, val profile: GrantProfile, val sequence: Long, val id: String)
 
 /** A right a raw grant names on one table. */
 enum class Right(val wire: String) {
@@ -165,8 +165,21 @@ data class Device(
     val profile: GrantProfile,
     val expiresAtEpochSeconds: Long? = null,
     val label: ByteArray? = null,
+    val invitationId: String? = null,
 )
 
 /** Unique operation identity, not a credential. Persist it with the queued action. */
 fun newMutationHandle(): String = kotlin.random.Random.Default.nextBytes(32)
     .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+
+/** SQL commands recorded for an atomic operation; building them performs no database or network work. */
+class SqlChanges internal constructor() {
+    private val statements = mutableListOf<kotlinx.serialization.json.JsonObject>()
+    fun execute(sql: String, vararg values: Any?) {
+        statements += kotlinx.serialization.json.buildJsonObject {
+            put("sql", kotlinx.serialization.json.JsonPrimitive(sql))
+            put("values", kotlinx.serialization.json.JsonArray(values.map(::cell)))
+        }
+    }
+    internal fun json() = kotlinx.serialization.json.JsonArray(statements)
+}

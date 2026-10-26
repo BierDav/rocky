@@ -174,7 +174,7 @@ fun main(args: Array<String>) = runBlocking {
     val upgraded = schema.copy(version = 2, tables = listOf(Table("items", listOf(Column.text("title"), Column.text("note", nullable = true)), primaryKey = listOf("id"))))
     db = RockyDatabase.open(directory, upgraded)
     check(db.credentials.status().node == node)
-    check(db.generation().getValue("current").jsonObject.getValue("schema").jsonPrimitive.int == 2)
+    check(db.generation().current.schema == 2u)
     check(titles(db) == listOf("apples"))
     check(Row.decode(db.read(upgraded.table("items").query())).single().isNull("note"))
     check(db.reconcile(action).getValue("committed").jsonPrimitive.boolean)

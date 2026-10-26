@@ -6,12 +6,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.ShoppingTables
 import org.example.examples.shopping.util.hex
@@ -24,7 +18,7 @@ const val MAIN = "main"
 
 /**
  * Seals, kept seals, branches and held changes as the household uses them; see `docs/runtime/shopping-seals.md`.
- * Rocky runs no timer: [maintain] is the app's policy, run by the node's upkeep and after each switch.
+ * The SDK runs history policy while the node is active and recovers pending branch switches.
  */
 class HouseholdTips(
     private val rocky: RockyDatabase,
@@ -43,41 +37,32 @@ class HouseholdTips(
     /** Why the last policy round failed, until one succeeds. */
     val problem = MutableStateFlow<String?>(null)
 
-    /** A bookmark this device asked to follow whose starting seal it is still pulling from a peer. */
-    private var pendingFollow: String? = null
+    private val policy get() = HistoryPolicy(
+        kept = if (rocky.isIssuer) KeptSeals(every = true) else KeptSeals(),
+        retentionWindows = ShoppingTables.associateWith { if (rocky.isIssuer) KEPT_HISTORY else 0L },
+        sealBookmark = MAIN,
+        sealAfter = sealAfter.takeIf { rocky.isIssuer },
+        uncompactedSeals = KEEP,
+    )
 
-    /**
-     * One round of the app's policy: trusted devices keep every seal, and seal `main` once [sealAfter] writes
-     * gathered since the last seal; every device compacts, leaving [KEEP] seals uncompacted unless one is final.
-     * A pending branch switch is retried. Expected refusals, such as a seal that lost, wait for the next round.
-     */
     suspend fun maintain(): Maintenance = lock.withLock {
-        keepSeals()
-        pendingFollow?.let { name -> if (followHeld(name)) pendingFollow = null }
-        val status = rocky.tips.status()
-        var sealed: String? = null
-        if (rocky.isIssuer && status.bookmark == MAIN && status.operationsSinceSeal >= sealAfter) {
-            sealed = expected { rocky.tips.seal().tip }
-        }
-        val compaction = rocky.tips.compact(KEEP)
-        Maintenance(sealed, compaction).also { refreshLocked() }
+        val result = rocky.maintainHistory(policy)
+        refreshLocked()
+        Maintenance(result.sealed, result.compaction)
     }
 
-    /**
-     * Called at open. Trusted devices keep every seal, others none; a seal made before is kept only while the live
-     * tables still hold its state. Members release list history at compaction once another device acknowledged it,
-     * and a device that missed it imports the base at a seal. Trusted devices keep their history: a migration or a
-     * rollback closes a tip, and a close needs every author position this device holds.
-     */
-    suspend fun keepSeals() {
-        val kept = if (rocky.isIssuer) KeptSeals(every = true) else KeptSeals()
-        if (rocky.tips.kept() != kept) rocky.tips.keep(kept)
-        val window = if (rocky.isIssuer) KEPT_HISTORY else 0L
-        for (table in ShoppingTables) {
-            val current = rocky.retention(table).getValue("policy").jsonObject
-            if (current["window"]?.jsonPrimitive?.long != window) rocky.retention(table, JsonObject(current + ("window" to JsonPrimitive(window))))
-        }
-    }
+    suspend fun run() = rocky.runHistoryMaintenance(
+        policy,
+        onResult = {
+            lock.withLock {
+                refreshLocked()
+                problem.value = null
+            }
+        },
+        onFailure = { problem.value = it.message ?: it.toString() },
+    )
+
+    suspend fun keepSeals() = rocky.applyHistoryPolicy(policy)
 
     /** Seals the followed tip now, whatever the policy; its bookmark moves to the successor. */
     suspend fun seal(): TipStatus = lock.withLock { rocky.tips.seal().also { refreshLocked() } }
@@ -98,23 +83,18 @@ class HouseholdTips(
             path = path,
             compaction = rocky.tips.compaction(),
             held = rocky.heldChanges().changes,
-            pendingFollow = pendingFollow,
+            pendingFollow = status.pendingFollow,
         ).also { mutableState.value = it }
     }
 
     /**
      * Follows [name]. Following a branch whose starting seal this device does not hold asks a peer that keeps it
-     * and switches during a later [maintain]; the result says which happened. Writes made on the bookmark left wait
+     * and switches during native recovery; the result says which happened. Writes made on the bookmark left wait
      * there until this device returns.
      */
     suspend fun follow(name: String): Follow = lock.withLock {
-        pendingFollow = null
-        val outcome = if (followHeld(name)) {
-            switched()
-        } else {
-            pendingFollow = name
-            Follow.Pulling
-        }
+        val status = rocky.tips.followWhenReady(name)
+        val outcome = if (status.pendingFollow == null) switched() else Follow.Pulling
         refreshLocked()
         outcome
     }
@@ -123,21 +103,10 @@ class HouseholdTips(
     suspend fun switched(): Follow {
         val generation = rocky.generation()
         return when {
-            generation["pending"] !is JsonNull && generation["pending"] != null -> Follow.Pending
-            generation["application"]?.jsonPrimitive?.content == "ahead" -> Follow.Ahead
+            generation.pending != null -> Follow.Pending
+            generation.application == DeclaredSchema.Ahead -> Follow.Ahead
             else -> Follow.Switched
         }
-    }
-
-    /** True once followed; false when the seal its tip starts from must be pulled first, which this asks for. */
-    private suspend fun followHeld(name: String): Boolean = try {
-        rocky.tips.follow(name)
-        true
-    } catch (error: RockyException) {
-        val start = startingSeal(rocky.tips.inspect(), name) ?: throw error
-        if (error.code != "rejected" || start.held != null) throw error
-        rocky.tips.pull(start.id)
-        false
     }
 
     /**
@@ -232,12 +201,6 @@ class HouseholdTips(
         }
     }
 
-    private suspend fun <T> expected(block: suspend () -> T): T? = try {
-        block()
-    } catch (error: RockyException) {
-        if (error.code in EXPECTED) null else throw error
-    }
-
     companion object {
         /** Writes gathered on `main` before a trusted device seals it. */
         const val SEAL_AFTER = 100uL
@@ -250,9 +213,6 @@ class HouseholdTips(
 
         /** The household's trusted devices run a branch's coordinated log; one in sync is enough. */
         const val BRANCH_MINIMUM = 1u
-
-        /** Another seal ended the tip first, or the coordinator did not answer: the next round decides again. */
-        private val EXPECTED = setOf("sealed", "coordinator_unavailable")
     }
 }
 
@@ -269,12 +229,6 @@ internal fun path(inspection: TipInspection, tip: String): List<SealOnPath> {
         current = seal.tip
     }
     return result
-}
-
-/** The seal [bookmark]'s tip starts from. */
-private fun startingSeal(inspection: TipInspection, bookmark: String): SealOnPath? {
-    val tip = inspection.bookmarks.singleOrNull { it.name == bookmark }?.tip ?: return null
-    return path(inspection, tip).firstOrNull()
 }
 
 data class TipsState(

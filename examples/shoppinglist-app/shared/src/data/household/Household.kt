@@ -1,13 +1,7 @@
 package org.example.examples.shopping.data.household
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -20,11 +14,13 @@ import org.example.examples.shopping.data.db.TrustedRows
 import org.example.examples.shopping.data.db.list
 import rocky.Device
 import rocky.GrantProfile
+import rocky.PartitionRecipients
 import rocky.Right
 import rocky.RockyDatabase
-import rocky.RockyEvent
+import rocky.observeDevices
+import rocky.observeInvitation
 import rocky.room.settledOnRocky
-import kotlin.time.TimeSource
+import rocky.shareFollowing
 
 /**
  * The household's devices and how list keys reach them, without a server: a trusted device records each device it
@@ -36,8 +32,7 @@ class Household(
     private val database: ShoppingDatabase,
     private val rocky: RockyDatabase,
     val self: String,
-    /** Runs the shared registry poll; a node cancels it before closing Rocky. */
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> }),
+
 ) {
     private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
 
@@ -46,35 +41,9 @@ class Household(
 
     private val invitationsLock = Mutex()
 
-    /** Choices by native invitation event, including enrollments the collector has not processed yet. */
-    private val pending = mutableMapOf<Long, PairingCode>()
-
-    /**
-     * One registry poll for every collector, stamped with when it started: reading the registry decodes every signed
-     * record on the SDK's only thread, which also answers peers.
-     */
-    private val polled: SharedFlow<Pair<TimeSource.Monotonic.ValueTimeMark, List<Device>>> by lazy {
-        flow {
-            while (true) {
-                val started = TimeSource.Monotonic.markNow()
-                emit(started to rocky.devices())
-                delay(500)
-            }
-        }.settledOnRocky().shareIn(scope, SharingStarted.WhileSubscribed(5_000), replay = 1)
-    }
-
-    /**
-     * Registry access exists only on an issuer; members never query it or the trusted tables. A collector starts from
-     * a fresh read, so a change it just made shows, then follows the shared poll's later reads. A registry row whose
-     * dependency has not arrived yet leaves it briefly unavailable; polling goes on.
-     */
     fun registry(): Flow<List<Device>> {
         check(rocky.isIssuer) { "Only trusted devices read the registry" }
-        return flow {
-            val started = TimeSource.Monotonic.markNow()
-            emit(rocky.devices())
-            emitAll(polled.filter { (read, _) -> read >= started }.map { (_, devices) -> devices })
-        }.settledOnRocky().distinctUntilChangedBy { devices -> devices.map { it.copy(label = null) to it.label?.toList() } }
+        return rocky.credentials.observeDevices()
     }
 
     fun devices(): Flow<List<DeviceRow>> {
@@ -100,20 +69,19 @@ class Household(
      * On a trusted device: the lists whose current key this device sent to each node, by node. Only the sharer knows
      * its deliveries; it refreshes whenever one moves.
      */
-    fun sent(): Flow<Map<String, Set<Long>>> = combine(
-        database.lists().observeAll().settledOnRocky(),
-        rocky.activity().filter { it is RockyEvent.EnvelopesDelivered || it is RockyEvent.PartitionChanged || it is RockyEvent.Renewed }
-            .map { Unit }.onStart { emit(Unit) },
-    ) { lists, _ -> lists }
-        .map { lists ->
-            val sent = mutableMapOf<String, MutableSet<Long>>()
-            for (list in lists) {
-                val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
-                for (recipient in status.recipients.filter { it.epoch == status.current }) {
-                    sent.getOrPut(recipient.node) { mutableSetOf() } += list.id
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun sent(): Flow<Map<String, Set<Long>>> = database.lists().observeAll().settledOnRocky()
+        .flatMapLatest { lists ->
+            if (lists.isEmpty()) return@flatMapLatest flowOf(emptyMap())
+            rocky.partitions.observeStatuses(lists.map { rocky.list(it.id) }).map { states ->
+                val sent = mutableMapOf<String, MutableSet<Long>>()
+                for ((list, status) in lists.zip(states)) {
+                    for (recipient in status.recipients.filter { it.epoch == status.current }) {
+                        sent.getOrPut(recipient.node) { mutableSetOf() } += list.id
+                    }
                 }
+                sent
             }
-            sent
         }
         .distinctUntilChanged()
 
@@ -122,11 +90,8 @@ class Household(
 
     /** On a trusted device: a single-use code for one new device of [kind], replacing the previous one. */
     suspend fun invite(kind: NodeKind, name: String): PairingCode = invitationsLock.withLock {
-        label(name, kind)
-        val invitation = rocky.pairing(kind.profile)
+        val invitation = rocky.credentials.pairing(kind.profile, label(name, kind))
         val code = PairingCode(kind, name, invitation.uri)
-        pending[invitation.sequence] = code
-        if (pending.size > 512) pending.remove(pending.keys.minOrNull())
         // Other trusted devices list it too; members cannot read `invitations`.
         attempt("list the invitation") {
             trusted.openInvitation(self, kind.name.lowercase(), name, code.toString(), invitation.expiresAtEpochSeconds)
@@ -177,74 +142,46 @@ class Household(
     }
 
     /** A full member sends new list keys to its known issuers, which distribute them to the household. */
-    private suspend fun deliverToIssuers() {
+    private suspend fun deliverToIssuers() = rocky.partitions.shareFollowing(
         combine(
-            database.lists().observeAll(),
+            database.lists().observeAll().settledOnRocky(),
             rocky.observeStatus().map { status -> status.network.peers.filter { it.isIssuer }.map { it.node }.toSet() }.distinctUntilChanged(),
-        ) { lists, issuers -> lists to issuers }.settledOnRocky().collectLatest { (lists, issuers) ->
-            for (list in lists) {
-                val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
-                val current = status.current ?: continue
-                val stale = issuers.filter { issuer -> status.recipients.none { it.node == issuer && it.epoch == current } }
-                if (stale.isNotEmpty()) attempt("share ${list.title}") { rocky.list(list.id).share(stale) }
-            }
-        }
-    }
+        ) { lists, issuers -> lists.map { PartitionRecipients(rocky.list(it.id), issuers) } },
+        onFailure = { notes.tryEmit("Could not share lists: ${it.message}") },
+    )
 
     private suspend fun recordEnrollments() {
-        rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
-            val known = trusted.devices().settledOnRocky().first().any { it.node == enrolled.node }
-            if (known) return@collect
-            val choice = invitationsLock.withLock {
-                val sequence = pending.keys.filter { it < enrolled.sequence }.maxOrNull()
-                sequence?.let { pending.remove(it) }
+        registry().collect { devices ->
+            val known = trusted.devices().settledOnRocky().first().map { it.node }.toSet()
+            for (device in devices.filter { !it.revoked && it.node !in known }) {
+                val description = device.label?.let(::deviceLabel)
+                val kind = description?.kind?.let(NodeKind::of) ?: kind(device)
+                val name = description?.name ?: "Device ${device.node.take(6)}"
+                attempt("record $name") { trusted.record(device.node, name, kind.name.lowercase()) }
             }
-            val (kind, name) = choice?.let { it.kind to it.name }
-                ?: (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
-            while (attempt("record $name") { record(enrolled.node, name, kind) } == null) delay(15_000)
-            notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
         }
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private suspend fun closeUsedInvitations() {
-        while (true) {
-            attempt("close the invitation") {
-                invitationsLock.withLock {
-                    val row = trusted.invitations().first().firstOrNull { it.issuer == self }
-                    if (row != null && !rocky.invitationOpen(PairingCode.parse(row.code).invitation)) {
-                        trusted.closeInvitation(self, row.code)
-                    }
-                }
-            }
-            delay(500)
-        }
+        trusted.invitations().settledOnRocky().flatMapLatest { rows ->
+            val row = rows.firstOrNull { it.issuer == self } ?: return@flatMapLatest emptyFlow()
+            rocky.credentials.observeInvitation(PairingCode.parse(row.code).invitation)
+                .filter { !it.open }.take(1).onEach { trusted.closeInvitation(self, row.code) }
+        }.collect()
     }
 
     /**
      * Shares each list's current epoch with every trusted and full device this device has not sent it to. A
      * revocation's rotation seals the new epoch to every device whose record reads the list, partial ones included.
      */
-    @OptIn(FlowPreview::class)
-    private suspend fun deliverEveryList() {
-        combine(database.lists().observeAll(), devices(), revokedDevices()) { lists, devices, revoked ->
-            lists to devices.filter { it.node !in revoked }
-        }
-            .settledOnRocky()
-            .debounce(300)
-            .collectLatest { (lists, devices) ->
-                val recipients = devices.filter { it.node != self && NodeKind.of(it.kind)?.receivesEveryList == true }
-                for (list in lists) {
-                    val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
-                    val current = status.current ?: continue
-                    val stale = recipients.filter { device -> status.recipients.none { it.node == device.node && it.epoch == current } }
-                    if (stale.isEmpty()) continue
-                    attempt("share ${list.title}") {
-                        rocky.list(list.id).share(stale.map { it.node })
-                        notes.tryEmit("Sealed “${list.title}” to ${stale.joinToString { it.name }}")
-                    }
-                }
-            }
-    }
+    private suspend fun deliverEveryList() = rocky.partitions.shareFollowing(
+        combine(database.lists().observeAll().settledOnRocky(), devices(), revokedDevices()) { lists, devices, revoked ->
+            val recipients = devices.filter { it.node != self && it.node !in revoked && NodeKind.of(it.kind)?.receivesEveryList == true }.map { it.node }.toSet()
+            lists.map { PartitionRecipients(rocky.list(it.id), recipients) }
+        },
+        onFailure = { notes.tryEmit("Could not share lists: ${it.message}") },
+    )
 
     private fun label(name: String, kind: NodeKind): ByteArray = buildJsonObject {
         put("name", name)

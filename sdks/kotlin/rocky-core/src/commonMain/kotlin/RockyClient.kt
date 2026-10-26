@@ -9,6 +9,12 @@ import kotlinx.serialization.json.*
 
 class RockyException(val code: String, val retryable: Boolean, message: String) : Exception(message)
 
+internal fun <T> Flow<T>.retryUnavailableReads(): Flow<T> = retryWhen { cause, attempt ->
+    val retry = cause is RockyException && cause.code in setOf("blocked", "missing_dependencies", "authority_changed", "transaction_timeout")
+    if (retry) delay(minOf(50L shl minOf(attempt, 4L).toInt(), 1_000L))
+    retry
+}
+
 interface Transport {
     suspend fun call(request: JsonObject): JsonObject
     suspend fun close()
@@ -48,13 +54,14 @@ class RockyClient(private val transport: Transport) {
             put("partition_values", partitionValues)
         },
     ).getValue("id").jsonPrimitive.content
-    suspend fun moveRow(handle: JsonArray, table: String, id: String, from: JsonArray, to: JsonArray): JsonObject = call(
+    suspend fun moveRow(handle: JsonArray, table: String, id: String, from: JsonArray, to: JsonArray, changes: JsonArray = JsonArray(emptyList())): JsonObject = call(
         request("move_row") {
             put("handle", handle)
             put("table", table)
             put("id", id)
             put("from", from)
             put("to", to)
+            put("changes", changes)
         },
     )
     val partitions: Partitions get() = Partitions(this)

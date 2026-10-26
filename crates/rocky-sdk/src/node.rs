@@ -765,6 +765,16 @@ impl Node {
                         .map_err(|_| {
                             refused("pairing needs a grant profile: reader, writer or issuer")
                         })?;
+                    let label: Option<Vec<u8>> = request
+                        .get("label")
+                        .map(|label| serde_json::from_value(label.clone()))
+                        .transpose()?;
+                    if label
+                        .as_ref()
+                        .is_some_and(|label| label.len() > crate::registry::MAX_LABEL)
+                    {
+                        return Err(refused("invitation label exceeds 256 bytes"));
+                    }
                     let transport = transport.ok_or(ServiceError::NetworkRequired("pairing"))?;
                     let registry = self.registry().await?;
                     let mut settings = self.settings.lock().await;
@@ -773,7 +783,7 @@ impl Node {
                             &self.path,
                             &self.vault,
                             transport,
-                            profile.clone(),
+                            (profile.clone(), label),
                             &registry,
                         )
                         .await
@@ -783,7 +793,8 @@ impl Node {
                         json!({"profile": profile, "expires": expires.to_string()}),
                     );
                     Ok(
-                        json!({"uri": uri, "expires": expires.to_string(), "profile": profile, "sequence": sequence.to_string()}),
+                        json!({"uri": uri, "expires": expires.to_string(), "profile": profile, "sequence": sequence.to_string(),
+                            "id": HEXLOWER.encode(&rocky_core::commitment("rocky.sdk.invitation.v1", &self.vault.get("invitation")?))}),
                     )
                 }
                 "renew" => {
@@ -844,6 +855,27 @@ impl Node {
                 }))
             }
             "session" => self.status(client).await,
+            "invitation_state" => {
+                let uri = request["uri"]
+                    .as_str()
+                    .ok_or_else(|| refused("uri must be an invitation"))?;
+                let (id, expires) = Settings::invitation_identity(uri)?;
+                let open = self.settings.lock().await.invitation_open(uri)?;
+                let registry = self.registry().await?;
+                let enrolled = registry
+                    .records
+                    .iter()
+                    .find(|(_, record)| {
+                        record
+                            .device
+                            .as_ref()
+                            .is_some_and(|device| device.invitation.as_deref() == Some(&id))
+                    })
+                    .map(|(node, _)| node.to_hex());
+                Ok(
+                    json!({"id": id, "expires": expires.to_string(), "open": open, "enrolled": enrolled}),
+                )
+            }
             "invitation_open" => {
                 let uri = request["uri"]
                     .as_str()
@@ -3469,14 +3501,46 @@ impl Node {
             let handle: [u8; 32] = handle
                 .try_into()
                 .map_err(|_| refused("handle must be 32 bytes"))?;
+            let statements: Vec<(String, Vec<SqlValue>)> = request
+                .get("changes")
+                .map(|changes| -> Result<_, Failure> {
+                    let changes = changes
+                        .as_array()
+                        .filter(|changes| changes.len() <= 256)
+                        .ok_or_else(|| refused("move changes must be at most 256 statements"))?;
+                    changes
+                        .iter()
+                        .map(|change| {
+                            let sql = change["sql"]
+                                .as_str()
+                                .filter(|sql| sql.len() <= MAX_SQL)
+                                .ok_or_else(|| refused("sql must be a bounded string"))?;
+                            let values: Vec<Cell> =
+                                serde_json::from_value(change["values"].clone())?;
+                            if values.len() > 256 {
+                                return Err(refused("SQL parameter quota"));
+                            }
+                            Ok((
+                                sql.into(),
+                                values
+                                    .into_iter()
+                                    .map(Cell::sql)
+                                    .collect::<Result<_, _>>()?,
+                            ))
+                        })
+                        .collect()
+                })
+                .transpose()?
+                .unwrap_or_default();
             let committed = reader
                 .sql
-                .move_row(
+                .move_row_with(
                     secure_handle(&handle),
                     table,
                     id,
                     &tuple("from")?,
                     &tuple("to")?,
+                    &statements,
                 )
                 .await?;
             return Ok(
@@ -3799,7 +3863,13 @@ fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
     }
 }
 fn is_authority(error: &Failure) -> bool {
-    error.to_string().contains("session authority changed")
+    matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::Sql(SqlError::Unavailable {
+            reason: Unavailable::Revoked,
+            ..
+        }))
+    )
 }
 
 /// The error object of a failed call: its code and whether retrying the
@@ -3847,7 +3917,7 @@ pub fn error(error: &Failure) -> Value {
             Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
                 Unavailable::Incomplete | Unavailable::KeyMissing => ("missing_dependencies", true),
                 Unavailable::NotHeld => ("rejected", false),
-                Unavailable::Revoked => ("denied", false),
+                Unavailable::Revoked => ("authority_changed", true),
                 Unavailable::Released => ("rejected", false),
             },
             Some(Error::Conflict) => ("conflict", true),

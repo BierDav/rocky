@@ -57,7 +57,7 @@ class CoordinatedTest {
             }
         }
         val committed = RockyClient(transport).coordinated(bytes(ByteArray(32))) {
-            val count = query("SELECT COUNT(*) FROM items")[0].jsonArray[0].jsonObject.getValue("value").jsonPrimitive.content.toLong()
+            val count = query("SELECT COUNT(*) FROM items")[0].long(0)
             execute("INSERT INTO items(key,title) VALUES(?,?)", (count + 1).toString().padStart(4, '0'), "invoice")
             count + 1
         }

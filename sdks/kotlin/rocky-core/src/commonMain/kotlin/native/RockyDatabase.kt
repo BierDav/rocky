@@ -245,7 +245,7 @@ class RockyNetworkService internal constructor(private val native: NativeNetwork
 }
 
 /** Credential lifecycle over managed storage, independently usable from coordination. */
-class Credentials internal constructor(private val session: RockySession) {
+class Credentials internal constructor(internal val session: RockySession) {
     companion object : PlatformCredentialOpeners() {
         /** Prepares the public identity and node keys for an independent issuer: [identity]'s, or one made in the secret store; secret material stays in the providers. */
         suspend fun prepare(directory: String, secrets: SecretStore? = null, identity: IdentityProvider? = null): JsonObject = withContext(Dispatchers.IO) {
@@ -254,7 +254,7 @@ class Credentials internal constructor(private val session: RockySession) {
     }
     suspend fun status(): SessionStatus = session.session()
     suspend fun renew(): SessionStatus = session.renew()
-    suspend fun pairing(profile: GrantProfile): PairingInvitation = session.pairing(profile)
+    suspend fun pairing(profile: GrantProfile, label: ByteArray? = null): PairingInvitation = session.pairing(profile, label)
     suspend fun invitationOpen(uri: String): Boolean = session.invitationOpen(uri)
 
     /** Another device of this user, an issuer unless `issuing = false`; see `RockySession.pairDevice`. */

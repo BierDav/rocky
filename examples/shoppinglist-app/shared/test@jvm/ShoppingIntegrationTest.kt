@@ -1,6 +1,7 @@
 package org.example.examples.shopping
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.*
 import org.example.examples.shopping.data.ShoppingRepository
@@ -11,6 +12,7 @@ import org.example.examples.shopping.data.db.list
 import org.example.examples.shopping.data.db.shoppingRoomOverlay
 import org.example.examples.shopping.data.household.NodeKind
 import rocky.*
+import rocky.room.createRockyPartition
 import rocky.room.followRocky
 import java.io.File
 import java.nio.file.Files
@@ -202,7 +204,7 @@ class ShoppingIntegrationTest {
     private val shopper = NodeKind.Full.profile
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
-    @Test fun `the hand-declared schema is the Room export's`() {
+    @Test fun `the packaged schema is the current Room export's`() {
         val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/8.json").readText()
         assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
@@ -261,6 +263,63 @@ class ShoppingIntegrationTest {
         } finally {
             da.close()
             a.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a failed move preserves category links and a successful move replays atomically`() = runBlocking {
+        val root = directory()
+        val rocky = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
+        val room = openShoppingDatabase(File(root, "a"), rocky)
+        val repository = ShoppingRepository(room, rocky)
+        try {
+            val from = repository.createList("From")
+            val to = repository.createList("To")
+            val category = repository.addCategory(from, "Dairy")
+            val item = repository.add(from, "Milk", setOf(category))
+            val handle = RockyDatabase.newHandle()
+            assertFailsWith<Exception> { repository.move(from, item, Long.MAX_VALUE, handle) }
+            assertEquals(listOf(item), room.items().all(from).map { it.id })
+            assertEquals(listOf(item to category), room.itemCategories().observe(from).first().map { it.item to it.category })
+            repository.move(from, item, to, handle)
+            repository.move(from, item, to, handle)
+            assertTrue(room.items().all(from).isEmpty())
+            assertEquals(listOf(item), room.items().all(to).map { it.id })
+            assertTrue(room.itemCategories().observe(from).first().isEmpty())
+            assertTrue(room.itemCategories().observe(to).first().isEmpty())
+        } finally {
+            room.close()
+            rocky.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `concurrent partition creation owns id preparation and callback failures roll back`() = runBlocking {
+        val root = directory()
+        val rocky = RockyDatabase.local(File(root, "a"), ShoppingSchema)
+        val room = openShoppingDatabase(File(root, "a"), rocky)
+        val repository = ShoppingRepository(room, rocky)
+        try {
+            val ids = kotlinx.coroutines.coroutineScope {
+                (1..8).map { index -> async { repository.createList("List $index") } }.map { it.await() }
+            }
+            assertEquals(8, ids.toSet().size)
+            assertEquals(ids.toSet(), room.lists().all().map { it.id }.toSet())
+            var callbacks = 0
+            assertFailsWith<IllegalStateException> {
+                room.createRockyPartition(rocky, "lists") { id ->
+                    callbacks++
+                    room.lists().insert(org.example.examples.shopping.data.db.entity.ShoppingList(id, "Rolled back"))
+                    error("application failure")
+                }
+            }
+            assertEquals(1, callbacks)
+            assertEquals(8, room.lists().all().size)
+            repository.createList("After rollback")
+            assertEquals(9, room.lists().all().size)
+        } finally {
+            room.close()
+            rocky.close()
             root.deleteRecursively()
         }
     }
@@ -417,7 +476,7 @@ class ShoppingIntegrationTest {
             runtime.close()
             // An application-local version change now rebuilds the projection without changing replicated identity.
             runtime = RockyDatabase.resume(root, ItemsSchema.copy(version = 2), local(), automaticSync = false)
-            assertEquals(1, runtime.generation().getValue("current").jsonObject.getValue("schema").jsonPrimitive.int)
+            assertEquals(1u, runtime.generation().current.schema)
             assertEquals("Persisted", Row.decode(runtime.read(ItemsSchema.table("items").query())).single().text("title"))
         } finally {
             runtime.close()

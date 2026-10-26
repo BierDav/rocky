@@ -16,17 +16,6 @@ interface ListDao {
 
     @Insert suspend fun insert(list: ShoppingList)
 
-    /** Verifies the id `partitions.nextId("lists")` prepared, inside the inserting transaction. */
-    @SkipQueryVerification
-    @Query("SELECT rocky_next_id('lists')")
-    suspend fun nextId(): Long
-
-    @Transaction suspend fun create(prepared: Long, title: String): ShoppingList {
-        val id = nextId()
-        check(id == prepared) { "list id $prepared was taken; prepare again" }
-        return ShoppingList(id, title).also { insert(it) }
-    }
-
     @Query("UPDATE lists SET title = :title WHERE id = :id")
     suspend fun rename(id: Long, title: String): Int
 

@@ -2,7 +2,6 @@ package org.example.examples.shopping
 
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.jsonPrimitive
 import org.example.examples.shopping.data.ShoppingRepository
 import org.example.examples.shopping.data.db.ShoppingSchema
 import org.example.examples.shopping.data.db.list
@@ -118,7 +117,7 @@ class SchemaUpgradeTest {
                 b.addPeer(a.contact().uri)
                 b.syncOnce()
                 assertTrue(b.reconciled())
-                assertEquals("behind", b.generation().getValue("application").jsonPrimitive.content)
+                assertEquals(rocky.DeclaredSchema.Behind, b.generation().application)
                 // Its write across the migration is held; its app re-authors it on the new tip.
                 val held = b.heldChanges()
                 assertEquals(1, held.count)

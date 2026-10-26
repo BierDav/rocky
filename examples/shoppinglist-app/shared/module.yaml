@@ -46,6 +46,8 @@ settings:
     minSdk: 26
   compose:
     enabled: true
+    resources:
+      packageName: org.example.examples.shopping.resources
   kotlin:
     freeCompilerArgs: [-Xexpect-actual-classes]
     # Navigation keys are serializable so the back stack survives saved-state restoration.

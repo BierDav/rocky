@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 19;
+pub const VERSION: u32 = 20;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -122,6 +122,7 @@ pub struct Settings {
     pub genesis: String,
     pub generation: u32,
     pub pending: Option<crate::tip_schemas::Pending>,
+    pub pending_follow: Option<String>,
     pub(crate) bootstrap: Option<crate::tip_schemas::Bootstrap>,
     /// Every revocation statement this device verified.
     pub revocations: RevocationSet,
@@ -214,6 +215,7 @@ impl Minting {
 #[serde(deny_unknown_fields)]
 pub struct Issuing {
     pub invitation: Option<Invitation>,
+    pub invitation_label: Option<Vec<u8>>,
     /// The device that consumed the invitation, so its retry is answered
     /// alike. Replaced with the invitation.
     pub claimed: Option<Claim>,
@@ -1227,6 +1229,7 @@ impl Settings {
             genesis: HEXLOWER.encode(&manifest.to_bytes()?),
             generation: schema.version,
             pending: None,
+            pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
@@ -1278,6 +1281,7 @@ impl Settings {
             generation: schema.version,
             genesis: manifest,
             pending: None,
+            pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
@@ -1661,9 +1665,15 @@ impl Settings {
         path: &Path,
         vault: &Vault,
         transport: &dyn Transport,
-        profile: Profile,
+        (profile, label): (Profile, Option<Vec<u8>>),
         registry: &Registry,
     ) -> Result<(String, u64), Failure> {
+        if label
+            .as_ref()
+            .is_some_and(|label| label.len() > registry::MAX_LABEL)
+        {
+            return Err("invitation label exceeds 256 bytes".into());
+        }
         profile.grants(&self.domain()?.resources())?;
         grants_of(&profile, &self.domain()?)?;
         self.issuing("invites devices")?;
@@ -1675,6 +1685,7 @@ impl Settings {
         let token = vault.replace("invitation")?;
         let expires = now()? + INVITATION_TTL;
         let issuing = self.issuing("invites devices")?;
+        issuing.invitation_label = label;
         issuing.invitation = Some(Invitation::open(&token, profile.clone(), expires));
         issuing.claimed = None;
         self.save(path)?;
@@ -1695,6 +1706,15 @@ impl Settings {
             BASE64URL_NOPAD.encode(&serde_json::to_vec(&invite)?)
         );
         Ok((uri, expires))
+    }
+
+    pub(crate) fn invitation_identity(uri: &str) -> Result<(String, u64), Failure> {
+        let invite = Invite::parse(uri)?;
+        let token = HEXLOWER.decode(invite.token.as_bytes())?;
+        Ok((
+            HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token)),
+            invite.expires,
+        ))
     }
 
     /// Checks this issuer's persisted invitation without attempting enrollment.
@@ -1803,9 +1823,19 @@ impl Settings {
                 issuer,
 
                 enrolled: time,
+                invitation: Some(HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token))),
             },
             false,
         )?;
+        if registry
+            .get(&request.node)
+            .and_then(|record| record.label.as_ref())
+            .is_none()
+            && let Some(label) = &self.issuing("enrolls devices")?.invitation_label
+        {
+            // The label and enrollment record commit together, including after a claimed join restarts.
+            changes.label(&request.node, label)?;
+        }
         changes.capability(
             &request.node,
             registry::Capability {
@@ -1910,6 +1940,7 @@ impl Settings {
                 issuer,
 
                 enrolled: time,
+                invitation: None,
             },
             replace,
         )?;
@@ -2009,6 +2040,7 @@ impl Settings {
                     issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
 
                     enrolled: now()?,
+                    invitation: None,
                 },
                 false,
             )?;
@@ -2173,6 +2205,7 @@ impl Settings {
                 issuer: node,
 
                 enrolled: now()?,
+                invitation: None,
             },
             false,
         )?;
@@ -2379,6 +2412,7 @@ impl Settings {
             genesis: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
             generation: schema.version,
             pending: None,
+            pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: credentials.chain.clone(),
@@ -2546,6 +2580,7 @@ impl Joining {
             schema: enrollment.record.schema.clone(),
             generation: enrollment.record.generation,
             pending: None,
+            pending_follow: None,
             bootstrap: Some(enrollment.bootstrap),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
@@ -3120,6 +3155,7 @@ impl Settings {
                 issuer: me,
 
                 enrolled: time,
+                invitation: None,
             },
             false,
         )?;
@@ -3195,6 +3231,7 @@ impl Settings {
                 issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
 
                 enrolled: now()?,
+                invitation: None,
             },
             false,
         )?;
@@ -3986,6 +4023,7 @@ impl Settings {
             genesis,
             generation,
             pending,
+            pending_follow,
             bootstrap,
             revocations,
             credentials,
@@ -4018,6 +4056,7 @@ impl Settings {
             && *genesis == other.genesis
             && *generation == other.generation
             && *pending == other.pending
+            && *pending_follow == other.pending_follow
             && *bootstrap == other.bootstrap
             && *revocations == other.revocations
             && *credentials == other.credentials

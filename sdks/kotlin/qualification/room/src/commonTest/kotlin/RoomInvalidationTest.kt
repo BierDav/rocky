@@ -1,6 +1,8 @@
 package rocky.room.qualification
 
 import androidx.room.Room
+import androidx.room.immediateTransaction
+import androidx.room.useWriterConnection
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
@@ -8,7 +10,11 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import rocky.*
+import rocky.room.RoomAvailability
+import rocky.room.buildOnRocky
+import rocky.room.createRockyPartition
 import rocky.room.followRocky
+import rocky.room.managedRockyRoom
 import rocky.room.setRockyDatabase
 import rocky.room.settledOnRocky
 import rocky.testing.testRepositoryRoot
@@ -31,7 +37,7 @@ class RoomInvalidationTest {
         val observed = flow {
             reads++
             if (reads == 1) emit(listOf("before seal"))
-            if (reads < 3) throw IllegalStateException("SQL error: the workspace waits for 1 blockers: 0a1b2c3d4e5f seal rebootstrap (replay=Peers, listed=0), cleared by any permitted peer")
+            if (reads < 3) throw RockyException("blocked", true, "Waiting for verified rows")
             emit(listOf("verified seal"))
         }.settledOnRocky().toList()
         assertEquals(listOf(listOf("before seal"), listOf("verified seal")), observed)
@@ -42,13 +48,13 @@ class RoomInvalidationTest {
         var reads = 0
         val observed = flow {
             reads++
-            if (reads == 1) throw RockyException("storage", false, "SQL session: transaction was rolled back: Timeout")
+            if (reads == 1) throw RockyException("transaction_timeout", true, "Read lease expired")
             emit(listOf("committed"))
         }.settledOnRocky().first()
         assertEquals(listOf("committed"), observed)
         assertEquals(2, reads)
 
-        val failure = RockyException("storage", false, "SQL session: corrupt projection")
+        val failure = RockyException("denied", false, "session authority changed; transaction was rolled back: Timeout")
         var failedReads = 0
         val failed = flow<List<String>> {
             failedReads++
@@ -56,6 +62,92 @@ class RoomInvalidationTest {
         }.settledOnRocky()
         assertSame(failure, assertFailsWith<RockyException> { failed.first() })
         assertEquals(1, failedReads)
+    }
+
+    @Test fun managedInstallationOwnsAcquisitionCloseAndBackgroundHealth() = runBlocking<Unit> {
+        val directory = Files.createTempDirectory("managed-room").toFile()
+        var opened: RockyDatabase? = null
+        try {
+            val installation = managedRockyRoom(
+                open = { Rocky.configure(File(directory, "owned").path, schema) { networking { enabled = false } }.create().also { opened = it } },
+                builder = { Room.databaseBuilder<ShopDatabase>(File(directory, "owned.room").path) },
+            )
+            var reads = 0
+            val observed = installation.observeAvailability {
+                flow {
+                    emit(listOf("committed"))
+                    if (reads++ == 0) throw RockyException("blocked", true, "Waiting for a verified base")
+                }
+            }.toList()
+            assertTrue(observed[0] is RoomAvailability.Ready)
+            assertEquals(listOf("committed"), (observed[1] as RoomAvailability.Waiting).previous)
+            assertTrue(observed[2] is RoomAvailability.Ready)
+            val problem = IllegalStateException("lifecycle failure")
+            installation.bindLifecycle(flow { throw problem })
+            assertSame(problem, withTimeout(5_000) { installation.failure.await() })
+            assertTrue(Row.decode(installation.rocky.read(query("SELECT * FROM lists"))).isEmpty())
+            installation.close()
+            installation.close()
+            assertFails { opened!!.read(query("SELECT * FROM lists")) }
+
+            val borrowed = RockyDatabase.local(File(directory, "borrowed").path, schema)
+            val attached = Room.databaseBuilder<ShopDatabase>(File(directory, "borrowed.room").path).buildOnRocky(borrowed)
+            attached.room.useWriterConnection { writer ->
+                writer.immediateTransaction {
+                    val nested = assertFailsWith<IllegalStateException> {
+                        attached.room.createRockyPartition(borrowed, "lists") { error("The callback must not run") }
+                    }
+                    assertEquals("Partition creation must start outside a Room transaction", nested.message)
+                }
+            }
+            attached.close()
+            assertTrue(Row.decode(borrowed.read(query("SELECT * FROM lists"))).isEmpty())
+            borrowed.close()
+
+            val problemOnBuild = IllegalArgumentException("builder failed")
+            assertEquals(
+                problemOnBuild.message,
+                assertFailsWith<IllegalArgumentException> {
+                    managedRockyRoom<ShopDatabase>(
+                        open = { RockyDatabase.local(File(directory, "failed").path, schema).also { opened = it } },
+                        builder = { throw problemOnBuild },
+                    )
+                }.message,
+            )
+            assertFails { opened!!.read(query("SELECT * FROM lists")) }
+        } finally {
+            opened?.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test fun cancellationAfterAcquisitionClosesTheOwnedInstallation() = runBlocking<Unit> {
+        val directory = Files.createTempDirectory("managed-cancellation").toFile()
+        val ready = CompletableDeferred<RockyDatabase>()
+        val release = CompletableDeferred<Unit>()
+        try {
+            val opening = launch {
+                managedRockyRoom(
+                    open = {
+                        withContext(NonCancellable) {
+                            RockyDatabase.local(File(directory, "database").path, schema).also {
+                                ready.complete(it)
+                                release.await()
+                            }
+                        }
+                    },
+                    builder = { Room.databaseBuilder<ShopDatabase>(File(directory, "room").path) },
+                )
+            }
+            val database = ready.await()
+            opening.cancel()
+            release.complete(Unit)
+            opening.join()
+            assertFails { database.read(query("SELECT * FROM lists")) }
+        } finally {
+            if (ready.isCompleted) ready.await().close()
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun daoObserversFireOnLocalAndSyncWrites() = runBlocking {

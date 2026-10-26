@@ -34,17 +34,19 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     suspend fun reconcile(handle: String): JsonObject = client.recoverMutation(handleBytes(handle))
 
     /** Persisted pruning policy for one granted collection; at least one other copy is always required. */
-    suspend fun retention(collection: String, policy: JsonObject? = null, maintain: Boolean = false): JsonObject = client.call(
-        request("retention") {
-            put("collection", collection)
-            policy?.let { put("policy", it) }
-            put("maintain", maintain)
-        },
+    suspend fun retention(collection: String, policy: RetentionPolicy? = null, maintain: Boolean = false): RetentionStatus = RetentionStatus.decode(
+        client.call(
+            request("retention") {
+                put("collection", collection)
+                policy?.let { put("policy", it.json()) }
+                put("maintain", maintain)
+            },
+        ),
     )
 
     /** Bounds apply to this open database; set them again after reopening. */
-    suspend fun retentionLimits(limits: JsonObject? = null): JsonObject = client.call(request("retention_limits") { limits?.let { put("limits", it) } })
-    suspend fun generation(): JsonObject = client.call(request("generation"))
+    suspend fun retentionLimits(limits: RetentionLimits? = null): RetentionLimits = RetentionLimits.decode(client.call(request("retention_limits") { limits?.let { put("limits", it.json()) } }))
+    suspend fun generation(): GenerationStatus = status().data.generation
     override fun observe(query: JsonObject): Flow<JsonObject> = client.observe(query)
     override suspend fun read(query: JsonObject): JsonObject = client.read(query)
     override suspend fun <T> write(handle: String, block: suspend SqlWrite.() -> T): T = transaction(handle, null, block)
@@ -95,15 +97,27 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
         }
     }
 
-    /** Moves a parent and its cascade children in one commit, outside an open SQL/Room transaction. */
-    suspend fun moveRow(handle: String, table: String, id: Long, from: List<Any?>, to: List<Any?>): JsonObject = writing.withLock {
-        client.moveRow(handleBytes(handle), table, id.toString(), JsonArray(from.map(::cell)), JsonArray(to.map(::cell)))
+    /**
+     * Commits related SQL and a move as one bundle. [changes] records statements before any work starts;
+     * it may delete cascade children or edit other rows, but cannot edit a row carried by the move.
+     * Reusing [handle] with the same commands returns the original result without executing them again.
+     */
+    suspend fun moveRow(handle: String, table: String, id: Long, from: List<Any?>, to: List<Any?>, changes: SqlChanges.() -> Unit = {}): JsonObject {
+        val statements = SqlChanges().apply(changes).json()
+        return writing.withLock {
+            client.moveRow(handleBytes(handle), table, id.toString(), JsonArray(from.map(::cell)), JsonArray(to.map(::cell)), statements)
+        }
     }
 
     /** A fresh invitation for one device with `profile`, replacing the previous one. Only an issuer invites. */
-    suspend fun pairing(profile: GrantProfile): PairingInvitation {
-        val result = client.call(request("pairing") { put("profile", profile.json()) })
-        return PairingInvitation(result.text("uri"), result.text("expires").toLong(), profile(result.getValue("profile").jsonObject), result.text("sequence").toLong())
+    suspend fun pairing(profile: GrantProfile, label: ByteArray? = null): PairingInvitation {
+        val result = client.call(
+            request("pairing") {
+                put("profile", profile.json())
+                label?.let { put("label", bytes(it)) }
+            },
+        )
+        return PairingInvitation(result.text("uri"), result.text("expires").toLong(), profile(result.getValue("profile").jsonObject), result.text("sequence").toLong(), result.text("id"))
     }
 
     /** Whether this issuer's persisted invitation can still enroll a new device, also after reopening. */
@@ -175,6 +189,7 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
             (it["profile"] as? JsonObject)?.let(::profile) ?: GrantProfile.Grants(emptyList()),
             it["expires"]?.jsonPrimitive?.contentOrNull?.toLong(),
             (it["label"] as? JsonArray)?.map { byte -> byte.jsonPrimitive.int.toByte() }?.toByteArray(),
+            it["invitation"]?.jsonPrimitive?.contentOrNull,
         )
     }
 

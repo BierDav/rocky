@@ -719,3 +719,202 @@ async fn each_commit_follows_marked_moves_without_scanning_stored_rows() {
         "{details:?}"
     );
 }
+
+#[tokio::test]
+async fn related_sql_and_move_rollback_replay_and_replicate_as_one_bundle() {
+    let f = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let partitions = [
+        RowIdentity::new(1, 1).unwrap().integer(),
+        RowIdentity::new(1, 2).unwrap().integer(),
+    ];
+    let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
+    let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
+    setup(&f, &a, &b, &partitions).await;
+    add_related(&f, &a, &b, partitions[0]).await;
+    let sql = session(&f, &a, &partitions)
+        .await
+        .sql(crate::SqlOptions::default())
+        .await
+        .unwrap();
+    let from = [SqlValue::Integer(partitions[0])];
+    let to = [SqlValue::Integer(partitions[1])];
+    let changes = vec![(
+        "DELETE FROM attachments WHERE list = ?".into(),
+        from.to_vec(),
+    )];
+    let id = RowIdentity::new(1, 1).unwrap();
+    // A move failure rolls back the preceding deletion.
+    assert!(
+        sql.move_row_with(
+            [90; 32],
+            "items",
+            RowIdentity::new(1, 999).unwrap(),
+            &from,
+            &to,
+            &changes
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        a.snapshot(f.scope("attachments", partitions[0]))
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    // A local commit failure rolls back rows, operation records and outbox together.
+    a.fail_next_sql_commit().await;
+    assert!(
+        sql.move_row_with([90; 32], "items", id, &from, &to, &changes)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        a.snapshot(f.scope("attachments", partitions[0]))
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    assert!(title(&f, &a, partitions[0]).await.is_some());
+    let committed = sql
+        .move_row_with([90; 32], "items", id, &from, &to, &changes)
+        .await
+        .unwrap();
+    let replayed = sql
+        .move_row_with([90; 32], "items", id, &from, &to, &changes)
+        .await
+        .unwrap();
+    assert_eq!(
+        encode(&committed.frames).unwrap(),
+        encode(&replayed.frames).unwrap()
+    );
+    let other = vec![(
+        "DELETE FROM categories WHERE list = ?".into(),
+        from.to_vec(),
+    )];
+    assert!(
+        sql.move_row_with([90; 32], "items", id, &from, &to, &other)
+            .await
+            .is_err()
+    );
+    send(&committed.frames, &b).await;
+    for replica in [&a, &b] {
+        assert!(
+            replica
+                .snapshot(f.scope("attachments", partitions[0]))
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(
+            replica
+                .snapshot(f.scope("attachments", partitions[1]))
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(title(&f, replica, partitions[0]).await.is_none());
+        assert!(title(&f, replica, partitions[1]).await.is_some());
+    }
+}
+
+#[tokio::test]
+async fn related_inserts_before_a_move_keep_its_source_frame_proof() {
+    let f = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let partitions = [
+        RowIdentity::new(1, 1).unwrap().integer(),
+        RowIdentity::new(1, 2).unwrap().integer(),
+    ];
+    let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
+    let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
+    setup(&f, &a, &b, &partitions).await;
+    let sql = session(&f, &a, &partitions)
+        .await
+        .sql(crate::SqlOptions::default())
+        .await
+        .unwrap();
+    // Related inserts span a frame, but bundle ordering puts the source deletion first.
+    let changes = (2..=33)
+        .map(|sequence| {
+            (
+                "INSERT INTO items(list,id,title) VALUES(?,?,?)".into(),
+                vec![
+                    SqlValue::Integer(partitions[0]),
+                    SqlValue::Integer(RowIdentity::new(1, sequence).unwrap().integer()),
+                    SqlValue::Text(format!("related {sequence}")),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    let committed = sql
+        .move_row_with(
+            [92; 32],
+            "items",
+            RowIdentity::new(1, 1).unwrap(),
+            &[SqlValue::Integer(partitions[0])],
+            &[SqlValue::Integer(partitions[1])],
+            &changes,
+        )
+        .await
+        .unwrap();
+    let mut deletion_sequence = None;
+    let mut linked_sequence = None;
+    for frame in &committed.frames {
+        let operation = frame.operation_ref().unwrap();
+        let opened = payload(&a, frame).await.unwrap();
+        for write in opened.writes() {
+            if write.change.after.is_none() {
+                deletion_sequence = Some(operation.header.seq_num);
+            }
+            if let Some(carried) = opened.carried(&write.change.row) {
+                #[derive(serde::Deserialize)]
+                struct SourcePosition {
+                    deletion_sequence: u64,
+                }
+                let source = f.scope("items", partitions[0]);
+                let destination = f.scope("items", partitions[1]);
+                let key = rocky_core::commitment("partition-fk-key", &source.encryption);
+                let bytes = crate::wire::decrypt(
+                    &key,
+                    &encode(&(destination, RowIdentity::new(1, 1).unwrap().integer())).unwrap(),
+                    carried.moved_from.as_ref().unwrap(),
+                )
+                .unwrap();
+                let position: SourcePosition =
+                    p2panda_core::cbor::decode_cbor(bytes.as_slice()).unwrap();
+                linked_sequence = Some(position.deletion_sequence);
+            }
+        }
+    }
+    assert!(deletion_sequence.is_some());
+    assert_eq!(linked_sequence, deletion_sequence);
+    send(&committed.frames, &b).await;
+    for replica in [&a, &b] {
+        assert_eq!(
+            replica
+                .snapshot(f.scope("items", partitions[0]))
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            32
+        );
+        assert_eq!(
+            replica
+                .snapshot(f.scope("items", partitions[1]))
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+    }
+}

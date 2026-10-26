@@ -66,11 +66,15 @@ class ServiceOwnerTest {
             ).also { databases += it }
             val tenant = Random.nextBytes(32)
             val first = create("domain-0")
-            suspend fun register(database: RockyDatabase, id: String) {
+            suspend fun register(database: RockyDatabase, id: String): ServiceControl {
                 val identity = database.session().node
-                database.service(tenant).register(id, listOf(identity))
+                return database.service(tenant).register(id, listOf(identity))
             }
-            register(first, newMutationHandle())
+            val firstRegistration = newMutationHandle()
+            val accepted = register(first, firstRegistration)
+            val signed = Json.parseToJsonElement(File(directory, "domain-0/tenant.requests").readText()).jsonArray.single().jsonObject
+            assertEquals(signed.getValue("time").jsonPrimitive.long + 86_400, accepted.expiresAtEpochSeconds)
+            assertEquals(accepted, register(first, firstRegistration))
             for (index in 1 until 16) {
                 val database = create("domain-$index")
                 register(database, newMutationHandle())

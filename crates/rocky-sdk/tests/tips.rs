@@ -1205,7 +1205,7 @@ mod races {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_pulls_a_seal_an_issuer_keeps_and_opens_a_branch_there() -> Result<(), Failure> {
+async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
@@ -1252,16 +1252,48 @@ async fn an_owner_pulls_a_seal_an_issuer_keeps_and_opens_a_branch_there() -> Res
     let refused = message(tips(&a, "open", open.clone()).await.unwrap_err());
     assert!(refused.contains("pull"), "{refused}");
 
-    ok(&a, "pull", json!({"seal": first})).await;
-    a.sync().await.expect("sync");
+    let identity = b.ok(json!({"type":"session"})).await["principal"].clone();
+    let grant = ok(&a, "trust", json!({"identity":identity})).await["grant"].clone();
+    ok(&b, "install_trust", json!({"grant":grant})).await;
+    // The issuer opens a branch on the old seal; the owner knows its graph but lacks its state.
+    let branch = ok(&b, "open", open.clone()).await["tip"].clone();
+    ok(&b, "create", json!({"name":"dev", "tip":branch})).await;
+    a.sync().await.expect("graph sync");
+    let pending = ok(&a, "follow_when_ready", json!({"name":"dev"})).await;
+    assert_eq!(pending["pending_follow"], "dev");
+    a.close().await;
+    let offline = Device::open(&root.path().join("a"), None)?;
+    assert_eq!(
+        ok(&offline, "status", json!({})).await["pending_follow"],
+        "dev"
+    );
+    offline.close().await;
+    let a = Device::open(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    a.sync().await.expect("pull sync");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut status = a.ok(json!({"type":"status"})).await;
+        loop {
+            let tips = ok(&a, "status", json!({})).await;
+            if tips["pending_follow"].is_null() && tips["bookmark"] == "dev" {
+                break;
+            }
+            status = a
+                .ok(json!({"type":"status_next", "after":status["token"]}))
+                .await;
+        }
+    })
+    .await?;
+    assert_eq!(a.titles().await, ["milk"]);
     assert_eq!(
         held(&ok(&a, "inspect", json!({})).await, &first),
         "checkpoint"
     );
-    let tip = ok(&a, "open", open).await["tip"].clone();
-    ok(&a, "create", json!({"name": "dev", "tip": tip})).await;
-    ok(&a, "follow", json!({"name": "dev"})).await;
-    assert_eq!(a.titles().await, ["milk"]);
+    // The acquired state remains available for another owner-created branch.
+    ok(&a, "open", open).await;
+
     Ok(())
 }
 

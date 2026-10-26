@@ -10,6 +10,7 @@ import org.example.examples.shopping.data.db.list
 import rocky.GrantProfile
 import rocky.RecipientDelivery
 import rocky.RockyDatabase
+import rocky.room.createRockyPartition
 import rocky.room.moveRockyRow
 import rocky.room.settledOnRocky
 import kotlin.uuid.ExperimentalUuidApi
@@ -25,7 +26,10 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
     /** Prepares the new list's group secret, then inserts it; returns the id Rocky issued. */
     suspend fun createList(title: String): Long {
         require(title.isNotBlank())
-        return database.lists().create(rocky.partitions.nextId("lists"), title).id
+        return database.createRockyPartition(rocky, "lists") { id ->
+            database.lists().insert(ShoppingList(id, title))
+            id
+        }
     }
     suspend fun renameList(list: Long, title: String) {
         require(title.isNotBlank())
@@ -98,8 +102,9 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
      * [handle] never moves twice.
      */
     suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) {
-        database.itemCategories().unlinkAll(from, id)
-        database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
+        database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to)) {
+            execute("DELETE FROM item_categories WHERE list = ? AND item = ?", from, id)
+        }
     }
 
     /**

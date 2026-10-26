@@ -585,6 +585,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                     issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
 
                     enrolled: now()?,
+                    invitation: None,
                 }),
                 ..Default::default()
             },
@@ -704,6 +705,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                 issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
 
                 enrolled: now()?,
+                invitation: None,
             }),
             ..Default::default()
         },

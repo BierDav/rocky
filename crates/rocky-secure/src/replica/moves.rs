@@ -770,6 +770,20 @@ impl<A: RowApplication> Inner<A> {
             "rocky.row-move-input.v1",
             &encode(&(name, id, scalar_bytes(from), scalar_bytes(to)))?,
         );
+        self.move_row_with((handle, input), name, id, from, to, allowed, Vec::new())
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn move_row_with(
+        &mut self,
+        (handle, input): (Commitment, Commitment),
+        name: &str,
+        id: rocky_core::RowIdentity,
+        from: &[SqlValue],
+        to: &[SqlValue],
+        allowed: &BTreeSet<ResourceScope>,
+        mut writes: Vec<RowWrite>,
+    ) -> Result<Vec<EncryptedFrame>, Error> {
         if let Some(previous) = self.lookup_bundle(handle, input).await? {
             return previous.map_err(|_| denied("move handle is behind pruned prefix"));
         }
@@ -842,6 +856,13 @@ impl<A: RowApplication> Inner<A> {
                     self.move_holdings(&child.table.sql_name, destination, allowed)
                         .await?;
                     for record in self.move_records(source).await? {
+                        if writes.iter().any(|write| {
+                            write.change.scope == source
+                                && Some(write.change.row) == record.key
+                                && write.change.after.is_none()
+                        }) {
+                            continue;
+                        }
                         let values = typed
                             .rows
                             .values(&child.table, &record.fields)
@@ -874,9 +895,19 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        let mut writes = Vec::new();
+        for ((scope, _), record) in &collected {
+            if writes
+                .iter()
+                .any(|write| write.change.scope == *scope && Some(write.change.row) == record.key)
+            {
+                return Err(denied("related SQL cannot edit a row carried by the move"));
+            }
+        }
         let mut carried = BTreeMap::new();
         let mut deletion_counts = BTreeMap::<ResourceScope, u64>::new();
+        for write in writes.iter().filter(|write| write.change.before.is_some()) {
+            *deletion_counts.entry(write.change.scope).or_default() += 1;
+        }
         for ((source, identity), record) in &collected {
             let table = typed
                 .by_scope(*source)
@@ -1104,7 +1135,7 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-fn scalar_bytes(values: &[SqlValue]) -> Vec<Vec<u8>> {
+pub(super) fn scalar_bytes(values: &[SqlValue]) -> Vec<Vec<u8>> {
     values
         .iter()
         .map(|value| {

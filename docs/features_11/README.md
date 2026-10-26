@@ -7,6 +7,8 @@ the phase briefs below are its response. Sealed-fork security, admission
 and atomicity contracts remain unchanged. Source code and tests define
 current behavior.
 
+The parallel application API work is recorded in [Kotlin SDK evidence](sdk-api-evidence.md).
+
 ## Destination
 
 A node that can reach a peer able to serve it becomes writable and

@@ -207,6 +207,7 @@ impl Node {
                     "kind": device.map(|device| device.kind),
                     "issuer": device.map(|device| device.issuer.to_hex()),
                     "enrolled": device.map(|device| device.enrolled.to_string()),
+                    "invitation": device.and_then(|device| device.invitation.as_ref()),
                     "revoked": record.revoked || settings.revoked_device(node, &registry),
                     "profile": record.profile(),
                     "capability": capability.map(|capability| data_encoding::HEXLOWER.encode(&capability.id)),

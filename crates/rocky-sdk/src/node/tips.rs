@@ -154,12 +154,35 @@ impl Node {
                 self.move_bookmark(scope, text(request, "name")?, None)
                     .await?;
             }
+            "follow_when_ready" => {
+                let name = text(request, "name")?;
+                let inspection = self.inspect_tips(scope).await?;
+                if !inspection
+                    .bookmarks
+                    .iter()
+                    .any(|bookmark| bookmark.name == name && bookmark.tip.is_some())
+                {
+                    return Err(refused("unknown or deleted bookmark"));
+                }
+                self.configure(|settings| {
+                    settings.pending_follow = Some(name.into());
+                    Ok(())
+                })
+                .await?;
+                self.complete_pending_follow().await?;
+                self.wake_sync();
+            }
             "follow" => {
                 let before = self.replica.followed_tip().await;
                 self.replica
                     .follow_bookmark(scope, text(request, "name")?)
                     .await
                     .map_err(refused)?;
+                self.configure(|settings| {
+                    settings.pending_follow = None;
+                    Ok(())
+                })
+                .await?;
                 self.followed_tip_changed(before).await;
                 self.ensure_tip_node().await?;
                 self.observations.touch();
@@ -212,10 +235,75 @@ impl Node {
         Ok(serde_json::to_value(self.tip_status(scope).await?)?)
     }
 
+    pub(super) async fn complete_pending_follow(&self) -> Result<(), Failure> {
+        let Some(name) = self.settings.lock().await.pending_follow.clone() else {
+            return Ok(());
+        };
+        let scope = self.domain().scope;
+        let inspection = self.inspect_tips(scope).await?;
+        let Some(tip) = inspection
+            .bookmarks
+            .iter()
+            .find(|bookmark| bookmark.name == name)
+            .and_then(|bookmark| bookmark.tip.as_ref())
+        else {
+            self.configure(|settings| {
+                settings.pending_follow = None;
+                Ok(())
+            })
+            .await?;
+            self.activity.record(
+                "bookmark_follow_failed",
+                json!({"name": name, "reason": "deleted"}),
+            );
+            return Ok(());
+        };
+        let seal = inspection
+            .seals
+            .iter()
+            .find(|seal| seal.id == *tip && seal.canonical && !seal.revoked)
+            .or_else(|| {
+                inspection
+                    .openings
+                    .iter()
+                    .find(|opening| opening.id == *tip)
+                    .and_then(|opening| {
+                        inspection
+                            .seals
+                            .iter()
+                            .find(|seal| seal.id == opening.seal && seal.canonical && !seal.revoked)
+                    })
+            });
+        if let Some(seal) = seal
+            && seal.held.is_none()
+        {
+            let digest = HEXLOWER
+                .decode(seal.id.as_bytes())?
+                .try_into()
+                .map_err(|_| refused("invalid seal digest"))?;
+            self.replica.want_seal(scope, digest).await?;
+            return Ok(());
+        }
+        let before = self.replica.followed_tip().await;
+        self.replica.follow_bookmark(scope, &name).await?;
+        self.configure(|settings| {
+            if settings.pending_follow.as_deref() == Some(&name) {
+                settings.pending_follow = None;
+            }
+            Ok(())
+        })
+        .await?;
+        self.followed_tip_changed(before).await;
+        self.ensure_tip_node().await?;
+        self.observations.touch();
+        Ok(())
+    }
+
     async fn tip_status(&self, scope: Scope) -> Result<TipStatus, Failure> {
         let observed = self.replica.tip_observation(scope).await?;
         Ok(TipStatus {
             bookmark: observed.bookmark,
+            pending_follow: self.settings.lock().await.pending_follow.clone(),
             tip: hex(&observed.tip.0),
             operations_since_seal: observed.operations_since_seal,
             evidence_releasable: None,

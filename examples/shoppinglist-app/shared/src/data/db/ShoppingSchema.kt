@@ -1,69 +1,14 @@
 package org.example.examples.shopping.data.db
 
+import kotlinx.coroutines.runBlocking
+import org.example.examples.shopping.resources.Res
 import rocky.*
 
-/**
- * Room tables plus trusted-only device management; list envelopes travel by direct delivery. Version 7 orders items
- * and gives them any number of categories; version 8 orders categories. See `docs/runtime/shopping-schema-7.md` and
- * `docs/runtime/shopping-schema-8.md`.
- */
-val ShoppingSchema = schema("shopping", version = 8) {
-    table("lists") {
-        text("title")
-        primaryKey("id")
-        partitionBy("id", group = "list")
+/** The packaged Room export supplies columns, keys, references and indexes; the overlay adds Rocky policy. */
+val ShoppingSchema: Schema by lazy {
+    runBlocking {
+        schemaFromRoom("shopping", Res.readBytes("files/ShoppingDatabase.json").decodeToString(), shoppingRoomOverlay)
     }
-    table("categories") {
-        integer("list")
-        text("name")
-        text("position", default = "")
-        primaryKey("list", "id")
-        partitionBy("list", group = "list")
-        index("index_categories_list_position", "list", "position")
-        reference("list", "lists", onDelete = Delete.Cascade)
-    }
-    table("items") {
-        integer("list")
-        text("key")
-        text("title")
-        boolean("completed")
-        integer("category", nullable = true)
-        text("position", default = "")
-        primaryKey("list", "key")
-        partitionBy("list", group = "list")
-        unique("list", "title", onConflict = Conflict.LatestWins)
-        index("index_items_list_category", "list", "category")
-        index("index_items_list_position", "list", "position")
-        reference("list", "lists", onDelete = Delete.Cascade)
-        reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
-    }
-    table("item_categories") {
-        integer("list")
-        integer("item")
-        integer("category")
-        primaryKey("list", "item", "category")
-        partitionBy("list", group = "list")
-        index("index_item_categories_list_category", "list", "category")
-        reference(listOf("list", "item"), "items", onDelete = Delete.Cascade)
-        reference(listOf("list", "category"), "categories", onDelete = Delete.Cascade)
-        grantedLike = "items"
-    }
-    itemsMigration()
-    categoriesMigration()
-    table("requests") {
-        text("key")
-        text("title")
-        text("note")
-        text("requester")
-        primaryKey("key")
-    }
-    table("decisions") {
-        text("key")
-        boolean("approved")
-        text("decider")
-        primaryKey("key")
-    }
-    trustedTables()
 }
 
 /** What a Room export cannot hold: the group, the title policy, the coordinator and the trusted-only tables. */

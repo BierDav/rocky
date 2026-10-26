@@ -1,5 +1,11 @@
 package rocky
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.serialization.json.*
 
 /**
@@ -8,6 +14,17 @@ import kotlinx.serialization.json.*
  * One secret per group partition and epoch derives every member table's key.
  */
 class Partitions internal constructor(private val client: RockyClient) {
+    // Local key delivery metadata can change without changing the public database status.
+    internal fun changes(): Flow<Unit> = merge(
+        client.statusChanges().map { Unit },
+        client.activity().filter { it is RockyEvent.PartitionChanged || it is RockyEvent.EnvelopesDelivered || it is RockyEvent.Renewed }.map { Unit },
+    ).conflate()
+
+    /** Current state in [groups] order, sharing status and activity waits across all groups. */
+    fun observeStatuses(groups: List<GroupPartition>): Flow<List<GroupStatus>> = changes().map {
+        groups.map { it.status() }
+    }.retryUnavailableReads().distinctUntilChanged()
+
     private suspend fun byGroup(type: String, group: String, values: JsonArray, body: JsonObjectBuilder.() -> Unit = {}): JsonObject = client.call(
         request(type) {
             put("group", group)
@@ -147,6 +164,8 @@ class GroupPartition internal constructor(private val partitions: Partitions, va
             },
         )
     }
+    fun observeStatus(): Flow<GroupStatus> = partitions.changes().map { status() }.retryUnavailableReads().distinctUntilChanged()
+
     suspend fun subscribe(omit: List<String> = emptyList()) = partitions.subscribe(group, values, omit)
     suspend fun unsubscribe(keep: List<String> = emptyList()) = partitions.unsubscribe(group, values, keep)
     suspend fun evict(keep: List<String> = emptyList()): JsonObject = partitions.evict(group, values, keep)

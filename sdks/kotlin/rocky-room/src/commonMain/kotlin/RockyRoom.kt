@@ -2,11 +2,15 @@ package rocky.room
 
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import rocky.RockyBinding
 import rocky.RockyDatabase
+import rocky.SqlChanges
 import rocky.sqlite.RockySQLiteDriver
+import rocky.sqlite.isRetryableRockyRead
 import kotlin.coroutines.CoroutineContext
 
 /** The Room version whose statements the driver answers; see `docs/runtime/room-integration.md`. */
@@ -27,18 +31,106 @@ fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyD
  */
 fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockySeal(database: RockyDatabase, binding: RockyBinding, queryContext: CoroutineContext = Dispatchers.IO): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE, binding = binding)).setQueryCoroutineContext(queryContext)
 
-/** Builds Room on [database]'s file and follows its sync in [queryContext] until [RockyRoom.close]. */
-fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RockyRoom<T> = RockyRoom(setRockyDatabase(database, queryContext).build(), database, queryContext)
+/** Builds Room on a borrowed database; closing the result leaves [database] open. */
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RockyRoom<T> = buildRockyRoom(database, false, queryContext)
 
 /**
- * A Room database on Rocky's file whose observers see sync writes. Closing it closes Room, not [rocky]: the
- * application closes that after.
+ * Acquires Rocky and Room as one installation. Failure or cancellation closes everything acquired;
+ * closing the result closes Room, then Rocky. Borrowed endpoints remain application-owned.
  */
-class RockyRoom<T : RoomDatabase> internal constructor(val room: T, val rocky: RockyDatabase, queryContext: CoroutineContext) {
-    private val following = CoroutineScope(queryContext + SupervisorJob()).launch { room.followRocky(rocky) }
-    suspend fun close() = withContext(NonCancellable) {
-        following.cancelAndJoin()
+suspend fun <T : RoomDatabase> managedRockyRoom(
+    open: suspend () -> RockyDatabase,
+    builder: (RockyDatabase) -> RoomDatabase.Builder<T>,
+    queryContext: CoroutineContext = Dispatchers.IO,
+): RockyRoom<T> {
+    currentCoroutineContext().ensureActive()
+    val database = open()
+    var acquired: RockyRoom<T>? = null
+    try {
+        val result = withContext(NonCancellable) {
+            builder(database).buildRockyRoom(database, true, queryContext).also { acquired = it }
+        }
+        currentCoroutineContext().ensureActive()
+        return result
+    } catch (error: Throwable) {
+        withContext(NonCancellable) {
+            val installation = acquired
+            if (installation == null) database.close() else installation.close()
+        }
+        throw error
+    }
+}
+
+private fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildRockyRoom(database: RockyDatabase, owned: Boolean, context: CoroutineContext): RockyRoom<T> {
+    val failed = CompletableDeferred<Throwable>()
+    val reporting = context +
+        CoroutineExceptionHandler { coroutine, error ->
+            failed.complete(error)
+            context[CoroutineExceptionHandler]?.handleException(coroutine, error)
+        }
+    val room = setRockyDatabase(database, reporting).build()
+    return try {
+        RockyRoom(room, database, owned, reporting, failed)
+    } catch (error: Throwable) {
         room.close()
+        throw error
+    }
+}
+
+/** Room and Rocky capabilities with explicit resource ownership and observable background failure. */
+class RockyRoom<T : RoomDatabase> internal constructor(val room: T, val rocky: RockyDatabase, private val ownsRocky: Boolean, queryContext: CoroutineContext, private val failed: CompletableDeferred<Throwable>) {
+    private val closing = Mutex()
+    private var closed = false
+    val failure: Deferred<Throwable> get() = failed
+    private val scope = CoroutineScope(queryContext + SupervisorJob())
+    init {
+        scope.launch { room.followRocky(rocky) }
+    }
+
+    /** Standard DAO observation survives temporary availability transitions; permanent failures reach the collector. */
+    fun <V> observe(query: T.() -> Flow<V>): Flow<V> = observeAvailability(query).transform { state ->
+        if (state is RoomAvailability.Ready) emit(state.value)
+    }
+
+    /** Includes temporary unavailability and the last committed value; permanent errors still fail the flow. */
+    fun <V> observeAvailability(query: T.() -> Flow<V>): Flow<RoomAvailability<V>> = flow {
+        var previous: V? = null
+        emitAll(
+            room.query().map<V, RoomAvailability<V>> { value ->
+                previous = value
+                RoomAvailability.Ready(value)
+            }.retryWhen { cause, attempt ->
+                if (!cause.isRetryableRockyRead()) return@retryWhen false
+                emit(RoomAvailability.Waiting(previous, cause))
+                delay(minOf(50L shl minOf(attempt, 4L).toInt(), 1_000L))
+                true
+            },
+        )
+    }
+
+    /** Follows visibility until cancelled or closed; cancellation leaves the database in background. */
+    fun bindLifecycle(foreground: Flow<Boolean>): Job = scope.launch {
+        try {
+            foreground.distinctUntilChanged().collect { visible ->
+                if (visible) rocky.enterForeground() else rocky.enterBackground()
+            }
+        } finally {
+            withContext(NonCancellable) { rocky.enterBackground() }
+        }
+    }
+
+    suspend fun close() = withContext(NonCancellable) {
+        closing.withLock {
+            if (!closed) {
+                closed = true
+                scope.coroutineContext.job.cancelAndJoin()
+                try {
+                    room.close()
+                } finally {
+                    if (ownsRocky) rocky.close()
+                }
+            }
+        }
     }
 }
 
@@ -68,8 +160,9 @@ suspend fun RoomDatabase.moveRockyRow(
     id: Long,
     from: List<Any?>,
     to: List<Any?>,
+    changes: SqlChanges.() -> Unit = {},
 ) {
-    database.moveRow(handle, table, id, from, to)
+    database.moveRow(handle, table, id, from, to, changes)
     invalidationTracker.refreshAsync()
 }
 
@@ -79,11 +172,13 @@ suspend fun RoomDatabase.moveRockyRow(
  * available or held yet, or a read lease timeout. A screen stays on the last committed rows instead of ending. Other failures end the flow.
  */
 fun <T> Flow<T>.settledOnRocky(): Flow<T> = retryWhen { cause, attempt ->
-    val message = cause.message.orEmpty()
-    val transient = TRANSIENT_READS.any { it in message }
-    if (transient) delay(minOf(50L shl minOf(attempt, 4L).toInt(), 1_000L))
-    transient
+    val retry = cause.isRetryableRockyRead()
+    if (retry) delay(minOf(50L shl minOf(attempt, 4L).toInt(), 1_000L))
+    retry
 }
 
-// A list's row may arrive before its other tables are held, while its key installs.
-private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held", "the workspace waits for ", "SQL session: transaction was rolled back: Timeout")
+/** Availability of one managed DAO observation. */
+sealed interface RoomAvailability<out T> {
+    data class Ready<T>(val value: T) : RoomAvailability<T>
+    data class Waiting<T>(val previous: T?, val cause: Throwable) : RoomAvailability<T>
+}

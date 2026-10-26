@@ -94,6 +94,9 @@ class Tips internal constructor(private val client: RockyClient) {
     )
     suspend fun deleteBookmark(name: String): TipStatus = TipStatus.decode(call("delete") { put("name", name) })
 
+    /** Persists a branch switch and pulls its starting seal; recovery completes it after sync or restart. */
+    suspend fun followWhenReady(name: String): TipStatus = TipStatus.decode(call("follow_when_ready") { put("name", name) })
+
     /** Rebuilds the local workspace at [name]; writes then belong to that bookmark's line. */
     suspend fun follow(name: String): TipStatus = TipStatus.decode(call("follow") { put("name", name) })
 
@@ -159,6 +162,7 @@ data class TipStatus(
     val operationsSinceSeal: ULong,
     val evidenceReleasable: TipEvidence?,
     val devices: List<TipDeviceFrontier>,
+    val pendingFollow: String? = null,
 ) {
     internal companion object {
         fun decode(value: JsonObject) = TipStatus(
@@ -178,6 +182,7 @@ data class TipStatus(
                     },
                 )
             },
+            value.nullableText("pending_follow"),
         )
     }
 }

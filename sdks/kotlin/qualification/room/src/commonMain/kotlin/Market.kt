@@ -2,7 +2,6 @@ package rocky.room.qualification
 
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
-import kotlinx.serialization.json.*
 import rocky.RockySession
 
 /** Ordinary stock rows; restocking uses a coordinated transaction to avoid lost increments. */
@@ -59,7 +58,7 @@ suspend fun RockySession.restock(item: String, quantity: Long): Long {
     require(item.isNotBlank() && quantity > 0)
     return coordinated {
         val row = query("SELECT remaining FROM stock WHERE item=?", item).singleOrNull()
-        val remaining = row?.jsonArray?.get(0)?.jsonObject?.getValue("value")?.jsonPrimitive?.content?.toLong() ?: 0L
+        val remaining = row?.long(0) ?: 0L
         if (row == null) {
             execute("INSERT INTO stock(item,remaining,id) VALUES(?,?,?)", item, quantity, nextId("stock"))
         } else {

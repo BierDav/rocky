@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct TipStatus {
     /// None until this device follows a bookmark.
     pub bookmark: Option<String>,
+    pub pending_follow: Option<String>,
     pub tip: String,
     pub operations_since_seal: u64,
     /// An optional estimate of what compaction would release.

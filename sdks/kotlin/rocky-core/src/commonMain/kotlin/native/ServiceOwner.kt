@@ -3,7 +3,7 @@ package rocky
 import kotlinx.serialization.json.*
 
 /** A control revision the coordination service accepted for this domain. */
-data class ServiceControl(val tenant: String, val revision: Long, val control: String)
+data class ServiceControl(val tenant: String, val revision: Long, val control: String, val expiresAtEpochSeconds: Long)
 
 /** A tenant's use of the service's budgets. */
 data class ServiceUsage(val openDomains: Int, val closedDomains: Int, val bytes: Long, val registrationsToday: Int)
@@ -81,6 +81,7 @@ class ServiceOwner internal constructor(private val session: RockySession, tenan
         value.getValue("tenant").jsonPrimitive.content,
         value.getValue("revision").jsonPrimitive.long,
         value.getValue("control").jsonPrimitive.content,
+        value.getValue("expires").jsonPrimitive.long,
     )
     private fun JsonObject.int(name: String) = getValue(name).jsonPrimitive.int
 }

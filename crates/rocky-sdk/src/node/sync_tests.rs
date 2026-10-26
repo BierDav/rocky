@@ -150,7 +150,7 @@ async fn enrolled_schema(
                 &issuer.path,
                 &issuer.vault,
                 &*link.as_ref().ok_or("link")?.transport,
-                profile,
+                (profile, None),
                 &registry,
             )
             .await?;

@@ -9,7 +9,7 @@ import kotlin.test.*
 class TipsTest {
     private val status = Json.parseToJsonElement(
         """{
-          "bookmark":null,"tip":"tip-main","operations_since_seal":18446744073709551615,
+          "bookmark":null,"pending_follow":null,"tip":"tip-main","operations_since_seal":18446744073709551615,
           "evidence_releasable":null,
           "devices":[
             {"node":"peer","tip":null,"frontiers":[]},

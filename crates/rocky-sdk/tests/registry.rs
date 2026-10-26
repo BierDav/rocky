@@ -823,3 +823,42 @@ async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failu
     a.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let path = root.path().join("issuer");
+    let owner = create(&path, memory(&hub, "issuer"))?;
+    let label = b"application-defined label";
+    let invitation = owner
+        .ok(json!({"type":"pairing", "profile":issuer(), "label":label}))
+        .await;
+    let member = join(
+        &root.path().join("member"),
+        memory(&hub, "member"),
+        invitation["uri"].as_str().ok_or("uri")?,
+    )?;
+    let node = member.ok(json!({"type":"session"})).await["node"]
+        .as_str()
+        .ok_or("node")?
+        .to_owned();
+    let record = devices(&owner).await.remove(&node).ok_or("record")?;
+    assert_eq!(record["invitation"], invitation["id"]);
+    assert_eq!(record["label"], json!(label));
+    // The next invitation cannot erase the association of the earlier enrollment.
+    owner
+        .ok(json!({"type":"pairing", "profile":issuer()}))
+        .await;
+    member.database.close().await?;
+    owner.database.close().await?;
+    let reopened = Device::new(Database::open(open(&path, None))?)?;
+    let record = devices(&reopened)
+        .await
+        .remove(&node)
+        .ok_or("reopened record")?;
+    assert_eq!(record["invitation"], invitation["id"]);
+    assert_eq!(record["label"], json!(label));
+    reopened.database.close().await?;
+    Ok(())
+}

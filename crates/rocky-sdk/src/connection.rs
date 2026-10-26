@@ -92,6 +92,8 @@ pub struct Page {
 pub struct SqlFailure {
     pub code: i32,
     pub message: String,
+    /// A fresh read may succeed after local recovery, key delivery or a new session.
+    pub retryable: bool,
 }
 impl std::fmt::Display for SqlFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,6 +116,7 @@ pub(crate) fn failure(code: i32, message: impl Into<String>) -> SqlFailure {
     SqlFailure {
         code,
         message: message.into(),
+        retryable: false,
     }
 }
 /// The code and message of a runtime failure.
@@ -139,7 +142,24 @@ pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
         Error::Quota { resource, limit } => format!("{resource} exceed {limit}"),
         other => other.to_string(),
     };
-    failure(code, message)
+    let retryable = matches!(
+        error,
+        Error::Blocked(_)
+            | Error::Backpressure
+            | Error::Sql(SqlError::Unavailable {
+                reason: Unavailable::NotHeld
+                    | Unavailable::KeyMissing
+                    | Unavailable::Incomplete
+                    | Unavailable::Revoked,
+                ..
+            })
+            | Error::Sql(SqlError::Aborted(rocky_secure::AbortReason::Timeout))
+    );
+    SqlFailure {
+        code,
+        message,
+        retryable,
+    }
 }
 
 /// `PRAGMA query_only`: Some(None) reads it, Some(Some(on)) sets it.
@@ -482,10 +502,15 @@ impl State {
     ) -> Result<Option<Pending>, Failure> {
         let answer = self.room_answer_once(sql, params).await;
         if !self.authority_pinned()
-            && answer
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.to_string().contains("session authority changed"))
+            && answer.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error.downcast_ref::<Error>(),
+                    Some(Error::Sql(SqlError::Unavailable {
+                        reason: Unavailable::Revoked,
+                        ..
+                    }))
+                )
+            })
         {
             // Schema reads may race a key install after the status check.
             self.opened = None;

@@ -240,6 +240,7 @@ mod service {
                 "tenant": tenant.public_key().to_hex(),
                 "revision": revision,
                 "control": HEXLOWER.encode(&reference),
+                "expires": time.saturating_add(lifetime),
             }))
         }
 

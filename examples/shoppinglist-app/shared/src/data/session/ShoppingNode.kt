@@ -17,13 +17,14 @@ import org.example.examples.shopping.util.readText
 import org.example.examples.shopping.util.removeFile
 import org.example.examples.shopping.util.replaceText
 import rocky.PeerTransport
+import rocky.Rocky
+import rocky.RockyConfiguration
 import rocky.RockyDatabase
 import rocky.RockyNetworkService
 import rocky.SecretStore
 import rocky.ServiceCoordinator
 import rocky.room.RockyRoom
-import rocky.room.buildOnRocky
-import kotlin.time.Duration.Companion.seconds
+import rocky.room.managedRockyRoom
 
 /** What differs per platform: where data and keys live, how Room is built and how devices reach each other. */
 class ShoppingPlatform(
@@ -64,10 +65,8 @@ class ShoppingNode private constructor(
     private val platform: ShoppingPlatform,
     online: Boolean,
 ) {
-    /** Flows the household shares between collectors; cancelled before Rocky closes. */
-    private val shared = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundErrors)
     val repository = ShoppingRepository(room.room, rocky)
-    val household = Household(room.room, rocky, self, shared)
+    val household = Household(room.room, rocky, self)
     val approvals = Approvals(room.room, rocky, household, self, coordinated)
     val tips = HouseholdTips(rocky, platform.room, platform.directory)
     val isTrusted: Boolean get() = rocky.isIssuer
@@ -103,51 +102,40 @@ class ShoppingNode private constructor(
                 coroutineScope {
                     launch { household.run() }
                     launch { approvals.run() }
-                    launch { maintainTips() }
+                    launch { tips.run() }
                 }
             }
         }
     }
 
-    /** The app's seal policy; a failed round is shown and retried. */
-    private suspend fun maintainTips() {
-        while (true) {
-            try {
-                tips.maintain()
-                tips.problem.value = null
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                tips.problem.value = error.message ?: error.toString()
-            }
-            delay(MAINTAIN_EVERY)
-        }
-    }
-
     suspend fun close() = withContext(NonCancellable) {
         work.cancelAndJoin()
-        shared.coroutineContext.job.cancelAndJoin()
         try {
             closed(rocky)
-            room.close()
         } finally {
             try {
                 attached?.close()
             } finally {
-                rocky.close()
+                room.close()
             }
         }
     }
 
     companion object {
-        /** How often the seal policy runs while the app is visible. */
-        private val MAINTAIN_EVERY = 30.seconds
+        private fun configuration(platform: ShoppingPlatform, service: ServiceCoordinator?, online: Boolean = true): RockyConfiguration = Rocky.configure(platform.directory, ShoppingSchema) {
+            secrets(platform.secrets())
+            coordinator(service)
+            networking {
+                transport = platform.transport()
+                enabled = online
+            }
+        }
 
         private fun offlinePath(directory: String) = "$directory/networking-disabled"
 
         /** A new household with this device as its first trusted device. */
         suspend fun create(platform: ShoppingPlatform): ShoppingNode = open(platform, trusted = true) { coordinator ->
-            RockyDatabase.create(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), coordinator = coordinator)
+            configuration(platform, coordinator).create()
         }.configure {
             // Rocky defines no bookmark: the household follows `main`, and a schema migration's opening inherits
             // the signed minimum of trusted devices in sync.
@@ -161,7 +149,7 @@ class ShoppingNode private constructor(
 
         /** Joins with a scanned [code]; a partial device holds only the lists shared with it. */
         suspend fun join(platform: ShoppingPlatform, code: PairingCode): ShoppingNode = open(platform, trusted = code.kind == NodeKind.Trusted) { coordinator ->
-            RockyDatabase.join(platform.directory, ShoppingSchema, code.invitation, platform.transport(), platform.secrets(), coordinator = coordinator)
+            configuration(platform, coordinator).join(code.invitation)
         }.configure {
             rememberKind(code.kind)
             rocky.partitions.role(code.kind.role)
@@ -175,11 +163,7 @@ class ShoppingNode private constructor(
          * publication stays private until its close is final anyway.
          */
         suspend fun resume(platform: ShoppingPlatform, confirmation: String? = null): ShoppingNode = open(platform, trusted = null) { coordinator ->
-            if (readText(offlinePath(platform.directory)) != null && coordinator == null) {
-                RockyDatabase.open(platform.directory, ShoppingSchema, null, platform.secrets(), automaticSync = false, coordinator = coordinator, confirmation = confirmation)
-            } else {
-                RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), coordinator = coordinator, confirmation = confirmation)
-            }
+            configuration(platform, coordinator, readText(offlinePath(platform.directory)) == null || coordinator != null).open(confirmation)
         }.configure {
             if (isTrusted && rocky.observeStatus().first().authority.verifiedRevocation == null && household.devices().first().none { it.node == self }) {
                 household.record(self, platform.deviceName, NodeKind.Trusted)
@@ -221,7 +205,7 @@ class ShoppingNode private constructor(
                         // Room keeps only a lock file next to Rocky's.
                         val failure = CompletableDeferred<Throwable>()
                         val backgroundErrors = CoroutineExceptionHandler { _, error -> failure.complete(error) }
-                        val openedRoom = platform.room("${platform.directory}/shopping").buildOnRocky(rocky, Dispatchers.IO + backgroundErrors)
+                        val openedRoom = managedRockyRoom({ rocky }, { platform.room("${platform.directory}/shopping") }, Dispatchers.IO + backgroundErrors)
                         room = openedRoom
                         platform.diagnostic("opening stage=room_ready")
                         val online = readText(offlinePath(platform.directory)) == null
@@ -240,7 +224,7 @@ class ShoppingNode private constructor(
                 }
             } catch (error: Throwable) {
                 // Cancellation can discard the result when returning from the IO dispatcher.
-                opened?.close()
+                withContext(NonCancellable) { opened?.close() }
                 throw error
             }
         }

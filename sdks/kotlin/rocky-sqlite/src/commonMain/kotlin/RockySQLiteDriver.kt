@@ -38,7 +38,12 @@ class RockySQLiteDriver(
 internal fun <T> native(call: suspend () -> T): T = try {
     runBlocking { call() }
 } catch (error: NativeException.Sql) {
-    throwSQLiteException(error.code, error.detail)
+    try {
+        throwSQLiteException(error.code, error.detail)
+    } catch (failure: androidx.sqlite.SQLiteException) {
+        if (error.retryable) failure.addSuppressed(RockyReadRetry())
+        throw failure
+    }
 } catch (error: NativeException.Failure) {
     throwSQLiteException(1, error.detail)
 } catch (error: rocky.RockyException) {
@@ -68,3 +73,12 @@ internal class RockySQLiteConnection(private val driver: RockySQLiteDriver) : SQ
         connection = null
     }
 }
+
+/** Structured metadata preserved alongside SQLite's standard exception type and result code. */
+private class RockyReadRetry : Exception()
+
+/** Whether a new read can recover after a Rocky availability transition. */
+fun Throwable.isRetryableRockyRead(): Boolean = this is RockyReadRetry ||
+    (this is rocky.RockyException && code in setOf("blocked", "missing_dependencies", "authority_changed", "transaction_timeout")) ||
+    suppressedExceptions.any { it.isRetryableRockyRead() } ||
+    cause?.isRetryableRockyRead() == true

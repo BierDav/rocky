@@ -99,12 +99,20 @@ impl<A: RowApplication> Drop for SecureSql<A> {
 }
 
 /// What a commit publishes the transaction as.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Target {
     /// One bundle, under the caller's handle or a random one.
     Bundle(Option<Commitment>),
     /// The consecutive bundles of a staged publication.
     Publication(Commitment),
+    Move {
+        handle: Commitment,
+        input: Commitment,
+        table: String,
+        id: rocky_core::RowIdentity,
+        from: Vec<SqlValue>,
+        to: Vec<SqlValue>,
+    },
 }
 /// What a commit resolves besides its rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +240,75 @@ impl<A: RowApplication> SecureSql<A> {
         }
         let frames = self.session.move_row(handle, table, id, from, to).await?;
         Ok(SecureCommit { handle, frames })
+    }
+    /// Executes related SQL and a move as one bundle. Commands may delete cascade
+    /// children or change other rows, but may not edit rows carried by the move.
+    pub async fn move_row_with(
+        &self,
+        handle: Commitment,
+        table: &str,
+        id: rocky_core::RowIdentity,
+        from: &[SqlValue],
+        to: &[SqlValue],
+        statements: &[(String, Vec<SqlValue>)],
+    ) -> Result<SecureCommit, Error> {
+        if self.seal.is_some() {
+            return Err(denied("a seal is read only"));
+        }
+        let input = rocky_core::commitment(
+            "rocky.row-move-sql-input.v1",
+            &encode(&(
+                table,
+                id,
+                super::moves::scalar_bytes(from),
+                super::moves::scalar_bytes(to),
+                statements
+                    .iter()
+                    .map(|(sql, values)| (sql, super::moves::scalar_bytes(values)))
+                    .collect::<Vec<_>>(),
+            ))?,
+        );
+        let mut lease = self.lease.lock().await;
+        if lease.held.is_some() || lease.aborted.is_some() {
+            return Err(denied("move requires an idle SQL session"));
+        }
+        self.begin(&mut lease, "BEGIN IMMEDIATE").await?;
+        let result = async {
+            let inner = &lease.held.as_ref().ok_or(Error::Closed)?.0;
+            if let Some(previous) = inner.lookup_bundle(handle, input).await? {
+                return Ok(SecureCommit {
+                    handle,
+                    frames: previous.map_err(|_| denied("move handle is behind pruned prefix"))?,
+                });
+            }
+            for (sql, params) in statements {
+                if !matches!(classify(sql).map_err(Error::Sql)?, Control::Statement) {
+                    return Err(refused("move changes must be ordinary SQL statements"));
+                }
+                self.statement(&mut lease, sql, params.clone(), false)?;
+            }
+            self.finish(
+                &mut lease,
+                Target::Move {
+                    handle,
+                    input,
+                    table: table.into(),
+                    id,
+                    from: from.to_vec(),
+                    to: to.to_vec(),
+                },
+                None,
+                Kind::Plain,
+            )
+            .await?
+            .committed
+            .ok_or(Error::Closed)
+        }
+        .await;
+        // Replays and every error roll back provisional SQL without publication.
+        lease.held = None;
+        lease.aborted = None;
+        result
     }
     /// Reserves a row id in an active transaction, before inserting it.
     /// Rollback releases reservations; a committed insert must use the next
@@ -1244,6 +1321,31 @@ impl<A: RowApplication> SecureSql<A> {
         }
         admit(inner, &self.session)?;
         let handle = match target {
+            Target::Move {
+                handle,
+                input,
+                table,
+                id,
+                from,
+                to,
+            } => {
+                let related = writes.clone();
+                inner.strict_projection = false;
+                let frames = inner
+                    .move_row_with(
+                        (handle, input),
+                        &table,
+                        id,
+                        &from,
+                        &to,
+                        &self.session.status.scopes,
+                        writes,
+                    )
+                    .await?;
+                inner.strict_projection = true;
+                inner.verify_sql_projection(&related).await?;
+                return Ok(Sealed::Commit(SecureCommit { handle, frames }));
+            }
             Target::Bundle(handle) => handle,
             Target::Publication(publication) => {
                 inner.strict_projection = true;

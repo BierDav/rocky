@@ -116,15 +116,19 @@ internal class TrustedRows(private val rocky: RockyDatabase) {
             registration,
         )
     }
-    suspend fun updateCoordination(revision: Long, control: String, members: String, expires: Long, applied: Boolean) = write {
-        execute(
-            "UPDATE coordination SET revision = ?, control = ?, members = ?, expires = ?, applied = ? WHERE key = 'household'",
-            revision,
-            control,
-            members,
-            expires,
-            applied,
-        )
+    suspend fun replaceCoordination(expected: rocky.CoordinationRegistration, replacement: rocky.CoordinationRegistration): Boolean {
+        val session = rocky.openSession()
+        return try {
+            session.write {
+                execute(
+                    "UPDATE coordination SET revision = ?, control = ?, members = ?, expires = ?, applied = ? WHERE key = 'household' AND revision = ? AND control = ? AND members = ? AND expires = ? AND applied = ?",
+                    replacement.revision, replacement.control, replacement.members.sorted().joinToString(","), replacement.expiresAtEpochSeconds, replacement.applied,
+                    expected.revision, expected.control, expected.members.sorted().joinToString(","), expected.expiresAtEpochSeconds, expected.applied,
+                ) == 1L
+            }
+        } finally {
+            session.close()
+        }
     }
 
     private fun rows(table: String): Flow<List<Row>> = rocky.observe(ShoppingSchema.table(table).query()).map(Row::decode)

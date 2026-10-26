@@ -52,6 +52,8 @@ pub struct Device {
     /// The issuer that wrote the record first.
     pub issuer: PublicKey,
     pub enrolled: u64,
+    /// Stable invitation digest; retained independently of later invitations.
+    pub invitation: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

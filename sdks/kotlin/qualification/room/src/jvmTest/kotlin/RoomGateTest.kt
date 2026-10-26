@@ -84,11 +84,11 @@ class RoomGateTest {
     }
 
     @Test fun aRoomTransactionIsOneBundleOnPeersAndAnOversizedOneFailsWhole() = pair {
+        // Register before authoring: the join's final sync can carry the write before syncOnce.
+        val events = b.driverTableEvents()
         val before = bundles(File(directory, "a"))
         roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs"), item("i3", "Jam")))
         assertEquals(before + 1, bundles(File(directory, "a")))
-        // Registered before the sync, so the bundle's commit on the peer is among the events.
-        val events = b.driverTableEvents()
         assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         val applied = withTimeout(10_000) {
             var change = events.next()

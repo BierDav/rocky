@@ -1,50 +1,152 @@
 #!/usr/bin/env python3
 """Stamp and publish the Rust SDK and its workspace dependencies to crates.io."""
 import argparse
+from email.utils import parsedate_to_datetime
+from graphlib import TopologicalSorter
 import json
 from pathlib import Path
 import re
 import subprocess
+import time
 import tomllib
 import urllib.error
 import urllib.request
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("version")
-parser.add_argument("--dry-run", action="store_true")
-args = parser.parse_args()
-if not re.fullmatch(r"\d+\.\d+\.\d+(?:-(?:alpha|beta|rc|nightly)\.\d+(?:\.\d+)?)?", args.version):
-    parser.error("expected a release version")
-root = Path(__file__).resolve().parents[2]
-manifest = root / "Cargo.toml"
-source = manifest.read_text()
-current = tomllib.loads(source)["workspace"]["package"]["version"]
-source = source.replace(f'version = "{current}"', f'version = "{args.version}"', 1)
-source = source.replace(f'version = "={current}"', f'version = "={args.version}"')
-manifest.write_text(source)
-metadata = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--no-deps", "--format-version=1"], cwd=root))
-packages = [p for p in metadata["packages"] if p["publish"] == ["crates-io"]]
-if not packages or not any(p["name"] == "rocky-sdk" for p in packages):
-    raise SystemExit("Rust SDK is missing from the publishable workspace packages")
-# Cargo packages and verifies the dependency graph before uploading it in order.
-# A retry may encounter crates uploaded before another release job failed.
-command = ["cargo", "publish", "--registry", "crates-io", "--allow-dirty"]
-if args.dry_run:
-    command.append("--dry-run")
-for package in packages:
+# Separate account-wide buckets: https://crates.io/docs/rate-limits
+class PublishBudget:
+    def __init__(self, burst, interval):
+        self.burst = burst
+        self.interval = interval
+        self.tokens = burst
+        self.refilled = None
+
+    def refill(self):
+        if self.refilled is None:
+            return
+        refill = int((time.monotonic() - self.refilled) // self.interval)
+        self.tokens = min(self.burst, self.tokens + refill)
+        self.refilled += refill * self.interval
+
+    def wait(self):
+        while True:
+            self.refill()
+            if self.tokens > 0:
+                return
+            delay = self.refilled + self.interval - time.monotonic() + 1
+            print(f"Waiting {delay:.0f}s for crates.io publish allowance", flush=True)
+            time.sleep(max(1, delay))
+
+    def consume(self):
+        self.refill()
+        if self.refilled is None:
+            self.refilled = time.monotonic()
+        self.tokens -= 1
+
+
+def registry_version(name, version=None):
     request = urllib.request.Request(
-        f'https://crates.io/api/v1/crates/{package["name"]}/{args.version}',
+        f"https://crates.io/api/v1/crates/{name}" + (f"/{version}" if version else ""),
         headers={"User-Agent": "Rocky releases (https://github.com/BierDav/rocky)"})
     try:
         with urllib.request.urlopen(request) as response:
-            published = json.load(response)
-        if published["version"]["yanked"]:
-            raise SystemExit(f'{package["name"]} {args.version} is yanked')
-        print(f'Already published {package["name"]} {args.version}', flush=True)
+            return json.load(response)
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-        command.extend(["--package", package["name"]])
-if "--package" in command:
-    subprocess.run(command, cwd=root, check=True)
+        return None
+
+
+def is_published(name, version):
+    published = registry_version(name, version)
+    if published is None:
+        return False
+    if published["version"]["yanked"]:
+        raise SystemExit(f"{name} {version} is yanked")
+    print(f"Already published {name} {version}", flush=True)
+    return True
+
+
+def retry_delay(output, interval=600):
+    if not re.search(r"status 429\b", output):
+        return None
+    match = re.search(r"Please try again after ([^\r\n]+? GMT)", output)
+    if match:
+        try:
+            return max(1, parsedate_to_datetime(match[1]).timestamp() - time.time() + 1)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    # Cargo does not expose Retry-After headers. Fall back to this bucket's
+    # refill interval when crates.io omits the timestamp from its diagnostic.
+    return interval + 1
+
+
+def publish(command, root, name, version, budget):
+    while True:
+        budget.wait()
+        # Tee diagnostics so long package builds remain visible in release logs.
+        output = []
+        with subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True) as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                output.append(line)
+            code = process.wait()
+        if code == 0:
+            budget.consume()
+            return
+        delay = retry_delay("".join(output), budget.interval)
+        if delay is None:
+            raise SystemExit(code)
+        print(f"crates.io rate limited {name}; retrying in {delay:.0f}s", flush=True)
+        time.sleep(delay)
+        # The account's allowance was lower than our initial burst estimate.
+        # The retry timestamp grants one token, not a fresh burst.
+        budget.tokens = 1
+        budget.refilled = time.monotonic()
+        if is_published(name, version):
+            budget.consume()
+            return
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("version")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-(?:alpha|beta|rc|nightly)\.\d+(?:\.\d+)?)?", args.version):
+        parser.error("expected a release version")
+    root = Path(__file__).resolve().parents[2]
+    manifest = root / "Cargo.toml"
+    source = manifest.read_text()
+    current = tomllib.loads(source)["workspace"]["package"]["version"]
+    source = source.replace(f'version = "{current}"', f'version = "{args.version}"', 1)
+    source = source.replace(f'version = "={current}"', f'version = "={args.version}"')
+    manifest.write_text(source)
+    metadata = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--no-deps", "--format-version=1"], cwd=root))
+    packages = [p for p in metadata["packages"] if p["publish"] == ["crates-io"]]
+    if not packages or not any(p["name"] == "rocky-sdk" for p in packages):
+        raise SystemExit("Rust SDK is missing from the publishable workspace packages")
+    names = {p["name"] for p in packages}
+    order = TopologicalSorter({
+        p["name"]: [d["name"] for d in p["dependencies"]
+                    if d["name"] in names and d["kind"] != "dev"]
+        for p in packages
+    }).static_order()
+    pending = [name for name in order if not is_published(name, args.version)]
+    command = ["cargo", "publish", "--registry", "crates-io", "--allow-dirty"]
+    if args.dry_run:
+        if pending:
+            subprocess.run(command + ["--dry-run"] +
+                           [arg for name in pending for arg in ("--package", name)],
+                           cwd=root, check=True)
+        return
+    new_budget = PublishBudget(5, 600)
+    update_budget = PublishBudget(30, 60)
+    for name in pending:
+        budget = new_budget if registry_version(name) is None else update_budget
+        publish(command + ["--package", name], root, name, args.version, budget)
+
+
+if __name__ == "__main__":
+    main()

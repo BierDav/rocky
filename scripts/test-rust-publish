@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Exercise release pacing and recovery without uploading crates or sleeping."""
+from contextlib import redirect_stdout
+from email.utils import parsedate_to_datetime
+import io
+import json
+from pathlib import Path
+import runpy
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+PUBLISH = runpy.run_path(str(Path(__file__).resolve().parent / "release/rust-publish"))
+RATE_LIMIT = ('error: the remote server responded with an error (status 429 Too Many Requests): '
+              'Please try again after Tue, 27 Oct 2026 10:31:56 GMT')
+
+
+class PublishTest(unittest.TestCase):
+    def setUp(self):
+        self.now = 0
+        self.sleeps = []
+        for target, replacement in (("time.monotonic", lambda: self.now),
+                                    ("time.sleep", self.sleep)):
+            patcher = patch(target, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        output = redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+
+    def sleep(self, delay):
+        self.sleeps.append(delay)
+        self.now += delay
+
+    def test_new_crates_use_burst_then_only_remaining_refill_time(self):
+        budget = PUBLISH["PublishBudget"](5, 600)
+        for _ in range(5):
+            budget.wait()
+            budget.consume()
+        self.assertEqual(self.sleeps, [])
+        self.now += 240
+        budget.wait()
+        budget.consume()
+        self.assertEqual(self.sleeps, [361])
+        budget.wait()
+        self.assertEqual(self.sleeps, [361, 600])
+
+    def test_updates_have_an_independent_faster_budget(self):
+        new = PUBLISH["PublishBudget"](5, 600)
+        update = PUBLISH["PublishBudget"](30, 60)
+        for _ in range(5):
+            new.consume()
+        for _ in range(30):
+            update.wait()
+            update.consume()
+        self.assertEqual(self.sleeps, [])
+        update.wait()
+        self.assertEqual(self.sleeps, [61])
+
+    def test_build_time_refills_but_first_build_does_not_grant_tokens(self):
+        budget = PUBLISH["PublishBudget"](5, 600)
+        budget.wait()
+        self.now += 900
+        budget.consume()
+        for _ in range(4):
+            budget.wait()
+            budget.consume()
+        budget.wait()
+        self.assertEqual(self.sleeps, [601])
+        self.now += 1800
+        for _ in range(4):
+            budget.wait()
+            budget.consume()
+        self.assertEqual(self.sleeps, [601])
+
+    def test_server_deadline_and_fallback(self):
+        deadline = parsedate_to_datetime("Tue, 27 Oct 2026 10:31:56 GMT").timestamp()
+        with patch("time.time", return_value=deadline - 42):
+            self.assertEqual(PUBLISH["retry_delay"](RATE_LIMIT), 43)
+        with patch("time.time", return_value=deadline + 42):
+            self.assertEqual(PUBLISH["retry_delay"](RATE_LIMIT), 1)
+        self.assertEqual(PUBLISH["retry_delay"]("status 429 Too Many Requests"), 601)
+        self.assertEqual(PUBLISH["retry_delay"]("status 429 Too Many Requests", 60), 61)
+        self.assertEqual(PUBLISH["retry_delay"]("status 429 Please try again after bad GMT"), 601)
+        self.assertIsNone(PUBLISH["retry_delay"]("status 403 Forbidden"))
+
+    def process(self, code, output):
+        process = MagicMock()
+        process.__enter__.return_value = process
+        process.stdout = io.StringIO(output)
+        process.wait.return_value = code
+        return process
+
+    def test_rate_limit_retries_and_reduces_subsequent_burst(self):
+        budget = PUBLISH["PublishBudget"](5, 600)
+        deadline = parsedate_to_datetime("Tue, 27 Oct 2026 10:31:56 GMT").timestamp()
+        with patch("subprocess.Popen", side_effect=[self.process(101, RATE_LIMIT),
+                                                    self.process(0, "Uploaded")]) as cargo, \
+                patch("time.time", return_value=deadline - 42), \
+                patch.dict(PUBLISH["publish"].__globals__, is_published=lambda *args: False):
+            PUBLISH["publish"](["cargo", "publish"], ".", "rocky-core", "1.0.0", budget)
+        self.assertEqual(cargo.call_count, 2)
+        self.assertEqual(self.sleeps, [43])
+        budget.wait()
+        self.assertEqual(self.sleeps, [43, 601])
+
+    def test_retry_skips_a_version_published_in_the_meantime(self):
+        budget = PUBLISH["PublishBudget"](5, 600)
+        with patch("subprocess.Popen", return_value=self.process(101, "status 429")) as cargo, \
+                patch.dict(PUBLISH["publish"].__globals__, is_published=lambda *args: True):
+            PUBLISH["publish"](["cargo", "publish"], ".", "rocky-core", "1.0.0", budget)
+        self.assertEqual(cargo.call_count, 1)
+        self.assertEqual(budget.tokens, 0)
+
+    def test_other_publish_errors_fail_immediately(self):
+        with patch("subprocess.Popen", return_value=self.process(101, "status 403 Forbidden")):
+            with self.assertRaises(SystemExit) as error:
+                PUBLISH["publish"](["cargo"], ".", "rocky-core", "1.0.0",
+                                   PUBLISH["PublishBudget"](5, 600))
+        self.assertEqual(error.exception.code, 101)
+        self.assertEqual(self.sleeps, [])
+
+    def run_main(self, dry_run, existing=()):
+        packages = [
+            {"name": "rocky-sdk", "publish": ["crates-io"], "dependencies": [
+                {"name": "rocky-core", "kind": None}]},
+            {"name": "rocky-core", "publish": ["crates-io"], "dependencies": [
+                {"name": "rocky-sdk", "kind": "dev"}]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.1.0"\n')
+            published = []
+            globals_ = PUBLISH["main"].__globals__
+            with patch.dict(globals_, __file__=str(root / "scripts/release/rust-publish"),
+                            is_published=lambda name, version: name in existing,
+                            registry_version=lambda *args: None,
+                            publish=lambda command, *args: published.append(command[-1])), \
+                    patch("sys.argv", ["rust-publish", "1.0.0"] + (["--dry-run"] if dry_run else [])), \
+                    patch("subprocess.check_output", return_value=json.dumps({"packages": packages})), \
+                    patch("subprocess.run") as cargo:
+                PUBLISH["main"]()
+            self.assertIn('version = "1.0.0"', (root / "Cargo.toml").read_text())
+            return published, cargo
+
+    def test_live_publish_orders_dependencies_and_ignores_dev_cycles(self):
+        published, cargo = self.run_main(False)
+        self.assertEqual(published, ["rocky-core", "rocky-sdk"])
+        cargo.assert_not_called()
+
+    def test_resume_skips_previously_published_packages(self):
+        published, _ = self.run_main(False, existing=("rocky-core",))
+        self.assertEqual(published, ["rocky-sdk"])
+        published, cargo = self.run_main(True, existing=("rocky-core", "rocky-sdk"))
+        self.assertEqual(published, [])
+        cargo.assert_not_called()
+
+    def test_yanked_versions_are_refused(self):
+        with patch.dict(PUBLISH["is_published"].__globals__,
+                        registry_version=lambda *args: {"version": {"yanked": True}}):
+            with self.assertRaisesRegex(SystemExit, "rocky-core 1.0.0 is yanked"):
+                PUBLISH["is_published"]("rocky-core", "1.0.0")
+
+    def test_dry_run_still_verifies_all_pending_packages_without_pacing(self):
+        published, cargo = self.run_main(True)
+        self.assertEqual(published, [])
+        self.assertEqual(cargo.call_args.args[0][-5:],
+                         ["--dry-run", "--package", "rocky-core", "--package", "rocky-sdk"])
+        self.assertEqual(self.sleeps, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

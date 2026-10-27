@@ -664,7 +664,8 @@ jobs:
       needs.android.result == 'success' && needs.ios.result == 'success' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # First-time crates may each wait ten minutes when the account allowance is spent.
+    timeout-minutes: 120
     permissions:
       contents: write
       packages: write

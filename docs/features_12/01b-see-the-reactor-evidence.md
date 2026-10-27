@@ -346,3 +346,14 @@ The implementation was rebased onto the concurrent release-publishing fix
 remain identical to tested `5eac0bb4`; the rebase added only the release workflow
 and scripts. Lint and commitlint passed after the rebase, including the new
 11-test release-publishing suite.
+
+## Integration
+
+Integrated into the original workspace in Jujutsu change `qyxtuntm`, preserving
+the concurrent release-publishing fix `fca4962a`. The integration tree matched
+the qualified implementation before adding this evidence note; it introduced
+no merge conflicts or additional runtime changes.
+
+Both temporary Jujutsu workspaces were forgotten and their directories removed.
+The task's before/after phone binaries and fixture directories were removed
+from `/data/local/tmp`; the measured tables remain in this roadmap.

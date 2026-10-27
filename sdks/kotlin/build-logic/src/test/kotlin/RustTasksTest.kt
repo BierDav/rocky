@@ -7,7 +7,7 @@ import kotlin.test.*
 class RustTasksTest {
     @Test
     fun importsBindingsAndHostRuntimeWithoutCargo() = withProject { project ->
-        val task = project.tasks.create("bindings", GenerateBindings::class.java)
+        val task = project.tasks.register("bindings", GenerateBindings::class.java).get()
         val source = project.layout.projectDirectory.dir("prebuilt")
         val outputs = listOf("common" to task.common, "jna" to task.jna, "ios" to task.ios, "headers" to task.headers, "host" to task.hostLibrary)
         for ((name, output) in outputs) {
@@ -26,7 +26,7 @@ class RustTasksTest {
 
     @Test
     fun refusesIncompleteBindings() = withProject { project ->
-        val task = project.tasks.create("bindings", GenerateBindings::class.java)
+        val task = project.tasks.register("bindings", GenerateBindings::class.java).get()
         task.prebuilt.set(project.layout.projectDirectory.dir("prebuilt").also { it.asFile.mkdirs() })
         task.common.set(project.layout.buildDirectory.dir("common"))
         assertFailsWith<NoSuchFileException> { task.generate() }
@@ -34,7 +34,7 @@ class RustTasksTest {
 
     @Test
     fun importsRuntimeWithoutCargoAndRemovesStaleOutputs() = withProject { project ->
-        val task = project.tasks.create("runtime", BuildIosLibrary::class.java)
+        val task = project.tasks.register("runtime", BuildIosLibrary::class.java).get()
         val source = project.layout.projectDirectory.file("librocky_uniffi.a")
         source.asFile.writeBytes(byteArrayOf(0, 1, 2, 3))
         task.prebuilt.set(source)
@@ -48,7 +48,7 @@ class RustTasksTest {
 
     @Test
     fun refusesPrebuiltRuntimeForFaultInjection() = withProject { project ->
-        val task = project.tasks.create("runtime", BuildIosLibrary::class.java)
+        val task = project.tasks.register("runtime", BuildIosLibrary::class.java).get()
         task.prebuilt.set(project.layout.projectDirectory.file("librocky_uniffi.a"))
         task.qualification.set(true)
         assertFailsWith<IllegalStateException> { task.build() }

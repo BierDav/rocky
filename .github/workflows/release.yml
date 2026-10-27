@@ -404,18 +404,9 @@ jobs:
 
       - uses: ./source/.github/actions/setup-sccache
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./source/.github/actions/setup-native-cache
         with:
-          workspaces: source/sdks/uniffi -> target
-          shared-key: jvm-${{ matrix.platform }}
-          key: ${{ github.sha }}
-          cache-bin: false
-          cache-workspace-crates: true
-          cache-on-failure: true
-
-      - name: Reuse timestamps of unchanged native inputs
-        working-directory: source
-        run: ./scripts/ci/source-times
+          platform: jvm-${{ matrix.platform }}
 
       - name: Package and qualify the SDK
         working-directory: source
@@ -426,11 +417,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir dist
-          # The host's native library, which the published JVM jar gathers from every platform.
-          cp -R sdks/kotlin/rocky-core/build/generated/bindings/host dist/natives
-          # The iOS packaging job uses the bindings already qualified on macOS.
+          # macOS supplies the bindings and host runtime; Linux adds its runtime to the JVM jar.
           if [ '${{ matrix.platform }}' = darwin-aarch64 ]; then
             cp -R sdks/kotlin/rocky-core/build/generated/bindings dist/bindings
+          else
+            cp -R sdks/kotlin/rocky-core/build/generated/bindings/host dist/natives
           fi
           tar -czf "dist/rocky-kotlin-sdk-${VERSION}-${{ matrix.platform }}.tar.gz" \
             -C sdks/kotlin/qualification/packaged-jvm/build packaged-sdk
@@ -602,18 +593,9 @@ jobs:
 
       - uses: ./source/.github/actions/setup-sccache
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./source/.github/actions/setup-native-cache
         with:
-          workspaces: source/sdks/uniffi -> target
-          shared-key: ios-native-${{ matrix.target }}
-          key: ${{ github.sha }}
-          cache-bin: false
-          cache-workspace-crates: true
-          cache-on-failure: true
-
-      - name: Reuse timestamps of unchanged native inputs
-        working-directory: source
-        run: ./scripts/ci/source-times
+          platform: ${{ matrix.target }}
 
       - name: Build the iOS runtime
         working-directory: source
@@ -668,6 +650,8 @@ jobs:
       - uses: ./source/.github/actions/setup-java
 
       - uses: ./source/.github/actions/setup-sdk-cache
+        with:
+          scope: ios
 
       # Both qualified host libraries, plus the generated bindings from macOS.
       - uses: actions/download-artifact@v4

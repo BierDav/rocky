@@ -1,0 +1,33 @@
+name: Cache SDK native builds
+description: Restore native outputs with matching source timestamps and save each revision.
+inputs:
+  platform:
+    description: Isolate each host or cross-compilation target.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # rust-cache ignores `key` when `shared-key` is set. A config comment varies
+    # its manifest hash while preserving the restore prefix across revisions.
+    - name: Key the native outputs by source revision
+      shell: bash
+      working-directory: source
+      env:
+        SOURCE_REVISION: ${{ github.sha }}
+      run: |
+        mkdir -p sdks/uniffi/.cargo
+        printf '# CI revision: %s\n' "$SOURCE_REVISION" > sdks/uniffi/.cargo/config.toml
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: source/sdks/uniffi -> target
+        shared-key: sdk-${{ inputs.platform }}
+        cache-bin: false
+        cache-workspace-crates: true
+        cache-on-failure: true
+
+    - name: Reuse timestamps of unchanged native inputs
+      shell: bash
+      working-directory: source
+      run: ./scripts/ci/source-times

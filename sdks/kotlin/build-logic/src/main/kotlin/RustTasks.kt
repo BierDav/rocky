@@ -2,6 +2,7 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.Project
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.*
 import kotlin.io.path.*
@@ -16,8 +17,6 @@ fun Project.rustSources(): List<Any> = listOf(
     "rust-toolchain.toml",
     "vendor",
     "crates",
-    "sdks/native/Cargo.toml",
-    "sdks/native/src",
     "sdks/uniffi/Cargo.toml",
     "sdks/uniffi/build.rs",
     "sdks/uniffi/Cargo.lock",
@@ -45,6 +44,11 @@ abstract class CargoTask : DefaultTask() {
  * implementation, the cinterop implementation and its C header, plus the host library as a JNA resource.
  */
 abstract class GenerateBindings : CargoTask() {
+    /** Bindings and host runtime built by this revision's host qualification job. */
+    @get:Optional @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val prebuilt: DirectoryProperty
+
     @get:OutputDirectory abstract val common: DirectoryProperty
 
     @get:OutputDirectory abstract val jna: DirectoryProperty
@@ -56,7 +60,14 @@ abstract class GenerateBindings : CargoTask() {
     @get:OutputDirectory abstract val hostLibrary: DirectoryProperty
 
     @TaskAction
+    @OptIn(ExperimentalPathApi::class)
     fun generate() {
+        prebuilt.orNull?.let { source ->
+            for ((name, output) in listOf("common" to common, "jna" to jna, "ios" to ios, "headers" to headers, "host" to hostLibrary)) {
+                source.dir(name).asFile.toPath().copyToRecursively(recreate(output.get().asFile.toPath()), followLinks = false, overwrite = true)
+            }
+            return
+        }
         val host = hostPlatform()
         cargo("build", "--manifest-path", "sdks/uniffi/Cargo.toml", "--locked", "--features", "bindgen")
         val target = root / "sdks/uniffi/target/debug"
@@ -68,7 +79,6 @@ abstract class GenerateBindings : CargoTask() {
         val jna = recreate(jna.get().asFile.toPath())
         (generated / "jna/rocky/internal/native/rocky_uniffi.kt").moveTo(jna / "RockyJna.kt")
         // Keep platform implementations out of the common source set.
-        @OptIn(ExperimentalPathApi::class)
         (generated / "jna").deleteRecursively()
         (generated / "RockyNative.kt").moveTo(recreate(ios.get().asFile.toPath()) / "RockyNative.kt")
         (generated / "rocky_uniffiFFI.h").moveTo(recreate(headers.get().asFile.toPath()) / "rocky_uniffiFFI.h")
@@ -79,6 +89,11 @@ abstract class GenerateBindings : CargoTask() {
 
 /** Builds the static runtime for one iOS target. */
 abstract class BuildIosLibrary : CargoTask() {
+    /** The matching target's runtime from this revision's native build job. */
+    @get:Optional @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val prebuilt: RegularFileProperty
+
     @get:Input abstract val target: Property<String>
 
     /** Adds the fault injection the in-repository simulator qualification uses; never for published builds. */
@@ -88,6 +103,11 @@ abstract class BuildIosLibrary : CargoTask() {
 
     @TaskAction
     fun build() {
+        prebuilt.orNull?.let { source ->
+            check(!qualification.get()) { "Prebuilt runtimes do not contain qualification fault injection" }
+            source.asFile.toPath().copyTo(recreate(library.get().asFile.toPath()) / "librocky_uniffi.a")
+            return
+        }
         val features = if (qualification.get()) arrayOf("--features", "qualification") else emptyArray()
         cargo(
             "build", "--manifest-path", "sdks/uniffi/Cargo.toml", "--lib", "--locked", "--target", target.get(), *features,

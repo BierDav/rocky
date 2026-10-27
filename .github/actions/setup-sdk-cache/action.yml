@@ -1,0 +1,16 @@
+name: Cache SDK tooling
+description: Reuse Gradle dependencies, build cache and Kotlin/Native toolchains.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.konan
+        key: sdk-tooling-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}-${{ github.sha }}
+        restore-keys: |
+          sdk-tooling-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}-
+          sdk-tooling-v1-${{ runner.os }}-${{ runner.arch }}-

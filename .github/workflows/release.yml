@@ -392,6 +392,8 @@ jobs:
 
       - uses: ./source/.github/actions/setup-java
 
+      - uses: ./source/.github/actions/setup-sdk-cache
+
       - name: Install the system build dependencies
         working-directory: source
         run: ./scripts/ci/install-system-deps
@@ -402,9 +404,22 @@ jobs:
 
       - uses: ./source/.github/actions/setup-sccache
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/sdks/uniffi -> target
+          shared-key: jvm-${{ matrix.platform }}
+          key: ${{ github.sha }}
+          cache-bin: false
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Reuse timestamps of unchanged native inputs
+        working-directory: source
+        run: ./scripts/ci/source-times
+
       - name: Package and qualify the SDK
         working-directory: source
-        run: sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:check
+        run: sdks/kotlin/gradlew -p sdks/kotlin :build-logic:test :qualification:packaged-jvm:check
 
       - name: Collect the package
         working-directory: source
@@ -413,6 +428,10 @@ jobs:
           mkdir dist
           # The host's native library, which the published JVM jar gathers from every platform.
           cp -R sdks/kotlin/rocky-core/build/generated/bindings/host dist/natives
+          # The iOS packaging job uses the bindings already qualified on macOS.
+          if [ '${{ matrix.platform }}' = darwin-aarch64 ]; then
+            cp -R sdks/kotlin/rocky-core/build/generated/bindings dist/bindings
+          fi
           tar -czf "dist/rocky-kotlin-sdk-${VERSION}-${{ matrix.platform }}.tar.gz" \
             -C sdks/kotlin/qualification/packaged-jvm/build packaged-sdk
 
@@ -545,16 +564,81 @@ jobs:
           name: android
           path: source/sdks/kotlin/build/release-maven
 
+  ios-native:
+    name: iOS runtime ${{ matrix.target }}
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim]
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Bootstrap Rustup and register its tool paths
+        working-directory: source
+        run: ./scripts/ci/install-rustup
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: ./source/.github/actions/setup-sccache
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/sdks/uniffi -> target
+          shared-key: ios-native-${{ matrix.target }}
+          key: ${{ github.sha }}
+          cache-bin: false
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Reuse timestamps of unchanged native inputs
+        working-directory: source
+        run: ./scripts/ci/source-times
+
+      - name: Build the iOS runtime
+        working-directory: source
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+          IOS_TARGET: ${{ matrix.target }}
+        run: cargo build --manifest-path sdks/uniffi/Cargo.toml --lib --locked --target "$IOS_TARGET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-${{ matrix.target }}
+          path: source/sdks/uniffi/target/${{ matrix.target }}/debug/librocky_uniffi.a
+          if-no-files-found: error
+
   ios:
     name: iOS and JVM SDK
-    # After `jvm`: the JVM jar carries every platform's native library.
-    needs: [version, check, jvm]
+    # Assemble this run's native artifacts; each runtime builds in parallel.
+    needs: [version, check, jvm, ios-native]
     if: >-
       always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' && needs.jvm.result == 'success' &&
+      needs.ios-native.result == 'success' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: macos-latest
-    # A cold build compiles both iOS targets, qualifies them and builds JVM libraries.
+    # Packaging, Kotlin compilation and the artifact-only consumer qualification.
     timeout-minutes: 90
     env:
       ROCKY_VERSION: ${{ needs.version.outputs.version }}
@@ -574,33 +658,47 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
-      - name: Install the pinned iOS toolchain
-        working-directory: source
+      - name: Require the iOS packaging tools
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
-          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          rustup toolchain install "$toolchain" --profile minimal
-          rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
 
-      - uses: ./source/.github/actions/setup-sccache
+      - uses: ./source/.github/actions/setup-java
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: source/sdks/uniffi -> target
-          shared-key: ios
+      - uses: ./source/.github/actions/setup-sdk-cache
 
-      # The Linux native library for the JVM jar; this job builds the macOS one.
+      # Both qualified host libraries, plus the generated bindings from macOS.
       - uses: actions/download-artifact@v4
         with:
           name: jvm-linux-x86-64
           path: ${{ runner.temp }}/jvm-linux
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: jvm-darwin-aarch64
+          path: ${{ runner.temp }}/jvm-darwin
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-native-aarch64-apple-ios
+          path: ${{ runner.temp }}/ios-native/aarch64-apple-ios
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-native-aarch64-apple-ios-sim
+          path: ${{ runner.temp }}/ios-native/aarch64-apple-ios-sim
+
       - name: Package and qualify the versioned iOS SDK, then publish the JVM libraries
         working-directory: source
         run: |
           set -euo pipefail
-          gradle() { sdks/kotlin/gradlew -p sdks/kotlin -ProckyVersion="${ROCKY_VERSION}" "$@"; }
+          gradle() {
+            sdks/kotlin/gradlew -p sdks/kotlin -ProckyVersion="${ROCKY_VERSION}" \
+              -Procky.bindings="$RUNNER_TEMP/jvm-darwin/bindings" \
+              -Procky.iosNatives="$RUNNER_TEMP/ios-native" "$@"
+          }
           gradle packageIos qualifyIosPackage
           mkdir -p dist
           tar -czf "dist/rocky-kotlin-sdk-${ROCKY_VERSION}-ios.tar.gz" -C sdks/kotlin/build packaged-ios

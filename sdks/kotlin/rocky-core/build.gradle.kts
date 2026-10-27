@@ -19,6 +19,7 @@ val bindings = tasks.register<GenerateBindings>("generateBindings") {
     ios.set(output.map { it.dir("ios") })
     headers.set(output.map { it.dir("headers") })
     hostLibrary.set(output.map { it.dir("host") })
+    prebuilt.set(providers.gradleProperty("rocky.bindings").map { rootProject.layout.projectDirectory.dir(it) })
 }
 
 // IDE imports need the same native declarations as compilation, including after a clean checkout.
@@ -47,6 +48,7 @@ kotlin {
             sources.from(rustSources())
             target.set(rustTarget)
             qualification.set(faultInjection.map { it && rustTarget.endsWith("-sim") })
+            prebuilt.set(providers.gradleProperty("rocky.iosNatives").map { rootProject.layout.projectDirectory.file("$it/$rustTarget/librocky_uniffi.a") })
             library.set(layout.buildDirectory.dir("runtime/$rustTarget"))
         }
         compilations.getByName("main").cinterops.create("rocky") {

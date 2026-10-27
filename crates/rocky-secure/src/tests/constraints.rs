@@ -4,6 +4,7 @@ use super::*;
 use crate::sql::{SqlError, SqlOptions};
 use crate::{Describe, ReceiveStatus, SecureSql};
 use rocky_core::{DomainId, LogicalSchema, Scope, SqlValue, TypedRows};
+use std::collections::BTreeMap;
 
 const DEFINITION: &str = r#"{
     "format":6, "publisher": "PUBLISHER", "application": "shop",
@@ -312,7 +313,13 @@ async fn unique_values_converge_in_any_order_and_the_loser_returns() {
         ],
     )
     .await;
+    let measurements = replicas[0].lock_measurements();
+    measurements.start();
     deliver(&replicas[0], &from_b).await;
+    assert!(
+        dependent_samples(&measurements.stop()).is_empty(),
+        "unique peers must not enter the dependent fan-out exception"
+    );
     deliver(&replicas[1], &from_a).await;
     // The third device receives everything the other way round.
     for frame in from_b.iter().chain(&from_a).rev() {
@@ -527,7 +534,16 @@ async fn deleted_parents_hide_children_until_a_live_parent_is_named() {
     .await;
     deliver(&replicas[2], &deleted).await;
     deliver(&replicas[0], &added).await;
+    let measurements = replicas[1].lock_measurements();
+    measurements.start();
     deliver(&replicas[1], &deleted).await;
+    assert_eq!(
+        dependent_samples(&measurements.stop())
+            .iter()
+            .map(|(count, _)| *count)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
     for session in &sessions[..2] {
         // Hidden on every replica that has not seen the repoint.
         assert_eq!(
@@ -738,6 +754,289 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
     assert!(rows(&session, ITEMS).await.is_empty());
     fresh.rebuild_projection(shop.lists).await.unwrap();
     assert_eq!(rows(&session, ITEMS).await, visible);
+}
+
+fn dependent_samples(measurements: &crate::replica::Measurements) -> Vec<(u64, u64)> {
+    measurements
+        .holders
+        .values()
+        .flat_map(|holder| {
+            holder
+                .units
+                .get("constraint_dependent_row")
+                .into_iter()
+                .flatten()
+        })
+        .copied()
+        .collect()
+}
+
+/// A one-row direct page must publish all newly anchored children together.
+#[tokio::test]
+async fn one_checkpoint_parent_reveals_all_previously_imported_children() {
+    checkpoint_parent_fanout(32).await;
+}
+
+#[tokio::test]
+#[ignore = "dependent fan-out measurement; run in release mode with --ignored --nocapture"]
+async fn measure_checkpoint_parent_fanout() {
+    for children in [1_000, 10_000] {
+        let mut costs = Vec::new();
+        for sample in 0..3 {
+            let (count, hold_us) = checkpoint_parent_fanout(children).await;
+            assert_eq!(count, children as u64);
+            eprintln!(
+                "dependent_fanout children={children} sample={sample} hold_us={hold_us} us_per_induced_row={:.3}",
+                hold_us as f64 / count as f64
+            );
+            costs.push(hold_us);
+        }
+        costs.sort_unstable();
+        eprintln!(
+            "dependent_fanout children={children} samples=3 p50_us={} p95_us={} p99_us={} max_us={}",
+            costs[1], costs[2], costs[2], costs[2]
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "checkpoint storage-step calibration; run in release mode with --ignored --nocapture"]
+async fn measure_checkpoint_storage_steps() {
+    const ROWS: usize = 2_048;
+    let sizes: &[usize] = if cfg!(feature = "qualification") {
+        &[32, 64, 128]
+    } else {
+        &[1, 2, 4, 8, 16]
+    };
+    for &store in sizes {
+        crate::replica::checkpoint::STORE_ROWS_FOR_TEST.with(|rows| rows.set(Some(store)));
+        let mut holds = Vec::new();
+        let mut metadata = BTreeMap::<u64, Vec<u64>>::new();
+        for _ in 0..2 {
+            let measured = checkpoint_storage_steps(ROWS, store).await;
+            holds.extend(measured.rows);
+            for (records, samples) in measured.metadata {
+                metadata.entry(records).or_default().extend(samples);
+            }
+        }
+        crate::replica::checkpoint::STORE_ROWS_FOR_TEST.with(|rows| rows.set(None));
+        holds.sort_unstable();
+        let rank = |p: usize| holds[(holds.len() * p).div_ceil(100).max(1) - 1];
+        eprintln!(
+            "checkpoint_store rows_per_step={store} samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+            holds.len(),
+            rank(50),
+            rank(95),
+            rank(99),
+            holds[holds.len() - 1]
+        );
+        for (records, mut samples) in metadata {
+            samples.sort_unstable();
+            let rank = |p: usize| samples[(samples.len() * p).div_ceil(100).max(1) - 1];
+            eprintln!(
+                "checkpoint_metadata rows_per_step={store} input_records={records} samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+                samples.len(),
+                rank(50),
+                rank(95),
+                rank(99),
+                samples.last().unwrap()
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct StorageHolds {
+    rows: Vec<u64>,
+    metadata: BTreeMap<u64, Vec<u64>>,
+}
+
+/// Stores a fresh `count`-child checkpoint after its parent and returns each
+/// full storage steps' holds; page tails are checked but excluded from the fit.
+async fn checkpoint_storage_steps(count: usize, store: usize) -> StorageHolds {
+    let shop = Shop::new();
+    let dir = TempDir::new().unwrap();
+    let source_node = PrivateKey::new();
+    let source = shop
+        .open(&dir.path().join("source.db"), &source_node, 31)
+        .await;
+    let sql = shop.sql(&source).await;
+    let (parents, _) = commit(
+        &sql,
+        &[("INSERT INTO lists(title,id) VALUES('parent',?id)", vec![])],
+    )
+    .await;
+    let statements: Vec<_> = (0..count)
+        .map(|index| {
+            (
+                "INSERT INTO items(list,code,id) VALUES(?,?,?id)",
+                vec![integer(parents[0]), text(&format!("child-{index}"))],
+            )
+        })
+        .collect();
+    for chunk in statements.chunks(128) {
+        commit(&sql, chunk).await;
+    }
+    let node = PrivateKey::new();
+    let target = shop.open(&dir.path().join("target.db"), &node, 33).await;
+    let credentials = shop.credentials(&node, crate::tests::node_number(node.public_key()));
+    let mut holds = StorageHolds::default();
+    let mut stored = 0;
+    for scope in [shop.lists, shop.items] {
+        let signed = compacted_base(&source, &shop.publisher, scope).await;
+        let checkpoint = signed.id().unwrap();
+        link_up(&source, &target, scope.domain).await;
+        target.begin_rebootstrap(signed).await.unwrap();
+        let measurements = target.lock_measurements();
+        let mut after = None;
+        loop {
+            let page = source
+                .checkpoint_page(
+                    node.public_key(),
+                    &credentials,
+                    scope,
+                    checkpoint,
+                    after,
+                    crate::MAX_SECURE_FRAME,
+                )
+                .await
+                .unwrap();
+            after = page.next;
+            measurements.start();
+            target.stage_checkpoint_page(page).await.unwrap();
+            if scope == shop.items {
+                for holder in measurements.stop().holders.into_values() {
+                    for (count, hold) in holder
+                        .units
+                        .get("checkpoint_store_row")
+                        .into_iter()
+                        .flatten()
+                    {
+                        assert!(*count > 0 && *count <= store as u64);
+                        stored += *count as usize;
+                        if *count == store as u64 {
+                            holds.rows.push(*hold);
+                        }
+                    }
+                    for (records, hold) in holder
+                        .units
+                        .get("checkpoint_store_metadata")
+                        .into_iter()
+                        .flatten()
+                    {
+                        assert!(
+                            *records > 0
+                                && *records <= crate::replica::checkpoint::STORE_METADATA as u64
+                        );
+                        // Combined metadata/row work is already in the full row hold.
+                        if !holder.units.contains_key("checkpoint_store_row") {
+                            holds.metadata.entry(*records).or_default().push(*hold);
+                        }
+                    }
+                }
+            } else {
+                measurements.stop();
+            }
+            if after.is_none() {
+                break;
+            }
+        }
+        target.finish_rebootstrap(scope).await.unwrap();
+    }
+    assert_eq!(stored, count);
+    assert!(!holds.rows.is_empty(), "no full {store}-row storage steps");
+    let session = shop.sql(&target).await;
+    assert_eq!(
+        rows(&session, "SELECT count(*) FROM items").await,
+        vec![vec![integer(count as i64)]]
+    );
+    target.audit(shop.items).await.unwrap();
+    holds
+}
+
+async fn checkpoint_parent_fanout(children: usize) -> (u64, u64) {
+    let shop = Shop::new();
+    let dir = TempDir::new().unwrap();
+    let source_node = PrivateKey::new();
+    let source = shop
+        .open(&dir.path().join("source.db"), &source_node, 31)
+        .await;
+    let sql = shop.sql(&source).await;
+    let (parents, _) = commit(
+        &sql,
+        &[("INSERT INTO lists(title,id) VALUES('parent',?id)", vec![])],
+    )
+    .await;
+    let statements: Vec<_> = (0..children)
+        .map(|index| {
+            (
+                "INSERT INTO items(list,code,id) VALUES(?,?,?id)",
+                vec![integer(parents[0]), text(&format!("child-{index}"))],
+            )
+        })
+        .collect();
+    for chunk in statements.chunks(128) {
+        commit(&sql, chunk).await;
+    }
+    let node = PrivateKey::new();
+    let target = shop.open(&dir.path().join("target.db"), &node, 33).await;
+    let credentials = shop.credentials(&node, crate::tests::node_number(node.public_key()));
+    let session = shop.sql(&target).await;
+    let mut measured = None;
+    for scope in [shop.items, shop.lists] {
+        let signed = compacted_base(&source, &shop.publisher, scope).await;
+        if scope == shop.lists {
+            assert_eq!(signed.statement.rows.count, 1);
+            assert!(rows(&session, ITEMS).await.is_empty());
+        }
+        let checkpoint = signed.id().unwrap();
+        link_up(&source, &target, scope.domain).await;
+        target.begin_rebootstrap(signed).await.unwrap();
+        let measurements = target.lock_measurements();
+        if scope == shop.lists {
+            measurements.start();
+        }
+        let mut after = None;
+        loop {
+            let page = source
+                .checkpoint_page(
+                    node.public_key(),
+                    &credentials,
+                    scope,
+                    checkpoint,
+                    after,
+                    crate::MAX_SECURE_FRAME,
+                )
+                .await
+                .unwrap();
+            after = page.next;
+            target.stage_checkpoint_page(page).await.unwrap();
+            if after.is_none() {
+                break;
+            }
+        }
+        if scope == shop.lists {
+            // These are live typed rows before finish_rebootstrap's transition.
+            assert_eq!(
+                rows(&session, "SELECT count(*) FROM items").await,
+                vec![vec![integer(children as i64)]]
+            );
+            let samples = dependent_samples(&measurements.stop());
+            assert_eq!(
+                samples.iter().map(|(count, _)| *count).collect::<Vec<_>>(),
+                vec![children as u64]
+            );
+            measured = samples.into_iter().next();
+        }
+        target.finish_rebootstrap(scope).await.unwrap();
+    }
+    assert_eq!(
+        rows(&session, "SELECT count(*) FROM items").await,
+        rows(&sql, "SELECT count(*) FROM items").await
+    );
+    target.audit(shop.lists).await.unwrap();
+    target.audit(shop.items).await.unwrap();
+    measured.unwrap()
 }
 
 /// A row record names its author's bindings by digest. Each set is stored

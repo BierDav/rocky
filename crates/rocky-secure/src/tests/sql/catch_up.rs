@@ -362,7 +362,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
             break (creator, updater);
         }
     };
-    let rows = 160;
+    let rows = 4;
     let source = t
         .open(&dir.path().join("creator.db"), &creator, t.full(), &both)
         .await;
@@ -444,15 +444,14 @@ async fn interrupted_catch_up(retry_receipt: bool) {
     for status in reader.receive_all(frames).await {
         assert_eq!(status.unwrap(), ReceiveStatus::PendingDependencies);
     }
-    // The first creation's group applies what it can; the pass stops
-    // before the next transaction.
+    // Receipt commits custody, then the fault stops before application.
     crate::APPLY_BUDGET.with(|budget| budget.set(Some(0)));
     assert!(reader.receive(first.clone()).await.is_err());
     let mut current = retry_receipt.then_some(reader);
     let mut interruptions = 1;
     loop {
         // Each reopen or retried receipt commits one more apply transaction.
-        crate::APPLY_BUDGET.with(|budget| budget.set(Some(usize::from(!retry_receipt))));
+        crate::APPLY_BUDGET.with(|budget| budget.set(Some(1)));
         let resumed = if let Some(reader) = current.take() {
             match reader.receive(first.clone()).await {
                 Ok(ReceiveStatus::Duplicate) => Ok(reader),
@@ -492,8 +491,8 @@ async fn interrupted_catch_up(retry_receipt: bool) {
             }
         }
     }
-    // 320 operations take at least five transactions of 64.
-    assert!(interruptions >= 4, "{interruptions} interruptions");
+    // Eight operations take separate application transactions.
+    assert!(interruptions >= 7, "{interruptions} interruptions");
 }
 async fn rows_of(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
     crate::storage::rows(

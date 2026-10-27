@@ -15,17 +15,17 @@ pub(crate) enum Class {
 /// The raw mutex stays private so every acquisition has a class and a caller.
 pub(crate) struct ReplicaLock<T> {
     mutex: Arc<Mutex<T>>,
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
 }
 impl<T> ReplicaLock<T> {
     pub(crate) fn new(
         value: T,
-        #[cfg(feature = "qualification")] measurements: LockMeasurements,
+        #[cfg(any(test, feature = "qualification"))] measurements: LockMeasurements,
     ) -> Self {
         Self {
             mutex: Arc::new(Mutex::new(value)),
-            #[cfg(feature = "qualification")]
+            #[cfg(any(test, feature = "qualification"))]
             measurements,
         }
     }
@@ -54,34 +54,38 @@ impl<T> ReplicaLock<T> {
         let timing = cfg!(feature = "qualification")
             || tracing::enabled!(target: "replica", tracing::Level::DEBUG);
         let requested = timing.then(Instant::now);
-        #[cfg(feature = "qualification")]
+        #[cfg(any(test, feature = "qualification"))]
         let measurements = self.measurements.clone();
         async move {
             let guard = future.await;
             let acquired = Instant::now();
-            #[cfg(feature = "qualification")]
+            #[cfg(any(test, feature = "qualification"))]
             let work_start = measurements.work_snapshot();
             Guard {
                 guard,
-                #[cfg(feature = "qualification")]
+                #[cfg(any(test, feature = "qualification"))]
                 work_start,
                 _timing: Hold {
                     site,
                     class,
                     acquired,
                     wait: requested.map_or(Duration::ZERO, |start| acquired.duration_since(start)),
-                    #[cfg(feature = "qualification")]
+                    #[cfg(any(test, feature = "qualification"))]
                     measurements,
-                    #[cfg(feature = "qualification")]
+                    #[cfg(any(test, feature = "qualification"))]
                     connection: qualification::connection(),
-                    #[cfg(feature = "qualification")]
+                    #[cfg(any(test, feature = "qualification"))]
                     units: Vec::new(),
+                    #[cfg(any(test, feature = "qualification"))]
+                    normal_rows: super::group::APPLICATION_ROWS,
+                    #[cfg(any(test, feature = "qualification"))]
+                    input_rows: 1,
                 },
             }
         }
     }
 
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     pub(crate) fn measurements(&self) -> LockMeasurements {
         self.measurements.clone()
     }
@@ -91,22 +95,33 @@ pub(crate) struct Guard<G> {
     // Field order releases the mutex before recording its completed hold.
     guard: G,
     _timing: Hold,
-    #[cfg(feature = "qualification")]
-    work_start: [u64; 3],
+    #[cfg(any(test, feature = "qualification"))]
+    work_start: [u64; 16],
 }
 struct Hold {
     site: &'static Location<'static>,
     class: Class,
     acquired: Instant,
     wait: Duration,
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     connection: Option<u64>,
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     units: Vec<(&'static str, u64)>,
+    #[cfg(any(test, feature = "qualification"))]
+    normal_rows: u64,
+    #[cfg(any(test, feature = "qualification"))]
+    input_rows: u64,
 }
-#[cfg(feature = "qualification")]
+#[cfg(any(test, feature = "qualification"))]
+impl<G> Guard<G> {
+    pub(crate) fn row_work(&mut self, bound: u64, inputs: u64) {
+        self._timing.normal_rows = bound;
+        self._timing.input_rows = inputs;
+    }
+}
+#[cfg(any(test, feature = "qualification"))]
 impl<G> Guard<G> {
     pub(crate) fn units(&mut self, unit: &'static str, count: u64) {
         if count > 0 {
@@ -114,13 +129,30 @@ impl<G> Guard<G> {
         }
     }
 }
-#[cfg(feature = "qualification")]
+#[cfg(any(test, feature = "qualification"))]
 impl<G> Drop for Guard<G> {
     fn drop(&mut self) {
         let end = self._timing.measurements.work_snapshot();
-        for (index, unit) in ["replayed_frame", "base_row", "checkpoint_row"]
-            .into_iter()
-            .enumerate()
+        for (index, unit) in [
+            "replayed_frame",
+            "base_row",
+            "checkpoint_row",
+            "constraint_dependent_row",
+            "maintenance_record",
+            "held_refresh_record",
+            "held_refresh_frame",
+            "held_member_frame",
+            "held_member_row",
+            "held_token_record",
+            "held_page_record",
+            "received_input_row",
+            "held_listing_row",
+            "migration_storage_record",
+            "prune_candidate",
+            "reclaimed_page",
+        ]
+        .into_iter()
+        .enumerate()
         {
             let count = end[index].saturating_sub(self.work_start[index]);
             if count > 0 {
@@ -148,18 +180,19 @@ impl Drop for Hold {
                 wait_us = self.wait.as_micros() as u64, hold_us = hold.as_micros() as u64,
                 "replica lock hold");
         }
-        #[cfg(feature = "qualification")]
+        #[cfg(any(test, feature = "qualification"))]
         self.measurements.record(
             self.site,
             self.class,
             (self.wait, hold),
             self.connection,
             &self.units,
+            (self.normal_rows, self.input_rows),
         );
     }
 }
 
-#[cfg(feature = "qualification")]
+#[cfg(any(test, feature = "qualification"))]
 mod qualification {
     use super::*;
     use std::collections::BTreeMap;
@@ -169,6 +202,7 @@ mod qualification {
         CONNECTION.try_with(|id| *id).ok()
     }
     /// Carries an SDK SQL connection identity across its server-side task.
+    #[cfg(feature = "qualification")]
     pub async fn with_measurement_connection<T>(id: u64, future: impl Future<Output = T>) -> T {
         CONNECTION.scope(id, future).await
     }
@@ -178,12 +212,27 @@ mod qualification {
     #[derive(Default)]
     struct Recording {
         data: std::sync::Mutex<Option<Measurements>>,
-        work: [std::sync::atomic::AtomicU64; 3],
+        work: [std::sync::atomic::AtomicU64; 16],
     }
     pub(crate) enum WorkUnit {
-        ReplayedFrame,
-        BaseRow,
-        CheckpointRow,
+        #[cfg(feature = "qualification")]
+        ReplayedFrame = 0,
+        BaseRow = 1,
+        #[cfg(feature = "qualification")]
+        CheckpointRow = 2,
+        DependentRow = 3,
+        MaintenanceRecord = 4,
+        HeldRefreshRecord = 5,
+        HeldRefreshFrame = 6,
+        HeldMemberFrame = 7,
+        HeldMemberRow = 8,
+        HeldTokenRecord = 9,
+        HeldPageRecord = 10,
+        ReceivedInputRow = 11,
+        HeldListingRow = 12,
+        MigrationStorageRecord = 13,
+        PruneCandidate = 14,
+        ReclaimedPage = 15,
     }
 
     #[derive(Default, Debug)]
@@ -197,6 +246,11 @@ mod qualification {
     pub struct HolderMeasurements {
         pub wait_us: Vec<u64>,
         pub hold_us: Vec<u64>,
+        /// Oversized dependent fan-out: (induced typed rows, full hold us).
+        /// These acquisitions are excluded from the ordinary hold histogram.
+        pub dependent_fanout_us: Vec<(u64, u64)>,
+        /// Existing indivisible-request exception, separate from induced fan-out.
+        pub oversized_request_us: Vec<u64>,
         /// (work count, full acquisition hold in microseconds).
         pub units: BTreeMap<String, Vec<(u64, u64)>>,
     }
@@ -210,7 +264,7 @@ mod qualification {
         pub(crate) fn work(&self, unit: WorkUnit, count: u64) {
             self.0.work[unit as usize].fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         }
-        pub(super) fn work_snapshot(&self) -> [u64; 3] {
+        pub(super) fn work_snapshot(&self) -> [u64; 16] {
             std::array::from_fn(|index| {
                 self.0.work[index].load(std::sync::atomic::Ordering::Relaxed)
             })
@@ -248,6 +302,7 @@ mod qualification {
             (wait, hold): (Duration, Duration),
             connection: Option<u64>,
             units: &[(&str, u64)],
+            (normal_rows, input_rows): (u64, u64),
         ) {
             if let Some(measurements) = self
                 .0
@@ -261,7 +316,26 @@ mod qualification {
                     .entry((site.to_string(), format!("{class:?}")))
                     .or_default();
                 holder.wait_us.push(wait.as_micros() as u64);
-                holder.hold_us.push(hold.as_micros() as u64);
+                let dependent = units
+                    .iter()
+                    .filter(|(unit, _)| *unit == "constraint_dependent_row")
+                    .map(|(_, count)| count)
+                    .sum::<u64>();
+                let oversized = units.iter().any(|(unit, count)| {
+                    (*unit == "oversized_request" && *count > 0)
+                        || (*unit == "held_member_row"
+                            && *count > super::super::group::APPLICATION_ROWS)
+                        || (*unit == "received_input_row" && *count > normal_rows)
+                });
+                if dependent > 0 && dependent.saturating_add(input_rows) > normal_rows {
+                    holder
+                        .dependent_fanout_us
+                        .push((dependent, hold.as_micros() as u64));
+                } else if oversized {
+                    holder.oversized_request_us.push(hold.as_micros() as u64);
+                } else {
+                    holder.hold_us.push(hold.as_micros() as u64);
+                }
                 for (unit, count) in units {
                     holder
                         .units
@@ -276,6 +350,7 @@ mod qualification {
                 }
             }
         }
+        #[cfg(feature = "qualification")]
         pub(crate) fn checkpoint(&self, mode: &str, pages: u64, elapsed: Duration) {
             if let Some(measurements) = self
                 .0
@@ -291,6 +366,7 @@ mod qualification {
                     .push((pages, elapsed.as_micros() as u64));
             }
         }
+        #[cfg(feature = "qualification")]
         pub(crate) fn flush(&self, elapsed: Duration) {
             if let Some(measurements) = self
                 .0
@@ -308,7 +384,7 @@ mod qualification {
         }
     }
 }
-#[cfg(feature = "qualification")]
+#[cfg(any(test, feature = "qualification"))]
 pub use qualification::*;
 
 #[cfg(test)]
@@ -355,7 +431,7 @@ mod tests {
         let _subscriber = tracing::subscriber::set_default(events.clone());
         let mutex = ReplicaLock::new(
             (),
-            #[cfg(feature = "qualification")]
+            #[cfg(any(test, feature = "qualification"))]
             LockMeasurements::default(),
         );
         let line = line!() + 1;
@@ -375,7 +451,7 @@ mod tests {
         assert!(fields["wait_us"].parse::<u64>().is_ok());
     }
 
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     #[tokio::test]
     async fn histogram_records_both_classes_and_owned_guards() {
         let measurements = LockMeasurements::default();
@@ -384,6 +460,7 @@ mod tests {
         let mut guard = mutex.lock(Class::Background).await;
         guard._timing.acquired -= Duration::from_millis(2);
         measurements.work(WorkUnit::BaseRow, 7);
+        measurements.work(WorkUnit::DependentRow, 4);
         drop(guard);
         let line = line!() + 1;
         let future = mutex.lock_owned(Class::Interactive);
@@ -400,6 +477,9 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].0, 7);
         assert!(samples[0].1 >= 2000);
+        assert!(background.hold_us.is_empty());
+        assert_eq!(background.dependent_fanout_us.len(), 1);
+        assert_eq!(background.dependent_fanout_us[0].0, 4);
         let interactive = snapshot
             .holders
             .iter()
@@ -407,6 +487,25 @@ mod tests {
             .unwrap();
         assert!(interactive.0.0.contains(&format!("lock.rs:{line}:")));
         assert_eq!(interactive.1.hold_us.len(), 1);
+        assert!(interactive.1.dependent_fanout_us.is_empty());
         assert!(measurements.take().holders.is_empty());
+    }
+    #[tokio::test]
+    async fn indivisible_requests_keep_their_own_histogram() {
+        let measurements = LockMeasurements::default();
+        let mutex = ReplicaLock::new((), measurements.clone());
+        measurements.start();
+        for rows in [0, 2] {
+            let guard = mutex.lock(Class::Background).await;
+            measurements.work(WorkUnit::HeldMemberRow, rows);
+            drop(guard);
+        }
+        let snapshot = measurements.stop();
+        assert_eq!(snapshot.holders.len(), 1);
+        let holder = snapshot.holders.values().next().unwrap();
+        assert_eq!(holder.wait_us.len(), 2);
+        assert_eq!(holder.hold_us.len(), 1);
+        assert_eq!(holder.oversized_request_us.len(), 1);
+        assert!(holder.dependent_fanout_us.is_empty());
     }
 }

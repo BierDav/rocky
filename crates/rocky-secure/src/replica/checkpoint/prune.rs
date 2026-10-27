@@ -170,6 +170,11 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
             )
             .await?;
+            #[cfg(any(test, feature = "qualification"))]
+            inner
+                .flusher
+                .measurements
+                .work(lock::WorkUnit::PruneCandidate, candidates.len() as u64);
             let mut step = PruneStep {
                 pruned: 0,
                 blocked: None,

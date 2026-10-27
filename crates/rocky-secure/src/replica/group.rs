@@ -1,16 +1,32 @@
 //! Group commit for authoring and incoming frames. Callers enqueue requests;
-//! whoever holds the replica lock drains the queue as leader and runs one
-//! `BEGIN IMMEDIATE` transaction with one savepoint per request. Results,
+//! whoever holds the replica lock drains the queue as leader and runs
+//! bounded `BEGIN IMMEDIATE` transactions with one savepoint per request. Results,
 //! the revision watch and everything readers see follow the commit; results
 //! that may leave the device also follow one shared flush.
 use super::*;
 use std::collections::VecDeque;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
-/// Requests per group transaction; also the applications per pending pass.
+/// Requests drained for one shared flush, across bounded transactions.
 pub(super) const GROUP_REQUESTS: usize = 64;
 /// Request bytes per group; a single larger request still forms its own group.
 pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
+/// Author requests per transaction. Receive admission also applies a ready
+/// request, so it uses RECEIVE_REQUESTS instead of this admission-only bound.
+const STEP_REQUESTS: usize = 2;
+/// One-row incoming frames per transaction, including ready application.
+/// Pixel cold/warm p99 27.032/25.025 ms, including inspection and commit;
+/// see docs/features_12/02-bounded-holds-evidence.md. Larger requests run alone.
+pub(crate) const RECEIVE_REQUESTS: usize = 4;
+/// Encoded input bytes per transaction; a larger atomic request runs alone.
+/// Sized in the receive-step sizing evidence.
+const STEP_BYTES: usize = 32 * 1024;
+/// One discovery, application or cleanup unit per acquisition. Pixel warm
+/// one-row application p99 8.466 ms; see the receive-step sizing evidence.
+pub(super) const SETTLE_REQUESTS: usize = 1;
+/// Larger atomic frames/bundles are reported as oversized requests.
+/// One warm row costs 8.466 ms at p99 on Pixel; see the sizing evidence.
+pub(super) const APPLICATION_ROWS: u64 = 1;
 /// WAL size that triggers a passive checkpoint between groups, and the
 /// size a reset WAL is cut back to.
 pub(super) const WAL_CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
@@ -20,8 +36,8 @@ pub(super) const WAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// Free pages past which, and at most how many, one step returns to the file
 /// system after a commit.
-const RECLAIM_PAGES: i64 = 1024;
-const RECLAIM_STEP: i64 = 4096;
+pub(crate) const RECLAIM_PAGES: i64 = 1024;
+pub(crate) const RECLAIM_STEP: i64 = 4096;
 /// Combined main and temporary page caches, negative as SQLite counts KiB.
 #[cfg(target_os = "android")]
 pub(super) const CACHE_KIB: i64 = -8 * 1024;
@@ -74,11 +90,10 @@ pub(super) type Queue = std::sync::Mutex<VecDeque<Request>>;
 #[derive(Default)]
 struct Outcome {
     results: Vec<Result<Staged, Error>>,
-    /// A failed pending pass; its savepoint is rolled back and receivers report it.
-    pass: Option<Error>,
-    /// The pass stopped at its bound; more passes follow the commit.
+    /// Previously blocked work may be ready after this commit.
     more: bool,
     revision: u64,
+    pass: Option<Error>,
 }
 
 /// Fault points inside a group, for crash and visibility tests.
@@ -89,6 +104,8 @@ pub(crate) enum GroupFault {
     ExitBeforeCommit,
     ExitAfterCommit,
     FailBeforeCommit,
+    FailAfterCommits(usize),
+    FailApplicationBeforeCommit,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -109,8 +126,97 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
+    #[cfg(test)]
+    pub(crate) async fn measure_ready_receive_for_test(
+        &self,
+        frames: &[EncryptedFrame],
+    ) -> Result<std::time::Duration, Error> {
+        let mut cohort = VecDeque::new();
+        let mut receivers = Vec::new();
+        for frame in frames {
+            let (reply, receiver) = oneshot::channel();
+            receivers.push(receiver);
+            cohort.push_back(Request {
+                work: Work::Receive(frame.clone()),
+                weight: frame.to_bytes()?.len(),
+                exposed: false,
+                reply,
+            });
+        }
+        let mut inner = self.inner.lock(Class::Background).await;
+        let started = std::time::Instant::now();
+        let requests = step(&mut cohort, &inner, frames.len());
+        assert!(
+            cohort.is_empty(),
+            "calibration must fit one ordinary receive step"
+        );
+        let works: Vec<_> = requests.into_iter().map(|request| request.work).collect();
+        inner.row_work(frames.len() as u64 * APPLICATION_ROWS, frames.len() as u64);
+        transaction!(@commit inner, |inner| inner.run_group(&works, now()?).await)?;
+        drop(inner);
+        let elapsed = started.elapsed();
+        for frame in frames {
+            assert_eq!(
+                self.receipt_status(frame.id()?).await?,
+                ReceiveStatus::Applied
+            );
+        }
+        Ok(elapsed)
+    }
+    /// Measures receipt separately from one indivisible pending application.
+    #[cfg(test)]
+    pub(crate) async fn measure_receive_steps_for_test(
+        &self,
+        frames: &[EncryptedFrame],
+        batch: usize,
+    ) -> Result<
+        (
+            Vec<std::time::Duration>,
+            std::time::Duration,
+            std::time::Duration,
+        ),
+        Error,
+    > {
+        let time = now()?;
+        let mut admissions = Vec::new();
+        for frames in frames.chunks(batch) {
+            let mut inner = self.inner.lock(Class::Background).await;
+            let started = std::time::Instant::now();
+            transaction!(@commit inner, |inner| {
+                for frame in frames {
+                    inner.receive_step(frame, time).await?;
+                }
+                Ok(())
+            })?;
+            admissions.push(started.elapsed());
+        }
+        let mut inner = self.inner.lock(Class::Background).await;
+        let started = std::time::Instant::now();
+        let outcome =
+            transaction!(@commit inner, |inner| inner.apply_frame(&frames[0], time).await)?;
+        let application = started.elapsed();
+        assert!(matches!(outcome, incoming::Outcome::Applied));
+        inner.publish_revision().await?;
+        drop(inner);
+        let mut inner = self.inner.lock(Class::Background).await;
+        let started = std::time::Instant::now();
+        transaction!(@commit inner, |inner| inner.apply_pending(time, 1).await)?;
+        let settle = started.elapsed();
+        Ok((admissions, application, settle))
+    }
     /// Enqueues `work` as contiguous requests and returns their results in order.
     pub(super) async fn submit(&self, work: Vec<(Work, usize)>, exposed: bool) -> Vec<Reply> {
+        #[cfg(feature = "qualification")]
+        let receive_limit = match crate::qualification_bound(
+            "ROCKY_RECEIVE_REQUESTS",
+            RECEIVE_REQUESTS,
+            GROUP_REQUESTS,
+        ) {
+            Ok(limit) => limit,
+            Err(error) => return work.iter().map(|_| Err(shared(&error))).collect(),
+        };
+        #[cfg(not(feature = "qualification"))]
+        let receive_limit = RECEIVE_REQUESTS;
         let class = if work
             .iter()
             .any(|(work, _)| matches!(work, Work::Author { .. } | Work::Bundle { .. }))
@@ -149,57 +255,101 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut guard = guard;
         let mut first = true;
         while !collect(&mut pending, &mut results) {
-            // The lock is released between groups and during a group's
-            // flush, so readers and other leaders run in between.
             let mut inner = match guard.take() {
                 Some(guard) => guard,
                 None => self.inner.lock(class).await,
             };
             if std::mem::take(&mut first) {
-                // One scheduler pass lets concurrent callers join; no timer.
+                drop(inner);
                 tokio::task::yield_now().await;
+                inner = self.inner.lock(class).await;
             }
-            let group = self.drain();
-            if group.is_empty() {
+            let mut cohort: VecDeque<_> = self.drain().into();
+            if cohort.is_empty() {
                 break;
             }
-            #[cfg(feature = "qualification")]
-            {
-                inner.units(
-                    "encoded_byte",
-                    group.iter().map(|request| request.weight as u64).sum(),
-                );
-                if group
+            let mut exposed = None;
+            let mut scopes = BTreeSet::new();
+            let mut pending_replies = VecDeque::new();
+            let mut settle_failure = None;
+            let flusher = inner.flusher.clone();
+            while !cohort.is_empty() {
+                let group = step(&mut cohort, &inner, receive_limit);
+                #[cfg(any(test, feature = "qualification"))]
+                let row_bound = group.len() as u64 * APPLICATION_ROWS;
+                #[cfg(any(test, feature = "qualification"))]
+                {
+                    inner.units("encoded_byte", group.iter().map(|r| r.weight as u64).sum());
+                    if group.iter().all(|r| matches!(r.work, Work::Receive(_))) {
+                        inner.units("received_frame", group.len() as u64);
+                    }
+                }
+                #[cfg(any(test, feature = "qualification"))]
+                let received_work = group
                     .iter()
                     .all(|request| matches!(request.work, Work::Receive(_)))
+                    .then(|| {
+                        (
+                            inner.frames_written.load(Ordering::Relaxed),
+                            inner.rows_written.load(Ordering::Relaxed),
+                            inner.applied_frames,
+                        )
+                    });
+                let (answers, written, settling) = inner.commit_group(group).await;
+                #[cfg(any(test, feature = "qualification"))]
+                if let Some(before) = received_work {
+                    let rows = inner.rows_written.load(Ordering::Relaxed) - before.1;
+                    let frames = inner.frames_written.load(Ordering::Relaxed) - before.0;
+                    let requests = inner.applied_frames - before.2;
+                    inner.row_work(row_bound, rows);
+                    inner.units("applied_row", rows);
+                    inner.units("applied_frame", frames);
+                    inner.units("applied_request", requests);
+                    if rows > row_bound {
+                        inner.units("oversized_request", 1);
+                    }
+                }
+                Exposed::append(&mut exposed, answers);
+                scopes.extend(written);
+                drop(inner);
+                pending_replies.extend(settling);
+                if !pending_replies.is_empty()
+                    && cohort
+                        .front()
+                        .is_some_and(|r| !matches!(r.work, Work::Receive(_)))
+                    && let Err(error) = self.settle().await
                 {
-                    inner.units("received_frame", group.len() as u64);
+                    settle_failure.get_or_insert(error);
+                }
+                // Yield outside the guard even when no mutex waiter has registered.
+                tokio::task::yield_now().await;
+                inner = self.inner.lock(class).await;
+            }
+            let mut last_commit = inner.commit;
+            drop(inner);
+            if !pending_replies.is_empty() {
+                if let Err(error) = self.settle().await {
+                    settle_failure.get_or_insert(error);
+                }
+                while !pending_replies.is_empty() {
+                    tokio::task::yield_now().await;
+                    let count = pending_replies.len().min(STEP_REQUESTS);
+                    let replies = pending_replies.drain(..count).collect();
+                    let inner = self.inner.lock(Class::Background).await;
+                    last_commit = inner.commit;
+                    let settled = settle_failure
+                        .as_ref()
+                        .map_or(Ok(()), |error| Err(shared(error)));
+                    Exposed::append(&mut exposed, inner.answer_settled(replies, settled).await);
                 }
             }
-            let (exposed, scopes, settling) = inner.commit_group(group).await;
-            if let Some(exposed) = exposed {
-                let flusher = inner.flusher.clone();
-                drop(inner);
-                // The blocking flush owns the replies even if this leader is cancelled.
+            if let Some(mut exposed) = exposed {
+                exposed.commit = last_commit;
                 exposed.answer(flusher).await;
-                inner = self.inner.lock(crate::replica::Class::Background).await;
             }
-            // Replies are out; one bounded step keeps retained history in check.
-            inner.maintain(&scopes).await;
+            self.maintain_scopes(scopes).await;
+            let mut inner = self.inner.lock(Class::Background).await;
             inner.checkpoint_if_due().await;
-            if !settling.is_empty() {
-                // The rest of the pass runs in transactions of its own and
-                // releases the replica between them.
-                drop(inner);
-                let settled = self.settle().await;
-                let inner = self.inner.lock(crate::replica::Class::Background).await;
-                let exposed = inner.answer_settled(settling, settled).await;
-                if let Some(exposed) = exposed {
-                    let flusher = inner.flusher.clone();
-                    drop(inner);
-                    exposed.answer(flusher).await;
-                }
-            }
         }
         // Another leader took these requests and answers them after its
         // flush, outside the lock. A reply is lost only when its leader was
@@ -244,6 +394,57 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+/// Takes one homogeneous transaction from an already admitted cohort.
+fn step<A: RowApplication>(
+    cohort: &mut VecDeque<Request>,
+    inner: &Inner<A>,
+    receive_limit: usize,
+) -> Vec<Request> {
+    let receiving = cohort
+        .front()
+        .is_some_and(|r| matches!(r.work, Work::Receive(_)));
+    let limit = if receiving {
+        receive_limit
+    } else {
+        STEP_REQUESTS
+    };
+    let mut group = Vec::new();
+    let mut bytes = 0usize;
+    while let Some(request) = cohort.front() {
+        if !group.is_empty()
+            && (group.len() == limit
+                || bytes.saturating_add(request.weight) > STEP_BYTES
+                || receiving != matches!(request.work, Work::Receive(_)))
+        {
+            break;
+        }
+        // Only known one-row frames share a receive step. An atomic bundle,
+        // larger frame or unopened payload keeps its own transaction.
+        let indivisible = if let Work::Receive(frame) = &request.work {
+            inner
+                .open_payload(frame)
+                .and_then(|bytes| inner.decode_row_payload(frame, &bytes))
+                .map_or(true, |payload| {
+                    payload.membership().is_some()
+                        || payload.writes().len() as u64 > APPLICATION_ROWS
+                })
+        } else {
+            false
+        };
+        if !group.is_empty() && indivisible {
+            break;
+        }
+        bytes = bytes.saturating_add(request.weight);
+        if let Some(request) = cohort.pop_front() {
+            group.push(request);
+        }
+        if indivisible {
+            break;
+        }
+    }
+    group
+}
+
 /// Moves delivered replies into `results`; true when every request has one.
 fn collect(pending: &mut [oneshot::Receiver<Reply>], results: &mut [Option<Reply>]) -> bool {
     for (receiver, slot) in pending.iter_mut().zip(results.iter_mut()) {
@@ -273,6 +474,16 @@ struct Exposed {
     commit: u64,
 }
 impl Exposed {
+    fn append(all: &mut Option<Self>, next: Option<Self>) {
+        if let Some(mut next) = next {
+            if let Some(all) = all {
+                all.commit = all.commit.max(next.commit);
+                all.replies.append(&mut next.replies);
+            } else {
+                *all = Some(next);
+            }
+        }
+    }
     /// One flush covers every exposed result in the group.
     async fn answer(self, flusher: Arc<Flusher>) {
         // A cancelled leader still owes every queued caller its durable reply.
@@ -375,8 +586,18 @@ impl<A: RowApplication> Inner<A> {
                 Ok(Staged::Author(frame)) => Ok(Done::Author(frame)),
                 Ok(Staged::Bundle(frames)) => Ok(Done::Bundle(frames)),
                 Ok(Staged::Handled(hash)) => Ok(Done::Pruned(hash)),
-                Ok(Staged::Covered) => Ok(Done::Receive(ReceiveStatus::Pruned)),
-                Ok(Staged::Duplicate) => Ok(Done::Receive(ReceiveStatus::Duplicate)),
+                Ok(Staged::Covered) => outcome
+                    .pass
+                    .as_ref()
+                    .map_or(Ok(Done::Receive(ReceiveStatus::Pruned)), |error| {
+                        Err(shared(error))
+                    }),
+                Ok(Staged::Duplicate) => outcome
+                    .pass
+                    .as_ref()
+                    .map_or(Ok(Done::Receive(ReceiveStatus::Duplicate)), |error| {
+                        Err(shared(error))
+                    }),
                 Ok(Staged::Stored(hash)) => match &outcome.pass {
                     Some(error) => Err(shared(error)),
                     None => self.status(hash).await.map(Done::Receive),
@@ -434,11 +655,6 @@ impl<A: RowApplication> Inner<A> {
                 Work::Receive(_) => crate::observe::Cause::Sync,
                 Work::Author { .. } | Work::Bundle { .. } => crate::observe::Cause::Local,
             });
-            // Authors see incoming frames of earlier requests applied, as in sequence.
-            if unapplied && matches!(work, Work::Author { .. } | Work::Bundle { .. }) {
-                self.group_pass(time, &mut outcome).await?;
-                unapplied = false;
-            }
             self.conn.execute("SAVEPOINT request", ()).await?;
             let result = match work {
                 Work::Author {
@@ -492,6 +708,43 @@ impl<A: RowApplication> Inner<A> {
                         Staged::Stored(_) | Staged::Covered | Staged::Duplicate
                     );
                     self.conn.execute("RELEASE request", ()).await?;
+                    if outcome.pass.is_none()
+                        && matches!(staged, Staged::Stored(_) | Staged::Duplicate)
+                        && let Work::Receive(frame) = work
+                    {
+                        self.conn
+                            .execute("SAVEPOINT received_application", ())
+                            .await?;
+                        #[cfg(test)]
+                        let before = self.applied_frames;
+                        let applied = self.apply_received(frame, time).await;
+                        #[cfg(test)]
+                        let applied = if self.applied_frames != before
+                            && (!crate::apply_allowed()
+                                || matches!(
+                                    self.group_fault,
+                                    Some(GroupFault::FailApplicationBeforeCommit)
+                                )) {
+                            Err(Error::InjectedFailure)
+                        } else {
+                            applied
+                        };
+                        if let Err(error) = applied {
+                            self.conn
+                                .execute("ROLLBACK TO received_application", ())
+                                .await?;
+                            self.invalidate_context();
+                            self.invalidate_held_refresh();
+                            self.untouch();
+                            if retryable(&error) {
+                                return Err(error);
+                            }
+                            outcome.pass = Some(error);
+                        }
+                        self.conn
+                            .execute("RELEASE received_application", ())
+                            .await?;
+                    }
                     outcome.results.push(Ok(staged));
                 }
             }
@@ -502,30 +755,22 @@ impl<A: RowApplication> Inner<A> {
                 std::process::exit(77);
             }
         }
-        if unapplied {
-            self.group_pass(time, &mut outcome).await?;
-        }
+        // Ready requests apply with admission so readers never see an artificial
+        // pending interval. Previously blocked work settles between groups.
+        outcome.more = unapplied;
         #[cfg(any(test, feature = "qualification"))]
         self.crash_at(|point| point == super::CrashPoint::GroupBeforeCommit)?;
         #[cfg(test)]
         match self.group_fault {
             Some(GroupFault::ExitBeforeCommit) => std::process::exit(77),
             Some(GroupFault::FailBeforeCommit) => return Err(Error::InjectedFailure),
+            Some(GroupFault::FailAfterCommits(count)) if self.group_commits >= count => {
+                return Err(Error::InjectedFailure);
+            }
             _ => {}
         }
         outcome.revision = self.stored_revision().await?;
         Ok(outcome)
-    }
-    async fn group_pass(&mut self, time: u64, outcome: &mut Outcome) -> Result<(), Error> {
-        if outcome.pass.is_some() {
-            return Ok(());
-        }
-        match Box::pin(self.apply_pending(time, GROUP_REQUESTS)).await {
-            Ok(more) => outcome.more |= more,
-            Err(error) if retryable(&error) => return Err(error),
-            Err(error) => outcome.pass = Some(error),
-        }
-        Ok(())
     }
     /// Admits one incoming frame into custody; application follows in the pass.
     async fn receive_step(&mut self, frame: &EncryptedFrame, time: u64) -> Result<Staged, Error> {
@@ -640,34 +885,29 @@ impl<A: RowApplication> Inner<A> {
         self.reclaim_free_pages().await;
         let size = std::fs::metadata(&self.wal).map_or(0, |metadata| metadata.len());
         let truncate = size >= self.wal_limits.1;
-        if !truncate && (size < self.wal_limits.0 || size <= self.wal_mark) {
+        if !truncate {
+            if size >= self.wal_limits.0 {
+                self.passive.schedule(size, self.flusher.clone());
+            }
             return;
         }
-        let sql = if truncate {
-            "PRAGMA wal_checkpoint(TRUNCATE)"
-        } else {
-            "PRAGMA wal_checkpoint(PASSIVE)"
-        };
-        let waits = truncate
-            && self
-                .conn
-                .connection()
-                .set_busy_timeout(TRUNCATE_WAIT)
-                .is_ok();
+        let waits = self
+            .conn
+            .connection()
+            .set_busy_timeout(TRUNCATE_WAIT)
+            .is_ok();
         #[cfg(feature = "qualification")]
         let started = std::time::Instant::now();
-        let checkpoint = rows(&self.conn, sql).await;
+        let checkpoint = rows(&self.conn, "PRAGMA wal_checkpoint(TRUNCATE)").await;
         #[cfg(feature = "qualification")]
         if let Ok(result) = &checkpoint {
             let pages = match result.first().map(Vec::as_slice) {
                 Some([_, _, SqlValue::Integer(done)]) => (*done).max(0) as u64,
                 _ => 0,
             };
-            self.flusher.measurements.checkpoint(
-                if truncate { "truncate" } else { "passive" },
-                pages,
-                started.elapsed(),
-            );
+            self.flusher
+                .measurements
+                .checkpoint("truncate", pages, started.elapsed());
         }
         if waits {
             let _ = self
@@ -681,7 +921,9 @@ impl<A: RowApplication> Inner<A> {
                 Some([SqlValue::Integer(0), SqlValue::Integer(log), SqlValue::Integer(done)])
                     if log == done
             );
-            self.wal_mark = if truncate && complete { 0 } else { size };
+            if complete {
+                self.passive.reset();
+            }
             #[cfg(test)]
             {
                 self.checkpoints += 1;
@@ -701,7 +943,27 @@ impl<A: RowApplication> Inner<A> {
                 &format!("PRAGMA incremental_vacuum({RECLAIM_STEP})"),
             )
             .await;
+            #[cfg(any(test, feature = "qualification"))]
+            if let Ok(after) = rows(&self.conn, "PRAGMA freelist_count").await
+                && let Some([SqlValue::Integer(after)]) = after.first().map(Vec::as_slice)
+            {
+                self.flusher.measurements.work(
+                    lock::WorkUnit::ReclaimedPage,
+                    free.saturating_sub(*after).max(0) as u64,
+                );
+            }
         }
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub(crate) async fn reclaim_free_pages_for_test(&self) {
+        self.inner
+            .lock(Class::Background)
+            .await
+            .reclaim_free_pages()
+            .await;
     }
 }
 

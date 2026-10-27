@@ -85,38 +85,31 @@ impl<A: RowApplication> Inner<A> {
         head.copy_from_slice(&hash[..8]);
         i64::from_le_bytes(head)
     }
-    pub(super) async fn quarantined(&self) -> Result<BTreeMap<Hash, Quarantine>, Error> {
-        let mut found = BTreeMap::new();
-        for record in rows(
-            &self.conn,
-            "SELECT hash,attempts,last_seen,context FROM secure_quarantine",
+    pub(super) async fn quarantined_frame(&self, hash: Hash) -> Result<Option<Quarantine>, Error> {
+        let records = collect_rows(
+            self.conn
+                .query(
+                    "SELECT attempts,last_seen,context FROM secure_quarantine WHERE hash=?",
+                    [hash.as_bytes().to_vec()],
+                )
+                .await?,
         )
-        .await?
-        {
-            let [
-                SqlValue::Blob(hash),
-                SqlValue::Integer(attempts),
-                SqlValue::Integer(last_seen),
-                SqlValue::Integer(context),
-            ] = record.as_slice()
-            else {
-                return Err(Error::Corrupt("quarantined frame".into()));
-            };
-            let hash = Hash::from_bytes(
-                hash.as_slice()
-                    .try_into()
-                    .map_err(|_| Error::Corrupt("quarantined frame".into()))?,
-            );
-            found.insert(
-                hash,
-                Quarantine {
-                    attempts: *attempts,
-                    last_seen: *last_seen,
-                    context: *context,
-                },
-            );
+        .await?;
+        match records.first().map(Vec::as_slice) {
+            Some(
+                [
+                    SqlValue::Integer(attempts),
+                    SqlValue::Integer(last_seen),
+                    SqlValue::Integer(context),
+                ],
+            ) => Ok(Some(Quarantine {
+                attempts: *attempts,
+                last_seen: *last_seen,
+                context: *context,
+            })),
+            None => Ok(None),
+            _ => Err(Error::Corrupt("quarantined frame".into())),
         }
-        Ok(found)
     }
     /// Inside the caller's transaction, records another failed attempt.
     pub(super) async fn quarantine(

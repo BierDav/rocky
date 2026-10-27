@@ -140,8 +140,8 @@ thread_local! {
     /// Seconds this test thread's clock runs ahead, to expire credentials
     /// without sleeping.
     static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Apply transactions this test thread's replicas may still start
-    /// before the pending pass is interrupted between two of them.
+    /// Transactions that apply operations this test thread may still commit
+    /// before the pending pass is interrupted. Discovery does not spend it.
     static APPLY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static BINDING_TRACE: std::cell::RefCell<Option<Vec<(usize, usize, usize)>>> = const { std::cell::RefCell::new(None) };
     static AUTHOR_PAYLOAD_TRACE: std::cell::RefCell<Option<Vec<(EncryptedFrame, usize)>>> = const { std::cell::RefCell::new(None) };
@@ -175,3 +175,16 @@ pub use rocky_credentials::PeerId;
 pub use replica::{
     HolderMeasurements, LockMeasurements, Measurements, with_measurement_connection,
 };
+
+/// Measurement-only overrides are validated before any bounded work starts.
+#[cfg(feature = "qualification")]
+fn qualification_bound(name: &str, default: usize, maximum: usize) -> Result<usize, Error> {
+    match std::env::var_os(name) {
+        None => Ok(default),
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bound| (1..=maximum).contains(bound))
+            .ok_or_else(|| denied(&format!("{name} must be between 1 and {maximum}"))),
+    }
+}

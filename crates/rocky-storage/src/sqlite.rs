@@ -213,7 +213,70 @@ pub struct Writes {
     /// removed.
     tables: std::sync::RwLock<Vec<(String, bool)>>,
     count: std::sync::atomic::AtomicU64,
-    counts: Mutex<std::collections::HashMap<String, u64>>,
+    counts: Mutex<std::collections::HashMap<String, TableCount>>,
+    rows: std::sync::RwLock<RowCounters>,
+    row_failures: std::sync::atomic::AtomicU64,
+}
+#[derive(Default)]
+struct TableCount {
+    all: u64,
+    structural: u64,
+}
+type RowCounters = std::collections::HashMap<
+    String,
+    std::collections::BTreeMap<
+        i32,
+        std::collections::HashMap<i64, std::sync::Weak<std::sync::atomic::AtomicU64>>,
+    >,
+>;
+type WatchedInteger = (
+    String,
+    i32,
+    i64,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+);
+/// Changes to physical rows selected by integer columns, including rolled
+/// back writes. Unrelated keys do not invalidate the watch.
+pub struct RowWrites {
+    keys: Vec<WatchedInteger>,
+    owner: std::sync::Arc<Writes>,
+}
+impl RowWrites {
+    pub fn count(&self) -> u64 {
+        self.owner
+            .row_failures
+            .load(std::sync::atomic::Ordering::Acquire)
+            + self
+                .keys
+                .iter()
+                .map(|(_, _, _, counter)| counter.load(std::sync::atomic::Ordering::Acquire))
+                .sum::<u64>()
+    }
+}
+impl Drop for RowWrites {
+    fn drop(&mut self) {
+        let mut rows = self
+            .owner
+            .rows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (table, column, key, counter) in &self.keys {
+            if std::sync::Arc::strong_count(counter) != 1 {
+                continue;
+            }
+            if let Some(columns) = rows.get_mut(table) {
+                if let Some(keys) = columns.get_mut(column) {
+                    keys.remove(key);
+                    if keys.is_empty() {
+                        columns.remove(column);
+                    }
+                }
+                if columns.is_empty() {
+                    rows.remove(table);
+                }
+            }
+        }
+    }
 }
 impl Writes {
     /// Changes so far; it only grows.
@@ -222,14 +285,70 @@ impl Writes {
     }
     /// Changes to one watched table, including changes within a transaction.
     pub fn table_count(&self, table: &str) -> u64 {
-        self.counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(table)
-            .copied()
-            .unwrap_or(0)
+        self.selected_count([(table, true)])
     }
-    fn observe(&self, table: &str, update: bool) {
+    /// A watch's own table/mutation selection, independent of other consumers.
+    pub fn selected_count<'a>(&self, tables: impl IntoIterator<Item = (&'a str, bool)>) -> u64 {
+        let counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tables.into_iter().fold(0u64, |total, (table, updates)| {
+            let count =
+                counts.get(table).map_or(
+                    0,
+                    |count| if updates { count.all } else { count.structural },
+                );
+            total.wrapping_add(count)
+        })
+    }
+    fn observe(&self, table: &str, case: &rusqlite::hooks::PreUpdateCase) {
+        let update = matches!(case, rusqlite::hooks::PreUpdateCase::Update { .. });
+        let rows = self
+            .rows
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(columns) = rows.get(table) {
+            use rusqlite::{hooks::PreUpdateCase, types::ValueRef};
+            let integer = |value: rusqlite::Result<ValueRef<'_>>| {
+                value.map(|value| match value {
+                    ValueRef::Integer(value) => Some(value),
+                    _ => None,
+                })
+            };
+            for (column, keys) in columns {
+                let values = match case {
+                    PreUpdateCase::Insert(added) => {
+                        integer(added.get_new_column_value(*column)).map(|new| (None, new))
+                    }
+                    PreUpdateCase::Delete(removed) => {
+                        integer(removed.get_old_column_value(*column)).map(|old| (old, None))
+                    }
+                    PreUpdateCase::Update {
+                        old_value_accessor,
+                        new_value_accessor,
+                    } => {
+                        integer(old_value_accessor.get_old_column_value(*column)).and_then(|old| {
+                            integer(new_value_accessor.get_new_column_value(*column))
+                                .map(|new| (old, new))
+                        })
+                    }
+                    PreUpdateCase::Unknown => {
+                        Err(rusqlite::Error::InvalidColumnIndex(*column as usize))
+                    }
+                };
+                let Ok((old, new)) = values else {
+                    self.row_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    continue;
+                };
+                for key in old.into_iter().chain(new.filter(|new| Some(*new) != old)) {
+                    if let Some(counter) = keys.get(&key).and_then(std::sync::Weak::upgrade) {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                }
+            }
+        }
         if self.tables.read().is_ok_and(|tables| {
             tables
                 .iter()
@@ -240,7 +359,11 @@ impl Writes {
                 .counts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *counts.entry(table.to_owned()).or_default() += 1;
+            let count = counts.entry(table.to_owned()).or_default();
+            count.all = count.all.wrapping_add(1);
+            if !update {
+                count.structural = count.structural.wrapping_add(1);
+            }
         }
     }
 }
@@ -353,12 +476,57 @@ impl Connection {
         tables: impl IntoIterator<Item = (String, bool)>,
     ) -> Result<std::sync::Arc<Writes>> {
         let writes = self.hooks()?.writes;
-        writes
-            .tables
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(tables);
+        {
+            let mut watched = writes
+                .tables
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (table, updates) in tables {
+                if let Some((_, existing)) = watched.iter_mut().find(|(name, _)| *name == table) {
+                    *existing |= updates;
+                } else {
+                    watched.push((table, updates));
+                }
+            }
+        }
         Ok(writes)
+    }
+    /// Watches physical rows with any matching (table, zero-based integer
+    /// column, value). Counters include triggers and rolled back writes.
+    pub fn watch_integer_rows(
+        &self,
+        keys: impl IntoIterator<Item = (String, i32, i64)>,
+    ) -> Result<std::sync::Arc<RowWrites>> {
+        let keys: Vec<_> = keys.into_iter().collect();
+        if keys.iter().any(|(_, column, _)| *column < 0) {
+            return Err(Error::Type("negative watched column".into()));
+        }
+        let writes = self.hooks()?.writes;
+        let mut rows = writes
+            .rows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watched = Vec::new();
+        for (table, column, key) in keys.into_iter().collect::<std::collections::BTreeSet<_>>() {
+            let entry = rows
+                .entry(table.clone())
+                .or_default()
+                .entry(column)
+                .or_default()
+                .entry(key)
+                .or_default();
+            let counter = entry.upgrade().unwrap_or_else(|| {
+                let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                *entry = std::sync::Arc::downgrade(&counter);
+                counter
+            });
+            watched.push((table, column, key, counter));
+        }
+        drop(rows);
+        Ok(std::sync::Arc::new(RowWrites {
+            keys: watched,
+            owner: writes,
+        }))
     }
     /// One hook per connection: it reads a changed row once and hands it to
     /// the digest tracker and to the capture sink.
@@ -376,9 +544,7 @@ impl Connection {
         self.raw()?.preupdate_hook(Some(
             move |_, database: &str, table: &str, case: &PreUpdateCase| {
                 if database == "main" {
-                    shared
-                        .writes
-                        .observe(table, matches!(case, PreUpdateCase::Update { .. }));
+                    shared.writes.observe(table, case);
                 }
                 let (Ok(mut tracker), Ok(mut capture)) =
                     (shared.tracker.lock(), shared.capture.lock())
@@ -876,6 +1042,55 @@ pub fn trace_statements(enabled: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_table_watches_share_one_registration_and_keep_update_tracking() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.run_now("CREATE TABLE watched(id INTEGER PRIMARY KEY,value INTEGER)")
+            .unwrap();
+        let writes = conn.watch_writes([("watched".into(), false)]).unwrap();
+        conn.watch_writes([("watched".into(), true)]).unwrap();
+        conn.watch_writes([("watched".into(), false)]).unwrap();
+        assert_eq!(writes.tables.read().unwrap().len(), 1);
+        conn.run_now("INSERT INTO watched VALUES(1,0)").unwrap();
+        conn.run_now("UPDATE watched SET value=1 WHERE id=1")
+            .unwrap();
+        assert_eq!(writes.table_count("watched"), 2);
+        assert_eq!(writes.selected_count([("watched", false)]), 1);
+        assert_eq!(writes.selected_count([("unwatched", true)]), 0);
+    }
+
+    #[test]
+    fn integer_row_watches_isolate_scopes_and_include_moves_and_rollback() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.raw().unwrap().execute_batch("CREATE TABLE rows(scope INTEGER, id INTEGER PRIMARY KEY, value TEXT); CREATE TABLE copies(scope INTEGER, id INTEGER PRIMARY KEY);
+            CREATE TRIGGER copy_row AFTER INSERT ON rows BEGIN INSERT INTO copies VALUES(NEW.scope,NEW.id); END;
+            INSERT INTO rows VALUES(2,1,'other')").unwrap();
+        let watch = conn
+            .watch_integer_rows([("rows".into(), 0, 1), ("copies".into(), 0, 1)])
+            .unwrap();
+        conn.run_now("UPDATE rows SET value='unrelated' WHERE id=1")
+            .unwrap();
+        assert_eq!(watch.count(), 0);
+        conn.run_now("INSERT INTO rows VALUES(1,2,'own')").unwrap();
+        assert_eq!(watch.count(), 2, "the trigger counts too");
+        conn.run_now("UPDATE rows SET scope=2 WHERE id=2").unwrap();
+        conn.run_now("UPDATE rows SET scope=1 WHERE id=1").unwrap();
+        assert_eq!(watch.count(), 4, "both sides of a scope move invalidate");
+        conn.raw()
+            .unwrap()
+            .execute_batch("BEGIN; DELETE FROM rows WHERE scope=1; ROLLBACK")
+            .unwrap();
+        assert_eq!(
+            watch.count(),
+            5,
+            "rollback never rewinds validation counters"
+        );
+        drop(watch);
+        let next = conn.watch_integer_rows([("rows".into(), 0, 1)]).unwrap();
+        assert_eq!(conn.hooks().unwrap().writes.rows.read().unwrap().len(), 1);
+        assert_eq!(next.count(), 0);
+    }
 
     #[test]
     fn a_wide_read_only_connection_keeps_first_reads_bounded_and_read_only() {

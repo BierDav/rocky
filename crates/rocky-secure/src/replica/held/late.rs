@@ -2,6 +2,55 @@
 use super::*;
 use crate::replica::incoming::Outcome;
 
+/// Metadata rows examined per refresh step. Provisional until the separated
+/// phone costs are recorded in docs/features_12/02-bounded-holds-evidence.md.
+const REFRESH_RECORDS: usize = 64;
+#[derive(Clone, Default)]
+struct Refresh {
+    generation: Option<Commitment>,
+    signer: Vec<u8>,
+    sequence: i64,
+    discover: bool,
+    records: std::collections::VecDeque<Vec<SqlValue>>,
+    version: Option<u64>,
+}
+const TOKEN_RECORDS: usize = 64;
+const PAGE_RECORDS: usize = 32;
+
+/// Definite CBOR array header; hashing it and the encoded elements preserves
+/// the existing held-token encoding without assembling the whole array.
+fn token_array_header(count: u64) -> Vec<u8> {
+    match count {
+        0..=23 => vec![0x80 | count as u8],
+        24..=0xff => vec![0x98, count as u8],
+        0x100..=0xffff => [vec![0x99], (count as u16).to_be_bytes().to_vec()].concat(),
+        0x1_0000..=0xffff_ffff => [vec![0x9a], (count as u32).to_be_bytes().to_vec()].concat(),
+        _ => [vec![0x9b], count.to_be_bytes().to_vec()].concat(),
+    }
+}
+
+struct TokenSource {
+    writes: Arc<crate::sqlite::Writes>,
+    tables: [String; 2],
+    versions: [u64; 2],
+    authority: u64,
+    tip: TipId,
+}
+impl TokenSource {
+    fn check<A: RowApplication>(&self, inner: &Inner<A>) -> Result<(), Error> {
+        if self.authority != inner.authority
+            || self.tip != inner.workspace.tip
+            || self
+                .tables
+                .iter()
+                .zip(self.versions)
+                .any(|(table, version)| self.writes.table_count(table) != version)
+        {
+            return Err(Error::RetryExhausted);
+        }
+        Ok(())
+    }
+}
 impl<A: RowApplication> Inner<A> {
     /// Stores already authenticated held members in the caller's transaction.
     pub(in crate::replica) async fn hold_members(
@@ -16,6 +65,20 @@ impl<A: RowApplication> Inner<A> {
             || first.id().map(|hash| *hash.as_bytes()),
             |membership| Ok(membership.transaction),
         )?;
+        #[cfg(any(test, feature = "qualification"))]
+        {
+            self.flusher.measurements.work(
+                crate::replica::lock::WorkUnit::HeldMemberFrame,
+                frames.len() as u64,
+            );
+            self.flusher.measurements.work(
+                crate::replica::lock::WorkUnit::HeldMemberRow,
+                frames
+                    .iter()
+                    .map(|(_, payload)| payload.writes().len() as u64)
+                    .sum(),
+            );
+        }
         let names = self.item_names().await?;
         let local = self.local_grants(time)?;
         let mut stored = Stored {
@@ -198,6 +261,10 @@ impl<A: RowApplication> Inner<A> {
                 (),
             )
             .await?;
+        self.frames_written
+            .fetch_add(frames.len() as u64, Ordering::Relaxed);
+        self.rows_written
+            .fetch_add(stored.rows.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -214,149 +281,227 @@ impl<A: RowApplication> Inner<A> {
         Ok(Outcome::Applied)
     }
 
-    /// Closed-source classification is lazy; learning a seal remains metadata only.
-    pub(in crate::replica) async fn refresh_closed_held(
+    fn closed_held_generation(
         &self,
+        scope: ResourceScope,
         time: u64,
-        only: Option<ResourceScope>,
-    ) -> Result<(), Error> {
-        let scopes = match only {
-            Some(scope) => vec![scope],
-            None => rows(&self.conn, "SELECT scope FROM secure_scope_state")
-                .await?
-                .into_iter()
-                .map(|row| match row.as_slice() {
-                    [SqlValue::Blob(scope)] => decode(scope),
-                    _ => Err(Error::Corrupt("held refresh scope".into())),
-                })
-                .collect::<Result<Vec<ResourceScope>, Error>>()?,
-        };
+    ) -> Result<(Commitment, bool), Error> {
         let grants = self.local_grants(time)?;
-        for scope in scopes {
-            let graph = self.graph_for(scope.domain)?;
-            let keys: Vec<_> = self
-                .config
-                .keys
-                .iter()
-                .chain(&self.history)
-                .filter(|key| key.scope == scope)
-                .map(|key| key.generation)
-                .collect();
-            let local: Vec<_> = grants.iter().filter(|grant| grant.scope == scope).collect();
-            let generation = rocky_core::commitment(
-                "rocky.held-refresh.v1",
-                &encode(&(
-                    self.workspace.tip,
-                    self.manifest,
-                    keys,
-                    local,
-                    self.can_read_key(scope, &grants),
-                    self.config.revocations.digest(time).map_err(credential)?,
-                    graph.seals.len(),
-                    graph.openings.len(),
-                    graph.moves.len(),
-                    graph.genesis_lines.len(),
-                    graph.finalities.len(),
-                    graph.checkpoints.len(),
-                    graph.carries.len(),
-                    &graph.revoked,
-                ))?,
-            );
-            if self
-                .held_refresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&scope)
-                == Some(&generation)
-            {
-                continue;
-            }
-            let recovery = graph
+        let graph = self.graph_for(scope.domain)?;
+        let keys: Vec<_> = self
+            .config
+            .keys
+            .iter()
+            .chain(&self.history)
+            .filter(|key| key.scope == scope)
+            .map(|key| key.generation)
+            .collect();
+        let local: Vec<_> = grants.iter().filter(|grant| grant.scope == scope).collect();
+        let generation = rocky_core::commitment(
+            "rocky.held-refresh.v1",
+            &encode(&(
+                self.workspace.tip,
+                self.manifest,
+                keys,
+                local,
+                self.can_read_key(scope, &grants),
+                self.config.revocations.digest(time).map_err(credential)?,
+                graph.seals.len(),
+                graph.openings.len(),
+                graph.moves.len(),
+                graph.genesis_lines.len(),
+                graph.finalities.len(),
+                graph.checkpoints.len(),
+                graph.carries.len(),
+                &graph.revoked,
+            ))?,
+        );
+        Ok((
+            generation,
+            graph
                 .seals
                 .iter()
-                .any(|seal| seal.statement.recovery.is_some());
-            let mut context =
-                tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
-            let records = collect_rows(self.conn.query(
-                "SELECT o.hash,p.scope,p.tip,p.author,p.sequence FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.scope=? AND o.status IN ('applied','pending') ORDER BY p.signer,p.log_sequence",
-                [encode(&scope)?],
-            ).await?).await?;
-            for record in records {
-                let [
-                    SqlValue::Blob(hash),
-                    SqlValue::Blob(scope),
-                    SqlValue::Blob(tip),
-                    SqlValue::Integer(author),
-                    SqlValue::Integer(sequence),
-                ] = record.as_slice()
-                else {
-                    return Err(Error::Corrupt("closed source frame".into()));
+                .any(|seal| seal.statement.recovery.is_some()),
+        ))
+    }
+    /// One signer discovery, bounded metadata page, or indivisible held frame.
+    async fn refresh_closed_held_step(
+        &self,
+        scope: ResourceScope,
+        time: u64,
+        pass: &mut Refresh,
+    ) -> Result<bool, Error> {
+        let (generation, recovery) = self.closed_held_generation(scope, time)?;
+        if self
+            .held_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope)
+            == Some(&generation)
+        {
+            return Ok(false);
+        }
+        if pass.generation != Some(generation) {
+            *pass = Refresh {
+                generation: Some(generation),
+                sequence: -1,
+                discover: true,
+                ..Refresh::default()
+            };
+        }
+        let table = self
+            .conn
+            .names()
+            .physical("secure_operations")
+            .unwrap_or("secure_operations")
+            .to_owned();
+        let writes = self
+            .conn
+            .connection()
+            .watch_writes([(table.clone(), true)])?;
+        let version = writes.table_count(&table);
+        if pass
+            .version
+            .replace(version)
+            .is_some_and(|previous| previous != version)
+        {
+            if !pass.records.is_empty() {
+                pass.discover = false;
+            }
+            pass.records.clear();
+        }
+        if pass.records.is_empty() {
+            if pass.discover {
+                let found = collect_rows(self.conn.query(
+                    "SELECT signer FROM secure_position_sources WHERE scope=? AND signer>? ORDER BY signer LIMIT 1",
+                    [encode(&scope)?, pass.signer.clone()],
+                ).await?).await?;
+                let Some(record) = found.first() else {
+                    self.held_refresh
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(scope, generation);
+                    return Ok(false);
                 };
-                if !recovery {
-                    let scope: ResourceScope = decode(scope)?;
-                    let tip = TipId(
-                        tip.as_slice()
-                            .try_into()
-                            .map_err(|_| Error::Corrupt("closed source tip".into()))?,
-                    );
-                    let author = u32::try_from(*author)
-                        .map_err(|_| Error::Corrupt("closed source author".into()))?;
-                    let sequence = u64::try_from(*sequence)
-                        .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
-                    let reach = self.frame_reach_at_using(
-                        scope.domain,
-                        tip,
-                        author,
-                        sequence,
-                        0,
-                        Some(&mut context),
-                    )?;
-                    if reach != tips::FrameReach::Held {
-                        continue;
-                    }
-                }
-                let (header, body) = match collect_rows(
-                    self.conn
-                        .query(
-                            "SELECT header,body FROM secure_operations WHERE hash=?",
-                            [hash.clone()],
-                        )
-                        .await?,
-                )
-                .await?
-                .pop()
-                .as_deref()
+                let [SqlValue::Blob(signer)] = record.as_slice() else {
+                    return Err(Error::Corrupt("held refresh signer".into()));
+                };
+                pass.signer = signer.clone();
+                pass.sequence = -1;
+                pass.discover = false;
+                return Ok(true);
+            }
+            // The operation's unique (author,scope,sequence) index preserves the
+            // original signer/log order without sorting the whole scope.
+            pass.records = collect_rows(self.conn.query(
+                "SELECT o.hash,p.scope,p.tip,p.author,p.sequence,o.sequence,o.status FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.author=? AND o.scope=? AND o.sequence>? ORDER BY o.sequence LIMIT ?",
+                bindings(vec![SqlValue::Blob(pass.signer.clone()), SqlValue::Blob(encode(&scope)?), SqlValue::Integer(pass.sequence), SqlValue::Integer(REFRESH_RECORDS as i64)]),
+            ).await?).await?.into();
+            #[cfg(any(test, feature = "qualification"))]
+            self.flusher.measurements.work(
+                crate::replica::lock::WorkUnit::HeldRefreshRecord,
+                pass.records.len() as u64,
+            );
+            // A short page already proves this signer's end. Keep its buffered
+            // records, then discover the next signer without an empty query.
+            pass.discover = pass.records.len() < REFRESH_RECORDS;
+            if pass.records.is_empty() {
+                return Ok(true);
+            }
+        }
+        let mut context = tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
+        while let Some(record) = pass.records.pop_front() {
+            let [
+                SqlValue::Blob(hash),
+                _,
+                _,
+                _,
+                _,
+                SqlValue::Integer(log_sequence),
+                SqlValue::Text(status),
+            ] = record.as_slice()
+            else {
+                return Err(Error::Corrupt("closed source frame".into()));
+            };
+            pass.sequence = *log_sequence;
+            if !matches!(status.as_str(), "applied" | "pending") {
+                continue;
+            }
+            let [
+                SqlValue::Blob(encoded_scope),
+                SqlValue::Blob(tip),
+                SqlValue::Integer(author),
+                SqlValue::Integer(sequence),
+            ] = &record[1..5]
+            else {
+                return Err(Error::Corrupt("closed source frame".into()));
+            };
+            if !recovery {
+                let scope: ResourceScope = decode(encoded_scope)?;
+                let tip = TipId(
+                    tip.as_slice()
+                        .try_into()
+                        .map_err(|_| Error::Corrupt("closed source tip".into()))?,
+                );
+                let author = u32::try_from(*author)
+                    .map_err(|_| Error::Corrupt("closed source author".into()))?;
+                let sequence = u64::try_from(*sequence)
+                    .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
+                if self.frame_reach_at_using(
+                    scope.domain,
+                    tip,
+                    author,
+                    sequence,
+                    0,
+                    Some(&mut context),
+                )? != tips::FrameReach::Held
                 {
-                    Some([SqlValue::Blob(header), SqlValue::Blob(body)]) => {
-                        (header.clone(), body.clone())
-                    }
-                    _ => return Err(Error::Corrupt("closed source frame".into())),
-                };
-                let frame = self.stored_frame(header, body).await?;
-                let operation = frame.operation_ref()?;
-                let extension = &operation.header.extensions;
-                if self.stored_status(operation.hash).await?.as_deref() == Some("held") {
                     continue;
                 }
-                if self.frame_reach(&frame)? == tips::FrameReach::Held
-                    && self.can_read_key(extension.scope, &self.local_grants(time)?)
-                    && self
-                        .opening_key(extension.scope, extension.generation)
-                        .is_some()
-                {
-                    if self.abandoned_write(&frame)? {
-                        self.hold_abandoned(&frame, time).await?;
-                    } else {
-                        self.hold_closed_frame(&frame, time).await?;
-                    }
+            }
+            #[cfg(any(test, feature = "qualification"))]
+            self.flusher
+                .measurements
+                .work(crate::replica::lock::WorkUnit::HeldRefreshFrame, 1);
+            let (header, body) = match collect_rows(
+                self.conn
+                    .query(
+                        "SELECT header,body FROM secure_operations WHERE hash=?",
+                        [hash.clone()],
+                    )
+                    .await?,
+            )
+            .await?
+            .pop()
+            .as_deref()
+            {
+                Some([SqlValue::Blob(header), SqlValue::Blob(body)]) => {
+                    (header.clone(), body.clone())
+                }
+                _ => return Err(Error::Corrupt("closed source frame".into())),
+            };
+            let frame = self.stored_frame(header, body).await?;
+            let operation = frame.operation_ref()?;
+            let extension = &operation.header.extensions;
+            if self.stored_status(operation.hash).await?.as_deref() == Some("held") {
+                return Ok(true);
+            }
+            if self.frame_reach(&frame)? == tips::FrameReach::Held
+                && self.can_read_key(extension.scope, &self.local_grants(time)?)
+                && self
+                    .opening_key(extension.scope, extension.generation)
+                    .is_some()
+            {
+                if self.abandoned_write(&frame)? {
+                    self.hold_abandoned(&frame, time).await?;
+                } else {
+                    self.hold_closed_frame(&frame, time).await?;
                 }
             }
-            self.held_refresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(scope, generation);
+
+            return Ok(true);
         }
-        Ok(())
+        Ok(true)
     }
     /// Holds the writes the workspace at `source` applied that `target`
     /// does not see, before a moved bookmark's workspace rebuild.
@@ -446,6 +591,53 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    pub(in crate::replica) async fn refresh_closed_held(
+        &self,
+        only: Option<ResourceScope>,
+    ) -> Result<(), Error> {
+        let mut after = 0;
+        loop {
+            let scope = match only {
+                Some(scope) => scope,
+                None => {
+                    let inner = self.inner.lock(Class::Background).await;
+                    let found = collect_rows(inner.conn.query("SELECT id,scope FROM secure_scope_state WHERE id>? ORDER BY id LIMIT 1", [after]).await?).await?;
+                    let Some(record) = found.first() else {
+                        return Ok(());
+                    };
+                    let [SqlValue::Integer(id), SqlValue::Blob(scope)] = record.as_slice() else {
+                        return Err(Error::Corrupt("held refresh scope".into()));
+                    };
+                    after = *id;
+                    decode(scope)?
+                }
+            };
+            let mut pass = Refresh::default();
+            loop {
+                tokio::task::yield_now().await;
+                let mut inner = self.inner.lock(Class::Background).await;
+                let saved = pass.clone();
+                let more = transaction!(@commit inner, |inner| {
+                    pass = saved.clone();
+                    inner.refresh_closed_held_step(scope, now()?, &mut pass).await
+                })?;
+                if !more {
+                    break;
+                }
+            }
+            if only.is_some() {
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn pause_held_token_for_test(
+        &self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        self.inner.lock(Class::Background).await.held_token_pause = Some((reached, resume));
+    }
     /// Checks read authority independently of the peer's followed tip.
     pub(crate) async fn authorize_held_reader(
         &self,
@@ -482,26 +674,96 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
     ) -> Result<Commitment, Error> {
         self.authorize_held_reader(peer, chain, scope).await?;
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        transaction!(inner, |inner| inner
-            .refresh_closed_held(now()?, Some(scope))
-            .await)?;
+        self.refresh_closed_held(Some(scope)).await?;
+        let mut inner = self.inner.lock(Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
-        let records = collect_rows(inner.conn.query(
-            "SELECT f.hash FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? ORDER BY f.hash",
-            [encode(&scope)?],
-        ).await?).await?;
-        let mut hashes = Vec::new();
-        for record in records {
-            let [SqlValue::Blob(hash)] = record.as_slice() else {
-                return Err(Error::Corrupt("held frame hash".into()));
-            };
-            hashes.push(hash.clone());
+        let tables = ["secure_held", "secure_held_frames"].map(|table| {
+            inner
+                .conn
+                .names()
+                .physical(table)
+                .unwrap_or(table)
+                .to_owned()
+        });
+        let writes = inner
+            .conn
+            .connection()
+            .watch_writes(tables.iter().map(|table| (table.clone(), true)))?;
+        let source = TokenSource {
+            versions: tables.each_ref().map(|table| writes.table_count(table)),
+            writes,
+            tables,
+            authority: inner.authority,
+            tip: inner.workspace.tip,
+        };
+        drop(inner);
+        let mut count = 0u64;
+        let mut hash = rocky_core::CommitmentBuilder::new("rocky.held-token.v1");
+        for hashing in [false, true] {
+            if hashing {
+                hash.update(&token_array_header(count));
+            }
+            let mut after = Vec::new();
+            loop {
+                tokio::task::yield_now().await;
+                let inner = self.inner.lock(Class::Background).await;
+                source.check(&inner)?;
+                let records = collect_rows(inner.conn.query(
+                    "SELECT f.hash,h.id FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
+                    bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Blob(after.clone()), SqlValue::Integer(TOKEN_RECORDS as i64)]),
+                ).await?).await?;
+                #[cfg(any(test, feature = "qualification"))]
+                inner.flusher.measurements.work(
+                    crate::replica::lock::WorkUnit::HeldTokenRecord,
+                    records.len() as u64,
+                );
+                drop(inner);
+                if records.is_empty() {
+                    break;
+                }
+                for record in records {
+                    let [SqlValue::Blob(key), present] = record.as_slice() else {
+                        return Err(Error::Corrupt("held token row".into()));
+                    };
+                    if key.len() != 32 {
+                        return Err(Error::Corrupt("held frame hash".into()));
+                    }
+                    after = key.clone();
+                    if matches!(present, SqlValue::Blob(_)) {
+                        if hashing {
+                            hash.update(&encode(key)?);
+                        } else {
+                            count = count.checked_add(1).ok_or(Error::Quota {
+                                resource: "held token rows",
+                                limit: usize::MAX,
+                            })?;
+                        }
+                    } else if !matches!(present, SqlValue::Null) {
+                        return Err(Error::Corrupt("held token header".into()));
+                    }
+                }
+                #[cfg(test)]
+                {
+                    let pause = self
+                        .inner
+                        .lock(Class::Background)
+                        .await
+                        .held_token_pause
+                        .take();
+                    if let Some((reached, resume)) = pause {
+                        let _ = reached.send(());
+                        let _ = resume.await;
+                    }
+                }
+            }
         }
-        Ok(rocky_core::commitment(
-            "rocky.held-token.v1",
-            &encode(&hashes)?,
-        ))
+        let inner = self.inner.lock(Class::Background).await;
+        source.check(&inner)?;
+        let grants = inner.verify_chain_scopes(chain, peer, now()?, &[scope])?;
+        if !inner.can_read_key(scope, &grants) {
+            return Err(denied("held changes require whole-scope read authority"));
+        }
+        Ok(hash.finish())
     }
     pub async fn held_frame_page(
         &self,
@@ -515,31 +777,70 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("held frame page quota"));
         }
         self.authorize_held_reader(peer, chain, scope).await?;
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        transaction!(inner, |inner| inner
-            .refresh_closed_held(now()?, Some(scope))
-            .await)?;
+        self.refresh_closed_held(Some(scope)).await?;
+        let mut inner = self.inner.lock(Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
+        let grants = inner.verify_chain_scopes(chain, peer, now()?, &[scope])?;
+        if !inner.can_read_key(scope, &grants) {
+            return Err(denied("held changes require whole-scope read authority"));
+        }
         let records = collect_rows(inner.conn.query(
-            "SELECT f.hash,f.frame FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT 33",
-            [encode(&scope)?, after.map(|hash| hash.as_bytes().to_vec()).unwrap_or_default()],
+            "SELECT f.hash,h.id FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
+            bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Blob(after.map(|hash| hash.as_bytes().to_vec()).unwrap_or_default()), SqlValue::Integer(PAGE_RECORDS as i64 + 1)]),
         ).await?).await?;
+        #[cfg(any(test, feature = "qualification"))]
+        inner.flusher.measurements.work(
+            crate::replica::lock::WorkUnit::HeldPageRecord,
+            records.len() as u64,
+        );
         let mut frames: Vec<EncryptedFrame> = Vec::new();
         let mut size = 1024;
-        for record in records {
-            let [SqlValue::Blob(_), SqlValue::Blob(bytes)] = record.as_slice() else {
+        let mut scanned = after;
+        for (index, record) in records.into_iter().enumerate() {
+            if index == PAGE_RECORDS {
+                return Ok((frames, scanned));
+            }
+            let [SqlValue::Blob(key), present] = record.as_slice() else {
+                return Err(Error::Corrupt("held source frame".into()));
+            };
+            let id = Hash::from_bytes(
+                key.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("held frame hash".into()))?,
+            );
+            if matches!(present, SqlValue::Null) {
+                scanned = Some(id);
+                continue;
+            }
+            if !matches!(present, SqlValue::Blob(_)) {
+                return Err(Error::Corrupt("held source header".into()));
+            }
+            let bytes = collect_rows(
+                inner
+                    .conn
+                    .query(
+                        "SELECT frame FROM secure_held_frames WHERE hash=?",
+                        [key.clone()],
+                    )
+                    .await?,
+            )
+            .await?;
+            let Some([SqlValue::Blob(bytes)]) = bytes.first().map(Vec::as_slice) else {
                 return Err(Error::Corrupt("held source frame".into()));
             };
             let frame: EncryptedFrame = decode_bounded(bytes, MAX_SECURE_FRAME)?;
-            if frames.len() == 32 || size + frame.weight() > quota {
-                let Some(last) = frames.last() else {
+            if frame.id()? != id {
+                return Err(Error::Corrupt("held frame hash".into()));
+            }
+            if size + frame.weight() > quota {
+                if frames.is_empty() {
                     return Err(denied("held frame does not fit the page quota"));
-                };
-                let next = last.id()?;
-                return Ok((frames, Some(next)));
+                }
+                return Ok((frames, scanned));
             }
             size += frame.weight();
             frames.push(frame);
+            scanned = Some(id);
         }
         Ok((frames, None))
     }
@@ -565,5 +866,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod token_encoding_tests {
+    use super::*;
+    #[test]
+    fn token_array_headers_match_the_current_encoding_at_length_boundaries() {
+        for count in [0, 1, 23, 24, 255, 256, 65_535, 65_536] {
+            let encoded = encode(&vec![Vec::<u8>::new(); count]).unwrap();
+            let header = token_array_header(count as u64);
+            assert!(encoded.starts_with(&header));
+            assert_eq!(encoded.len(), header.len() + count);
+        }
+        assert_eq!(
+            token_array_header(1u64 << 32),
+            vec![0x9b, 0, 0, 0, 1, 0, 0, 0, 0]
+        );
     }
 }

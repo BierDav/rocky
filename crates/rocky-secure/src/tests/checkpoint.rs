@@ -390,11 +390,27 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         .await
         .unwrap();
     // A failure in the second batch keeps the first one pruned and the file whole.
+    let measurements = a.lock_measurements();
+    measurements.start();
     a.inject_stage_fault(Stage::Prune, 1).await;
     assert!(matches!(
         a.prune(f.public).await,
         Err(Error::InjectedFailure)
     ));
+    let measured = measurements.stop();
+    let candidates: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| {
+            holder
+                .units
+                .get("prune_candidate")
+                .into_iter()
+                .flatten()
+                .map(|(count, _)| *count)
+        })
+        .collect();
+    assert_eq!(candidates, [8, 8]);
     drop(a);
     a = open(&f, &path, &a_key).await.0;
     assert_eq!(
@@ -1861,4 +1877,230 @@ async fn checkpoint_pages_travel_in_windows_of_four_and_install_in_order() {
         pulled.checkpoint
     );
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
+}
+
+#[tokio::test]
+async fn a_partial_page_resumes_with_smaller_pages_and_is_served_onward() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let (a, _) = open(&f, &dir.path().join("prefix-a.db"), &keys[0]).await;
+    let name = "prefix".repeat(32);
+    for index in 1..=24 {
+        a.author(handle(index), insert(&f, index, &name), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = compacted(&f, &a).await;
+    let checkpoint = signed.id().unwrap();
+    let (b, credentials) = open(&f, &dir.path().join("prefix-b.db"), &keys[1]).await;
+    share_graph(&f, &a, (&b, &keys[1], &credentials)).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let page = a
+        .checkpoint_page(
+            keys[1].public_key(),
+            &credentials,
+            f.public,
+            checkpoint,
+            None,
+            MAX_SECURE_FRAME,
+        )
+        .await
+        .unwrap();
+    assert!(page.next.is_none_or(|next| next > id(8)));
+    b.inject_stage_fault(Stage::Import, 1).await;
+    assert!(matches!(
+        b.stage_checkpoint_page(page).await,
+        Err(Error::InjectedFailure)
+    ));
+    assert_eq!(b.imported_rows(f.public, checkpoint).await.unwrap(), 8);
+    assert_eq!(
+        b.rebootstrap_progress(f.public).await.unwrap().unwrap().1,
+        None
+    );
+    let mut cursor = None;
+    loop {
+        let page = a
+            .checkpoint_page(
+                keys[1].public_key(),
+                &credentials,
+                f.public,
+                checkpoint,
+                cursor,
+                4096,
+            )
+            .await
+            .unwrap();
+        if cursor.is_none() {
+            assert!(page.next.is_some_and(|next| next < id(8)));
+        }
+        cursor = page.next;
+        b.stage_checkpoint_page(page).await.unwrap();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    b.finish_rebootstrap(f.public).await.unwrap();
+    assert_eq!(all_rows(&f, &b).await, all_rows(&f, &a).await);
+    b.audit(f.public).await.unwrap();
+    let (c, credentials) = open(&f, &dir.path().join("prefix-c.db"), &keys[2]).await;
+    share_graph(&f, &b, (&c, &keys[2], &credentials)).await;
+    c.begin_rebootstrap(signed).await.unwrap();
+    let mut cursor = None;
+    loop {
+        let page = b
+            .checkpoint_page(
+                keys[2].public_key(),
+                &credentials,
+                f.public,
+                checkpoint,
+                cursor,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        cursor = page.next;
+        c.stage_checkpoint_page(page).await.unwrap();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    c.finish_rebootstrap(f.public).await.unwrap();
+    assert_eq!(all_rows(&f, &c).await, all_rows(&f, &a).await);
+    c.audit(f.public).await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_export_validates_its_source_between_pages() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let source_key = PrivateKey::new();
+    let (a, _) = open(&f, &dir.path().join("export-a.db"), &source_key).await;
+    for index in 1..=12 {
+        a.author(handle(index), insert(&f, index, "export"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = compacted(&f, &a).await;
+    let peer = PrivateKey::new();
+    let (b, credentials) = open(&f, &dir.path().join("export-b.db"), &peer).await;
+    share_graph(&f, &a, (&b, &peer, &credentials)).await;
+    let (reached, waiting) = tokio::sync::oneshot::channel();
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    a.pause_checkpoint_export_for_test(reached, paused).await;
+    let export = a.checkpoint_page(
+        peer.public_key(),
+        &credentials,
+        f.public,
+        signed.id().unwrap(),
+        None,
+        MAX_SECURE_FRAME,
+    );
+    let change = async {
+        waiting.await.unwrap();
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("UPDATE secure_checkpoints SET signed=signed", ())
+            .await
+            .unwrap();
+        inner.note_commit().await;
+        drop(inner);
+        resume.send(()).unwrap();
+    };
+    let (exported, ()) = tokio::join!(export, change);
+    assert!(
+        matches!(exported, Err(Error::Rejected(message)) if message.contains("checkpoint source changed"))
+    );
+    a.audit(f.public).await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_preflight_validates_only_its_scope_and_authority() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a, _) = open(
+        &f,
+        &dir.path().join("preflight-source.db"),
+        &PrivateKey::new(),
+    )
+    .await;
+    for index in 1..=12 {
+        a.author(handle(index), insert(&f, index, "preflight"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = compacted(&f, &a).await;
+    for interference in ["metadata", "scope", "authority"] {
+        let peer = PrivateKey::new();
+        let (b, credentials) = open(
+            &f,
+            &dir.path().join(format!("preflight-{interference}.db")),
+            &peer,
+        )
+        .await;
+        share_graph(&f, &a, (&b, &peer, &credentials)).await;
+        b.begin_rebootstrap(signed.clone()).await.unwrap();
+        let page = a
+            .checkpoint_page(
+                peer.public_key(),
+                &credentials,
+                f.public,
+                signed.id().unwrap(),
+                None,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        let (reached, waiting) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        b.pause_checkpoint_store_for_test(reached, paused).await;
+        let staging = b.stage_checkpoint_page(page.clone());
+        let change = async {
+            waiting.await.unwrap();
+            let mut inner = b.inner.lock(crate::replica::Class::Background).await;
+            match interference {
+                "scope" => {
+                    inner
+                        .conn
+                        .execute("UPDATE secure_rebootstrap SET sets=sets", ())
+                        .await
+                        .unwrap();
+                }
+                "authority" => {
+                    inner.authority += 1;
+                }
+                _ => {
+                    inner
+                        .conn
+                        .execute(
+                            "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                            (),
+                        )
+                        .await
+                        .unwrap();
+                    inner.invalidate_context();
+                }
+            }
+            inner.note_commit().await;
+            drop(inner);
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(staging, change);
+        if interference != "metadata" {
+            assert!(matches!(result, Err(Error::RetryExhausted)));
+            assert_eq!(
+                b.imported_rows(f.public, signed.id().unwrap())
+                    .await
+                    .unwrap(),
+                0
+            );
+            b.stage_checkpoint_page(page).await.unwrap();
+        } else {
+            result.unwrap();
+        }
+        b.finish_rebootstrap(f.public).await.unwrap();
+        assert_eq!(all_rows(&f, &b).await, all_rows(&f, &a).await);
+        b.audit(f.public).await.unwrap();
+    }
 }

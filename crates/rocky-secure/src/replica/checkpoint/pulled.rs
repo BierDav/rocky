@@ -353,9 +353,19 @@ impl<A: RowApplication> Inner<A> {
             Err(error) => Err(error),
         }
     }
-    /// Inside the caller's transaction, drops every pulled state that no
-    /// longer passes the import checks, such as after a revocation.
-    /// Corruption is reported, never dropped.
+    /// Whether the pulled state is refused or already held by the replay base.
+    /// Corruption remains an error.
+    pub(in crate::replica) async fn stale_pulled(&self, id: i64) -> Result<bool, Error> {
+        let Some(pulled) = self.pulled_record(id).await? else {
+            return Ok(false);
+        };
+        match self.verify_pulled_statement(&pulled.signed).await {
+            Ok(()) => Ok(self.base_seal(id).await? == pulled.signed.statement.seal),
+            Err(error) if refusal(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+    /// Whole-state revalidation inside a tip transition.
     pub(in crate::replica) async fn revalidate_pulled(&self) -> Result<(), Error> {
         for record in rows(&self.conn, "SELECT scope FROM secure_pulled").await? {
             let [SqlValue::Integer(id)] = record.as_slice() else {

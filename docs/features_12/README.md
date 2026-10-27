@@ -130,12 +130,23 @@ instead of choosing differently.
   (WAL at `synchronous=NORMAL`), not power loss. Nothing outside the
   device has seen it until the background flush (`settle_commits`)
   advances the durable watermark. No new SDK API is added.
+- **Temporary dependent fan-out exception.** Phase 2 permits only the
+  constraint resolver's induced child reveals/hides on a received, imported
+  or updated parent to exceed the normal input-row bound. Keep atomicity,
+  count the induced typed-row changes per acquisition, and report measured
+  1k/10k-child costs separately from steady-state targets and latency samples.
+  All other holders keep their bounds. Phase 3 starts oversized fan-out work
+  only when no interactive write is waiting. This exception expires in
+  features_13, when constraints move into replay. See the
+  [phase 2 contract](02-bounded-holds.md#settled).
 - **Work bounds, not wall-clock bounds.** Every background critical
   section is bounded by work counts: frames, rows, pages and bytes. Never
   by `Instant` deadlines, so seeded simulation stays deterministic. Phase
-  2 measures each separated step's cost per unit on the slowest supported
-  phone, and picks each bound so that the phone hold target fits with a
-  factor of two of headroom. Bounds are named constants next to the code they bound.
+  2 measures separated steps on desktop and phone. The owner-approved
+  checkpoint-storage and receive sizing uses paired sync throughput and
+  records phone holds against features_13's interactive targets; the
+  former 12.5 ms sizing rule no longer selects those constants. Bounds
+  remain named work counts next to the code they bound.
 - **Steady state versus transitions.** Steady-state work (receiving,
   settling, maintenance, pruning, WAL checkpoints, checkpoint page
   storage, metadata scans) is bounded in phase 2 without a format change.
@@ -213,7 +224,7 @@ provisional stamps.
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
 | 1b (complete) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
-| 2 (replanned, inventory done) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
+| 2 (in progress, sizing measured; holders open) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
 | 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step; transitions start only when quiet |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |
 | 5 | [Staged migration publication](05-staged-migration-publication.md) | 1 | 2 w | Bounded migration authoring; issuer 100k ≤ 70 s |

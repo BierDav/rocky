@@ -219,13 +219,12 @@ async fn maintenance_finalizes_one_seal_per_step() {
     }
     let status = replica.compaction_status(f.public.domain).await.unwrap();
     assert!(status.uncompacted.is_empty(), "{status:?}");
-    let scopes = BTreeSet::from([f.public]);
     for finalized in 1..=3 {
         replica
             .inner
             .lock(crate::replica::Class::Background)
             .await
-            .maintain(&scopes)
+            .maintain(f.public)
             .await;
         let status = replica.compaction_status(f.public.domain).await.unwrap();
         assert_eq!(status.uncompacted.len(), finalized, "{status:?}");

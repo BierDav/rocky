@@ -9,6 +9,7 @@ use rocky_credentials::{
 };
 
 mod fixture;
+mod storage;
 mod syntax;
 mod syntax_authority;
 mod syntax_bounds;

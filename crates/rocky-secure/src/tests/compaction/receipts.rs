@@ -596,10 +596,13 @@ async fn a_failed_admission_rolls_back_its_receipt_with_every_record() {
     let frames = crate::tests::stored_frames(&a, "SELECT header,body FROM secure_operations").await;
     assert_eq!(frames.len(), 1);
     let state = "SELECT 'e',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'c',identity,entry,provenance FROM secure_admission_claims UNION ALL SELECT 'x',context,head,signature FROM secure_admission_context UNION ALL SELECT 'p',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'l',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'r',revision,0,0 FROM secure_metadata UNION ALL SELECT 'o',hash,status,0 FROM secure_operations";
+    b.stage_bundle_before_apply_for_test(&frames).await.unwrap();
     let before = records(&b, state).await;
     let full_before = crate::tests::bundles::payload::state(&b).await;
-    b.inject_group_fault(Some(crate::replica::group::GroupFault::FailBeforeCommit))
-        .await;
+    b.inject_group_fault(Some(
+        crate::replica::group::GroupFault::FailApplicationBeforeCommit,
+    ))
+    .await;
     crate::BINDING_TRACE.with(|trace| *trace.borrow_mut() = Some(Vec::new()));
     assert!(b.receive(frames[0].clone()).await.is_err());
     assert_eq!(

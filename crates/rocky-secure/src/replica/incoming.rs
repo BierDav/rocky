@@ -1,6 +1,35 @@
 use super::*;
 
+#[derive(Default)]
+enum PendingPhase {
+    #[default]
+    Reset,
+    Discover,
+    Apply,
+    NewRound,
+    Clean,
+    Finish,
+}
+#[derive(Default)]
+pub(super) struct PendingPass {
+    commit: u64,
+    epoch: u64,
+    phase: PendingPhase,
+    cursor: Option<(Vec<u8>, Vec<u8>)>,
+    clean: Option<Hash>,
+    heads: BTreeSet<Head>,
+    examined: BTreeSet<Hash>,
+    skipped: BTreeSet<Hash>,
+    context: i64,
+    advanced: bool,
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
+    #[cfg(test)]
+    pub(crate) async fn pending_step_for_test(&self) -> Result<bool, Error> {
+        let mut inner = self.inner.lock(Class::Background).await;
+        inner.apply_step(now()?).await
+    }
     /// Applies pending frames one bounded transaction at a time, publishing
     /// after each commit. The replica is released between transactions, so
     /// a writer that asked for it meanwhile goes first. Applications before
@@ -8,20 +37,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn settle(&self) -> Result<(), Error> {
         loop {
             tokio::task::yield_now().await;
-            #[cfg(test)]
-            if !crate::apply_allowed() {
-                return Err(Error::InjectedFailure);
-            }
             let mut inner = self.inner.lock(Class::Background).await;
             #[cfg(feature = "qualification")]
-            let frames = inner.applied_frames;
-            let more = inner.apply_step(now()?).await?;
+            let work = (
+                inner.frames_written.load(Ordering::Relaxed),
+                inner.rows_written.load(Ordering::Relaxed),
+                inner.applied_frames,
+            );
+            let result = inner.apply_step(now()?).await;
             #[cfg(feature = "qualification")]
             {
-                let frames = inner.applied_frames - frames;
+                let frames = inner.frames_written.load(Ordering::Relaxed) - work.0;
+                let rows = inner.rows_written.load(Ordering::Relaxed) - work.1;
+                let requests = inner.applied_frames - work.2;
+                inner.row_work(group::APPLICATION_ROWS, rows);
                 inner.units("applied_frame", frames);
+                inner.units("applied_request", requests);
+                inner.units("applied_row", rows);
+                if rows > group::APPLICATION_ROWS {
+                    inner.units("oversized_request", 1);
+                }
             }
-            if !more {
+            if !result? {
                 return Ok(());
             }
         }
@@ -94,21 +131,46 @@ impl<A: RowApplication> Inner<A> {
             frames = tracing::field::Empty,
             rows = tracing::field::Empty,
             waiting = tracing::field::Empty,
+            oversized = tracing::field::Empty,
             outcome = tracing::field::Empty
         );
-        let (rows, frames) = (
+        let (rows_before, frames) = (
             self.rows_written.load(Ordering::Relaxed),
             self.applied_frames,
         );
         let result = tracing::Instrument::instrument(
             async {
-                let (more, failure) = transaction!(self, |inner| {
-                    match inner.apply_pending(time, group::GROUP_REQUESTS).await {
+                if self.pending_pass.commit != self.commit || self.pending_pass.epoch != self.context_epoch.load(Ordering::Relaxed) {
+                    self.pending_pass.phase = PendingPhase::Reset;
+                }
+                let finishing = matches!(self.pending_pass.phase, PendingPhase::Finish)
+                    && self.pending_pass.examined.is_empty() && self.pending_pass.skipped.is_empty();
+                let moved = finishing && !rows(&self.conn, "SELECT 1 FROM secure_move_rows LIMIT 1").await?.is_empty();
+                let writable = matches!(self.pending_pass.phase, PendingPhase::Apply) && !self.pending_pass.heads.is_empty() || moved;
+                if !writable {
+                    return self.apply_pending(time, group::SETTLE_REQUESTS).await;
+                }
+                let (more, failure) = transaction!(@commit self, |inner| {
+                    inner.cause(crate::observe::Cause::Sync);
+                    let result = match inner.apply_pending(time, group::SETTLE_REQUESTS).await {
                         Ok(more) => Ok((more, None)),
                         Err(error) if retryable(&error) => Err(error),
                         Err(error) => Ok((false, Some(error))),
+                    };
+                    #[cfg(test)]
+                    if inner.applied_frames != frames && !crate::apply_allowed() {
+                        return Err(Error::InjectedFailure);
                     }
+                    #[cfg(test)]
+                    if matches!(inner.group_fault, Some(group::GroupFault::FailApplicationBeforeCommit)) {
+                        return Err(Error::InjectedFailure);
+                    }
+                    result
                 })?;
+                self.follow_pass.commit = if failure.is_none() { self.commit } else { u64::MAX };
+                self.follow_pass.epoch = self.context_epoch.load(Ordering::Relaxed);
+                self.pending_pass.commit = self.commit;
+                self.pending_pass.epoch = self.context_epoch.load(Ordering::Relaxed);
                 self.publish_revision().await?;
                 match failure {
                     Some(error) => Err(error),
@@ -122,119 +184,222 @@ impl<A: RowApplication> Inner<A> {
             "rows",
             self.rows_written
                 .load(Ordering::Relaxed)
-                .saturating_sub(rows),
+                .saturating_sub(rows_before),
         );
         span.record("frames", self.applied_frames - frames);
+        span.record(
+            "oversized",
+            self.rows_written
+                .load(Ordering::Relaxed)
+                .saturating_sub(rows_before)
+                > group::APPLICATION_ROWS,
+        );
         span.record("waiting", self.waits.len() as u64);
         crate::network::trace::outcome(&span, &result);
         result
     }
-    /// Applies or rejects dependency-ready pending frames inside the caller's
-    /// transaction, each application in its own savepoint. A failing
-    /// application rolls back alone and is quarantined: its log waits and
-    /// other logs go on. Only a storage failure ends the pass. Returns true
-    /// when `limit` stopped the pass before it settled.
-    ///
-    /// Each later frame of a log names the one before as its backlink, so
-    /// only a log's first pending frame can be ready: a round examines that
-    /// frame of every log and follows a log while its frames apply, in
-    /// sequence order across logs. A waiting log costs one examination per
-    /// round, however many of its frames wait behind it.
+    /// One pending discovery, application or cleanup step. Progress is
+    /// recomputed after another transaction changes its source state.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {
-        let mut changed = 0;
-        let context = self.quarantine_context();
-        let mut quarantined = self.quarantined().await?;
-        let mut skipped = BTreeSet::new();
-        loop {
-            let mut heads = BTreeSet::new();
-            for record in collect_rows(self.conn.query(
-                "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence WHERE o.status='pending'",
-                (),
-            ).await?).await? {
-                heads.insert(head(record)?);
+        let mut pass = std::mem::take(&mut self.pending_pass);
+        let epoch = self.context_epoch.load(Ordering::Relaxed);
+        if pass.commit != self.commit || pass.epoch != epoch {
+            pass.phase = PendingPhase::Reset;
+        }
+        let result = async {
+            for _ in 0..limit {
+                if !self.pending_step(&mut pass, time).await? {
+                    return Ok(false);
+                }
             }
-            let mut advanced = false;
-            let mut examined = BTreeSet::new();
-            while let Some((sequence, hash, scope, author)) = heads.pop_first() {
-                if changed >= limit {
+            Ok(true)
+        }
+        .await;
+        if result.is_err() {
+            pass.phase = PendingPhase::Reset;
+        }
+        pass.commit = self.commit;
+        pass.epoch = self.context_epoch.load(Ordering::Relaxed);
+        self.pending_pass = pass;
+        result
+    }
+    async fn pending_step(&mut self, pass: &mut PendingPass, time: u64) -> Result<bool, Error> {
+        match pass.phase {
+            PendingPhase::Reset => {
+                if pass.heads.pop_first().is_some()
+                    || pass.examined.pop_first().is_some()
+                    || pass.skipped.pop_first().is_some()
+                {
                     return Ok(true);
                 }
-                let Some(frame) = self
-                    .frame(Hash::from_bytes(
-                        hash.try_into()
-                            .map_err(|_| denied("corrupt pending operation"))?,
-                    ))
-                    .await?
-                else {
-                    return Err(denied("missing pending operation"));
-                };
-                let id = frame.id()?;
-                examined.insert(id);
-                let held = quarantined.get(&id).copied();
-                if skipped.contains(&id) || held.is_some_and(|held| !held.due(time, context)) {
-                    self.waits.insert(id, WaitReason::Quarantined);
-                    continue;
-                }
-                self.conn.execute("SAVEPOINT quarantine", ()).await?;
-                let outcome = Box::pin(self.apply_frame(&frame, time)).await;
-                let failure = match &outcome {
-                    Ok(Outcome::Waiting(WaitReason::Undecryptable)) => {
-                        Some(quarantine::UNDECRYPTABLE)
-                    }
-                    Err(error) if quarantine::quarantines(error) => Some(error.category()),
-                    _ => None,
-                };
-                if let Some(reason) = failure {
-                    self.conn.execute("ROLLBACK TO quarantine", ()).await?;
-                    self.conn.execute("RELEASE quarantine", ()).await?;
-                    self.invalidate_context();
-                    self.quarantine(id, reason, time, context).await?;
-                    skipped.insert(id);
-                    self.waits.insert(id, WaitReason::Quarantined);
-                    continue;
-                }
-                self.conn.execute("RELEASE quarantine", ()).await?;
-                if held.is_some() {
-                    self.release_quarantine(id).await?;
-                    quarantined.remove(&id);
-                }
-                match outcome {
-                    Ok(Outcome::Waiting(reason)) => {
-                        self.waits.insert(id, reason);
-                        continue;
-                    }
-                    Ok(_) => {
-                        self.waits.remove(&id);
-                    }
-                    Err(error) => {
-                        if !retryable(&error) {
-                            self.waits.insert(id, WaitReason::Failed);
-                        }
-                        return Err(error);
-                    }
-                }
-                changed += 1;
-                self.applied_frames += 1;
-                advanced = true;
-                let next = collect_rows(self.conn.query(
-                    "SELECT sequence,hash,scope,author FROM secure_operations WHERE scope=? AND author=? AND sequence>? AND status='pending' ORDER BY sequence LIMIT 1",
-                    bindings(vec![SqlValue::Blob(scope), SqlValue::Blob(author), SqlValue::Integer(sequence)]),
-                ).await?).await?;
-                for record in next {
-                    heads.insert(head(record)?);
-                }
+                pass.context = self.quarantine_context();
+                pass.cursor = None;
+                pass.advanced = false;
+                pass.phase = PendingPhase::Discover;
             }
-            if !advanced {
-                // Every pending head was examined this round.
-                self.waits.retain(|hash, _| examined.contains(hash));
-                #[cfg(test)]
-                if self.waits.len() != examined.len() {
-                    return Err(Error::Corrupt("a pending frame has no wait reason".into()));
+            PendingPhase::NewRound => {
+                if pass.examined.pop_first().is_some() {
+                    return Ok(true);
                 }
-                Box::pin(self.follow_moves(time)).await?;
+                pass.cursor = None;
+                pass.advanced = false;
+                pass.phase = PendingPhase::Discover;
+            }
+            PendingPhase::Discover => {}
+            PendingPhase::Apply => {
+                if let Some(item) = pass.heads.pop_first() {
+                    return self.pending_head(pass, item, time).await.map(|()| true);
+                }
+                pass.phase = if pass.advanced {
+                    PendingPhase::NewRound
+                } else {
+                    PendingPhase::Clean
+                };
+                pass.clean = None;
+                return Ok(true);
+            }
+            PendingPhase::Clean => {
+                use std::ops::Bound::{Excluded, Unbounded};
+                let next = match pass.clean {
+                    Some(after) => self
+                        .waits
+                        .range((Excluded(after), Unbounded))
+                        .next()
+                        .map(|(hash, _)| *hash),
+                    None => self.waits.keys().next().copied(),
+                };
+                if let Some(hash) = next {
+                    pass.clean = Some(hash);
+                    if !pass.examined.contains(&hash) {
+                        self.waits.remove(&hash);
+                    }
+                    return Ok(true);
+                }
+                pass.phase = PendingPhase::Finish;
+                return Ok(true);
+            }
+            PendingPhase::Finish => {
+                if pass.examined.pop_first().is_some() || pass.skipped.pop_first().is_some() {
+                    return Ok(true);
+                }
+                if Box::pin(self.follow_moves(time)).await? {
+                    return Ok(true);
+                }
+                pass.phase = PendingPhase::Reset;
                 return Ok(false);
             }
         }
+        let records = match &pass.cursor {
+            Some((scope, author)) => collect_rows(self.conn.query(
+                "SELECT sequence,hash,scope,author FROM secure_operations WHERE status='pending' AND (scope,author)>(?,?) ORDER BY scope,author,sequence LIMIT 1",
+                [scope.clone(), author.clone()],
+            ).await?).await?,
+            None => rows(&self.conn,
+                "SELECT sequence,hash,scope,author FROM secure_operations WHERE status='pending' ORDER BY scope,author,sequence LIMIT 1",
+            ).await?,
+        };
+        if let Some(record) = records.into_iter().next() {
+            let item = head(record)?;
+            pass.cursor = Some((item.2.clone(), item.3.clone()));
+            pass.heads.insert(item);
+        } else {
+            pass.phase = PendingPhase::Apply;
+        }
+        Ok(true)
+    }
+    async fn pending_head(
+        &mut self,
+        pass: &mut PendingPass,
+        (sequence, hash, scope, author): Head,
+        time: u64,
+    ) -> Result<(), Error> {
+        let id = Hash::from_bytes(
+            hash.try_into()
+                .map_err(|_| denied("corrupt pending operation"))?,
+        );
+        let frame = self
+            .frame(id)
+            .await?
+            .ok_or_else(|| denied("missing pending operation"))?;
+        pass.examined.insert(id);
+        if !self.pending_frame(pass, &frame, time).await? {
+            return Ok(());
+        }
+        for record in collect_rows(self.conn.query(
+            "SELECT sequence,hash,scope,author FROM secure_operations WHERE scope=? AND author=? AND sequence>? AND status='pending' ORDER BY sequence LIMIT 1",
+            bindings(vec![SqlValue::Blob(scope), SqlValue::Blob(author), SqlValue::Integer(sequence)]),
+        ).await?).await? {
+            pass.heads.insert(head(record)?);
+        }
+        Ok(())
+    }
+    /// Attempts only this request; no scan of unrelated pending logs.
+    pub(super) async fn apply_received(
+        &mut self,
+        frame: &EncryptedFrame,
+        time: u64,
+    ) -> Result<(), Error> {
+        let id = frame.operation_ref()?.hash;
+        if self.stored_status(id).await?.as_deref() != Some("pending") {
+            return Ok(());
+        }
+        let mut pass = PendingPass {
+            context: self.quarantine_context(),
+            ..PendingPass::default()
+        };
+        self.pending_frame(&mut pass, frame, time).await?;
+        Ok(())
+    }
+    async fn pending_frame(
+        &mut self,
+        pass: &mut PendingPass,
+        frame: &EncryptedFrame,
+        time: u64,
+    ) -> Result<bool, Error> {
+        let id = frame.operation_ref()?.hash;
+        let held = self.quarantined_frame(id).await?;
+        if pass.skipped.contains(&id) || held.is_some_and(|held| !held.due(time, pass.context)) {
+            self.waits.insert(id, WaitReason::Quarantined);
+            return Ok(false);
+        }
+        self.conn.execute("SAVEPOINT quarantine", ()).await?;
+        let outcome = Box::pin(self.apply_frame(frame, time)).await;
+        let failure = match &outcome {
+            Ok(Outcome::Waiting(WaitReason::Undecryptable)) => Some(quarantine::UNDECRYPTABLE),
+            Err(error) if quarantine::quarantines(error) => Some(error.category()),
+            _ => None,
+        };
+        if let Some(reason) = failure {
+            self.conn.execute("ROLLBACK TO quarantine", ()).await?;
+            self.conn.execute("RELEASE quarantine", ()).await?;
+            self.invalidate_context();
+            self.quarantine(id, reason, time, pass.context).await?;
+            pass.skipped.insert(id);
+            self.waits.insert(id, WaitReason::Quarantined);
+            return Ok(false);
+        }
+        self.conn.execute("RELEASE quarantine", ()).await?;
+        if held.is_some() {
+            self.release_quarantine(id).await?;
+        }
+        match outcome {
+            Ok(Outcome::Waiting(reason)) => {
+                self.waits.insert(id, reason);
+                return Ok(false);
+            }
+            Ok(_) => {
+                self.waits.remove(&id);
+            }
+            Err(error) => {
+                if !retryable(&error) {
+                    self.waits.insert(id, WaitReason::Failed);
+                }
+                return Err(error);
+            }
+        }
+        self.applied_frames += 1;
+        pass.advanced = true;
+        Ok(true)
     }
     /// Applies or rejects one stored frame inside the caller's transaction,
     /// in its own savepoint. A storage failure rolls the savepoint back.
@@ -319,6 +484,13 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Outcome::Waiting(WaitReason::Undecryptable));
         };
         let payload = self.decode_row_payload(frame, &plaintext);
+        #[cfg(any(test, feature = "qualification"))]
+        if let Ok(payload) = &payload {
+            self.flusher.measurements.work(
+                crate::replica::lock::WorkUnit::ReceivedInputRow,
+                payload.writes().len() as u64,
+            );
+        }
         match self
             .dependencies_ready(frame, &BTreeSet::new(), payload.as_ref().ok())
             .await

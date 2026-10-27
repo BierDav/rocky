@@ -586,11 +586,12 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         .database
         .attach(Network::Borrowed(gate.clone()))
         .await?;
-    member.sync().await.expect("resume the remaining scopes");
+    let resumed = member.sync().await.expect("resume the remaining scopes");
     assert!(*attempts.borrow() > before);
     assert_eq!(
         member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
-        false
+        false,
+        "resume report: {resumed:?}"
     );
     assert!(!path.join("bootstrap.json").exists());
     assert_eq!(member.titles().await, ["first scope"]);

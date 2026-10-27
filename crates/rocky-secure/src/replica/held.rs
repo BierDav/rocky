@@ -2,8 +2,9 @@
 //! newer generation's removal would split. Adopting the generation holds
 //! them whole, voids their frames with a signed record so their author logs
 //! continue, and rolls their effects back; the application re-authors or
-//! drops them. See `docs/runtime/held-changes.md` and decision 0069.
+//! drops them.
 mod late;
+mod listing;
 use super::checkpoint::hash_of;
 use super::*;
 use p2panda_core::{Header, Signature, validate_header};
@@ -1062,67 +1063,48 @@ impl<A: RowApplication> Inner<A> {
         self.record_held_resolution(id, &self.local_grants(now()?)?)
             .await
     }
-    async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
-        let mut changes = Vec::new();
-        for record in rows(&self.conn, "SELECT id,change FROM secure_held ORDER BY id").await? {
-            let [SqlValue::Blob(id), SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(Error::Corrupt("held change".into()));
-            };
-            let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
-            let mut rows = Vec::with_capacity(stored.rows.len());
-            for row in stored.rows {
-                let removed = !self.tables.contains(&row.scope.table);
-                let current = match removed {
-                    true => None,
-                    false => self
-                        .row(row.scope, row.row)
-                        .await?
-                        .filter(|row| !row.deleted),
-                };
-                rows.push(HeldRow {
-                    scope: row.scope,
-                    table: row.table,
-                    removed,
-                    row: row.row,
-                    kind: row.kind,
-                    fields: row
-                        .fields
-                        .into_iter()
-                        .map(|(field, name, value, written)| {
-                            let removed = removed || !self.fields.contains(&field);
-                            HeldField {
-                                current: (written && !removed)
-                                    .then(|| {
-                                        current.as_ref().and_then(|current| {
-                                            let stamp = current.stamps.get(&field)?;
-                                            Some(CurrentValue {
-                                                value: current.fields.get(&field).cloned(),
-                                                time: stamp.clock,
-                                                author: *current.authors.get(&stamp.author)?,
-                                            })
-                                        })
+    async fn held_row(&self, row: StoredRow) -> Result<HeldRow, Error> {
+        let removed = !self.tables.contains(&row.scope.table);
+        let current = match removed {
+            true => None,
+            false => self
+                .row(row.scope, row.row)
+                .await?
+                .filter(|row| !row.deleted),
+        };
+        Ok(HeldRow {
+            scope: row.scope,
+            table: row.table,
+            removed,
+            row: row.row,
+            kind: row.kind,
+            fields: row
+                .fields
+                .into_iter()
+                .map(|(field, name, value, written)| {
+                    let removed = removed || !self.fields.contains(&field);
+                    HeldField {
+                        current: (written && !removed)
+                            .then(|| {
+                                current.as_ref().and_then(|current| {
+                                    let stamp = current.stamps.get(&field)?;
+                                    Some(CurrentValue {
+                                        value: current.fields.get(&field).cloned(),
+                                        time: stamp.clock,
+                                        author: *current.authors.get(&stamp.author)?,
                                     })
-                                    .flatten(),
-                                field,
-                                name,
-                                value: value.into_vec(),
-                                written,
-                                removed,
-                            }
-                        })
-                        .collect(),
-                });
-            }
-            changes.push(HeldChange {
-                id: id
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::Corrupt("held change".into()))?,
-                time: stored.time,
-                rows,
-            });
-        }
-        Ok(changes)
+                                })
+                            })
+                            .flatten(),
+                        field,
+                        name,
+                        value: value.into_vec(),
+                        written,
+                        removed,
+                    }
+                })
+                .collect(),
+        })
     }
 }
 
@@ -1180,10 +1162,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Local changes held because a newer generation removed what they
     /// write, each with the current values of the fields it writes.
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        transaction!(inner, |inner| inner.refresh_closed_held(now()?, None).await)?;
-        inner = flush_guard(inner, &self.inner).await?;
-        inner.held_changes().await
+        self.refresh_closed_held(None).await?;
+        self.list_held_changes().await
     }
     /// Drops a held change; fails when it is not held.
     pub async fn drop_held(&self, id: Commitment) -> Result<(), Error> {

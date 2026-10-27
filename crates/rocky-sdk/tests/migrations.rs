@@ -2,6 +2,8 @@
 //! migrations in one local transaction and publishes the result as many
 //! bundles. See `docs/runtime/generations.md#migrations`.
 mod common;
+#[path = "migrations/prepared_pull.rs"]
+mod prepared_pull;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -384,7 +386,20 @@ async fn additive_switch_changes(root: &Path, rows: usize) -> Result<i64, Failur
     Ok(changes)
 }
 
+struct MemberFixture {
+    root: common::identity::Directory,
+    large: usize,
+    multi_step: bool,
+    fill: String,
+    hub: Arc<Hub>,
+    a: Device,
+}
+
 async fn converges_on_every_member(large: usize, history: usize) -> Result<(), Failure> {
+    pull_member_fixture(prepare_member_fixture(large, history).await?).await
+}
+
+async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFixture, Failure> {
     let root = common::identity::small_directory()?;
     // The history gate needs one 50k-row state; the other gates exercise
     // the additive switch and second migration as well.
@@ -579,7 +594,45 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
         );
     }
     c.close().await;
+    eprintln!(
+        "PREPARED rows={large} history={history_time:?} seed_open={seeded:?} {additive_measurement} {open_stage}={filled:?} file_before={before} file_seeded={between} data_seeded={data} issuer_file={} publication={published:?} closing_compaction={closed:?}",
+        size(&a_dir)?,
+    );
+    Ok(MemberFixture {
+        root,
+        large,
+        multi_step,
+        fill,
+        hub,
+        a,
+    })
+}
 
+async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
+    let MemberFixture {
+        root,
+        large,
+        multi_step,
+        fill,
+        hub,
+        a,
+    } = fixture;
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let size =
+        |directory: &Path| std::fs::metadata(directory.join("rocky.sqlite")).map(|m| m.len());
+    let (ready_query, ready_rows) = if multi_step {
+        (
+            FILLED_COUNT,
+            json!([[{"type": "integer", "value": large.to_string()}, {"type": "integer", "value": large.to_string()}]]),
+        )
+    } else {
+        (
+            "SELECT count(*) FROM items",
+            json!([[{"type": "integer", "value": large.to_string()}]]),
+        )
+    };
+    let network_bytes = hub.written();
     // The returning member takes the listed closing checkpoint and the tail.
     let member_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
@@ -733,7 +786,7 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
         }
     }
     eprintln!(
-        "MEASURED rows={large} history={history_time:?} seed_open={seeded:?} {additive_measurement} {open_stage}={filled:?} file_before={before} file_seeded={between} data_seeded={data} issuer_file={} publication={published:?} closing_compaction={closed:?} member_open={member_open:?} member_syncs={syncs} member_pull={pulled:?} member_file={}",
+        "MEASURED rows={large} issuer_file={} member_open={member_open:?} member_syncs={syncs} member_pull={pulled:?} member_file={}",
         size(&a_dir)?,
         size(&b_dir)?,
     );

@@ -38,6 +38,13 @@ After this phase it waits for at most the one step already running.
   interactive waiter is registered, then acquires as background. Once
   started, it runs to completion, as today. The starvation guard applies
   to its start in the same way.
+- **Dependent fan-out waits for a quiet gate.** An oversized
+  [dependent fan-out step](02-bounded-holds.md#settled) starts only when no
+  interactive write is waiting and then commits all induced child changes
+  atomically. Handle its start like a transition; the starvation guard must
+  not bypass this explicit no-waiter requirement. Report overlapping latency
+  samples separately. The exception expires in features_13 when constraints
+  move into replay.
 - **The flush is not a holder.** Flushes already run without the replica
   and are unaffected.
 
@@ -55,9 +62,10 @@ After this phase it waits for at most the one step already running.
    the next step.
 3. Starvation guard. Test: continuous interactive acquisitions still let
    a background loop complete, with the expected step count.
-4. Transition start gate. Test: a transition requested while an
-   interactive waiter is registered starts only after that waiter
-   acquires and releases.
+4. Transition and dependent fan-out start gates. Test each: work requested
+   while an interactive waiter is registered starts only after that waiter
+   acquires and releases. A fan-out start never bypasses a waiting interactive
+   write through the starvation guard.
 5. Simulation: add the interactive probe to the fixed seed set. Every seed
    converges, and blockers decrease as before.
 6. Rerun L0–L4 on desktop, and on phone where available, plus the desktop
@@ -71,7 +79,8 @@ After this phase it waits for at most the one step already running.
   confirm it in the measured runs.
 - Desktop interactive write in L1–L4 meets p95 ≤ 16 ms, p99 ≤ 50 ms and
   max ≤ 100 ms, excluding samples that overlap a running transition.
-  Those samples are counted and reported separately. Phone results where
+  Those samples, and samples overlapping oversized dependent fan-out, are
+  counted and reported separately. Phone results where
   measured are recorded against 33 / 100 / 250 ms.
 - The desktop sync non-regression rows hold. In particular, L1 member pull
   time with the probe running is within 110% of the paired baseline

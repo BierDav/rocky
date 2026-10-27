@@ -282,6 +282,12 @@ fn merge(into: &mut Measurements, interval: Measurements) {
         let holder = into.holders.entry(site).or_default();
         holder.wait_us.append(&mut values.wait_us);
         holder.hold_us.append(&mut values.hold_us);
+        holder
+            .dependent_fanout_us
+            .append(&mut values.dependent_fanout_us);
+        holder
+            .oversized_request_us
+            .append(&mut values.oversized_request_us);
         for (unit, mut samples) in values.units {
             holder.units.entry(unit).or_default().append(&mut samples);
         }
@@ -295,6 +301,32 @@ fn merge(into: &mut Measurements, interval: Measurements) {
     }
 }
 pub(super) fn holders(measurements: &Measurements) {
+    for ((site, class), holder) in &measurements.holders {
+        if !holder.oversized_request_us.is_empty() {
+            let [p50, p95, p99, max] = percentiles(&holder.oversized_request_us);
+            eprintln!(
+                "P12 exception=oversized_request site={site} class={class} acquisitions={} hold_p50_us={p50} hold_p95_us={p95} hold_p99_us={p99} hold_max_us={max}",
+                holder.oversized_request_us.len()
+            );
+        }
+        if !holder.dependent_fanout_us.is_empty() {
+            let holds: Vec<_> = holder
+                .dependent_fanout_us
+                .iter()
+                .map(|(_, us)| *us)
+                .collect();
+            let [p50, p95, p99, max] = percentiles(&holds);
+            eprintln!(
+                "P12 exception=dependent_fanout site={site} class={class} acquisitions={} induced_rows={} hold_p50_us={p50} hold_p95_us={p95} hold_p99_us={p99} hold_max_us={max}",
+                holds.len(),
+                holder
+                    .dependent_fanout_us
+                    .iter()
+                    .map(|(count, _)| count)
+                    .sum::<u64>()
+            );
+        }
+    }
     for (order, percentile) in [("p99", 2), ("max", 3)] {
         let mut sites: Vec<_> = measurements.holders.iter().collect();
         sites

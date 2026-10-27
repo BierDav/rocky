@@ -32,6 +32,7 @@ impl<A> Inner<A> {
     }
     /// Also used after rollback and after restoring an earlier in-memory context.
     pub(crate) fn invalidate_context(&self) {
+        self.context_epoch.fetch_add(1, Ordering::Relaxed);
         self.invalidate_frontiers();
         self.invalidate_records();
         self.metadata.clear();

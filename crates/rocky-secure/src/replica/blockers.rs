@@ -70,6 +70,7 @@ impl DomainReadiness {
 /// state-table writes and one context (tip, authority, graph, custody).
 pub(crate) struct Readiness {
     writes: Arc<crate::sqlite::Writes>,
+    tables: Vec<(String, bool)>,
     cache: std::sync::Mutex<ReadinessCache>,
 }
 #[derive(Default)]
@@ -86,9 +87,11 @@ impl Readiness {
         let tables = STATE_TABLES
             .iter()
             .map(|table| (physical(table), true))
-            .chain([(physical("secure_scope_state"), false)]);
+            .chain([(physical("secure_scope_state"), false)])
+            .collect::<Vec<_>>();
         Ok(Self {
-            writes: conn.connection().watch_writes(tables)?,
+            writes: conn.connection().watch_writes(tables.iter().cloned())?,
+            tables,
             cache: Default::default(),
         })
     }
@@ -103,9 +106,16 @@ impl Readiness {
         cache.generation = cache.generation.wrapping_add(1);
         cache.domains.clear();
     }
+    fn write_count(&self) -> u64 {
+        self.writes.selected_count(
+            self.tables
+                .iter()
+                .map(|(table, updates)| (table.as_str(), *updates)),
+        )
+    }
     fn get(&self, domain: Scope, context: Commitment) -> Option<Arc<DomainReadiness>> {
         let cache = self.cache();
-        let writes = self.writes.count();
+        let writes = self.write_count();
         cache
             .domains
             .get(&domain)
@@ -128,14 +138,14 @@ impl Readiness {
         {
             cache.derivations += 1;
         }
-        if cache.generation == generation && self.writes.count() == writes {
+        if cache.generation == generation && self.write_count() == writes {
             cache
                 .domains
                 .insert(domain, (generation, writes, context, readiness));
         }
     }
     fn mark(&self) -> (u64, u64) {
-        (self.cache().generation, self.writes.count())
+        (self.cache().generation, self.write_count())
     }
     #[cfg(test)]
     pub(crate) fn derivations(&self) -> u64 {

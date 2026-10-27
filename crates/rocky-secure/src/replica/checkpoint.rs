@@ -34,6 +34,8 @@ use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, PrunedPage, RebootstrapReport};
 #[cfg(test)]
+pub(crate) use transfer::{STORE_METADATA, STORE_ROWS_FOR_TEST};
+#[cfg(test)]
 pub(crate) use transfer::{
     forge_page, forge_page_bindings, forge_page_clocks, forge_page_legend, page_header_count,
 };
@@ -1864,11 +1866,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     #[cfg(test)]
     pub(crate) async fn maintain_checkpoint_for_test(&self, scope: ResourceScope) {
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .maintain(&[scope].into())
-            .await;
+        self.maintain_scopes([scope].into()).await;
     }
     #[cfg(test)]
     pub(crate) async fn inject_stage_fault(&self, stage: Stage, skip: usize) {

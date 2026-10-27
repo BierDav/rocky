@@ -4,8 +4,9 @@ description = "Generic execution fencing, head confirmation and request deduplic
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
 
 [features]
 default = ["iroh"]
@@ -26,8 +27,8 @@ fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
-rocky-runtime.workspace = true
-rocky-secure.workspace = true
+rocky-runtime = { path = "../rocky-runtime" }
+rocky-secure = { path = "../rocky-secure" }
 directory-app = { path = "../../examples/directory-app" }
 inventory-app = { path = "../../examples/inventory-app" }
 

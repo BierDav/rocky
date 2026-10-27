@@ -1,4 +1,4 @@
-use rocky::{Affinity, Column, Configuration, Failure, Schema, Table, params};
+use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 
 #[tokio::main]
 async fn main() -> Result<(), Failure> {

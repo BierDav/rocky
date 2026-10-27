@@ -4,8 +4,9 @@ description = "Shared Rocky identities, operation envelopes, versions and protoc
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
 
 [lints]
 workspace = true

@@ -4,8 +4,9 @@ description = "Signed capabilities, encrypted replicas and authenticated live li
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
 
 [features]
 # Deterministic simulator fault hooks; never enabled in published artifacts.
@@ -28,8 +29,8 @@ rand = "=0.8.8"
 [dev-dependencies]
 serde_json = "1"
 employees-app = { path = "../../examples/employees-app" }
-rocky-coordinator.workspace = true
-rocky-storage = { workspace = true, features = ["test-support"] }
+rocky-coordinator = { path = "../rocky-coordinator" }
+rocky-storage = { path = "../rocky-storage", features = ["test-support"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

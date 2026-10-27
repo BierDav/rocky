@@ -1,4 +1,4 @@
-use rocky::{Affinity, Column, Configuration, Failure, Schema, Table, params};
+use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 
 fn schema() -> Result<Schema, Failure> {
     Schema::builder("rust_application", 1)
@@ -163,7 +163,7 @@ fn invalid_schema_is_refused_before_installation() {
 
 #[tokio::test]
 async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), Failure> {
-    use rocky::{GrantProfile, Network, transport::memory::Hub};
+    use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
     let issuer_directory = tempfile::tempdir()?;

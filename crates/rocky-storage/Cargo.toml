@@ -4,8 +4,9 @@ description = "SQLite access, row capture and errors shared by the runtimes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
 
 [features]
 # Process-death probes inside SQLite COMMIT, omitted from packaged runtimes.

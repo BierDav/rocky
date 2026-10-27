@@ -5971,15 +5971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocky"
-version = "0.1.0"
-dependencies = [
- "rocky-sdk",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "rocky-apple-libc"
 version = "0.1.0"
 dependencies = [

@@ -21,7 +21,7 @@ bindgen = ["uniffi/cli", "dep:uniffi_bindgen", "dep:askama", "dep:anyhow", "dep:
 iroh = ["rocky-sdk/iroh", "dep:tokio"]
 
 [dependencies]
-rocky-sdk = { package = "rocky", path = "../native", default-features = false }
+rocky-sdk = { path = "../../crates/rocky-sdk", default-features = false }
 # The in-process coordinated log for development.
 rocky-coordinator = { path = "../../crates/rocky-coordinator", default-features = false }
 uniffi = "=0.32.2"

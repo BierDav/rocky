@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "sdks/native", "examples/*", "benchmarks/runtime-scaling"]
+members = ["crates/*", "examples/*", "benchmarks/runtime-scaling"]
 exclude = ["benchmarks/engine-comparison", "benchmarks/engine-scale",  "examples/shoppinglist-app", "sdks/uniffi", "vendor/apple-libc", "vendor/netdev", "vendor/netwatch"]
 resolver = "3"
 
@@ -8,16 +8,18 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "PolyForm-Noncommercial-1.0.0"
+license-file = "LICENSE"
+repository = "https://github.com/BierDav/rocky"
 publish = false
 
 [workspace.dependencies]
-rocky-core = { path = "crates/rocky-core" }
-rocky-credentials = { path = "crates/rocky-credentials" }
-rocky-runtime = { path = "crates/rocky-runtime" }
-rocky-secure = { path = "crates/rocky-secure" }
-rocky-storage = { path = "crates/rocky-storage" }
-rocky-coordinator = { path = "crates/rocky-coordinator" }
-rocky-iroh = { path = "crates/rocky-iroh" }
+rocky-core = { path = "crates/rocky-core", version = "=0.1.0" }
+rocky-credentials = { path = "crates/rocky-credentials", version = "=0.1.0" }
+rocky-runtime = { path = "crates/rocky-runtime", version = "=0.1.0" }
+rocky-secure = { path = "crates/rocky-secure", version = "=0.1.0" }
+rocky-storage = { path = "crates/rocky-storage", version = "=0.1.0" }
+rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0" }
+rocky-iroh = { path = "crates/rocky-iroh", version = "=0.1.0" }
 todo-app = { path = "examples/todo-app" }
 # Structured spans and events; Rocky crates never install a subscriber.
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }

@@ -146,6 +146,7 @@ jobs:
             echo
             echo "### Packages"
             echo
+            echo "- Rust: \`rocky-sdk = \"=${version}\"\` ([crates.io](https://crates.io/crates/rocky-sdk/${version}))"
             echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
             echo "- \`${registry}/bierdav/rocky-db-peer:${version}\`"
             echo "- Maven \`${maven}\`: \`rocky:rocky-core\`, \`rocky:rocky-sqlite\` and"
@@ -172,7 +173,7 @@ jobs:
     # A manual release can explicitly bypass the check gate.
     needs: [version, check]
     if: >-
-      !cancelled() && needs.version.result == 'success' &&
+      always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: ${{ matrix.runner }}
@@ -277,7 +278,7 @@ jobs:
     name: Publish the ${{ matrix.image }} manifest
     needs: [version, image]
     if: >-
-      !cancelled() && needs.version.result == 'success' &&
+      always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' && needs.image.result == 'success'
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 15
@@ -549,11 +550,12 @@ jobs:
     # After `jvm`: the JVM jar carries every platform's native library.
     needs: [version, check, jvm]
     if: >-
-      !cancelled() && needs.version.result == 'success' &&
+      always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' && needs.jvm.result == 'success' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     runs-on: macos-latest
-    timeout-minutes: 45
+    # A cold build compiles both iOS targets, qualifies them and builds JVM libraries.
+    timeout-minutes: 90
     env:
       ROCKY_VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -616,14 +618,14 @@ jobs:
     name: Publish
     needs: [version, check, image-manifest, jvm, android, ios]
     if: >-
-      !cancelled() && needs.version.result == 'success' &&
+      always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' &&
       needs.image-manifest.result == 'success' && needs.jvm.result == 'success' &&
       needs.android.result == 'success' && needs.ios.result == 'success' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: write
@@ -695,6 +697,22 @@ jobs:
         with:
           name: ios
           path: dist/ios
+
+      - name: Install the system build dependencies
+        working-directory: source
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+
+      - uses: ./source/.github/actions/setup-sccache
+
+      - name: Publish the Rust SDK to crates.io
+        working-directory: source
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "${CARGO_REGISTRY_TOKEN}" || { echo "::error::Set the CARGO_REGISTRY_TOKEN secret to publish new crates."; exit 1; }
+          scripts/release/rust-publish "${VERSION}"
 
       - name: Publish the Maven artifacts
         env:

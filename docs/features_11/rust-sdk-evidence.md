@@ -2,9 +2,11 @@
 
 Status: implemented; automated Rust and Kotlin checks passed (2026-10-26).
 
-The public `rocky` package lives in `sdks/native` and belongs to the Cargo
-workspace. The former native binding package lives in `sdks/uniffi` and depends
-on `rocky`, so Kotlin and Rust share the same implementation in `rocky-sdk`.
+The public `rocky-sdk` package lives in `crates/rocky-sdk` and belongs to the
+Cargo workspace. The redundant `sdks/native` re-export package was removed on
+2026-10-27; its example, doctest and six application tests now live in
+`rocky-sdk`. The native binding package lives in `sdks/uniffi` and depends
+directly on `rocky-sdk`, so Kotlin and Rust share the same implementation.
 Kotlin build inputs, packaging, qualification commands and CI paths follow the
 binding package; its ABI and library names remain `rocky_uniffi`.
 
@@ -58,3 +60,26 @@ explicit enrollment and two-peer replication without JSON calls.
 
 Physical-device sync, shopping application packaging, and performance phases
 are not qualified by this work.
+
+## Registry releases (2026-10-27)
+
+The release workflow publishes `rocky-sdk` and its seven Rocky dependencies to
+crates.io before Maven artifacts and the GitHub/Gitea release. Each release
+stamps the workspace version and exact internal dependency requirements from
+its computed release version. Cargo verifies all packages before uploading them
+in dependency order; retries omit versions already present in the registry and
+refuse yanked versions. Example applications remain unpublished. Registry
+packages include the full license; local-only test dependencies are omitted
+from published manifests to avoid development dependency cycles.
+
+The release dependency conditions explicitly use `always()` while retaining
+cancellation, successful artifact and opt-in skipped-check guards. The last
+GitHub attempt (40392544751) actually timed out in the iOS build after 45
+minutes; publishing correctly refused its cancelled artifact job. The iOS
+budget is now 90 minutes to accommodate cold builds of both Apple targets and
+JVM native libraries. Rust package verification has a 60-minute publishing
+budget.
+
+Registry consumers use upstream iroh transitive dependencies. Workspace-only
+Apple patches remain local; the crates.io SDK's iOS transport is not qualified
+by desktop package verification.

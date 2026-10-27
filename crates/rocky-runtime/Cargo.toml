@@ -4,8 +4,9 @@ description = "Local transactions, operation storage, replication and observable
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
 
 [dependencies]
 rocky-core.workspace = true
@@ -16,7 +17,7 @@ serde_json = "1"
 
 [dev-dependencies]
 inventory-app = { path = "../../examples/inventory-app" }
-rocky-storage = { workspace = true, features = ["test-support"] }
+rocky-storage = { path = "../rocky-storage", features = ["test-support"] }
 todo-app.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

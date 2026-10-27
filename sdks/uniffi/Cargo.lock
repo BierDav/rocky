@@ -3286,13 +3286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocky"
-version = "0.1.0"
-dependencies = [
- "rocky-sdk",
-]
-
-[[package]]
 name = "rocky-apple-libc"
 version = "0.1.0"
 dependencies = [
@@ -3430,8 +3423,8 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "rocky",
  "rocky-coordinator",
+ "rocky-sdk",
  "serde",
  "serde_json",
  "syn 2.0.119",

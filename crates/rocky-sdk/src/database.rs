@@ -83,6 +83,11 @@ struct Setup {
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
 enum Command {
+    #[cfg(all(test, feature = "qualification"))]
+    BlockReactor(
+        oneshot::Sender<()>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    ),
     Call {
         session: u64,
         bytes: Vec<u8>,
@@ -93,20 +98,31 @@ enum Command {
     Attach(Network, oneshot::Sender<Result<u64, Failure>>),
     Detach(u64, oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), String>>),
-    Connect(
-        ConnectionOptions,
-        Arc<Shared>,
-        oneshot::Sender<Result<Connection, Failure>>,
-    ),
+    Connect {
+        options: ConnectionOptions,
+        shared: Arc<Shared>,
+        #[cfg(feature = "qualification")]
+        queued: std::time::Instant,
+        reply: oneshot::Sender<Result<Connection, Failure>>,
+    },
     Sql {
         connection: u64,
         call: connection::Call,
+        #[cfg(feature = "qualification")]
+        queued: std::time::Instant,
         reply: oneshot::Sender<Result<connection::Reply, SqlFailure>>,
     },
-    Disconnect(u64, oneshot::Sender<()>),
+    Disconnect {
+        connection: u64,
+        #[cfg(feature = "qualification")]
+        queued: std::time::Instant,
+        reply: oneshot::Sender<()>,
+    },
     Coordinate(Option<Arc<dyn rocky_core::DomainLog>>, oneshot::Sender<()>),
     #[cfg(feature = "qualification")]
     LockMeasurements(oneshot::Sender<rocky_secure::LockMeasurements>),
+    #[cfg(feature = "qualification")]
+    ReactorMeasurements(oneshot::Sender<Option<crate::ReactorMeasurements>>),
     Observe(
         Option<Vec<String>>,
         oneshot::Sender<Result<rocky_runtime::TableObserver, Failure>>,
@@ -190,6 +206,13 @@ impl Database {
     #[cfg(feature = "qualification")]
     pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
         Ok(self.shared.request(Command::LockMeasurements).await?)
+    }
+    #[cfg(feature = "qualification")]
+    pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, Failure> {
+        self.shared
+            .request(Command::ReactorMeasurements)
+            .await?
+            .ok_or_else(|| "reactor measurement context missing".into())
     }
     /// Creates a domain in an empty directory, owned by this node's
     /// identity, whose key is the publisher key. Credentials last
@@ -445,7 +468,13 @@ impl Database {
     /// `docs/runtime/sql-driver.md`.
     pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
         self.shared
-            .request(|reply| Command::Connect(options, self.shared.clone(), reply))
+            .request(|reply| Command::Connect {
+                options,
+                shared: self.shared.clone(),
+                #[cfg(feature = "qualification")]
+                queued: std::time::Instant::now(),
+                reply,
+            })
             .await?
     }
     /// Committed changes of `tables`, or of every table. Register before
@@ -497,7 +526,7 @@ impl Database {
         let (cleanup, cleanups) = mpsc::unbounded_channel();
         let (hello, greeting) = oneshot::channel();
         let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
-        let task = tokio::task::spawn_local(async move {
+        let task = crate::reactor::spawn_local("host", async move {
             let local = tokio::task::LocalSet::new();
             let result = local
                 .run_until(run(setup, network, receiver, cleanups, &hello))
@@ -555,6 +584,8 @@ impl Connection {
             .request(|reply| Command::Sql {
                 connection,
                 call,
+                #[cfg(feature = "qualification")]
+                queued: std::time::Instant::now(),
                 reply,
             })
             .await
@@ -591,6 +622,8 @@ impl Connection {
         let _ = self.shared.cleanup.send(Command::Sql {
             connection: self.id,
             call: connection::Call::Finish { statement },
+            #[cfg(feature = "qualification")]
+            queued: std::time::Instant::now(),
             reply: oneshot::channel().0,
         });
     }
@@ -612,7 +645,12 @@ impl Connection {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
                 .shared
-                .request(|reply| Command::Disconnect(self.id, reply))
+                .request(|reply| Command::Disconnect {
+                    connection: self.id,
+                    #[cfg(feature = "qualification")]
+                    queued: std::time::Instant::now(),
+                    reply,
+                })
                 .await;
         }
     }
@@ -620,10 +658,12 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
-            let _ = self
-                .shared
-                .cleanup
-                .send(Command::Disconnect(self.id, oneshot::channel().0));
+            let _ = self.shared.cleanup.send(Command::Disconnect {
+                connection: self.id,
+                #[cfg(feature = "qualification")]
+                queued: std::time::Instant::now(),
+                reply: oneshot::channel().0,
+            });
         }
     }
 }
@@ -1204,6 +1244,19 @@ async fn restore(
 async fn run(
     setup: Setup,
     network: Option<Network>,
+    input: mpsc::Receiver<Command>,
+    cleanups: mpsc::UnboundedReceiver<Command>,
+    hello: &Hello,
+) -> Result<(), Failure> {
+    let serving = run_inner(setup, network, input, cleanups, hello);
+    #[cfg(feature = "qualification")]
+    let serving = crate::reactor::scope(crate::ReactorMeasurements::default(), serving);
+    serving.await
+}
+
+async fn run_inner(
+    setup: Setup,
+    network: Option<Network>,
     mut input: mpsc::Receiver<Command>,
     mut cleanups: mpsc::UnboundedReceiver<Command>,
     hello: &Hello,
@@ -1434,6 +1487,7 @@ async fn run(
     }
     // Migration commits precede the revision subscription. Drain their work
     // before enrollment or the first reconciliation can trigger it instead.
+    replica.flush().await?;
     replica.maintain().await;
     replica.finalize_path(node.domain().scope).await?;
     let network = match link {
@@ -1445,7 +1499,7 @@ async fn run(
         .map_err(|_| "database opener abandoned")?;
     if directory.join("bootstrap.json").exists() && network.is_some() {
         let joining = node.clone();
-        tokio::task::spawn_local(async move {
+        crate::reactor::spawn_local("bootstrap", async move {
             // Failure leaves the durable bootstrap intent for the next sync/open.
             let _ = joining.initial_sync().await;
         });
@@ -1454,8 +1508,8 @@ async fn run(
     let connections = Arc::new(connection::Registry::default());
     let mut tasks = tokio::task::JoinSet::new();
     let mut shutdown = None;
-    let settling = tokio::task::spawn_local(settle_commits(replica.clone()));
-    let recovering = tokio::task::spawn_local(node.clone().drive_recovery());
+    let settling = crate::reactor::spawn_local("settle_commits", settle_commits(replica.clone()));
+    let recovering = crate::reactor::spawn_local("recovery", node.clone().drive_recovery());
     loop {
         let command = tokio::select! {
             command = input.recv() => match command { Some(command) => command, None => break },
@@ -1463,6 +1517,13 @@ async fn run(
         };
         let node = node.clone();
         match command {
+            #[cfg(all(test, feature = "qualification"))]
+            Command::BlockReactor(entered, resume) => {
+                crate::reactor::spawn_in(&mut tasks, "test_blocking", async move {
+                    let _ = entered.send(());
+                    let _ = resume.lock().unwrap().recv();
+                });
+            }
             Command::Call {
                 session,
                 bytes,
@@ -1487,7 +1548,7 @@ async fn run(
                 } else {
                     node.client(session)
                 };
-                tasks.spawn_local(async move {
+                crate::reactor::spawn_in(&mut tasks, "call", async move {
                     let _permit = permit;
                     let response = if waits {
                         tokio::select! {
@@ -1508,12 +1569,12 @@ async fn run(
                 let _ = reply.send(());
             }
             Command::Attach(network, reply) => {
-                tasks.spawn_local(async move {
+                crate::reactor::spawn_in(&mut tasks, "attach", async move {
                     let _ = reply.send(node.attach(network).await);
                 });
             }
             Command::Detach(id, reply) => {
-                tasks.spawn_local(async move {
+                crate::reactor::spawn_in(&mut tasks, "detach", async move {
                     node.detach(Some(id)).await;
                     let _ = reply.send(());
                 });
@@ -1522,9 +1583,17 @@ async fn run(
                 shutdown = Some(reply);
                 break;
             }
-            Command::Connect(options, shared, reply) => {
+            Command::Connect {
+                options,
+                shared,
+                #[cfg(feature = "qualification")]
+                queued,
+                reply,
+            } => {
                 let connections = connections.clone();
-                tasks.spawn_local(async move {
+                crate::reactor::spawn_in(&mut tasks, "connect", async move {
+                    #[cfg(feature = "qualification")]
+                    let timing = crate::reactor::CallTimer::start(queued);
                     let result = connections
                         .connect(node, options)
                         .await
@@ -1534,6 +1603,10 @@ async fn run(
                             statements: AtomicU64::new(1),
                             closed: AtomicBool::new(false),
                         });
+                    #[cfg(feature = "qualification")]
+                    if let Ok(connection) = &result {
+                        timing.finish(connection.id);
+                    }
                     // The reply owns the handle, so dropping an unread reply also disconnects.
                     let _ = reply.send(result);
                 });
@@ -1541,10 +1614,14 @@ async fn run(
             Command::Sql {
                 connection,
                 call,
+                #[cfg(feature = "qualification")]
+                queued,
                 reply,
             } => match connections.get(connection) {
                 Ok(state) => {
-                    tasks.spawn_local(async move {
+                    crate::reactor::spawn_in(&mut tasks, "sql", async move {
+                        #[cfg(feature = "qualification")]
+                        let timing = crate::reactor::CallTimer::start(queued);
                         let statement = match &call {
                             connection::Call::Execute { statement, .. }
                             | connection::Call::Next { statement } => Some(*statement),
@@ -1555,6 +1632,8 @@ async fn run(
                         let serving =
                             rocky_secure::with_measurement_connection(connection, serving);
                         let result = serving.await;
+                        #[cfg(feature = "qualification")]
+                        timing.finish(connection);
                         if reply.send(result).is_err()
                             && let Some(statement) = statement
                         {
@@ -1564,10 +1643,23 @@ async fn run(
                         }
                     });
                 }
-                Err(error) => drop(reply.send(Err(connection::sql_failure(error)))),
+                Err(error) => {
+                    #[cfg(feature = "qualification")]
+                    crate::reactor::CallTimer::start(queued).finish(connection);
+                    drop(reply.send(Err(connection::sql_failure(error))));
+                }
             },
-            Command::Disconnect(connection, reply) => {
+            Command::Disconnect {
+                connection,
+                #[cfg(feature = "qualification")]
+                queued,
+                reply,
+            } => {
+                #[cfg(feature = "qualification")]
+                let timing = crate::reactor::CallTimer::start(queued);
                 connections.close(Some(connection));
+                #[cfg(feature = "qualification")]
+                timing.finish(connection);
                 let _ = reply.send(());
             }
             Command::Coordinate(log, reply) => {
@@ -1578,8 +1670,12 @@ async fn run(
             Command::LockMeasurements(reply) => {
                 let _ = reply.send(node.replica.lock_measurements());
             }
+            #[cfg(feature = "qualification")]
+            Command::ReactorMeasurements(reply) => {
+                let _ = reply.send(crate::reactor::current());
+            }
             Command::Observe(tables, reply) => {
-                tasks.spawn_local(async move {
+                crate::reactor::spawn_in(&mut tasks, "observe", async move {
                     let tables: Option<Vec<&str>> = tables
                         .as_ref()
                         .map(|tables| tables.iter().map(String::as_str).collect());
@@ -1623,12 +1719,33 @@ async fn run(
 /// Flushes buffered SQL commits and runs their queued maintenance after
 /// they answer. The flush runs on a blocking thread and covers every
 /// commit that arrived during the previous flush. A flush failure surfaces
-/// at the next call that exposes data, which flushes itself.
+/// at the next call that exposes data, which flushes itself. Failed background
+/// flushes retain maintenance and retry with backoff.
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
-    while revisions.changed().await.is_ok() {
-        let _ = replica.flush().await;
-        replica.maintain().await;
+    revisions.mark_changed();
+    let mut retry = crate::scheduling::Retry::default();
+    loop {
+        let deadline = retry.deadline();
+        tokio::select! {
+            changed = revisions.changed() => if changed.is_err() { break },
+            () = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {},
+        }
+        match replica.flush().await {
+            Ok(_) if replica.maintain().await => retry.reset(),
+            // A concurrent commit leaves its revision pending too. The timer
+            // also covers work present before this driver's subscription.
+            Ok(_) => retry.soon(),
+            Err(error) => {
+                tracing::warn!(%error, "background flush failed; maintenance remains queued");
+                retry.failed();
+            }
+        }
     }
 }
 fn purge_directory(directory: &Path) -> Result<(), Failure> {
@@ -1668,10 +1785,90 @@ async fn dispatch(bytes: &[u8], client: Result<Arc<Client>, Failure>, node: &Nod
 mod tests {
     use super::*;
 
+    #[cfg(feature = "qualification")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocking_reactor_task_and_queued_sql_call_are_attributed() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let schema = crate::Schema::builder("reactor_timing", 1)
+            .table(
+                crate::Table::mergeable("items")
+                    .column(crate::Column::new("title", crate::Affinity::Text)),
+            )
+            .build()?;
+        let schema = serde_json::to_string(&schema)?;
+        let database = Database::create(
+            Open {
+                directory: directory.path(),
+                schema: &schema,
+                secrets: None,
+                identity: None,
+                network: None,
+                coordination: None,
+            },
+            None,
+        )?
+        .database;
+        let connection = database
+            .connect(ConnectionOptions {
+                read_only: true,
+                durability: connection::Durability::Buffered,
+                profile: None,
+                transaction_timeout: None,
+                binding: None,
+            })
+            .await?;
+        let measurements = database.reactor_measurements().await?;
+        measurements.start();
+        let (entered, waiting) = oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        database
+            .shared
+            .input
+            .send(Command::BlockReactor(
+                entered,
+                std::sync::Mutex::new(resumed),
+            ))
+            .await?;
+        waiting.await?;
+        let queued = std::time::Instant::now();
+        let (reply, result) = oneshot::channel();
+        database
+            .shared
+            .input
+            .send(Command::Sql {
+                connection: connection.id,
+                call: connection::Call::InTransaction,
+                queued,
+                reply,
+            })
+            .await?;
+        // Deliberately block the reactor, while a real connection call is queued.
+        while queued.elapsed() < std::time::Duration::from_millis(2) {
+            std::hint::spin_loop();
+        }
+        resume.send(())?;
+        assert!(matches!(result.await??, connection::Reply::Flag(false)));
+        let snapshot = measurements.stop();
+        assert!(snapshot.polls["test_blocking"].iter().any(|us| *us >= 2000));
+        assert!(
+            snapshot.calls[&connection.id]
+                .iter()
+                .any(|call| call.queue_us >= 2000)
+        );
+        connection.close().await;
+        database.close().await?;
+        Ok(())
+    }
+
     #[test]
     fn unread_connection_reply_cleans_up_with_a_full_request_queue() -> Result<(), Failure> {
         let (input, _requests) = mpsc::channel(1);
-        input.try_send(Command::Disconnect(99, oneshot::channel().0))?;
+        input.try_send(Command::Disconnect {
+            connection: 99,
+            #[cfg(feature = "qualification")]
+            queued: std::time::Instant::now(),
+            reply: oneshot::channel().0,
+        })?;
         let (cleanup, mut cleanups) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             input,
@@ -1689,7 +1886,10 @@ mod tests {
         let (reply, unread) = oneshot::channel::<Result<Connection, Failure>>();
         assert!(reply.send(Ok(connection)).is_ok());
         drop(unread);
-        assert!(matches!(cleanups.try_recv()?, Command::Disconnect(7, _)));
+        assert!(matches!(
+            cleanups.try_recv()?,
+            Command::Disconnect { connection: 7, .. }
+        ));
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 //! Release-only latency measurements; finite loads report their overlap explicitly.
 use super::*;
-use rocky_sdk::{Connection, ConnectionOptions, Durability, TableEvents};
+use rocky_sdk::{
+    Connection, ConnectionOptions, Durability, ReactorMeasurements, ReactorSnapshot, TableEvents,
+};
 use rocky_secure::{LockMeasurements, Measurements};
 use std::time::{Duration, Instant};
 use tokio::{
@@ -306,6 +308,26 @@ pub(super) fn holders(measurements: &Measurements) {
     }
 }
 
+fn merge_polls(into: &mut ReactorSnapshot, interval: ReactorSnapshot) {
+    for (name, mut values) in interval.polls {
+        into.polls.entry(name).or_default().append(&mut values);
+    }
+}
+
+fn poll_table(snapshot: &ReactorSnapshot) {
+    for (order, percentile) in [("p99", 2), ("max", 3)] {
+        let mut tasks: Vec<_> = snapshot.polls.iter().collect();
+        tasks.sort_by_key(|(_, values)| std::cmp::Reverse(percentiles(values)[percentile]));
+        for (name, values) in tasks {
+            let [p50, p95, p99, max] = percentiles(values);
+            eprintln!(
+                "P12 poll_order={order} task={name} polls={} poll_p50_us={p50} poll_p95_us={p95} poll_p99_us={p99} poll_max_us={max}",
+                values.len()
+            );
+        }
+    }
+}
+
 pub(super) fn unit_costs(measurements: &Measurements) {
     for (mode, samples) in &measurements.checkpoints {
         let elapsed: Vec<_> = samples.iter().map(|(_, us)| *us).collect();
@@ -425,14 +447,20 @@ async fn probe(
     database: &Database,
     count: usize,
     measurements: Option<&LockMeasurements>,
+    reactor: Option<&ReactorMeasurements>,
     events: &TableEvents,
     buffered: Option<&Connection>,
-) -> Result<Measurements, Failure> {
+) -> Result<(Measurements, ReactorSnapshot), Failure> {
     let mut write = Vec::with_capacity(count);
     let mut observed = Vec::with_capacity(count);
     let mut waits = Vec::with_capacity(count);
     let mut holds = Vec::with_capacity(count);
     let mut flushes = Vec::with_capacity(count);
+    let mut delays = Vec::with_capacity(count);
+    let mut in_calls = Vec::with_capacity(count);
+    let mut unattributed = Vec::with_capacity(count);
+    let mut overlap = Vec::with_capacity(count);
+    let mut polls = ReactorSnapshot::default();
     let mut all = Measurements::default();
     let mut ticks = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_millis(100),
@@ -476,6 +504,26 @@ async fn probe(
         waits.push(work.map_or(0, |work| work.wait_us));
         holds.push(work.map_or(0, |work| work.hold_us));
         flushes.push(work.map_or(0, |work| work.flush_us));
+        let timing = reactor.map(ReactorMeasurements::take).unwrap_or_default();
+        let calls = timing.calls.get(&connection_id);
+        if reactor.is_some() && calls.is_none() {
+            return Err("probe calls were not attributed to their reactor connection".into());
+        }
+        let delay = calls.map_or(0, |calls| {
+            calls.iter().map(|call| call.queue_us).sum::<u64>()
+        });
+        delays.push(delay);
+        in_calls.push(calls.map_or(0, |calls| {
+            calls.iter().map(|call| call.in_call_us).sum::<u64>()
+        }));
+        let accounted = waits.last().copied().unwrap_or(0)
+            + holds.last().copied().unwrap_or(0)
+            + flushes.last().copied().unwrap_or(0)
+            + delay;
+        let elapsed = *write.last().unwrap_or(&0);
+        unattributed.push(elapsed.saturating_sub(accounted));
+        overlap.push(accounted.saturating_sub(elapsed));
+        merge_polls(&mut polls, timing);
         merge(&mut all, interval);
     }
     report("write", &write);
@@ -483,8 +531,12 @@ async fn probe(
     report("write_lock_wait", &waits);
     report("write_lock_hold", &holds);
     report("write_flush_wait", &flushes);
+    report("write_reactor_delay", &delays);
+    report("write_sql_in_call", &in_calls);
+    report("write_unattributed", &unattributed);
+    report("write_attribution_overlap", &overlap);
     report("replica_flush_wait", &all.flush_us);
-    Ok(all)
+    Ok((all, polls))
 }
 
 async fn scenario(kind: Load) -> Result<(), Failure> {
@@ -500,6 +552,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
     for &durability in modes {
         let fixture = Fixture::new(kind).await?;
         let measurements = fixture.node.database.lock_measurements().await?;
+        let reactor = fixture.node.database.reactor_measurements().await?;
         let events = fixture
             .node
             .database
@@ -525,11 +578,13 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
             &fixture.node.database,
             warmup,
             None,
+            None,
             &events,
             buffered.as_ref(),
         )
         .await?;
         measurements.start();
+        reactor.start();
         let (stop, stopping) = watch::channel(false);
         let started = Instant::now();
         let workload = async {
@@ -546,6 +601,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
                 &fixture.node.database,
                 samples,
                 Some(&measurements),
+                Some(&reactor),
                 &events,
                 buffered.as_ref(),
             )
@@ -554,9 +610,11 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
             result
         };
         let (result, loaded) = tokio::join!(measurement, workload);
-        let mut result = result?;
+        let (mut result, mut reactor_result) = result?;
         loaded?;
         merge(&mut result, measurements.stop());
+        merge_polls(&mut reactor_result, reactor.stop());
+        poll_table(&reactor_result);
         if kind == Load::Checkpoints && !smoke() {
             for mode in ["passive", "truncate"] {
                 assert!(

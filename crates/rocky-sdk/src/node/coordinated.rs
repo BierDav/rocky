@@ -115,7 +115,7 @@ impl Node {
         }
         let weak = Arc::downgrade(self);
         let mut stored = self.replica.observe_entries();
-        tokio::task::spawn_local(async move {
+        crate::reactor::spawn_local("coordinated_entries", async move {
             loop {
                 let Some(node) = weak.upgrade() else {
                     return;

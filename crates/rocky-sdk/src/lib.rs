@@ -57,6 +57,7 @@ mod identities;
 mod mesh;
 mod node;
 mod owner;
+mod reactor;
 mod registry;
 mod rollout;
 mod scheduling;
@@ -86,6 +87,8 @@ pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
 pub use engine::Engine;
 pub use enrollment::{DeviceKeys, Supplied, route_enrollment};
+#[cfg(feature = "qualification")]
+pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// The client of a coordination service and the bundle that pins it.
 #[cfg(feature = "iroh")]
 pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};

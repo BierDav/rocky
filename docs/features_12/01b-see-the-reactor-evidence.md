@@ -1,6 +1,6 @@
 # 1b. See the reactor: prerequisite review
 
-Status: blocked before slice 1 (2026-10-27). Reviewed phase-start commit
+Initial review: blocked before slice 1 (2026-10-27). Reviewed phase-start commit
 `83ecee33` in Jujutsu change `xslnvstn` on a macOS arm64 host.
 This is source inspection, not performance evidence. No runtime behavior changed.
 
@@ -65,3 +65,51 @@ review does not select a scheduling or retry policy.
 - Kotlin, shopping app, release latency and physical-device checks were not
   run: implementation stopped at the prerequisite review, with documentation
   changes only.
+
+## Authorized prerequisite repair (2026-10-27)
+
+The owner accepted the repair and continuation of phase 1b. Change `nktmmvzx`
+adds a replica-owned durability check under the writer lock before deferred
+maintenance is removed from the queue. If any current commit is not covered,
+maintenance returns without consuming work. The SDK driver retries failed
+flushes using its existing bounded exponential backoff, and retries skipped
+maintenance on a new revision or a one-second retry deadline. It checks existing
+work on startup too. Startup migration maintenance now flushes first.
+
+This preserves the existing scope set and format. Maintenance reads current
+state, so checking the whole current commit watermark avoids pretending that
+an older scope timestamp provides a snapshot. No lock is held during device
+flushing, and no application or network ownership changes.
+
+`cargo test -p rocky-secure tests::sql::maintenance --lib -- --nocapture`
+passed both deterministic regressions (0.18 s total): a failed flush retains
+work until retry, and a paused flush followed by a second commit cannot drain
+maintenance until another flush covers the second commit. These are behavioral
+checks, not latency measurements.
+
+## Slice 1: instrumentation
+
+Qualification builds name every SDK reactor task at its spawn site and record
+polls longer than 1 ms. SQL calls record send-to-first-poll queue time and
+first-poll-to-reply service time, keyed by connection. Connection opening and
+closing are included because Rust transactions await both. Normal builds have
+no timing state or clock reads from this instrumentation.
+
+The probe adds `write_reactor_delay`, `write_sql_in_call`, `write_unattributed`
+and a longest-poll table. Lock holds span multiple SQL calls and can overlap
+queue delays within a transaction. Consequently the requested subtraction is
+not an exclusive decomposition: `write_unattributed` records the nonnegative
+remainder, and `write_attribution_overlap` explicitly reports any excess in the
+sum instead of hiding negative remainders. The real SDK connection regression
+`database::tests::blocking_reactor_task_and_queued_sql_call_are_attributed`
+passed with `--no-default-features --features qualification` (0.13 s). It queues
+a connection call while a named local task is deliberately blocked, then
+checks both the named poll and the queue delay. The five release smoke
+scenarios also passed in both durability modes (24.10 s); these use 100 rows
+and three samples, so they are validation, not qualification measurements.
+
+Full results are being recorded in the
+[attribution tables](01b-see-the-reactor-measurements-evidence.md). Initial
+600-sample desktop L0 remainder p95 is 786 us Flushed and 648 us Buffered.
+Long polls are present (SQL max 84.775 ms Flushed; maintenance max 106.771 ms
+Buffered), so the reactor hypothesis is not refuted by the idle runs.

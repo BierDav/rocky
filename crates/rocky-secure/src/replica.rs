@@ -1231,6 +1231,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(replica)
     }
     #[cfg(test)]
+    pub(crate) async fn maintenance_queued(&self, scope: ResourceScope) -> bool {
+        self.inner
+            .lock(Class::Background)
+            .await
+            .deferred_maintenance
+            .contains(&scope)
+    }
+    #[cfg(test)]
     pub(crate) async fn pause_flush(
         &self,
     ) -> (
@@ -1493,9 +1501,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
     }
     /// Runs maintenance queued by buffered SQL commits: one bounded checkpoint or
-    /// pruning step for their scopes, and a WAL checkpoint when due.
-    pub async fn maintain(&self) {
+    /// pruning step for their scopes, and a WAL checkpoint when due. Returns
+    /// false, leaving work queued, if a newer commit still needs flushing.
+    pub async fn maintain(&self) -> bool {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        // Maintenance reads the current state, not a snapshot of the scopes
+        // queued before the flush. Check again under the writer lock.
+        if inner.flusher.durable() < inner.commit {
+            return false;
+        }
         let scopes = std::mem::take(&mut inner.deferred_maintenance);
         let span = tracing::debug_span!("maintain", scopes = scopes.len());
         tracing::Instrument::instrument(
@@ -1508,6 +1522,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             span,
         )
         .await;
+        true
     }
     /// Names the scopes the owner is about to import from a checkpoint,
     /// replacing the previous set. A scope with a staged import counts too.

@@ -47,10 +47,12 @@ impl Deliveries for Port<'_> {
                 .ok_or_else(|| secure("delivery owner ended".into()))?;
             // Installing an epoch ends the link. Finish the admitted local batch
             // even when its caller loses the reply, so retry observes every install.
-            tokio::task::spawn_local(async move { node.receive(peer, deliveries).await })
-                .await
-                .map_err(|error| secure(error.into()))?
-                .map_err(secure)
+            crate::reactor::spawn_local("receive_deliveries", async move {
+                node.receive(peer, deliveries).await
+            })
+            .await
+            .map_err(|error| secure(error.into()))?
+            .map_err(secure)
         })
     }
     fn deposit<'a>(

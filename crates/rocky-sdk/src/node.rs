@@ -594,21 +594,25 @@ impl Node {
             refused: AtomicU64::new(0),
         });
         link.transport.listen(true);
-        let publisher = tokio::task::spawn_local(self.clone().publish_links(link.clone()));
+        let publisher =
+            crate::reactor::spawn_local("publish_links", self.clone().publish_links(link.clone()));
         *link
             .publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
-        let synchronizer = tokio::task::spawn_local(self.clone().synchronize(link.clone()));
+        let synchronizer =
+            crate::reactor::spawn_local("synchronize", self.clone().synchronize(link.clone()));
         *link
             .synchronizer
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(synchronizer);
-        let server = tokio::task::spawn_local(self.clone().accept(link.clone()));
+        let server = crate::reactor::spawn_local("accept", self.clone().accept(link.clone()));
         *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
         if let Some(discovery) = link.discovery.clone() {
-            let discoverer =
-                tokio::task::spawn_local(self.clone().discover(link.clone(), discovery));
+            let discoverer = crate::reactor::spawn_local(
+                "discover",
+                self.clone().discover(link.clone(), discovery),
+            );
             *link
                 .discoverer
                 .lock()
@@ -723,7 +727,7 @@ impl Node {
             link.served.fetch_add(1, Ordering::Relaxed);
             let node = self.clone();
             let service = link.clone();
-            tasks.spawn_local(async move {
+            crate::reactor::spawn_in(&mut tasks, "inbound", async move {
                 if protocol == Protocol::Link {
                     let settings = node.settings.lock().await.clone();
                     if let Err(error) = node

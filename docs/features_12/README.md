@@ -210,7 +210,7 @@ provisional stamps.
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
-| 1b (blocked: maintenance ordering) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
+| 1b (in progress) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
 | 2 (replanned, inventory done) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
 | 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step; transitions start only when quiet |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |

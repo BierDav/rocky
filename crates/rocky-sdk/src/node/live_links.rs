@@ -668,7 +668,7 @@ impl Node {
         // The stage watch owns cancellation even for outbound links.
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
-        tokio::task::spawn_local(async move {
+        crate::reactor::spawn_local("live_link", async move {
             let started = tokio::time::Instant::now();
             let _permit = permit;
             let result = node

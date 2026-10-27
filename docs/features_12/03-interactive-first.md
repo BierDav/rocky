@@ -33,6 +33,11 @@ After this phase it waits for at most the one step already running.
 - **Determinism.** The gate uses no clocks, so seeded simulation still
   reproduces exactly. Tests drive interleavings with the existing
   fault-injection and pause points, not sleeps.
+- **Transitions wait for a quiet gate.** A [phase 7](07-transitions.md)
+  transition is one unbounded step. Before it starts, it waits until no
+  interactive waiter is registered, then acquires as background. Once
+  started, it runs to completion, as today. The starvation guard applies
+  to its start in the same way.
 - **The flush is not a holder.** Flushes already run without the replica
   and are unaffected.
 
@@ -50,19 +55,24 @@ After this phase it waits for at most the one step already running.
    the next step.
 3. Starvation guard. Test: continuous interactive acquisitions still let
    a background loop complete, with the expected step count.
-4. Simulation: add the interactive probe to the fixed seed set. Every seed
+4. Transition start gate. Test: a transition requested while an
+   interactive waiter is registered starts only after that waiter
+   acquires and releases.
+5. Simulation: add the interactive probe to the fixed seed set. Every seed
    converges, and blockers decrease as before.
-5. Rerun L0–L4 on desktop, and on phone where available, plus the desktop
+6. Rerun L0–L4 on desktop, and on phone where available, plus the desktop
    sync non-regression rows.
 
 ## Completion gate
 
 - In L1–L4, every interactive acquisition waits for at most one
-  background step. Assert this deterministically with a counter in test
-  support, and confirm it in the measured runs.
+  background step. A transition already running counts as that step.
+  Assert this deterministically with a counter in test support, and
+  confirm it in the measured runs.
 - Desktop interactive write in L1–L4 meets p95 ≤ 16 ms, p99 ≤ 50 ms and
-  max ≤ 100 ms. Phone results where measured are recorded against
-  33 / 100 / 250 ms.
+  max ≤ 100 ms, excluding samples that overlap a running transition.
+  Those samples are counted and reported separately. Phone results where
+  measured are recorded against 33 / 100 / 250 ms.
 - The desktop sync non-regression rows hold. In particular, L1 member pull
   time with the probe running is within 110% of the paired baseline
   without the probe.
@@ -70,5 +80,5 @@ After this phase it waits for at most the one step already running.
 
 ## Not in scope
 
-Shortening application transactions, preempting a running step, and
-priorities among background holders.
+Shortening application transactions, preempting a running step or
+transition, and priorities among background holders.

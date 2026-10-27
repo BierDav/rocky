@@ -1,6 +1,7 @@
 # Bounded holds: inventory and blocking findings
 
-Status: stopped after inventory (2026-10-27); no runtime implementation.
+Status: inventory complete; phase replanned (2026-10-27), no runtime
+implementation. See "Replanning" at the end.
 Phase start: `ynnvllrn` (`4e4e2497`); investigation: `wxutrylm`, workspace
 `bounded-holds`. Source, manifests and workspace metadata were inspected.
 This is a design investigation, not new performance evidence.
@@ -187,3 +188,27 @@ Validation from the main workspace:
   SDK without default features. These baseline tests do not qualify phase 2.
 - The inventory/status change is integrated in the main workspace; the
   `bounded-holds` Jujutsu workspace and its temporary directory are removed.
+
+## Replanning (2026-10-27)
+
+The owner accepted a re-scope after reviewing this inventory against the
+phase 1 probe breakdown. In most scenarios, phase 1's lock wait and hold
+account for little of a write's time. Examples: Pixel L0 Buffered write
+p95 359.850 ms against lock wait 0.009 ms and hold 25.841 ms, and Desktop
+L3 Buffered write max 132.867 s against lock wait max 0.032 ms. The
+database reactor serves all tasks with `spawn_local` on one `LocalSet`
+thread, and holders run synchronous SQLite on it. A call that is never
+polled records no lock wait. This is an inference from code and numbers,
+not yet measured; [phase 1b](01b-see-the-reactor.md) measures it.
+
+Resulting plan:
+
+- Phase 1b measures reactor stalls and removes interactive-path detours.
+- Phase 2 covers steady-state holders only, with no format change.
+- The atomic whole-scope replacement described above becomes a
+  [transition](07-transitions.md), deferred behind an evidence or product
+  trigger. A format change is allowed there.
+- Phase 3 keeps transitions from starting while interactive work waits.
+
+Slice 1 continues: re-label each row above as steady state or transition,
+with its reason, once phase 1b's poll table is available.

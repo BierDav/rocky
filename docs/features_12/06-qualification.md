@@ -1,8 +1,8 @@
 # 6. Qualification
 
 Status: planned. Owner: whoever runs the devices. The code owners of
-phases 2–5 fix regressions found here. Depends on
-[phases 2, 3, 4 and 5](README.md#phases). Effort: three to five days.
+phases 1b–5 fix regressions found here. Depends on
+[phases 1b, 2, 3, 4 and 5](README.md#phases). Effort: three to five days.
 Follow the [execution contract](README.md#agent-execution-contract).
 
 ## Objective
@@ -30,7 +30,8 @@ shopping app and the isolated 100k load.
 ## Ordered slices
 
 1. Phone L0–L4 write probe on both builds (iPhone and Pixel), with the
-   per-site holder table.
+   per-site holder table, the reactor poll table and the samples that
+   overlap a transition.
 2. Sync non-regression rows from the
    [README](README.md#sync-must-not-regress):
    - phone 100k bootstrap
@@ -39,7 +40,9 @@ shopping app and the isolated 100k load.
    - member and issuer file sizes
 3. Shopping app: three devices editing one list while one phone
    bootstraps the isolated 100k load. Record the probe's percentiles on
-   the editing phone, and check that every device converges.
+   the editing phone, and check that every device converges. Record each
+   transition that overlaps an edit; this evaluates
+   [phase 7](07-transitions.md)'s trigger.
 4. Offline restart: kill the editing app right after a buffered commit
    returns, reopen it offline, and verify the write is present.
    Separately, confirm that a write killed before `commit()` returns is
@@ -55,7 +58,8 @@ shopping app and the isolated 100k load.
   verified with the reason.
 - Rows that miss their target are listed with their profile and the
   holder or step responsible. The README's "Revisit deferred authoring"
-  criteria are evaluated against them, and the outcome is stated.
+  criteria and phase 7's trigger are evaluated against them, and the
+  outcomes are stated.
 - `./scripts/check`, the Kotlin check and the shopping app check pass on
   the integrated build.
 

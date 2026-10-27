@@ -59,7 +59,9 @@ open.
 ## Ordered slices
 
 1. Buffered `Database::transaction` default, doc comment, and adjusted
-   tests. Rerun the L0 probe.
+   tests. Rerun the L0 probe. Land this slice first; it needs nothing
+   else and is the largest desktop L0 win (Flushed p50 77.0 ms, Buffered
+   3.5 ms in phase 1).
 2. Authoring cuts: single row read, per-bundle reads, per-group work.
    Statement-count regression test for a single-row local author, which
    fails if the count rises above the new value.

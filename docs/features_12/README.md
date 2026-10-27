@@ -1,6 +1,8 @@
 # features_12: writes that never wait
 
 Status: phase 1 complete (2026-10-27); [evidence and qualification limits](01-see-the-wait-evidence.md).
+Replanned 2026-10-27 after the [phase 2 inventory](02-bounded-holds-evidence.md#replanning-2026-10-27):
+phase 1b added, phase 2 narrowed to steady state, transitions deferred to phase 7.
 L1 uses an already writable member, as approved by the owner. Phase briefs record
 their own status; evidence goes beside each brief as
 `NN-<name>-evidence.md`. Source code and tests define current behavior.
@@ -8,9 +10,12 @@ their own status; evidence goes beside each brief as
 ## Destination
 
 A local write commits and becomes visible to observers within one display
-frame, whatever the replica is doing in the background. That includes
-receiving a bootstrap, compacting, finalizing a seal or checkpointing the
-WAL. Nothing that features_11 gained for sync gets slower to buy it.
+frame, whatever steady-state work the replica is doing in the background.
+That includes receiving frames and checkpoint pages, settling,
+maintenance, pruning and checkpointing the WAL. Transitions that replace
+a scope's state wholesale (checkpoint installation, rebootstrap, live
+schema switch, compaction and finalization rewrites) don't start while
+a write waits. Making them bounded is a [later decision](07-transitions.md). Nothing that features_11 gained for sync gets slower to buy it.
 Opening after a 100k-row schema migration stops being dominated by SQLite
 spilling one giant transaction.
 
@@ -25,6 +30,13 @@ Reading the write path shows where the latency comes from:
   checkpoints, compaction, finalization and checkpoint transfer take the
   same FIFO mutex. A tap waits behind whatever is queued ahead of it, and
   some background holders are unbounded.
+- **One thread serves everything.** `Database` runs every connection,
+  link, receive and maintenance task with `spawn_local` on one `LocalSet`
+  thread. Holders run synchronous SQLite inline on it. A write that isn't
+  polled can't even start waiting for the lock. Phase 1's lock wait
+  explains little of a write's latency: Pixel L0 Buffered write p95 is
+  359.850 ms, with lock wait 0.009 ms and hold 25.841 ms. Phase 1b
+  measures this directly.
 - **The write itself is cheap.** Ed25519 and AEAD cost tens of
   microseconds per frame. The archived engine comparison measured about
   4 ms per serial crypto commit at FULL fsync on an M5, and most of that
@@ -37,18 +49,19 @@ Reading the write path shows where the latency comes from:
   `Buffered`. The Rust SDK's `Database::transaction` still hard-codes
   `Flushed`.
 
-So the fix is to bound and prioritize the shared critical section, not to
-add a new local state.
+So the fix is to bound and prioritize the shared critical section and the
+reactor thread it runs on, not to add a new local state.
 
 ## Goals
 
 | Measure | Baseline | Target | Phase |
 | --- | --- | --- | --- |
-| Interactive write, idle (p95) | measured in phase 1 | desktop ≤ 3 ms, phone ≤ 10 ms | 4 |
-| Interactive write under background load L1–L4 (p95 / p99 / max) | measured in phase 1 | desktop ≤ 16 / 50 / 100 ms; phone ≤ 33 / 100 / 250 ms | 2, 3 |
+| Interactive write, idle (p95) | measured in phase 1 | desktop ≤ 3 ms, phone ≤ 10 ms | 1b, 4 |
+| Interactive write under background load L1–L4, outside transitions (p95 / p99 / max) | measured in phase 1 | desktop ≤ 16 / 50 / 100 ms; phone ≤ 33 / 100 / 250 ms | 1b, 2, 3 |
+| Write time not attributed to a named site (p95) | not measured (phase 1 lock wait misses reactor stalls) | ≤ 1 ms | 1b |
 | Observer notification after `commit()` returns (p95) | measured in phase 1 | ≤ 5 ms | 1, 4 |
-| Background lock hold, steady state (p99 / max) | unbounded for some holders | desktop ≤ 10 / 50 ms; phone ≤ 25 / 100 ms | 2 |
-| Background holders an interactive request waits behind | FIFO, unbounded | at most one bounded step | 3 |
+| Background lock hold and reactor poll, steady state (p99 / max) | unbounded for some holders | desktop ≤ 10 / 50 ms; phone ≤ 25 / 100 ms | 2 |
+| Background holders an interactive request waits behind | FIFO, unbounded | at most one bounded step or running transition | 3 |
 | Single-row receive, SQL statements | 83 | ≤ 45 | 4 |
 | Single-row local author, SQL statements | 87 (phase 1) | ≤ half of the phase 1 count | 4 |
 | Issuer 100k migration fill (open running the migration) | 239.6 s (paired, loaded host) | ≤ 70 s; publication to a peer ≤ 110% of paired baseline | 5 |
@@ -118,17 +131,30 @@ instead of choosing differently.
 - **Work bounds, not wall-clock bounds.** Every background critical
   section is bounded by work counts: frames, rows, pages and bytes. Never
   by `Instant` deadlines, so seeded simulation stays deterministic. Phase
-  1 measures cost per unit on the slowest supported phone, and phase 2
-  picks each bound so that the phone hold target fits with a factor of two
-  of headroom. Bounds are named constants next to the code they bound.
+  2 measures each separated step's cost per unit on the slowest supported
+  phone, and picks each bound so that the phone hold target fits with a
+  factor of two of headroom. Bounds are named constants next to the code they bound.
+- **Steady state versus transitions.** Steady-state work (receiving,
+  settling, maintenance, pruning, WAL checkpoints, checkpoint page
+  storage, metadata scans) is bounded in phase 2 without a format change.
+  A transition replaces a scope's state wholesale and must look atomic:
+  checkpoint installation, rebootstrap replay, live schema switch,
+  projection rebuild, compaction and finalization rewrites, and tip
+  workspace rebuilding. It keeps its single transaction until
+  [phase 7](07-transitions.md), and phase 3 delays its start while
+  interactive work waits.
+- **One reactor thread stays.** The `LocalSet` reactor is kept.
+  CPU-bound work that touches no SQLite connection moves to the existing
+  blocking pool where phase 1b measures it above 1 ms. Bounded SQLite
+  steps keep the thread responsive.
 - **Bounded holds keep one flush.** A receive group that exceeds its bound
   commits as several SQLite transactions and releases the replica between
   them. Its exposed replies still wait for one shared flush that covers
   all of them. Holds get shorter; device flushes don't multiply.
   Atomicity stays per request, as each request's savepoint already gives.
 - **Passive checkpoints leave the replica lock.** A passive WAL checkpoint
-  runs on a dedicated connection on a blocking thread, without the
-  replica. A truncating checkpoint still needs the writer. It stays under
+  runs on a dedicated connection on the blocking pool, without the
+  replica or the reactor thread. A truncating checkpoint still needs the writer. It stays under
   the replica lock and keeps its existing 50 ms reader wait.
 - **Interactive work goes first.** The replica lock becomes a two-class
   gate. An interactive acquisition (SQL session `BEGIN`, a writing
@@ -137,7 +163,8 @@ instead of choosing differently.
   interactive waiter is registered releases the lock and re-queues behind
   it. To prevent starvation, after 8 consecutive yields a background step
   runs once before the next yield. Interactive acquisitions among
-  themselves stay FIFO.
+  themselves stay FIFO. A transition starts only when no interactive
+  waiter is registered.
 - **One acquisition point.** Every replica lock acquisition goes through
   one wrapper that records the call site, the class, wait time and hold
   time. Existing spans and the opt-in tracing sink carry these; no new
@@ -157,7 +184,9 @@ instead of choosing differently.
 - **Format.** Only phase 5 changes a persisted format: the replica moves
   from 39 to 40 for the staging input. Phase 4 may add an index or a
   cache only if it fits within that same single bump; otherwise phase 4
-  changes no persisted shape. Each format keeps one current version and
+  changes no persisted shape. Phase 7, if triggered, may change the
+  replica format for transitions: within phase 5's bump if they overlap,
+  otherwise as one new version. Each format keeps one current version and
   nothing reads an earlier one.
 
 ## Revisit deferred authoring
@@ -165,8 +194,9 @@ instead of choosing differently.
 Interactive deferred authoring becomes a candidate brief only if one of
 these holds after phase 6:
 
-- The phone L1–L4 p95 gate still misses, and phase 1's breakdown shows the
-  authoring step (not lock wait or flush) as the largest share.
+- The phone L1–L4 p95 gate still misses, and the phase 1b breakdown shows
+  the authoring step (not lock wait, reactor delay or flush) as the
+  largest share.
 - The product decides that writes in a blocked scope (rebootstrap, missing
   key, unwritable tip) must be accepted and published later instead of
   refused.
@@ -180,33 +210,39 @@ provisional stamps.
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
-| 2 (blocked after inventory) | [Bounded holds](02-bounded-holds.md) | 1 | 2 w | Every steady-state background holder bounded; passive checkpoint off the lock |
-| 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step |
+| 1b | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
+| 2 (replanned, inventory done) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
+| 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step; transitions start only when quiet |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |
 | 5 | [Staged migration publication](05-staged-migration-publication.md) | 1 | 2 w | Bounded migration authoring; issuer 100k ≤ 70 s |
-| 6 | [Qualification](06-qualification.md) | 2, 3, 4, 5 | 3–5 d | Device gates, sync non-regression, final evidence |
+| 6 | [Qualification](06-qualification.md) | 1b, 2, 3, 4, 5 | 3–5 d | Device gates, sync non-regression, final evidence, phase 7 trigger evaluated |
+| 7 (deferred) | [Bounded transitions](07-transitions.md) | 6 and its trigger | design first | Transitions published in bounded steps; may change the replica format |
 
 ```mermaid
 flowchart LR
-    P1["1 See the wait"] --> P2["2 Bounded holds"]
+    P1["1 See the wait"] --> P1b["1b See the reactor"]
+    P1b --> P2["2 Bounded holds"]
     P2 --> P3["3 Interactive first"]
     P1 --> P4["4 Cheaper commits"]
     P1 --> P5["5 Staged migration publication"]
     P3 --> P6["6 Qualification"]
     P4 --> P6
     P5 --> P6
+    P6 -.->|trigger| P7["7 Bounded transitions"]
 ```
 
 Order: phase 1 first and alone, because every bound and target depends
 on its numbers. Then three lanes run in parallel:
 
-- phase 2, then phase 3, in the replica's locking, group and maintenance
-  code
-- phase 4, in authoring, receive and the SDK default
+- phase 1b, then 2, then 3, in the reactor, the replica's locking, group
+  and maintenance code
+- phase 4, in authoring, receive and the SDK default; its buffered-default
+  slice lands first
 - phase 5, in SQL publication and SDK schema publication
 
 When two lanes touch the same file, the later one rebases; neither
-reverts the other. Phase 6 runs last.
+reverts the other. Phase 6 runs after the lanes. Phase 7 runs only if
+phase 6 or a product decision triggers it.
 
 ## Agent execution contract
 

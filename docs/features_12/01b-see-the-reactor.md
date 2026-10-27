@@ -1,6 +1,7 @@
 # 1b. See the reactor
 
-Status: planned. Owner: `rocky-sdk` (database reactor, connection
+Status: blocked at prerequisite review (2026-10-27); [maintenance ordering evidence](01b-see-the-reactor-evidence.md).
+Owner: `rocky-sdk` (database reactor, connection
 serving, write probe), `rocky-secure` (SQL session and commit path).
 Depends on [phase 1](01-see-the-wait.md). Effort: three to five days.
 Follow the [execution contract](README.md#agent-execution-contract).

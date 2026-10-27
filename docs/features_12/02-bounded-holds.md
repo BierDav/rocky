@@ -1,6 +1,7 @@
 # 2. Bounded holds
 
-Status: planned. Owner: `rocky-secure`: group commit, settle passes,
+Status: blocked after inventory (2026-10-27); [findings and resumption requirements](02-bounded-holds-evidence.md).
+Owner: `rocky-secure`: group commit, settle passes,
 maintenance, WAL checkpoints, compaction, finalization and checkpoint
 transfer. Depends on [phase 1](01-see-the-wait.md). Effort: two weeks.
 Follow the [execution contract](README.md#agent-execution-contract).

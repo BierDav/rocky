@@ -180,7 +180,7 @@ provisional stamps.
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
-| 2 | [Bounded holds](02-bounded-holds.md) | 1 | 2 w | Every steady-state background holder bounded; passive checkpoint off the lock |
+| 2 (blocked after inventory) | [Bounded holds](02-bounded-holds.md) | 1 | 2 w | Every steady-state background holder bounded; passive checkpoint off the lock |
 | 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |
 | 5 | [Staged migration publication](05-staged-migration-publication.md) | 1 | 2 w | Bounded migration authoring; issuer 100k ≤ 70 s |

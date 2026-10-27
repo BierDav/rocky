@@ -34,11 +34,19 @@ impl<A> Inner<A> {
     pub(crate) fn invalidate_context(&self) {
         self.invalidate_frontiers();
         self.invalidate_records();
+        self.metadata.clear();
         *self
             .graph_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
         self.path_fields
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+    /// A failed refresh may have marked scopes whose held writes rolled back.
+    pub(crate) fn invalidate_held_refresh(&self) {
+        self.held_refresh
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();

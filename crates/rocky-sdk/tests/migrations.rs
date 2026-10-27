@@ -40,6 +40,9 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
 }
 async fn sync(device: &Device) {
     let report = device.sync().await.expect("sync");
+    if std::env::var_os("ROCKY_TRACE_MIGRATION").is_some() {
+        eprintln!("migration report: {report}");
+    }
     for peer in report["peers"].as_array().into_iter().flatten() {
         for attempt in peer["attempts"].as_array().into_iter().flatten() {
             if !attempt["failure"].is_null() {
@@ -935,6 +938,86 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
         json!([[text("inherited"), text("inherited")]])
     );
     b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_migration_open_drives_maintenance_before_the_first_request() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let a = Device::create(root.path(), None)?;
+    a.follow_main_migrating().await;
+    a.add(1, "apples").await;
+    a.close().await;
+    let finalized = || -> Result<i64, Failure> {
+        let db = rusqlite::Connection::open_with_flags(
+            root.path().join("rocky.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        Ok(
+            db.query_row("SELECT count(*) FROM secure_finalized", [], |row| {
+                row.get(0)
+            })?,
+        )
+    };
+    let before = finalized()?;
+    let database = Database::open(open(root.path(), POSITIONED, None))?;
+    assert!(
+        finalized()? > before,
+        "open left its migration seal for a later request"
+    );
+    let a = Device::new(database)?;
+    assert_eq!(
+        rows(&a, POSITIONS).await,
+        json!([[text("apples"), text("apples")]])
+    );
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration_tail()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let source = root.path().join("source");
+    let a = Device::create(&source, None)?;
+    a.follow_main_migrating().await;
+    a.close().await;
+    let a = Device::new(Database::open(open(
+        &source,
+        &SEEDED.replace("100000", "8"),
+        None,
+    ))?)?;
+    a.close().await;
+    let a = Device::new(Database::open(open(
+        &source,
+        &TAGGED.replace("100000", "8"),
+        None,
+    ))?)?;
+    a.ok(json!({"type":"tips","action":"compact","keep":0}))
+        .await;
+    a.close().await;
+    let hub = Arc::new(Hub::default());
+    let schema = FILLED.replace("100000", "8");
+    let a = Device::new(Database::open(open(
+        &source,
+        &schema,
+        Some(Network::Owned(hub.connector("a"))),
+    ))?)?;
+    let c = Device::new(Database::join(
+        open(
+            &root.path().join("member"),
+            &schema,
+            Some(Network::Owned(hub.connector("c"))),
+        ),
+        &a.invite().await,
+    )?)?;
+    c.sync().await.map_err(|e| e.to_string())?;
+    assert_eq!(
+        rows(&c, FILLED_COUNT).await,
+        json!([[{"type":"integer","value":"8"},{"type":"integer","value":"8"}]])
+    );
+    c.close().await;
     a.close().await;
     Ok(())
 }

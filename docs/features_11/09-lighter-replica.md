@@ -1,7 +1,13 @@
 # 9. A lighter replica
 
-Status: partially implemented; issuer time gate open. See the
-[evidence](09-lighter-replica-evidence.md). Owner: `rocky-secure` row records, identity, checkpoints,
+Status: incomplete. The official 100k migration now passes its correctness
+assertions, and a physical iPhone LAN load and offline restart passed.
+The strict single-row receive statement gate remains open at 83 statements;
+the isolated issuer-time qualification is deferred at the owner's request.
+The merged full check passes: 203 unit and 1,435 integration tests;
+integration takes 287.52 s within its unchanged 300 s budget. The earlier
+pre-merge suite-budget failure remains recorded in evidence.
+See the [evidence](09-lighter-replica-evidence.md). Owner: `rocky-secure` row records, identity, checkpoints,
 placements and held refresh; `rocky-storage` connection settings. Depends on
 [phase 4](04-recovery-that-drives-itself.md), so the replica format moves
 once after it. Effort: two to three weeks. Follow the
@@ -37,9 +43,11 @@ keys compactly, and apply does only the statements a row needs.
   from `secure_move_rows` only when the old record moved, decodes once,
   merges the winner and seal-slot reads, and signs the admission head once
   per transaction.
-- **SQLite settings.** Statement cache 512; writer `cache_size` 32 MiB on
-  desktops and 8 MiB on Android; `temp_store=MEMORY`; reader `mmap_size`
-  64 MiB; passive WAL checkpoints at 32 MiB with `journal_size_limit`;
+- **SQLite settings.** Statement cache 512; the writer's configured main
+  and temporary page-cache budgets total 32 MiB on desktops and 8 MiB on
+  Android, split equally. `temp_store` stays at its default; the measured
+  reasons are in the evidence. Reader `mmap_size` is 64 MiB;
+  passive WAL checkpoints at 32 MiB with `journal_size_limit`;
   truncation waits a bounded time for readers. New files use
   `auto_vacuum=INCREMENTAL`, and compaction and pruning reclaim free pages
   in bounded steps. `PRAGMA optimize` runs at close.

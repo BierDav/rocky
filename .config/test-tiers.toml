@@ -82,7 +82,8 @@ suite-exempt-filter = '''
     | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
 '''
 filter = '''
-    (package(rocky-secure) & test(/positions_10000/))
+    (package(rocky-secure) & test(/lthash_100000/))
+    | (package(rocky-secure) & test(/positions_10000/))
     | (package(rocky-secure) & test(/finalization_100000/))
     | (package(rocky-secure) & test(=tests::coordinated::recovery::regressions::collects_every_entry_across_the_real_hash_window_before_recovery_is_signed))
     | (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))

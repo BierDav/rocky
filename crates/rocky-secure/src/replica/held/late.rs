@@ -215,86 +215,146 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Closed-source classification is lazy; learning a seal remains metadata only.
-    pub(in crate::replica) async fn refresh_closed_held(&self, time: u64) -> Result<(), Error> {
-        // Ordinary reach uses the transactional position index. Loading every
-        // signed header here makes an empty held page scale with history size.
-        let recovery = self.graphs.values().any(|graph| {
-            graph
-                .seals
+    pub(in crate::replica) async fn refresh_closed_held(
+        &self,
+        time: u64,
+        only: Option<ResourceScope>,
+    ) -> Result<(), Error> {
+        let scopes = match only {
+            Some(scope) => vec![scope],
+            None => rows(&self.conn, "SELECT scope FROM secure_scope_state")
+                .await?
+                .into_iter()
+                .map(|row| match row.as_slice() {
+                    [SqlValue::Blob(scope)] => decode(scope),
+                    _ => Err(Error::Corrupt("held refresh scope".into())),
+                })
+                .collect::<Result<Vec<ResourceScope>, Error>>()?,
+        };
+        let grants = self.local_grants(time)?;
+        for scope in scopes {
+            let graph = self.graph_for(scope.domain)?;
+            let keys: Vec<_> = self
+                .config
+                .keys
                 .iter()
-                .any(|seal| seal.statement.recovery.is_some())
-        });
-        let mut context = tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
-        let records = rows(&self.conn, "SELECT o.hash,p.scope,p.tip,p.author,p.sequence FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.status IN ('applied','pending') ORDER BY p.scope,p.signer,p.log_sequence").await?;
-        for record in records {
-            let [
-                SqlValue::Blob(hash),
-                SqlValue::Blob(scope),
-                SqlValue::Blob(tip),
-                SqlValue::Integer(author),
-                SqlValue::Integer(sequence),
-            ] = record.as_slice()
-            else {
-                return Err(Error::Corrupt("closed source frame".into()));
-            };
-            if !recovery {
-                let scope: ResourceScope = decode(scope)?;
-                let tip = TipId(
-                    tip.as_slice()
-                        .try_into()
-                        .map_err(|_| Error::Corrupt("closed source tip".into()))?,
-                );
-                let author = u32::try_from(*author)
-                    .map_err(|_| Error::Corrupt("closed source author".into()))?;
-                let sequence = u64::try_from(*sequence)
-                    .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
-                let reach = self.frame_reach_at_using(
-                    scope.domain,
-                    tip,
-                    author,
-                    sequence,
-                    0,
-                    Some(&mut context),
-                )?;
-                if reach != tips::FrameReach::Held {
-                    continue;
-                }
-            }
-            let (header, body) = match collect_rows(
-                self.conn
-                    .query(
-                        "SELECT header,body FROM secure_operations WHERE hash=?",
-                        [hash.clone()],
-                    )
-                    .await?,
-            )
-            .await?
-            .pop()
-            .as_deref()
+                .chain(&self.history)
+                .filter(|key| key.scope == scope)
+                .map(|key| key.generation)
+                .collect();
+            let local: Vec<_> = grants.iter().filter(|grant| grant.scope == scope).collect();
+            let generation = rocky_core::commitment(
+                "rocky.held-refresh.v1",
+                &encode(&(
+                    self.workspace.tip,
+                    self.manifest,
+                    keys,
+                    local,
+                    self.can_read_key(scope, &grants),
+                    self.config.revocations.digest(time).map_err(credential)?,
+                    graph.seals.len(),
+                    graph.openings.len(),
+                    graph.moves.len(),
+                    graph.genesis_lines.len(),
+                    graph.finalities.len(),
+                    graph.checkpoints.len(),
+                    graph.carries.len(),
+                    &graph.revoked,
+                ))?,
+            );
+            if self
+                .held_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&scope)
+                == Some(&generation)
             {
-                Some([SqlValue::Blob(header), SqlValue::Blob(body)]) => {
-                    (header.clone(), body.clone())
-                }
-                _ => return Err(Error::Corrupt("closed source frame".into())),
-            };
-            let frame = self.stored_frame(header, body).await?;
-            let operation = frame.operation_ref()?;
-            let extension = &operation.header.extensions;
-            if self.stored_status(operation.hash).await?.as_deref() == Some("held") {
                 continue;
             }
-            if self.frame_reach(&frame)? == tips::FrameReach::Held
-                && self.can_read_key(extension.scope, &self.local_grants(time)?)
-                && self
-                    .opening_key(extension.scope, extension.generation)
-                    .is_some()
-            {
-                if self.abandoned_write(&frame)? {
-                    self.hold_abandoned(&frame, time).await?;
-                } else {
-                    self.hold_closed_frame(&frame, time).await?;
+            let recovery = graph
+                .seals
+                .iter()
+                .any(|seal| seal.statement.recovery.is_some());
+            let mut context =
+                tips::refresh::RefreshGraphContext::new(&self.graphs, self.workspace.tip);
+            let records = collect_rows(self.conn.query(
+                "SELECT o.hash,p.scope,p.tip,p.author,p.sequence FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.scope=? AND o.status IN ('applied','pending') ORDER BY p.signer,p.log_sequence",
+                [encode(&scope)?],
+            ).await?).await?;
+            for record in records {
+                let [
+                    SqlValue::Blob(hash),
+                    SqlValue::Blob(scope),
+                    SqlValue::Blob(tip),
+                    SqlValue::Integer(author),
+                    SqlValue::Integer(sequence),
+                ] = record.as_slice()
+                else {
+                    return Err(Error::Corrupt("closed source frame".into()));
+                };
+                if !recovery {
+                    let scope: ResourceScope = decode(scope)?;
+                    let tip = TipId(
+                        tip.as_slice()
+                            .try_into()
+                            .map_err(|_| Error::Corrupt("closed source tip".into()))?,
+                    );
+                    let author = u32::try_from(*author)
+                        .map_err(|_| Error::Corrupt("closed source author".into()))?;
+                    let sequence = u64::try_from(*sequence)
+                        .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
+                    let reach = self.frame_reach_at_using(
+                        scope.domain,
+                        tip,
+                        author,
+                        sequence,
+                        0,
+                        Some(&mut context),
+                    )?;
+                    if reach != tips::FrameReach::Held {
+                        continue;
+                    }
+                }
+                let (header, body) = match collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT header,body FROM secure_operations WHERE hash=?",
+                            [hash.clone()],
+                        )
+                        .await?,
+                )
+                .await?
+                .pop()
+                .as_deref()
+                {
+                    Some([SqlValue::Blob(header), SqlValue::Blob(body)]) => {
+                        (header.clone(), body.clone())
+                    }
+                    _ => return Err(Error::Corrupt("closed source frame".into())),
+                };
+                let frame = self.stored_frame(header, body).await?;
+                let operation = frame.operation_ref()?;
+                let extension = &operation.header.extensions;
+                if self.stored_status(operation.hash).await?.as_deref() == Some("held") {
+                    continue;
+                }
+                if self.frame_reach(&frame)? == tips::FrameReach::Held
+                    && self.can_read_key(extension.scope, &self.local_grants(time)?)
+                    && self
+                        .opening_key(extension.scope, extension.generation)
+                        .is_some()
+                {
+                    if self.abandoned_write(&frame)? {
+                        self.hold_abandoned(&frame, time).await?;
+                    } else {
+                        self.hold_closed_frame(&frame, time).await?;
+                    }
                 }
             }
+            self.held_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(scope, generation);
         }
         Ok(())
     }
@@ -423,7 +483,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Commitment, Error> {
         self.authorize_held_reader(peer, chain, scope).await?;
         let mut inner = self.inner.lock().await;
-        transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
+        transaction!(inner, |inner| inner
+            .refresh_closed_held(now()?, Some(scope))
+            .await)?;
         inner = flush_guard(inner, &self.inner).await?;
         let records = collect_rows(inner.conn.query(
             "SELECT f.hash FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? ORDER BY f.hash",
@@ -454,7 +516,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         self.authorize_held_reader(peer, chain, scope).await?;
         let mut inner = self.inner.lock().await;
-        transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
+        transaction!(inner, |inner| inner
+            .refresh_closed_held(now()?, Some(scope))
+            .await)?;
         inner = flush_guard(inner, &self.inner).await?;
         let records = collect_rows(inner.conn.query(
             "SELECT f.hash,f.frame FROM secure_held_frames f JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT 33",

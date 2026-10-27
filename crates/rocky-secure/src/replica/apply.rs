@@ -2,9 +2,8 @@ use super::*;
 use identity::receipts;
 use std::borrow::Cow;
 
-/// A merged write, its record and the stored row it read, if any: bytes
-/// and decoded record.
-pub(super) type MergedRow = (RowChange, Materialized, Option<(Vec<u8>, Materialized)>);
+/// A merged write, its new record and the previous decoded record.
+pub(super) type MergedRow = (RowChange, Materialized, Option<Materialized>);
 pub(super) struct Materialization<'p> {
     pub rows: Vec<MergedRow>,
     pub admission: Admission,
@@ -193,8 +192,8 @@ impl<A: RowApplication> Inner<A> {
             for (ordinal, write) in &current {
                 let change = &write.change;
                 let carried = payload.carried(&change.row);
-                let stored = self.stored_row(scope, self.storage_row(change)?).await?;
-                let current = stored.as_ref().map(|(_, record)| record.clone());
+                let stored = self.row(scope, self.storage_row(change)?).await?;
+                let current = stored.clone();
                 let birth = match change.before {
                     None => self
                         .app
@@ -555,7 +554,7 @@ impl<A: RowApplication> Inner<A> {
         let mut sets = checkpoint::Sets::new();
         (sets.rows, sets.tombstones, sets.digest) = (rows, tombstones, digest);
         let mut projections = Vec::new();
-        for (change, record, stored) in materialized {
+        for (change, record, old_record) in materialized {
             let row = match record.identity {
                 Some(id) => rocky_core::commitment("rocky.row-incarnation.v2", &id.to_le_bytes()),
                 None => change.row,
@@ -577,7 +576,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             }
-            let (old, old_record) = stored.unzip();
             // The record names its proof's bindings by digest.
             if let Some(proof) = payload
                 .carried(&change.row)
@@ -588,8 +586,7 @@ impl<A: RowApplication> Inner<A> {
                 self.keep_bindings(proof).await?;
             }
             let new = self.encode_record(&record).await?;
-            sets.replace_stored(self, &row, old.as_deref(), &new)
-                .await?;
+            sets.replace_materialized(&row, old_record.as_ref(), &record)?;
             self.conn
                 .execute(
                     "INSERT INTO secure_row_records VALUES(?,?,?)",

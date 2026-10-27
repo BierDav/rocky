@@ -224,14 +224,25 @@ pub struct ReplicaStatus {
 
 impl<A: RowApplication> Inner<A> {
     pub(crate) async fn role(&self) -> Result<RoleConfig, Error> {
-        let stored = rows(&self.conn, "SELECT config FROM secure_roles WHERE id=1").await?;
-        match stored.first().map(Vec::as_slice) {
-            Some([SqlValue::Blob(bytes)]) => decode(bytes),
-            None => Ok(RoleConfig::default()),
-            _ => Err(Error::Corrupt("role configuration".into())),
+        if let Some(role) = self.metadata.with(|cache| cache.role.clone()) {
+            return Ok(role);
         }
+        let stored = rows(&self.conn, "SELECT config FROM secure_roles WHERE id=1").await?;
+        let role = match stored.first().map(Vec::as_slice) {
+            Some([SqlValue::Blob(bytes)]) => decode(bytes)?,
+            None => RoleConfig::default(),
+            _ => return Err(Error::Corrupt("role configuration".into())),
+        };
+        self.metadata.with(|cache| cache.role = Some(role.clone()));
+        Ok(role)
     }
     pub(crate) async fn holding(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
+        if let Some(holding) = self
+            .metadata
+            .with(|cache| cache.holdings.get(&scope).copied())
+        {
+            return Ok(holding);
+        }
         let mut result = self
             .conn
             .query(
@@ -239,10 +250,14 @@ impl<A: RowApplication> Inner<A> {
                 [encode(&scope)?],
             )
             .await?;
-        match result.next().await? {
-            Some(row) => Ok(Some(Holding::parse(&row.get::<String>(0)?)?)),
-            None => Ok(None),
-        }
+        let holding = match result.next().await? {
+            Some(row) => Some(Holding::parse(&row.get::<String>(0)?)?),
+            None => None,
+        };
+        self.metadata.with(|cache| {
+            cache.holdings.insert(scope, holding);
+        });
+        Ok(holding)
     }
     /// Scopes whose payload custody current grants authorize, even without keys.
     pub(super) fn custody_scopes(&self, time: u64) -> Result<BTreeSet<ResourceScope>, Error> {

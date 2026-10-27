@@ -634,7 +634,9 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
         }
-        for (row, _, record) in &page.rows {
+        let mut ordered: Vec<_> = page.rows.iter().collect();
+        ordered.sort_unstable_by_key(|(row, ..)| *row);
+        for (row, _, record) in ordered {
             let fields = self.encode_record(record).await?;
             stored.extend([
                 SqlValue::Integer(id),

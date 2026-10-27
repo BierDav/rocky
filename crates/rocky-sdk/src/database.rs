@@ -1421,6 +1421,10 @@ async fn run(
         }
         return Err(error);
     }
+    // Migration commits precede the revision subscription. Drain their work
+    // before enrollment or the first reconciliation can trigger it instead.
+    replica.maintain().await;
+    replica.finalize_path(node.domain().scope).await?;
     let network = match link {
         Some((transport, owned)) => Some(node.link(transport, owned).await),
         None => None,
@@ -1597,12 +1601,10 @@ async fn run(
     }
     Ok(())
 }
-/// Removes what a logged-out device stored, keeping only the lock.
-/// Finishes buffered SQL commits after they answered: a flush makes them
-/// durable, then their maintenance step runs. The flush runs on a blocking
-/// thread, so no statement waits for the device, and one flush covers every
-/// commit that arrived during the previous one. A flush failure surfaces at
-/// the next call that exposes data, which flushes itself.
+/// Flushes buffered SQL commits and runs their queued maintenance after
+/// they answer. The flush runs on a blocking thread and covers every
+/// commit that arrived during the previous flush. A flush failure surfaces
+/// at the next call that exposes data, which flushes itself.
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     while revisions.changed().await.is_ok() {

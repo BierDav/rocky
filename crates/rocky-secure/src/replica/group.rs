@@ -22,7 +22,7 @@ const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// system after a commit.
 const RECLAIM_PAGES: i64 = 1024;
 const RECLAIM_STEP: i64 = 4096;
-/// The page cache, negative as SQLite counts KiB.
+/// Combined main and temporary page caches, negative as SQLite counts KiB.
 #[cfg(target_os = "android")]
 pub(super) const CACHE_KIB: i64 = -8 * 1024;
 #[cfg(not(target_os = "android"))]

@@ -354,7 +354,7 @@ impl<A: RowApplication> Inner<A> {
         let mut quarantined: BTreeMap<(String, String), u64> = BTreeMap::new();
         for record in rows(
             &self.conn,
-            "SELECT o.scope,o.hash,h.n,q.reason FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence LEFT JOIN secure_quarantine q ON q.hash=o.hash",
+            "SELECT o.scope,o.hash,h.n,q.reason FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence LEFT JOIN secure_quarantine q ON q.hash=o.hash WHERE o.status='pending'",
         )
         .await?
         {

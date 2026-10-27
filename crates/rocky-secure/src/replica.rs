@@ -40,6 +40,7 @@ pub(crate) use identity::Raise;
 mod author_sets;
 mod incoming;
 mod keys;
+mod metadata;
 pub(crate) mod migrate;
 pub(crate) mod moves;
 mod offload;
@@ -315,6 +316,8 @@ pub(super) struct Inner<A> {
     /// Blockers per domain; invalidated with the frontiers, after commits
     /// and by writes to the state they derive from.
     pub(crate) readiness: blockers::Readiness,
+    metadata: metadata::Metadata,
+    held_refresh: std::sync::Mutex<BTreeMap<ResourceScope, Commitment>>,
     stamp_authors: stamp_authors::Cache,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
@@ -914,6 +917,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             copy: Default::default(),
         });
         let readiness = blockers::Readiness::new(&conn)?;
+        let metadata = metadata::Metadata::new(&conn)?;
         let mut inner = Inner {
             _owner: owner,
             conn,
@@ -925,6 +929,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             decoded_checkpoints: Default::default(),
             tip_frontiers: Default::default(),
             readiness,
+            metadata,
+            held_refresh: Default::default(),
             record_dictionary: Default::default(),
             stamp_authors: Default::default(),
             author_sets: Default::default(),
@@ -1433,10 +1439,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
     }
-    /// Runs the maintenance buffered SQL commits left for later: one bounded
-    /// checkpoint or pruning step for the scopes they wrote, and a WAL
-    /// checkpoint when one is due. A commit acknowledged `Flushed` runs its
-    /// own step before it answers.
+    /// Runs maintenance queued by buffered SQL commits: one bounded checkpoint or
+    /// pruning step for their scopes, and a WAL checkpoint when due.
     pub async fn maintain(&self) {
         let mut inner = self.inner.lock().await;
         let scopes = std::mem::take(&mut inner.deferred_maintenance);
@@ -1931,14 +1935,6 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         row: Commitment,
     ) -> Result<Option<Materialized>, Error> {
-        Ok(self.stored_row(scope, row).await?.map(|(_, record)| record))
-    }
-    /// The stored record of `row`, as bytes and decoded.
-    async fn stored_row(
-        &self,
-        scope: ResourceScope,
-        row: Commitment,
-    ) -> Result<Option<(Vec<u8>, Materialized)>, Error> {
         let mut result = self
             .conn
             .query(
@@ -1949,8 +1945,7 @@ impl<A: RowApplication> Inner<A> {
         match result.next().await? {
             Some(row) => {
                 let bytes = row.get::<Vec<u8>>(0)?;
-                let record = self.decode_record(&bytes).await?;
-                Ok(Some((bytes, record)))
+                Ok(Some(self.decode_record(&bytes).await?))
             }
             None => Ok(None),
         }
@@ -2172,7 +2167,8 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
         }
     }
     for (name, value) in [
-        ("cache_size", group::CACHE_KIB),
+        ("cache_size", group::CACHE_KIB / 2),
+        ("temp.cache_size", group::CACHE_KIB / 2),
         ("journal_size_limit", group::WAL_CHECKPOINT_BYTES as i64),
     ] {
         rows(conn, &format!("PRAGMA {name}={value}")).await?;

@@ -139,7 +139,7 @@ impl<A: RowApplication> Inner<A> {
         loop {
             let mut heads = BTreeSet::new();
             for record in collect_rows(self.conn.query(
-                "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence",
+                "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence WHERE o.status='pending'",
                 (),
             ).await?).await? {
                 heads.insert(head(record)?);

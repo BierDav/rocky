@@ -395,6 +395,8 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
             )
             .await
             .unwrap();
+        // Direct SQL corruption bypasses the replica's refresh generations.
+        a.inner.lock().await.invalidate_held_refresh();
         let before = snapshot(&a).await;
         let error = page(&a, f.public).await.unwrap_err();
         if column == "author" {

@@ -213,11 +213,21 @@ pub struct Writes {
     /// removed.
     tables: std::sync::RwLock<Vec<(String, bool)>>,
     count: std::sync::atomic::AtomicU64,
+    counts: Mutex<std::collections::HashMap<String, u64>>,
 }
 impl Writes {
     /// Changes so far; it only grows.
     pub fn count(&self) -> u64 {
         self.count.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Changes to one watched table, including changes within a transaction.
+    pub fn table_count(&self, table: &str) -> u64 {
+        self.counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(table)
+            .copied()
+            .unwrap_or(0)
     }
     fn observe(&self, table: &str, update: bool) {
         if self.tables.read().is_ok_and(|tables| {
@@ -226,6 +236,11 @@ impl Writes {
                 .any(|(watched, updates)| watched == table && (*updates || !update))
         }) {
             self.count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let mut counts = self
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *counts.entry(table.to_owned()).or_default() += 1;
         }
     }
 }
@@ -614,7 +629,14 @@ impl Connection {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
         #[cfg(any(test, feature = "test-support"))]
-        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+        {
+            STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+            STATEMENT_TRACE.with(|trace| {
+                if let Some(statements) = trace.borrow_mut().as_mut() {
+                    statements.push(sql.to_owned());
+                }
+            });
+        }
         let columns = statement.column_count();
         let mut rows = statement.query(rusqlite::params_from_iter(params))?;
         let mut values = Vec::with_capacity(columns);
@@ -724,7 +746,14 @@ impl Connection {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
         #[cfg(any(test, feature = "test-support"))]
-        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+        {
+            STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+            STATEMENT_TRACE.with(|trace| {
+                if let Some(statements) = trace.borrow_mut().as_mut() {
+                    statements.push(sql.to_owned());
+                }
+            });
+        }
         let columns = statement.column_count();
         let mut page = Page {
             rows: Vec::new(),
@@ -766,7 +795,14 @@ impl Connection {
         let raw = self.raw()?;
         let mut statement = raw.prepare_cached(sql)?;
         #[cfg(any(test, feature = "test-support"))]
-        STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+        {
+            STATEMENTS.with(|cell| cell.set(cell.get() + 1));
+            STATEMENT_TRACE.with(|trace| {
+                if let Some(statements) = trace.borrow_mut().as_mut() {
+                    statements.push(sql.to_owned());
+                }
+            });
+        }
         let columns = statement.column_count();
         let mut result = VecDeque::new();
         let mut rows = statement.query(rusqlite::params_from_iter(params))?;
@@ -823,11 +859,18 @@ pub fn wal_frames() -> i64 {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static STATEMENTS: Cell<u64> = const { Cell::new(0) };
+    static STATEMENT_TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 /// Statements prepared on this thread, for tests that count them per row.
 #[cfg(any(test, feature = "test-support"))]
 pub fn statements() -> u64 {
     STATEMENTS.with(Cell::get)
+}
+
+/// Starts or stops collecting statement text on this test thread; returns the previous trace.
+#[cfg(any(test, feature = "test-support"))]
+pub fn trace_statements(enabled: bool) -> Vec<String> {
+    STATEMENT_TRACE.with(|trace| trace.replace(enabled.then(Vec::new)).unwrap_or_default())
 }
 
 #[cfg(test)]

@@ -355,6 +355,8 @@ async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top
     let sealed = seal(&lineage, &a).await.id().unwrap();
     // Births after the seal raise the live mark, not the kept seal's.
     insert(&a, "y", "later").await;
+    a.flush().await.unwrap();
+    assert!(a.maintain().await);
     assert_eq!(own_mark(&a, scope).await, (author, covered + 1));
     let b = open(&lineage, &dir, "b", &keys[1]).await;
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;

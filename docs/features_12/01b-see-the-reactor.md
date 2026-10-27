@@ -1,7 +1,8 @@
 # 1b. See the reactor
 
-Status: in progress (2026-10-27); owner authorized the maintenance-ordering
-prerequisite repair, then continuation. [Evidence](01b-see-the-reactor-evidence.md).
+Status: complete with documented attribution limits (2026-10-27).
+The authorized maintenance-ordering repair is included.
+[Evidence](01b-see-the-reactor-evidence.md).
 Owner: `rocky-sdk` (database reactor, connection
 serving, write probe), `rocky-secure` (SQL session and commit path).
 Depends on [phase 1](01-see-the-wait.md). Effort: three to five days.
@@ -47,8 +48,13 @@ attributed to a named site.
 - **Unattributed time.** The probe reports `write_reactor_delay`, which
   sums the queue delays of the write's calls. It also reports
   `write_unattributed`, the per-sample remainder of `write` minus lock
-  wait, lock hold, flush wait and reactor delay. It adds a table of the
-  longest polls by task, in the same format as the holder tables.
+  wait, lock hold, flush wait and reactor delay. Overlapping intervals make
+  this non-exclusive: the nonnegative remainder is paired with
+  `write_attribution_overlap`, which retains any excess in the sum.
+  `write_sql_covered` reports the union of request/reply intervals clipped
+  to the write, and `write_client_remainder` reports time outside those
+  timed intervals, including caller, timing-record and reply-handoff work.
+  The probe also lists the longest polls by task, like the holder tables.
 - **Status checks are interactive.** `SecureSession::status()` runs per
   statement on the SQL path and currently acquires as Background. Called
   on behalf of an SQL connection, it acquires as Interactive. Its checks

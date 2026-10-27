@@ -292,11 +292,13 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> SecureSession<A> {
     /// The session's bindings, after checking it is still valid.
     pub async fn status(&self) -> Result<SessionStatus, Error> {
-        let inner = self
-            .replica
-            .inner
-            .lock(crate::replica::Class::Background)
-            .await;
+        self.status_with(crate::replica::Class::Background).await
+    }
+    pub(super) async fn status_with(
+        &self,
+        class: crate::replica::Class,
+    ) -> Result<SessionStatus, Error> {
+        let inner = self.replica.inner.lock(class).await;
         inner.check_authority(Some(self.authority))?;
         inner.local_grants(now()?)?;
         Ok(self.status.clone())

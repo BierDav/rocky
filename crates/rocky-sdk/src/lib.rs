@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Rocky DB's official Rust application SDK.
 //!
 //! Add `rocky-sdk = "<release version>"` to your dependencies.

@@ -40,6 +40,8 @@ impl HeldPrefix {
         for index in 0..count {
             insert(&replica, &format!("old{index}"), "old line").await;
         }
+        replica.flush().await.unwrap();
+        assert!(replica.maintain().await);
         let frames = crate::tests::stored_frames(
             &replica,
             "SELECT header,body FROM secure_operations ORDER BY sequence",

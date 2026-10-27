@@ -551,7 +551,7 @@ impl Node {
     pub(crate) async fn sql_session(
         &self,
         options: SqlOptions,
-    ) -> Result<(SecureSession<TypedRows>, SecureSql<TypedRows>), Failure> {
+    ) -> Result<SecureSql<TypedRows>, Failure> {
         if self.ended.lock().await.is_some() {
             return Err(refused("this device logged out of the domain"));
         }
@@ -559,8 +559,7 @@ impl Node {
             .replica
             .session(self.app_scopes().into_iter().collect())
             .await?;
-        let sql = session.sql(options).await?;
-        Ok((session, sql))
+        Ok(session.sql(options).await?)
     }
     async fn forget_readers(&self) {
         for client in self.clients() {

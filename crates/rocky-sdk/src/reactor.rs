@@ -51,6 +51,9 @@ mod qualification {
 
     #[derive(Debug)]
     pub struct SqlCallTiming {
+        /// Process-local bounds for measuring overlapping calls as one interval.
+        pub queued_at: Instant,
+        pub replied_at: Instant,
         pub queue_us: u64,
         pub in_call_us: u64,
     }
@@ -145,9 +148,12 @@ mod qualification {
             }
         }
         pub(crate) fn finish(self, connection: u64) {
+            let replied_at = Instant::now();
             let timing = SqlCallTiming {
+                queued_at: self.queued,
+                replied_at,
                 queue_us: self.started.duration_since(self.queued).as_micros() as u64,
-                in_call_us: self.started.elapsed().as_micros() as u64,
+                in_call_us: replied_at.duration_since(self.started).as_micros() as u64,
             };
             if let Some(recording) = current() {
                 recording

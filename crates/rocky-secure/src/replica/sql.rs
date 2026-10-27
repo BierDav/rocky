@@ -233,6 +233,13 @@ impl<A: RowApplication> SecureSession<A> {
 }
 
 impl<A: RowApplication> SecureSql<A> {
+    /// The SQL session's bindings, checked as interactive work.
+    pub async fn status(&self) -> Result<SessionStatus, Error> {
+        self.session
+            .status_with(crate::replica::Class::Interactive)
+            .await
+    }
+
     /// Commits a move as its own atomic bundle; an active SQL transaction must end first.
     pub async fn move_row(
         &self,
@@ -1080,25 +1087,14 @@ impl<A: RowApplication> SecureSql<A> {
             .collect::<Result<BTreeSet<_>, _>>()?;
         let flushed = self.options.acknowledge == CommitClass::Flushed
             || matches!(commit, Kind::Coordinated(_));
-        if !flushed {
-            // Queue before announcing the revision, so the maintenance driver
-            // cannot miss the work when it wakes for this commit.
-            inner.deferred_maintenance.extend(scopes.iter().copied());
-        }
+        // Queue before announcing the revision, including when the caller flushes.
+        inner.deferred_maintenance.extend(scopes);
         inner.publish_revision().await?;
         if flushed {
             // The frames may leave the device.
             let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
             drop(held);
             flusher.run(committed_at).await?;
-            let mut inner = self
-                .session
-                .replica
-                .inner
-                .lock(crate::replica::Class::Background)
-                .await;
-            inner.maintain(&scopes).await;
-            inner.checkpoint_if_due().await;
         }
         rows.committed = Some(committed);
         Ok(rows)

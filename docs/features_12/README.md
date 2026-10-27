@@ -1,6 +1,8 @@
 # features_12: writes that never wait
 
-Status: phase 1 complete (2026-10-27); [evidence and qualification limits](01-see-the-wait-evidence.md).
+Status: phases 1 and 1b complete (2026-10-27).
+[Phase 1 evidence and limits](01-see-the-wait-evidence.md) and
+[reactor qualification and attribution limits](01b-see-the-reactor-evidence.md).
 Replanned 2026-10-27 after the [phase 2 inventory](02-bounded-holds-evidence.md#replanning-2026-10-27):
 phase 1b added, phase 2 narrowed to steady state, transitions deferred to phase 7.
 L1 uses an already writable member, as approved by the owner. Phase briefs record
@@ -210,7 +212,7 @@ provisional stamps.
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
-| 1b (in progress) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
+| 1b (complete) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
 | 2 (replanned, inventory done) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
 | 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step; transitions start only when quiet |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |

@@ -6,7 +6,7 @@
 use crate::{Failure, node::Node};
 use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::{CursorLimits, SnapshotCursor, SqlControl, TableObserver, classify_sql};
-use rocky_secure::{Error, SecureSession, SecureSql, SqlError, Unavailable};
+use rocky_secure::{Error, SecureSql, SqlError, Unavailable};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex as StdMutex},
@@ -341,20 +341,13 @@ struct Reading {
     implicit: bool,
 }
 
-/// The session a connection runs on, opened again after an authority
-/// change ended it.
-struct Opened {
-    session: SecureSession<TypedRows>,
-    sql: SecureSql<TypedRows>,
-}
-
 /// One connection's state on the database's reactor.
 pub(crate) struct State {
     options: ConnectionOptions,
     /// The connection is a reader now; see `query_only`.
     read_only: bool,
     node: Arc<Node>,
-    opened: Option<Opened>,
+    opened: Option<SecureSql<TypedRows>>,
     /// A writer's `BEGIN` not yet sent: the session takes the writer only
     /// once a statement needs the file.
     begin: Option<&'static str>,
@@ -427,17 +420,19 @@ impl State {
     /// authority outside a transaction.
     async fn sql(&mut self) -> Result<&SecureSql<TypedRows>, Failure> {
         let current = match &self.opened {
-            Some(opened) => self.authority_pinned() || opened.session.status().await.is_ok(),
+            Some(opened) => self.authority_pinned() || opened.status().await.is_ok(),
             None => false,
         };
         if !current {
-            let (session, mut sql) = self.node.sql_session(self.options.sql()).await?;
+            let mut sql = self.node.sql_session(self.options.sql()).await?;
             if let Some(seal) = self.seal {
                 sql.bind_seal(seal).await?;
             }
-            self.opened = Some(Opened { session, sql });
+            self.opened = Some(sql);
         }
-        Ok(&self.opened.as_ref().ok_or("connection has no session")?.sql)
+        self.opened
+            .as_ref()
+            .ok_or_else(|| "connection has no session".into())
     }
 
     /// Runs one statement and returns the first page of its result.
@@ -556,7 +551,7 @@ impl State {
             ..
         } = self;
         let version = *version;
-        let sql_session = &opened.as_ref().ok_or("connection has no session")?.sql;
+        let sql_session = opened.as_ref().ok_or("connection has no session")?;
         room.answer(
             sql,
             params,
@@ -731,18 +726,17 @@ impl State {
                 };
                 if let Some(reading) = &mut self.reading {
                     if reading.snapshot.is_none() {
-                        reading.snapshot = Some(opened.sql.snapshot(limits).await?);
+                        reading.snapshot = Some(opened.snapshot(limits).await?);
                     }
                     let snapshot = reading.snapshot.as_mut().ok_or("no snapshot")?;
                     let rows = opened
-                        .sql
                         .snapshot_rows(snapshot, sql, params)
                         .await
                         .map_err(readonly)?;
                     let columns = rows.columns.into_iter().map(|column| column.name).collect();
                     return Ok(Pending::rows(columns, rows.rows));
                 }
-                let cursor = match opened.sql.cursor(sql, params.clone(), limits).await {
+                let cursor = match opened.cursor(sql, params.clone(), limits).await {
                     // The session lost its authority: a new one may read.
                     Err(Error::Sql(SqlError::Unavailable {
                         reason: Unavailable::Revoked,

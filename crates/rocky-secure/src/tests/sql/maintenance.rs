@@ -80,3 +80,92 @@ async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
         vec![vec![text("second")]]
     );
 }
+
+#[tokio::test]
+async fn flushed_commit_defers_maintenance_until_driver_runs() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &dir.path().join("flushed.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = sql(&replica, &[t.items]).await;
+    insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
+        .await
+        .unwrap();
+    assert!(replica.maintenance_queued(t.items).await);
+    assert!(replica.maintain().await);
+    assert!(!replica.maintenance_queued(t.items).await);
+}
+
+#[tokio::test]
+async fn failed_flushed_commit_retains_maintenance_for_driver_retry() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &dir.path().join("failed-flushed.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = sql(&replica, &[t.items]).await;
+    replica.fail_flushes(1).await;
+    assert!(
+        insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
+            .await
+            .is_err()
+    );
+    assert!(replica.maintenance_queued(t.items).await);
+    assert!(!replica.maintain().await);
+    replica.flush().await.unwrap();
+    assert!(replica.maintain().await);
+    assert!(!replica.maintenance_queued(t.items).await);
+    assert_eq!(
+        select(&sql, "SELECT title FROM items").await,
+        vec![vec![text("first")]]
+    );
+}
+
+#[cfg(feature = "qualification")]
+#[tokio::test]
+async fn sql_status_checks_use_interactive_acquisitions() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &dir.path().join("status.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let session = replica.session([t.items].into()).await.unwrap();
+    let sql = session.sql(SqlOptions::default()).await.unwrap();
+    let measurements = replica.lock_measurements();
+    for interactive in [false, true] {
+        measurements.start();
+        let status = if interactive {
+            sql.status().await
+        } else {
+            session.status().await
+        }
+        .unwrap();
+        assert!(status.writable.contains(&t.items));
+        let snapshot = measurements.stop();
+        assert_eq!(snapshot.holders.len(), 1, "{snapshot:?}");
+        assert_eq!(
+            snapshot.holders.keys().next().unwrap().1,
+            if interactive {
+                "Interactive"
+            } else {
+                "Background"
+            }
+        );
+    }
+}

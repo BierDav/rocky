@@ -1,7 +1,8 @@
 //! Release-only latency measurements; finite loads report their overlap explicitly.
 use super::*;
 use rocky_sdk::{
-    Connection, ConnectionOptions, Durability, ReactorMeasurements, ReactorSnapshot, TableEvents,
+    Connection, ConnectionOptions, Durability, ReactorMeasurements, ReactorSnapshot, SqlCallTiming,
+    TableEvents,
 };
 use rocky_secure::{LockMeasurements, Measurements};
 use std::time::{Duration, Instant};
@@ -255,9 +256,9 @@ async fn ready_probe(device: &Device) -> Result<(), Failure> {
     Err(format!("member bootstrap did not make the probe writable: {last_report}").into())
 }
 
-fn percentiles(values: &[u64]) -> [u64; 4] {
+fn percentiles<T: Copy + Ord + Default>(values: &[T]) -> [T; 4] {
     if values.is_empty() {
-        return [0; 4];
+        return [T::default(); 4];
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
@@ -269,7 +270,7 @@ fn percentiles(values: &[u64]) -> [u64; 4] {
         sorted[sorted.len() - 1],
     ]
 }
-fn report(name: &str, values: &[u64]) {
+fn report<T: Copy + Ord + Default + std::fmt::Display>(name: &str, values: &[T]) {
     let [p50, p95, p99, max] = percentiles(values);
     eprintln!(
         "P12 metric={name} samples={} p50_us={p50} p95_us={p95} p99_us={p99} max_us={max}",
@@ -443,6 +444,42 @@ async fn load(
     Ok(units)
 }
 
+fn call_coverage(calls: &[SqlCallTiming], start: Instant, end: Instant) -> u64 {
+    let mut intervals: Vec<_> = calls
+        .iter()
+        .map(|call| (call.queued_at.max(start), call.replied_at.min(end)))
+        .filter(|(from, to)| from < to)
+        .collect();
+    intervals.sort_unstable();
+    let mut cursor = start;
+    let mut covered = Duration::ZERO;
+    for (from, to) in intervals {
+        if to > cursor {
+            covered += to.duration_since(from.max(cursor));
+            cursor = to;
+        }
+    }
+    covered.as_micros() as u64
+}
+
+#[test]
+fn overlapping_cleanup_calls_cover_each_write_instant_once() {
+    let base = Instant::now();
+    let at = |us| base + Duration::from_micros(us);
+    let calls: Vec<_> = [(11, 14), (0, 5), (4, 9), (15, 16)]
+        .into_iter()
+        .map(|(from, to)| SqlCallTiming {
+            queued_at: at(from),
+            replied_at: at(to),
+            queue_us: 0,
+            in_call_us: 0,
+        })
+        .collect();
+    assert_eq!(call_coverage(&calls, at(2), at(12)), 8);
+    assert_eq!(call_coverage(&calls, at(9), at(11)), 0);
+    assert_eq!(call_coverage(&[], at(2), at(12)), 0);
+}
+
 async fn probe(
     database: &Database,
     count: usize,
@@ -460,6 +497,9 @@ async fn probe(
     let mut in_calls = Vec::with_capacity(count);
     let mut unattributed = Vec::with_capacity(count);
     let mut overlap = Vec::with_capacity(count);
+    let mut server_remainder = Vec::with_capacity(count);
+    let mut client_remainder = Vec::with_capacity(count);
+    let mut covered_calls = Vec::with_capacity(count);
     let mut polls = ReactorSnapshot::default();
     let mut all = Measurements::default();
     let mut ticks = tokio::time::interval_at(
@@ -523,6 +563,15 @@ async fn probe(
         let elapsed = *write.last().unwrap_or(&0);
         unattributed.push(elapsed.saturating_sub(accounted));
         overlap.push(accounted.saturating_sub(elapsed));
+        let service = *in_calls.last().unwrap_or(&0) as i64;
+        server_remainder.push(service - (accounted - delay) as i64);
+        let covered = call_coverage(
+            calls.map(Vec::as_slice).unwrap_or_default(),
+            start,
+            committed,
+        );
+        covered_calls.push(covered);
+        client_remainder.push(elapsed.saturating_sub(covered));
         merge_polls(&mut polls, timing);
         merge(&mut all, interval);
     }
@@ -535,6 +584,9 @@ async fn probe(
     report("write_sql_in_call", &in_calls);
     report("write_unattributed", &unattributed);
     report("write_attribution_overlap", &overlap);
+    report("write_server_remainder", &server_remainder);
+    report("write_client_remainder", &client_remainder);
+    report("write_sql_covered", &covered_calls);
     report("replica_flush_wait", &all.flush_us);
     Ok((all, polls))
 }

@@ -1500,7 +1500,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
     }
-    /// Runs maintenance queued by buffered SQL commits: one bounded checkpoint or
+    /// Runs maintenance queued by SQL commits: one bounded checkpoint or
     /// pruning step for their scopes, and a WAL checkpoint when due. Returns
     /// false, leaving work queued, if a newer commit still needs flushing.
     pub async fn maintain(&self) -> bool {

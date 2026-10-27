@@ -1,8 +1,8 @@
 name: Release
 
-# Publishes a versioned release to the packages and releases of the hosting
-# forge, GitHub or Gitea: nightly when shipped code changed, or a manually
-# chosen channel. The version is computed from Conventional Commits.
+# Publishes a versioned release to GitHub's packages and releases: nightly
+# when shipped code changed, or a manually chosen channel. The version is
+# computed from Conventional Commits.
 
 on:
   schedule:
@@ -38,8 +38,7 @@ env:
 jobs:
   version:
     name: Version
-    # Any architecture.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ubuntu-latest
     # Includes waiting for the commit's push checks.
     timeout-minutes: 120
     permissions:
@@ -132,13 +131,8 @@ jobs:
           set -euo pipefail
           version="$(git tag --list 'v*' | scripts/release/version "${CHANNEL}")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
-            registry=ghcr.io
-            maven="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
-          else
-            registry="${GITHUB_SERVER_URL#*://}"
-            maven="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven"
-          fi
+          registry=ghcr.io
+          maven="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
           if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/notes"
           {
@@ -237,26 +231,21 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
-      # GHCR on GitHub; the instance's own container registry on Gitea.
+      # GHCR hosts the container images.
       - name: Select the registry
         run: |
-          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
-            registry=ghcr.io
-          else
-            registry="${GITHUB_SERVER_URL#*://}"
-          fi
-          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          echo "REGISTRY=ghcr.io" >> "$GITHUB_ENV"
           # Registries require a lowercase repository name; `github.repository_owner`
           # is `BierDav` on GitHub, which Docker rejects in a tag.
-          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
-          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -265,7 +254,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
-          # Gitea's cache server may not serve BuildKit; a cold build still works.
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }},ignore-error=true
           labels: |
@@ -280,7 +268,7 @@ jobs:
     if: >-
       always() && !cancelled() && needs.version.result == 'success' &&
       needs.version.outputs.release == 'true' && needs.image.result == 'success'
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -298,26 +286,21 @@ jobs:
             package: rocky-db-peer
             heading: Custody peer image
     steps:
-      # GHCR on GitHub; the instance's own container registry on Gitea.
+      # GHCR hosts the container images.
       - name: Select the registry
         run: |
-          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
-            registry=ghcr.io
-          else
-            registry="${GITHUB_SERVER_URL#*://}"
-          fi
-          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          echo "REGISTRY=ghcr.io" >> "$GITHUB_ENV"
           # Registries require a lowercase repository name; `github.repository_owner`
           # is `BierDav` on GitHub, which Docker rejects in a tag.
-          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
-          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Each architecture is a single-platform image, so merge them rather than
       # pushing another index, tagged with the version and the moving channel tag.
@@ -367,14 +350,6 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      # The Gitea macOS runner is a service without a login environment.
-      - name: Use the Gitea runner's tools
-        if: github.server_url != 'https://github.com' && runner.os == 'macOS'
-        run: |
-          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
-          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
-
       - name: Download the exact source revision
         env:
           GH_TOKEN: ${{ github.token }}
@@ -484,24 +459,7 @@ jobs:
 
       - uses: ./source/.github/actions/setup-java
 
-      # Gitea's runner image has no Android SDK.
-      - uses: android-actions/setup-android@v3
-        if: github.server_url != 'https://github.com'
-        with:
-          packages: ""
-
       # The versions docs/runtime/android.md names.
-      # The NDK download is large and occasionally truncated; GitHub's image has
-      # an SDK already.
-      - name: Cache the Android platform and NDK
-        if: github.server_url != 'https://github.com'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_HOME }}/platforms/android-35
-            ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
-          key: android-sdk-${{ runner.os }}-35-ndk-28.2.13676358
-
       - name: Install the Android platform and NDK
         run: |
           set -euo pipefail
@@ -705,8 +663,7 @@ jobs:
       needs.image-manifest.result == 'success' && needs.jvm.result == 'success' &&
       needs.android.result == 'success' && needs.ios.result == 'success' &&
       (needs.check.result == 'success' || (inputs.skip_checks && needs.check.result == 'skipped'))
-    # Any architecture.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write
@@ -738,7 +695,6 @@ jobs:
       # after five retries (run 37939385427); retry the fetch instead of
       # re-running the whole workflow.
       - name: Download the release artifacts
-        if: github.server_url == 'https://github.com'
         env:
           GH_REPO: ${{ github.repository }}
         run: |
@@ -754,31 +710,6 @@ jobs:
             sleep $((attempt * 15))
           done
           exit 1
-
-      # Gitea has no `gh`; the same layout as `gh run download`.
-      - uses: actions/download-artifact@v4
-        if: github.server_url != 'https://github.com'
-        with:
-          name: notes
-          path: dist/notes
-
-      - uses: actions/download-artifact@v4
-        if: github.server_url != 'https://github.com'
-        with:
-          name: android
-          path: dist/android
-
-      - uses: actions/download-artifact@v4
-        if: github.server_url != 'https://github.com'
-        with:
-          pattern: jvm-*
-          path: dist
-
-      - uses: actions/download-artifact@v4
-        if: github.server_url != 'https://github.com'
-        with:
-          name: ios
-          path: dist/ios
 
       - name: Install the system build dependencies
         working-directory: source
@@ -798,19 +729,14 @@ jobs:
 
       - name: Publish the Maven artifacts
         env:
-          MAVEN_USER: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
-          MAVEN_TOKEN: ${{ github.server_url == 'https://github.com' && github.token || secrets.PACKAGE_TOKEN }}
+          MAVEN_URL: https://maven.pkg.github.com/${{ github.repository }}
+          MAVEN_USER: ${{ github.actor }}
+          MAVEN_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
-            export MAVEN_URL="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
-          else
-            export MAVEN_URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven"
-          fi
           source/scripts/release/maven-deploy dist/android dist/ios/sdks/kotlin/build/release-maven
 
       - name: Create the GitHub release
-        if: github.server_url == 'https://github.com'
         run: |
           set -euo pipefail
           if [ "${CHANNEL}" = latest ]; then
@@ -825,63 +751,14 @@ jobs:
             --notes-file dist/notes/notes.md \
             dist/jvm-*/rocky-kotlin-sdk-*.tar.gz dist/ios/dist/rocky-kotlin-sdk-*-ios.tar.gz
 
-      - name: Create the Gitea release
-        if: github.server_url != 'https://github.com'
-        env:
-          GH_API_URL: ${{ github.api_url }}
-        run: |
-          set -euo pipefail
-          api() {
-            curl --fail --silent --show-error --location \
-              --header "Authorization: token ${GH_TOKEN}" "$@"
-          }
-          prerelease="$([ "${CHANNEL}" = latest ] && echo false || echo true)"
-          payload="$(jq -n \
-            --arg tag "v${VERSION}" \
-            --arg target "${GITHUB_SHA}" \
-            --rawfile body dist/notes/notes.md \
-            --argjson prerelease "${prerelease}" \
-            '{tag_name: $tag, target_commitish: $target, name: $tag, body: $body, draft: false, prerelease: $prerelease}')"
-          id="$(api --request POST --header 'Content-Type: application/json' --data "${payload}" \
-            "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases" | jq -r .id)"
-          for asset in dist/jvm-*/rocky-kotlin-sdk-*.tar.gz dist/ios/dist/rocky-kotlin-sdk-*-ios.tar.gz; do
-            api --request POST --form "attachment=@${asset}" \
-              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${id}/assets?name=$(basename "${asset}")" > /dev/null
-          done
-
       # Nightly releases and tags are kept for two weeks of builds; their
       # package versions stay in the package registry.
-      - name: Prune old nightly GitHub releases
-        if: github.server_url == 'https://github.com' && needs.version.outputs.channel == 'nightly'
+      - name: Prune old nightly releases
+        if: needs.version.outputs.channel == 'nightly'
         run: |
           set -euo pipefail
           gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName,createdAt \
             --jq '[.[] | select(.tagName | test("-nightly\\."))] | sort_by(.createdAt) | reverse | .[14:] | .[].tagName' \
           | while read -r tag; do
               gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
-            done
-
-      - name: Prune old nightly Gitea releases
-        if: github.server_url != 'https://github.com' && needs.version.outputs.channel == 'nightly'
-        env:
-          GH_API_URL: ${{ github.api_url }}
-        run: |
-          set -euo pipefail
-          api() {
-            curl --fail --silent --show-error --location \
-              --header "Authorization: token ${GH_TOKEN}" "$@"
-          }
-          page=1
-          : > "$RUNNER_TEMP/releases"
-          while :; do
-            api "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases?per_page=50&page=${page}" > "$RUNNER_TEMP/page"
-            [ "$(jq length "$RUNNER_TEMP/page")" -gt 0 ] || break
-            jq -c '.[]' "$RUNNER_TEMP/page" >> "$RUNNER_TEMP/releases"
-            page=$((page + 1))
-          done
-          jq -rs '[.[] | select(.tag_name | test("-nightly\\."))] | sort_by(.created_at) | reverse | .[14:] | .[].tag_name' \
-            "$RUNNER_TEMP/releases" \
-          | while read -r tag; do
-              api --request DELETE "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
-              api --request DELETE "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/tags/${tag}"
             done

@@ -95,17 +95,9 @@ runs:
         echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
     - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true' && steps.tools.outcome != 'success' && github.server_url == 'https://github.com'
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true' && steps.tools.outcome != 'success'
       with:
         tool: cargo-nextest
-
-    # install-action's checksum check fails with the Gitea runner's sha256sum,
-    # so Gitea installs the matching nextest for the runner architecture.
-    - name: Install cargo-nextest on Gitea
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true' && steps.tools.outcome != 'success' && github.server_url != 'https://github.com'
-      shell: sh
-      working-directory: source
-      run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
     # Each is missing when `build` found the tree's checks passed or failed to
     # upload it; the job then builds what it runs.

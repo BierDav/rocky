@@ -1,6 +1,6 @@
 #!/bin/sh
-# Uploads every artifact of Maven repository directories to a Maven registry
-# (GitHub Packages or Gitea), with MD5 and SHA-1 checksums; see docs/releasing.md.
+# Uploads every artifact of Maven repository directories to GitHub Packages
+# with MD5 and SHA-1 checksums.
 #
 #   MAVEN_URL=... MAVEN_USER=... MAVEN_TOKEN=... scripts/release/maven-deploy DIRECTORY...
 set -eu

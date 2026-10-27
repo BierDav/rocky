@@ -38,7 +38,7 @@ if [[ ! -x "$destination/sccache" ]]; then
     curl --fail --silent --show-error --location \
         --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 120 \
         --output "$archive" "https://github.com/mozilla/sccache/releases/download/v$version/$name.tar.gz"
-    # Compare digests directly; the Gitea runner's `sha256sum -c` is unreliable.
+    # Compare digests directly; `sha256sum -c` is not available everywhere.
     if command -v sha256sum >/dev/null 2>&1; then
         actual=$(sha256sum "$archive" | cut -d' ' -f1)
     else

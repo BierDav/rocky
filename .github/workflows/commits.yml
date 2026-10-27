@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   lint:
-    # Any architecture.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'unix-any-arch' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # A pull request is checked by its base's rules, so it cannot relax them.
@@ -51,7 +50,7 @@ jobs:
             # A squash merge uses the title as the commit header.
             printf '%s\n' "${PULL_REQUEST_TITLE}" | source/scripts/commitlint "$@" - 2>&1 \
               | sed "s/^commitlint: stdin/commitlint: pull request title/" || title_failed=1
-            # The same endpoint and paging on GitHub and Gitea.
+            # Page the pull request's commits like the push payload lists them.
             : > "$RUNNER_TEMP/commits"
             page=1
             while :; do

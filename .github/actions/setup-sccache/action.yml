@@ -1,7 +1,7 @@
 name: Set up sccache
 description: >-
   Install the pinned sccache that `.cargo/config.toml` names as rustc-wrapper.
-  On GitHub its cache lives in the Actions cache; elsewhere on the runner's disk.
+  Its cache lives in the Actions cache.
 
 runs:
   using: composite
@@ -13,7 +13,6 @@ runs:
     # Only JavaScript actions see the cache service credentials; export them
     # for sccache's GitHub Actions backend, as mozilla-actions/sccache-action does.
     - name: Use the Actions cache for sccache
-      if: github.server_url == 'https://github.com'
       uses: actions/github-script@v7
       with:
         script: |

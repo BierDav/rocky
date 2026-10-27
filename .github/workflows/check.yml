@@ -41,8 +41,7 @@ jobs:
   lint:
     if: ${{ !inputs.release }}
     # Formatting and static lint checks need no build, so they fail fast; see docs/linting.md.
-    # Any architecture.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Download the exact source revision
@@ -54,7 +53,6 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
@@ -138,7 +136,6 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
@@ -202,16 +199,9 @@ jobs:
         run: ./scripts/ci/source-times
 
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
+        if: steps.passed.outputs.cache-hit != 'true'
         with:
           tool: cargo-nextest
-
-      # install-action's checksum check fails with the Gitea runner's sha256sum,
-      # so Gitea installs the matching nextest for the runner architecture.
-      - name: Install cargo-nextest on Gitea
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        working-directory: source
-        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
@@ -223,9 +213,8 @@ jobs:
           cp "$(command -v cargo-nextest)" "$RUNNER_TEMP/build/cargo-nextest"
 
       # One artifact per consumer so a failure to finalize the large shared
-      # archive cannot also lose the small ones, and `shopping`
-      # download only what they run. Gitea's artifact service intermittently
-      # fails on the large upload; a consumer rebuilds when its artifact is gone.
+      # archive cannot also lose the small ones, and every consumer downloads
+      # only what it runs. A consumer rebuilds when its artifact is gone.
       - name: Upload the workspace test archive
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -282,7 +271,6 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
@@ -343,7 +331,6 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
@@ -403,7 +390,6 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
@@ -431,11 +417,6 @@ jobs:
 
       - uses: ./source/.github/actions/setup-java
         if: steps.reuse.outputs.passed != 'true'
-
-      - uses: android-actions/setup-android@v3
-        if: steps.reuse.outputs.passed != 'true' && github.server_url != 'https://github.com'
-        with:
-          packages: ""
 
       - name: Install the Android runtime prerequisites
         if: steps.reuse.outputs.passed != 'true'
@@ -557,24 +538,7 @@ jobs:
 
       - uses: ./source/.github/actions/setup-java
 
-      # Gitea's runner image has no Android SDK.
-      - uses: android-actions/setup-android@v3
-        if: github.server_url != 'https://github.com'
-        with:
-          packages: ""
-
       # The versions docs/runtime/android.md names.
-      # The NDK download is large and occasionally truncated; GitHub's image has
-      # an SDK already.
-      - name: Cache the Android platform and NDK
-        if: github.server_url != 'https://github.com'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_HOME }}/platforms/android-35
-            ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
-          key: android-sdk-${{ runner.os }}-35-ndk-28.2.13676358
-
       - name: Install the Android platform and NDK
         run: |
           set -euo pipefail
@@ -626,10 +590,6 @@ jobs:
     if: ${{ !inputs.release }}
     # Builds its own native artifacts; no dependency on the Linux build.
     runs-on: macos-latest
-    # Different refs share the persistent Gitea checkout and compiled outputs.
-    concurrency:
-      group: ${{ github.repository }}-baseline-ios
-      cancel-in-progress: false
     # Includes first-time cache seeding and the complete simulator/app matrix.
     timeout-minutes: 90
     steps:
@@ -656,10 +616,6 @@ jobs:
             "${GH_API_URL}/repos/${GH_REPOSITORY}/commits/${GH_REVISION}?stat=false&files=false"
           tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"]["tree"]["sha"])' "$RUNNER_TEMP/commit.json")
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
-
-      - name: Use a stable source path on the macOS Gitea runner
-        if: github.server_url != 'https://github.com'
-        run: ./source/scripts/ci/stable-ios-source
 
       - name: Bootstrap Rustup and register its tool paths
         working-directory: source
@@ -695,7 +651,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ env.ROCKY_CI_SOURCE || 'source' }}/sdks/uniffi -> target
+          workspaces: source/sdks/uniffi -> target
           shared-key: ios
           # Preserve the host's rustup executable; it is not a cargo-installed tool.
           cache-bin: false
@@ -752,7 +708,7 @@ jobs:
           sdks/kotlin/gradlew -p sdks/kotlin publishKotlinMultiplatformPublicationToMavenLocal \
             publishIosArm64PublicationToMavenLocal publishIosSimulatorArm64PublicationToMavenLocal
           export ROCKY_SHOPPING_PROJECT
-          ROCKY_SHOPPING_PROJECT=$(./scripts/ci/shopping-project "${ROCKY_CI_SOURCE:-$RUNNER_TEMP}/local/shopping-ios" ios)
+          ROCKY_SHOPPING_PROJECT=$(./scripts/ci/shopping-project "$RUNNER_TEMP/local/shopping-ios" ios)
           ./scripts/ci/local-maven --project "$ROCKY_SHOPPING_PROJECT"
           ./examples/shoppinglist-app/check-ios 2>&1 | tee local/phase21-evidence/build-and-tests.log
           ./scripts/coordinator-local local/phase21-service 17300

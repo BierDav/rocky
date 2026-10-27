@@ -240,7 +240,7 @@ async fn migration_race(source_version: u32, target_version: u32, delete: bool) 
         let before_graph = graph(&a, &lineage).await;
         let context = a.schema_context().await;
         let revision = a.stored_and_memory_revision().await;
-        a.inner.lock().await.conn.execute("CREATE TEMP TRIGGER fail_held_switch AFTER INSERT ON secure_held_frames BEGIN SELECT RAISE(ABORT,'held switch rollback'); END", ()).await.unwrap();
+        a.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER fail_held_switch AFTER INSERT ON secure_held_frames BEGIN SELECT RAISE(ABORT,'held switch rollback'); END", ()).await.unwrap();
         let error = lineage
             .follow(
                 &a,
@@ -259,7 +259,7 @@ async fn migration_race(source_version: u32, target_version: u32, delete: bool) 
         assert_eq!(a.schema_context().await, context);
         assert_eq!(a.stored_and_memory_revision().await, revision);
         a.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute("DROP TRIGGER fail_held_switch", ())
@@ -313,7 +313,13 @@ async fn migration_race(source_version: u32, target_version: u32, delete: bool) 
     assert_eq!(a.followed_tip().await, stage.target);
     for replica in [&a, &publisher] {
         assert_eq!(
-            replica.inner.lock().await.app.manifest().hash(),
+            replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .app
+                .manifest()
+                .hash(),
             lineage.definition(target_version).hash()
         );
     }
@@ -629,7 +635,7 @@ async fn applied_binding(
     crate::storage::collect_rows(
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .query(
@@ -650,7 +656,7 @@ async fn assert_held(
 ) {
     assert_eq!(replica.held_changes().await.unwrap().len(), 1);
     assert_eq!(applied_binding(replica, original).await, applied);
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     assert!(
         crate::storage::rows(&inner.conn, "SELECT * FROM secure_held_resolved")
             .await

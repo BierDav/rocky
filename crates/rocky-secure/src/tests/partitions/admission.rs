@@ -22,10 +22,17 @@ async fn items(f: &Fixture, replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<Sq
 }
 
 async fn count(replica: &EncryptedReplica<TypedRows>, sql: &str) -> usize {
-    rows(&replica.inner.lock().await.conn, sql)
-        .await
-        .unwrap()
-        .len()
+    rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        sql,
+    )
+    .await
+    .unwrap()
+    .len()
 }
 
 /// `Fixture::write` for another author number.
@@ -110,9 +117,15 @@ async fn an_authors_separate_partition_transactions_converge_in_every_delivery_o
     // A summary of A at mark 2 does not refuse B's earlier honest birth, and
     // is recorded only at A's own scope.
     let z = keyed(&f, &root.path().join("z"), [150; 32], 4).await;
-    let signer = a.inner.lock().await.config.node.public_key();
+    let signer = a
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .public_key();
     {
-        let mut inner = z.inner.lock().await;
+        let mut inner = z.inner.lock(crate::replica::Class::Background).await;
         let mark = crate::replica::checkpoint::IdentityMark {
             author: 1,
             signer,
@@ -132,7 +145,7 @@ async fn an_authors_separate_partition_transactions_converge_in_every_delivery_o
     }
     assert_eq!(items(&f, &z).await.len(), 2);
     let summary = rows(
-        &z.inner.lock().await.conn,
+        &z.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT scope FROM secure_identity_summary",
     )
     .await
@@ -183,7 +196,11 @@ async fn a_known_origin_refuses_its_reuse_in_another_partition() {
     let hash = reuse.operation().unwrap().hash;
     let _ = receiver.receive(reuse).await;
     let status = rows(
-        &receiver.inner.lock().await.conn,
+        &receiver
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         &format!(
             "SELECT status FROM secure_operations WHERE hash=X'{}'",
             hash.to_hex()
@@ -260,7 +277,13 @@ async fn a_revoked_authors_unproved_partition_header_is_omitted_without_its_tupl
     );
     seal_main(&writer, &f.publisher, f.domain).await;
     exchange_graphs(&writer, &reader, f.domain).await;
-    let credentials = reader.inner.lock().await.config.credentials.clone();
+    let credentials = reader
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     let mut requests = reader.wanted_placements().await.unwrap();
     requests.sort_by_key(|request| request.author);
     let [eligible_request, revoked_request] = requests.as_slice() else {
@@ -301,7 +324,13 @@ async fn a_revoked_authors_unproved_partition_header_is_omitted_without_its_tupl
         page(*revoked_request).await,
         crate::PlacementPage::CustodyRequired
     ));
-    let grant = other.inner.lock().await.config.credentials.0[0]
+    let grant = other
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .0[0]
         .id()
         .unwrap();
     writer

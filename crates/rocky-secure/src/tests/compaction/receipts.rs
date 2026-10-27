@@ -4,7 +4,16 @@ use super::*;
 use crate::storage::{bindings, rows};
 
 async fn records(replica: &Replica, sql: &str) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn, sql).await.unwrap()
+    rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        sql,
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -98,7 +107,7 @@ async fn journal_tampering_never_becomes_an_empty_admission_history() {
     ] {
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(attack, ())
@@ -106,7 +115,7 @@ async fn journal_tampering_never_becomes_an_empty_admission_history() {
             .unwrap();
         let error = replica.audit(lineage.scope("items")).await.unwrap_err();
         assert!(matches!(error, Error::Corrupt(_)), "{attack}: {error}");
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         for table in [
             "secure_admission_entries",
             "secure_admission_claims",
@@ -358,7 +367,7 @@ async fn a_restore_cut_never_adopts_later_predecessor_or_sibling_receipts() {
         assert_ne!(foreign, original);
         target
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -379,7 +388,7 @@ async fn a_restore_cut_never_adopts_later_predecessor_or_sibling_receipts() {
         );
         target
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -500,7 +509,7 @@ pub(super) async fn accounting(
     ] {
         bounded.push(scalar(replica, &format!("SELECT count(*) FROM {table}")).await);
     }
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.flush().unwrap();
     let modules = rows(
         &inner.conn,

@@ -2,7 +2,7 @@
 use super::*;
 
 async fn state(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn, "SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'L',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,provenance,entry FROM secure_admission_claims UNION ALL SELECT 'H',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'V',revision,0,0 FROM secure_metadata UNION ALL SELECT 'F',hash,status,0 FROM secure_operations").await.unwrap()
+    rows(&replica.inner.lock(crate::replica::Class::Background).await.conn, "SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'L',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,provenance,entry FROM secure_admission_claims UNION ALL SELECT 'H',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'V',revision,0,0 FROM secure_metadata UNION ALL SELECT 'F',hash,status,0 FROM secure_operations").await.unwrap()
 }
 
 pub(super) async fn mark(
@@ -13,7 +13,7 @@ pub(super) async fn mark(
     crate::storage::collect_rows(
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .query(

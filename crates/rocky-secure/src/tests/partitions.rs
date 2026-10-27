@@ -389,7 +389,7 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
     let session = replica.session([f.scope("A")].into()).await.unwrap();
     let sql = session.sql(Default::default()).await.unwrap();
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -547,7 +547,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         SqlValue::Integer(30)
     );
     let (peer, credentials) = {
-        let inner = reader.inner.lock().await;
+        let inner = reader.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -587,7 +587,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .await
         .unwrap();
     let legacy_checkpoint = {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         let mut legacy = cp.clone();
         legacy.statement.format = 3;
         legacy.statement.partition = None;
@@ -626,7 +626,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
     f.key(&restored, "B", [2; 32]).await;
     restored.receive(fb).await.unwrap();
     let (peer, credentials) = {
-        let inner = restored.inner.lock().await;
+        let inner = restored.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -670,7 +670,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         SqlValue::Integer(30)
     );
     let (full_node, full_credentials) = {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -752,7 +752,7 @@ async fn measure_200_partitions() {
         .await;
     let empty_open = started.elapsed();
     let empty_pages = {
-        let inner = writer.inner.lock().await;
+        let inner = writer.inner.lock(crate::replica::Class::Background).await;
         crate::storage::rows(&inner.conn, "PRAGMA page_count")
             .await
             .unwrap()[0][0]
@@ -765,7 +765,7 @@ async fn measure_200_partitions() {
         f.key(&writer, &name, [index; 32]).await;
     }
     let partition_pages = {
-        let inner = writer.inner.lock().await;
+        let inner = writer.inner.lock(crate::replica::Class::Background).await;
         crate::storage::rows(&inner.conn, "PRAGMA page_count")
             .await
             .unwrap()[0][0]
@@ -804,7 +804,7 @@ async fn measure_200_partitions() {
         .sum::<usize>();
     let started = std::time::Instant::now();
     let (peer, credentials) = {
-        let inner = reader.inner.lock().await;
+        let inner = reader.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -836,7 +836,7 @@ async fn measure_200_partitions() {
     }
     let checkpoint = started.elapsed();
     let logical_bytes = {
-        let inner = writer.inner.lock().await;
+        let inner = writer.inner.lock(crate::replica::Class::Background).await;
         crate::storage::rows(&inner.conn, "PRAGMA page_count")
             .await
             .unwrap()[0][0]
@@ -896,7 +896,7 @@ async fn constraint_state(
     replica: &EncryptedReplica<TypedRows>,
     partition: &str,
 ) -> Vec<Vec<SqlValue>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::collect_rows(inner.conn.query(
         "SELECT c.id,c.rocky_live,c.rocky_stamps,NOT EXISTS(SELECT 1 FROM items i WHERE i.list=c.list AND i.id=c.id) FROM secure_candidates_items c WHERE c.list=? ORDER BY c.id",
         [partition.to_string()],
@@ -1004,7 +1004,7 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
     let before_a = constraint_state(&a, "A").await;
     let before_b = constraint_state(&a, "B").await;
     {
-        let mut inner = a.inner.lock().await;
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner.clear_typed(f.scope("A")).await).unwrap();
     }
     assert!(constraint_state(&a, "A").await.is_empty());
@@ -1040,7 +1040,7 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
     partial.rebuild_projection(f.scope("A")).await.unwrap();
     assert_eq!(constraint_state(&partial, "A").await, before_a);
     let (full_node, full_credentials) = {
-        let inner = b.inner.lock().await;
+        let inner = b.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -1126,7 +1126,7 @@ async fn partitioned_open_refuses_dropped_or_changed_constraint_indexes() {
             .open(&path, PrivateKey::new(), f.grant(None, &all()), None)
             .await;
         let config = {
-            let inner = a.inner.lock().await;
+            let inner = a.inner.lock(crate::replica::Class::Background).await;
             SecureConfig {
                 publisher: inner.config.publisher,
                 manifest: inner.config.manifest.clone(),
@@ -1262,7 +1262,13 @@ async fn an_unproved_partition_requires_custody_without_disclosing_its_header_or
     assert_eq!(request.author, operation.header.extensions.author.unwrap());
     assert_eq!(request.from, operation.header.extensions.author_sequence);
     assert_eq!(request.to, request.from);
-    let credentials = reader.inner.lock().await.config.credentials.clone();
+    let credentials = reader
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     let page = writer
         .placement_page(
             reader_key.public_key(),
@@ -1304,7 +1310,7 @@ async fn an_unproved_partition_requires_custody_without_disclosing_its_header_or
             .await,
         Err(crate::CoordinatedError::CustodyRequired)
     ));
-    let inner = reader.inner.lock().await;
+    let inner = reader.inner.lock(crate::replica::Class::Background).await;
     assert!(
         crate::storage::rows(&inner.conn, "SELECT 1 FROM secure_placements")
             .await
@@ -1349,7 +1355,14 @@ async fn sixty_four_partitions_derive_readiness_once_and_parse_each_statement_on
         .author_bundle([1; 32], bundle(1), vec![])
         .await
         .unwrap();
-    let derivations = || async { writer.inner.lock().await.readiness.derivations() };
+    let derivations = || async {
+        writer
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .readiness
+            .derivations()
+    };
     let before = derivations().await;
     writer
         .author_bundle([2; 32], bundle(65), vec![])

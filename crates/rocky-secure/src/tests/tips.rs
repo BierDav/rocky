@@ -256,14 +256,28 @@ fn branch(f: &Fixture, seal: &SignedSeal) -> (TipId, Vec<TipStatement>) {
     )
 }
 async fn scalar(replica: &Replica, sql: &str) -> i64 {
-    match rows(&replica.inner.lock().await.conn, sql).await.unwrap()[0][0] {
+    match rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        sql,
+    )
+    .await
+    .unwrap()[0][0]
+    {
         rocky_core::SqlValue::Integer(value) => value,
         _ => panic!("integer query"),
     }
 }
 async fn raw_rows(replica: &Replica) -> Vec<Vec<rocky_core::SqlValue>> {
     rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT scope,row,fields FROM secure_row_records ORDER BY scope,row",
     )
     .await
@@ -282,7 +296,7 @@ async fn adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or
         insert(&f, &replica, 1, "Retained").await;
         // Clone valid stored row materialization, excluding row capture and
         // encryption cost from this graph-metadata scaling assertion.
-        replica.inner.lock().await.conn.execute(
+        replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
             "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_row_records SELECT scope,CAST(printf('%032d',i) AS BLOB),fields FROM secure_row_records,n",
             [count - 1],
         ).await.unwrap();
@@ -336,7 +350,7 @@ async fn graph_admission_rolls_back_its_database_and_memory_and_survives_reopen(
     let replica = open(&f, &path, &key).await;
     let signed = seal(&f, &replica).await;
     let record = TipStatement::Seal(signed.clone());
-    replica.inner.lock().await.conn.execute(
+    replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "CREATE TEMP TRIGGER fail_tip_statement BEFORE INSERT ON secure_tip_statements BEGIN SELECT RAISE(ABORT,'injected graph storage failure'); END",(),
     ).await.unwrap();
     assert!(
@@ -359,7 +373,7 @@ async fn graph_admission_rolls_back_its_database_and_memory_and_survives_reopen(
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER fail_tip_statement", ())
@@ -685,7 +699,13 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
     let peer = PrivateKey::new();
     let target = open(&f, &dir.path().join("checkpoint-joiner.db"), &peer).await;
     exchange_graphs(&replica, &target, f.public.domain).await;
-    let credentials = target.inner.lock().await.config.credentials.clone();
+    let credentials = target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     replica
         .admit_peer(peer.public_key(), &credentials, target.followed_tip().await)
         .await
@@ -813,7 +833,7 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
     let original = PrivateKey::new();
     let (replica, identity_chain) = identity_replica(&f, &path, &identity, &original).await;
     let config = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         SecureConfig {
             publisher: inner.config.publisher,
             manifest: inner.config.manifest.clone(),
@@ -924,7 +944,7 @@ async fn backward_bookmark_close_and_move_roll_back_together_then_hold_abandoned
         TipStatement::Seal(SignedSeal::sign(close, &f.publisher).unwrap()),
         bookmark(&f, "main", Some(old), Some(genesis)),
     ];
-    replica.inner.lock().await.conn.execute(
+    replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "CREATE TEMP TRIGGER fail_follow BEFORE UPDATE ON secure_followed_tip BEGIN SELECT RAISE(ABORT,'injected follow failure'); END",(),
     ).await.unwrap();
     assert!(replica.receive_tip_statements(&records).await.is_err());
@@ -942,7 +962,7 @@ async fn backward_bookmark_close_and_move_roll_back_together_then_hold_abandoned
     assert!(replica.held_changes().await.unwrap().is_empty());
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER fail_follow", ())
@@ -953,7 +973,13 @@ async fn backward_bookmark_close_and_move_roll_back_together_then_hold_abandoned
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
     let held = replica.held_changes().await.unwrap();
     assert_eq!(held.len(), 1);
-    let credentials = replica.inner.lock().await.config.credentials.clone();
+    let credentials = replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     let (frames, _) = replica
         .held_frame_page(
             key.public_key(),
@@ -1008,7 +1034,13 @@ async fn offline_across_close_is_held_and_relayed_unchanged_by_every_holder_and_
         replica.receive_tip_statements(&records).await.unwrap();
     }
     a.receive(offline.clone()).await.unwrap();
-    let c_credentials = c.inner.lock().await.config.credentials.clone();
+    let c_credentials = c
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     let (relayed, next) = a
         .held_frame_page(
             c_key.public_key(),
@@ -1050,7 +1082,7 @@ async fn offline_across_close_is_held_and_relayed_unchanged_by_every_holder_and_
     .unwrap();
     let held = a.held_changes().await.unwrap()[0].id;
     let reauthored = {
-        let mut inner = a.inner.lock().await;
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
         let writes = vec![rocky_core::RowWrite::changed(change(
             f.public,
             2,
@@ -1152,7 +1184,11 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].to_bytes().unwrap(), original.to_bytes().unwrap());
     // Evicting the declaration must not reinterpret this peer as following main.
-    a.inner.lock().await.peer_tips.clear();
+    a.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .peer_tips
+        .clear();
     assert!(
         a.transfer_page(
             b_key.public_key(),

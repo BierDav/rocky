@@ -53,7 +53,7 @@ async fn a_staged_switch_audits_stripped_rows_and_removed_tables_on_source_reope
         .unwrap();
         let tags = crate::storage::collect_rows(
             a.inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .conn
                 .query(
@@ -78,7 +78,7 @@ async fn a_staged_switch_audits_stripped_rows_and_removed_tables_on_source_reope
             Err(Error::InjectedFailure)
         ));
         {
-            let mut inner = a.inner.lock().await;
+            let mut inner = a.inner.lock(crate::replica::Class::Background).await;
             if removed {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = tags[0].as_slice() else {
                     panic!("tag row")
@@ -150,12 +150,15 @@ async fn a_different_staged_target_is_refused_before_writes() {
     ])
     .await
     .unwrap();
-    let before = crate::storage::rows(&a.inner.lock().await.conn, "SELECT total_changes()")
-        .await
-        .unwrap();
+    let before = crate::storage::rows(
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
+        "SELECT total_changes()",
+    )
+    .await
+    .unwrap();
     let revision = a.stored_and_memory_revision().await;
     let intent = crate::storage::rows(
-        &a.inner.lock().await.conn,
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT scope,bookmark,source,target FROM secure_schema_switch",
     )
     .await
@@ -178,15 +181,18 @@ async fn a_different_staged_target_is_refused_before_writes() {
         "{error}"
     );
     assert_eq!(
-        crate::storage::rows(&a.inner.lock().await.conn, "SELECT total_changes()")
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &a.inner.lock(crate::replica::Class::Background).await.conn,
+            "SELECT total_changes()"
+        )
+        .await
+        .unwrap(),
         before
     );
     assert_eq!(a.stored_and_memory_revision().await, revision);
     assert_eq!(
         crate::storage::rows(
-            &a.inner.lock().await.conn,
+            &a.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT scope,bookmark,source,target FROM secure_schema_switch"
         )
         .await
@@ -341,7 +347,7 @@ async fn a_sideways_switch_audits_with_the_stored_target_definition() {
 /// Rows of the staged switch intent.
 async fn intents(a: &Replica) -> usize {
     crate::storage::rows(
-        &a.inner.lock().await.conn,
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT 1 FROM secure_schema_switch",
     )
     .await
@@ -349,9 +355,12 @@ async fn intents(a: &Replica) -> usize {
     .len()
 }
 async fn changes(a: &Replica) -> Vec<Vec<SqlValue>> {
-    crate::storage::rows(&a.inner.lock().await.conn, "SELECT total_changes()")
-        .await
-        .unwrap()
+    crate::storage::rows(
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
+        "SELECT total_changes()",
+    )
+    .await
+    .unwrap()
 }
 /// Switches `a` to `tip` with `version`'s schema.
 async fn switch(
@@ -809,7 +818,7 @@ async fn an_own_publication_withdraws_with_its_staged_switch() {
     assert_eq!(a.stored_and_memory_revision().await, revision);
     assert_eq!(super::audit::snapshot(&a).await, before);
     // A failure after withdrawal has begun must restore the same live context.
-    a.inner.lock().await.conn.execute(
+    a.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "CREATE TEMP TRIGGER fail_withdraw AFTER DELETE ON secure_projection_plan BEGIN SELECT RAISE(ABORT,'withdraw rollback'); END", ()
     ).await.unwrap();
     let error = a
@@ -832,7 +841,7 @@ async fn an_own_publication_withdraws_with_its_staged_switch() {
     assert_eq!(a.stored_and_memory_revision().await, revision);
     assert_eq!(super::audit::snapshot(&a).await, before);
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER fail_withdraw", ())

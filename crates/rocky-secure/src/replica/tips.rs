@@ -1247,13 +1247,25 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn followed_tip(&self) -> TipId {
-        self.inner.lock().await.workspace.tip
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .workspace
+            .tip
     }
     pub async fn followed_bookmark(&self) -> Option<(Scope, String)> {
-        self.inner.lock().await.workspace.followed.clone()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .workspace
+            .followed
+            .clone()
     }
     pub async fn tip_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
-        self.inner.lock().await.scope_graph(scope)
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .scope_graph(scope)
     }
     /// Verified union; no row scan is needed for seals or forward bookmark
     /// moves. On a trusted node a seal or move whose terminal log entry
@@ -1304,7 +1316,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         remainder: &[TipStatement],
         stage: Option<&super::staging::SchemaStage>,
     ) -> Result<usize, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(stage) = stage {
             inner.check_schema_stage(stage).await?;
         }
@@ -1487,7 +1499,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if limit == 0 || limit > 32 {
             return Err(denied("tip graph page quota"));
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner.private_schema().await? {
             return Err(denied("schema publication is private"));
         }
@@ -1502,7 +1514,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect()
     }
     pub async fn follow_bookmark(&self, scope: Scope, name: &str) -> Result<TipId, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let previous = inner.workspace.tip;
         let target = inner
             .graph_for(scope)?
@@ -1527,7 +1539,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         identity: &dyn rocky_credentials::IdentityProvider,
     ) -> Result<LineNode, Error> {
-        let mut chain = self.inner.lock().await.config.credentials.clone();
+        let mut chain = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone();
         if chain
             .0
             .last()
@@ -1553,7 +1571,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Restores a saved line's signer without selecting it for writes. Checkpoints
     /// at a shared seal may still need its page signatures on another branch.
     pub async fn restore_line_node(&self, node: LineNode) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if node.credentials.principal() != inner.config.credentials.principal() {
             return Err(denied("line node belongs to another identity"));
         }
@@ -1592,7 +1610,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     pub async fn register_line_node(&self, node: LineNode) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let (scope, _) = inner
             .workspace
             .followed
@@ -1685,7 +1703,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             false => None,
         };
-        self.inner.lock().await.publication_fault(1)?;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .publication_fault(1)?;
         let coordinated = match self
             .coordinate_tip_statements(statements, peers, true, true)
             .await
@@ -1704,7 +1725,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 });
             }
         };
-        self.inner.lock().await.publication_fault(2)?;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .publication_fault(2)?;
         self.admit_tip_statements(&coordinated.kept, journaled)
             .await
     }

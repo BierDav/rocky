@@ -41,15 +41,29 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
     let author = crate::tests::node_number(key.public_key());
     let ledger = format!("SELECT sequence FROM secure_identity_ledger WHERE author={author}");
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, &ledger)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            &ledger
+        )
+        .await
+        .unwrap(),
         vec![vec![SqlValue::Integer(2)]]
     );
     let evidence = "SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims";
-    let permanent = crate::storage::rows(&replica.inner.lock().await.conn, evidence)
-        .await
-        .unwrap();
+    let permanent = crate::storage::rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        evidence,
+    )
+    .await
+    .unwrap();
     let mut config = lineage.config(3, &key);
     config.revocations = crate::tests::revoking(
         lineage.publisher(),
@@ -58,16 +72,27 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
         &[],
     );
     let before = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT revocations,revision FROM secure_metadata",
     )
     .await
     .unwrap();
     let atomic_query = "SELECT 'm',revocations,revision,identity FROM secure_metadata UNION ALL SELECT 'h',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'r',scope,row,fields FROM secure_row_records UNION ALL SELECT 'L',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'f',hash,status,sequence FROM secure_operations UNION ALL SELECT 't',scope,bookmark,tip FROM secure_followed_tip UNION ALL SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'S',scope,author,sequence FROM secure_identity_summary UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims UNION ALL SELECT 'pending',scope,tip,manifest FROM secure_pending_schema UNION ALL SELECT 'pending-control',id,bookmark,moved FROM secure_pending_schema UNION ALL SELECT 'pull',scope,seal,length(signed) FROM secure_pulled UNION ALL SELECT 'tip',digest,0,0 FROM secure_tip_statements";
-    let before_atomic = crate::storage::rows(&replica.inner.lock().await.conn, atomic_query)
-        .await
-        .unwrap();
-    replica.inner.lock().await.conn.execute("CREATE TRIGGER refuse_ledger_reseed BEFORE DELETE ON secure_identity_ledger BEGIN SELECT RAISE(ABORT,'reseeding refused'); END",()).await.unwrap();
+    let before_atomic = crate::storage::rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        atomic_query,
+    )
+    .await
+    .unwrap();
+    replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TRIGGER refuse_ledger_reseed BEFORE DELETE ON secure_identity_ledger BEGIN SELECT RAISE(ABORT,'reseeding refused'); END",()).await.unwrap();
     drop(replica);
     let failed = EncryptedReplica::open(dir.path().join("node.db"), lineage.app(3), config).await;
     let error = match failed {
@@ -103,15 +128,29 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
         .unwrap();
     assert_eq!(plain.followed_tip().await, successor);
     assert_eq!(
-        crate::storage::rows(&plain.inner.lock().await.conn, &ledger)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &plain
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            &ledger
+        )
+        .await
+        .unwrap(),
         vec![vec![SqlValue::Integer(2)]]
     );
     assert_eq!(
-        crate::storage::rows(&plain.inner.lock().await.conn, atomic_query)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &plain
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            atomic_query
+        )
+        .await
+        .unwrap(),
         before_atomic
     );
     plain.audit(lineage.scope("items")).await.unwrap();
@@ -209,15 +248,29 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
     assert!(graph.revoked.contains(&sealed.id().unwrap()));
     assert_eq!(replica.followed_tip().await, genesis);
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, &ledger)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            &ledger
+        )
+        .await
+        .unwrap(),
         vec![vec![SqlValue::Integer(1)]]
     );
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, evidence)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            evidence
+        )
+        .await
+        .unwrap(),
         permanent
     );
     assert_eq!(
@@ -226,9 +279,16 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
     );
     replica.audit(lineage.scope("items")).await.unwrap();
     let stable = "SELECT revocations,revision,head,head_signature FROM secure_metadata,secure_admission_context";
-    let committed = crate::storage::rows(&replica.inner.lock().await.conn, stable)
-        .await
-        .unwrap();
+    let committed = crate::storage::rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        stable,
+    )
+    .await
+    .unwrap();
     drop(replica);
     let mut same = lineage.config(3, &key);
     same.revocations = supplied.clone();
@@ -237,9 +297,16 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
         .unwrap();
     assert_eq!(replica.followed_tip().await, genesis);
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, stable)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            stable
+        )
+        .await
+        .unwrap(),
         committed
     );
     replica.audit(lineage.scope("items")).await.unwrap();
@@ -250,17 +317,31 @@ async fn an_issuer_excluded_at_open_reseeds_the_workspace_ledger() {
         .unwrap();
     replica.audit(lineage.scope("items")).await.unwrap();
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, &ledger)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            &ledger
+        )
+        .await
+        .unwrap(),
         vec![vec![SqlValue::Integer(1)]]
     );
     assert_eq!(replica.revocations().await, supplied);
     assert_eq!(replica.followed_tip().await, genesis);
     assert_eq!(
-        crate::storage::rows(&replica.inner.lock().await.conn, stable)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            stable
+        )
+        .await
+        .unwrap(),
         committed
     );
     // A new, validly signed issuer attempt remains excluded after reopen.
@@ -329,7 +410,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     .unwrap();
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(

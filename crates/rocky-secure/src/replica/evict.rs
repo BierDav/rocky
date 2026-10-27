@@ -19,7 +19,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// scope reads as unavailable.
     pub async fn evict(&self, scope: ResourceScope) -> Result<EvictReport, Error> {
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if inner.holding(scope).await? != Some(Holding::Evicting) {
                 inner.begin_eviction(scope).await?;
             }
@@ -29,7 +29,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             operations: 0,
         };
         loop {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if inner.eviction_step(scope, &mut report).await? {
                 inner.load_direct().await?;
                 return Ok(report);

@@ -1,6 +1,7 @@
 # 1. See the wait
 
-Status: planned. Owner: `rocky-secure` (replica lock acquisition, spans),
+Status: complete (2026-10-27); [baseline and validation evidence](01-see-the-wait-evidence.md).
+Owner: `rocky-secure` (replica lock acquisition, spans),
 `rocky-sdk` (write probe and load scenarios). Depends on nothing.
 Effort: one week. Follow the [execution contract](README.md#agent-execution-contract).
 
@@ -44,8 +45,11 @@ against, and records the baseline. It changes no behavior.
 - **Load scenarios.** Each scenario runs the probe on one node while the
   load runs.
   - **L0 idle.**
-  - **L1 bulk receive.** The node pulls the 100k migration fixture from a
-    peer: the member pull in `rocky-sdk::migrations`.
+  - **L1 bulk receive.** After bootstrap, an already writable member pulls
+    a queued update of all 100k rows of the migration fixture from a peer.
+    The peer authors 32-row transactions while disconnected; reconnect
+    after warm-up. Owner-approved adjustment (2026-10-27); see the evidence
+    for the setup error that prompted this adjustment.
   - **L2 small receive.** A peer authors one-row writes at 50 per second
     and the node receives them.
   - **L3 local maintenance.** The node runs closing compaction and seal

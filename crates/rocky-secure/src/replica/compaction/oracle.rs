@@ -207,7 +207,7 @@ impl<A: RowApplication> Inner<A> {
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn defer_finalization_for_test(&self, scope: ResourceScope, deferred: bool) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if deferred {
             inner.direct.insert(scope);
         } else {

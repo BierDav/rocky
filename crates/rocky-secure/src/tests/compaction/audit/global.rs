@@ -24,7 +24,11 @@ async fn omitted_global_claim_head_and_off_custody_ledgers_are_rechecked() {
         ),
     ] {
         let before = snapshot(&f.replica).await;
-        let inner = f.replica.inner.lock().await;
+        let inner = f
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         let saved = rows(&inner.conn, &format!("SELECT * FROM {table}"))
             .await
             .unwrap();
@@ -63,7 +67,11 @@ async fn omitted_global_claim_head_and_off_custody_ledgers_are_rechecked() {
             ),
             "{attack}"
         );
-        let mut inner = f.replica.inner.lock().await;
+        let mut inner = f
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.tables = saved_tables;
         if table == "secure_identity_ledger" {
             inner
@@ -127,7 +135,11 @@ async fn omitted_queued_empty_and_keyless_ledgers_remain_valid() {
     let f = AuditFixture::new(false).await;
     let items = f.lineage.scope("items");
     let tags = f.lineage.scope("tags");
-    let mut inner = f.replica.inner.lock().await;
+    let mut inner = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     inner.config.keys.retain(|key| key.scope != tags);
     inner
         .conn

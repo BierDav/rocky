@@ -816,12 +816,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn receive_existence(&self, record: ExistenceRecord) -> Result<ReceiveStatus, Error> {
         if let Some(tuple) = &record.statement.partition {
             {
-                self.inner.lock().await.verify_existence(&record, now()?)?;
+                self.inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .verify_existence(&record, now()?)?;
             }
             self.register_partition(record.scope(), tuple.clone())
                 .await?;
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let hash = record.hash()?;
         let known = rows_with(
             &inner.conn,
@@ -875,7 +878,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         limit: usize,
     ) -> Result<ExistencePage, Error> {
         let (page, commit, flusher) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             inner.authorize_domain_peer(peer, credentials, scope)?;
             let page = inner.existence_records(scope, known, after, limit).await?;
             (page, inner.commit, inner.flusher.clone())
@@ -888,7 +891,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<BTreeMap<PublicKey, u64>, Error> {
-        self.inner.lock().await.existence_frontier(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .existence_frontier(scope)
+            .await
     }
     /// Fails unless `peer` is a device of the domain of an existence log.
     pub async fn authorize_existence_peer(
@@ -898,14 +905,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
     ) -> Result<(), Error> {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .authorize_domain_peer(peer, credentials, scope)
     }
     /// The existence logs this replica follows: those of tables it holds a
     /// grant on, read or custody, and of tables such tables reference.
     pub async fn existence_scopes(&self) -> Result<Vec<ResourceScope>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(typed) = &inner.workspace.typed else {
             return Ok(Vec::new());
         };
@@ -958,7 +965,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// What the existence log of `scope` says about `id`: None without
     /// evidence, else whether the row is alive.
     pub async fn existence(&self, scope: ResourceScope, id: i64) -> Result<Option<bool>, Error> {
-        self.inner.lock().await.existence(scope, id).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .existence(scope, id)
+            .await
     }
 }
 
@@ -971,7 +982,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &BTreeSet<ResourceScope>,
         sql: &str,
     ) -> Result<u64, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let typed = inner
             .workspace
             .typed

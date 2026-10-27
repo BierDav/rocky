@@ -83,7 +83,7 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
         // which individual identities it once held. B's own floor stays 0.
         reader
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .put_identity_mark(
                 f.scope("A"),
@@ -127,7 +127,11 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
             )
             .unwrap();
             let before_rows = rows(
-                &reader.inner.lock().await.conn,
+                &reader
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .conn,
                 "SELECT * FROM secure_admission_entries ORDER BY entry",
             )
             .await
@@ -141,7 +145,11 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
             );
             assert_eq!(
                 rows(
-                    &reader.inner.lock().await.conn,
+                    &reader
+                        .inner
+                        .lock(crate::replica::Class::Background)
+                        .await
+                        .conn,
                     "SELECT * FROM secure_admission_entries ORDER BY entry"
                 )
                 .await
@@ -152,7 +160,7 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
         let summary = || async {
             reader
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .put_identity_mark(
                     f.scope("A"),
@@ -178,7 +186,7 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
         let receipt = crate::storage::collect_rows(
             reader
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .conn
                 .query(query, [early.id().unwrap().as_bytes().to_vec()])
@@ -232,7 +240,7 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
             crate::storage::collect_rows(
                 reader
                     .inner
-                    .lock()
+                    .lock(crate::replica::Class::Background)
                     .await
                     .conn
                     .query(query, [early.id().unwrap().as_bytes().to_vec()])
@@ -243,7 +251,7 @@ async fn an_unresolved_partition_birth_restores_past_another_partitions_summary(
             .unwrap(),
             receipt
         );
-        let normalized = crate::storage::collect_rows(reader.inner.lock().await.conn.query(
+        let normalized = crate::storage::collect_rows(reader.inner.lock(crate::replica::Class::Background).await.conn.query(
             "SELECT t.scope FROM secure_admission_claims c JOIN secure_identity_tables t ON t.id=c.allocation WHERE c.identity=?",
             [RowIdentity::new(1, 1).unwrap().integer()],
         ).await.unwrap()).await.unwrap();

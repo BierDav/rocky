@@ -93,7 +93,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             if seal.statement.recovery.is_some() {
                 let graph = {
-                    let inner = self.inner.lock().await;
+                    let inner = self.inner.lock(crate::replica::Class::Background).await;
                     let mut graph = inner.scope_graph(seal.statement.scope)?;
                     for statement in statements
                         .iter()
@@ -360,7 +360,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(TipStatement::id)
             .collect::<Result<Vec<_>, _>>()?;
         let batch = rocky_core::commitment("rocky.pending-tips.v1", &encode(&ids)?);
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let all = inner.pending_tips(None).await?;
         if all.iter().any(|(id, _)| *id == batch) {
             return Ok(batch);
@@ -403,7 +403,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Returns the statements admitted.
     pub async fn settle_tip_statements(&self, peers: &dyn EntryPeers) -> Result<usize, Error> {
         let (pending, own) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let own = inner
                 .pending_tips(Some(true))
                 .await?
@@ -445,7 +445,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn pending_tip_candidates(&self) -> Result<Vec<Vec<TipStatement>>, Error> {
         Ok(self
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .pending_tips(None)
             .await?
@@ -458,7 +458,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         digest: Commitment,
     ) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let found = collect_rows(
             inner
                 .conn
@@ -476,7 +476,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         statements: &[TipStatement],
     ) -> Result<(), Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut graphs = BTreeMap::new();
         for statement in statements {
             statement.id()?;
@@ -662,7 +662,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         head: &LogHead,
         coordinator: &dyn DomainLog,
     ) -> Result<(), CoordinatedError> {
-        let Some(minimum) = self.inner.lock().await.line_minimum(log)? else {
+        let Some(minimum) = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .line_minimum(log)?
+        else {
             return Ok(());
         };
         if head.epoch == 0 && head.minimum != minimum {

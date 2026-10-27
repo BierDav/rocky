@@ -4,7 +4,7 @@ use crate::KeptSeals;
 
 /// `replica`'s only identity author in `scope` and its live mark.
 async fn own_mark(replica: &Replica, scope: ResourceScope) -> (u32, u32) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
             .conn
@@ -31,7 +31,7 @@ async fn own_mark(replica: &Replica, scope: ResourceScope) -> (u32, u32) {
 /// Corrupts the attacker's local allocation evidence so it can sign a reuse.
 /// Receivers keep their complete journal and all original refusal assertions.
 async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u32) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(
@@ -60,7 +60,7 @@ async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u32) {
     ).await.unwrap();
 }
 async fn status(replica: &Replica, hash: Hash) -> Option<String> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
             .conn
@@ -80,7 +80,7 @@ async fn status(replica: &Replica, hash: Hash) -> Option<String> {
     }
 }
 async fn consumed(replica: &Replica, hash: Hash) -> bool {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     !crate::storage::collect_rows(
         inner
             .conn
@@ -672,7 +672,7 @@ async fn a_kept_prefix_seed_counts_retired_births_and_is_unavailable_once_pruned
     // Once the prefix is pruned without a base at or before the bound,
     // the seed is unavailable rather than empty.
     {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(

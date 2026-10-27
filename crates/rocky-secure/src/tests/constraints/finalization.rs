@@ -113,9 +113,22 @@ async fn excluding_a_parent_delete_restores_dependents_and_matches_the_rebuild()
         .await
         .unwrap();
     replica.finalize_path(shop.domain).await.unwrap();
-    assert!(replica.inner.lock().await.compare_finalization);
+    assert!(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .compare_finalization
+    );
     assert_eq!(rows(&sql, ITEMS).await, live);
-    assert!(replica.inner.lock().await.finalization_oracle_time > std::time::Duration::ZERO);
+    assert!(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .finalization_oracle_time
+            > std::time::Duration::ZERO
+    );
     for scope in [shop.lists, shop.items] {
         replica.audit(scope).await.unwrap();
     }

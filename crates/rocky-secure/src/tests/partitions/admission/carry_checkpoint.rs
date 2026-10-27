@@ -131,7 +131,7 @@ async fn setup() -> BeforeBirth {
         ReceiveStatus::Applied
     );
     for replica in [&issuer, &listed, &fresh] {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         assert!(
             inner
                 .config
@@ -210,7 +210,7 @@ async fn import(f: &BeforeBirth, target: &EncryptedReplica<TypedRows>) -> crate:
     );
     assert_eq!(target.followed_tip().await, f.successor);
     let (key, credentials) = {
-        let inner = target.inner.lock().await;
+        let inner = target.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -379,7 +379,7 @@ async fn an_own_zero_carry_checkpoint_allows_a_late_birth_on_its_continuation() 
         assert!(
             reopened
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .config
                 .keys
@@ -436,7 +436,7 @@ async fn an_own_zero_carry_checkpoint_reapplies_the_exact_retained_birth() {
 }
 
 async fn config(replica: &EncryptedReplica<TypedRows>) -> SecureConfig {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let c = &inner.config;
     SecureConfig {
         publisher: c.publisher,

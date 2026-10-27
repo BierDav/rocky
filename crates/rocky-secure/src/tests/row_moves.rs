@@ -188,7 +188,7 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
     // The carry below a's own marks is observed, never a second origin.
     let identity = RowIdentity::new(1, 1).unwrap().integer();
     for replica in [&a, &b] {
-        let claims = crate::storage::rows(&replica.inner.lock().await.conn, &format!("SELECT kind FROM secure_admission_claims WHERE identity={identity} AND allocation=(SELECT allocation FROM secure_admission_claims WHERE identity={identity} AND kind=1) ORDER BY kind")).await.unwrap();
+        let claims = crate::storage::rows(&replica.inner.lock(crate::replica::Class::Background).await.conn, &format!("SELECT kind FROM secure_admission_claims WHERE identity={identity} AND allocation=(SELECT allocation FROM secure_admission_claims WHERE identity={identity} AND kind=1) ORDER BY kind")).await.unwrap();
         assert_eq!(
             claims,
             vec![vec![SqlValue::Integer(0)], vec![SqlValue::Integer(1)]]
@@ -210,14 +210,20 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
         title(&f, &b, partitions[1]).await.as_deref(),
         Some("ticked")
     );
-    let before = crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
-        .await
-        .unwrap();
+    let before = crate::storage::rows(
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
+        "SELECT * FROM secure_followed",
+    )
+    .await
+    .unwrap();
     assert_eq!(before.len(), 1);
     send(&frames, &a).await;
-    let after = crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
-        .await
-        .unwrap();
+    let after = crate::storage::rows(
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
+        "SELECT * FROM secure_followed",
+    )
+    .await
+    .unwrap();
     assert_eq!(before, after);
     for partition in partitions {
         a.audit(f.scope("items", partition)).await.unwrap();
@@ -263,10 +269,13 @@ async fn source_only_author_drops_offline_update_and_cannot_open_destination() {
     send(&offline, &b).await;
     assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
     assert!(
-        crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
-            .await
-            .unwrap()
-            .is_empty()
+        crate::storage::rows(
+            &a.inner.lock(crate::replica::Class::Background).await.conn,
+            "SELECT * FROM secure_followed"
+        )
+        .await
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -470,7 +479,10 @@ async fn missing_child_holding_and_interrupted_move_leave_everything_unchanged()
     let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
     setup(&f, &a, &b, &partitions).await;
     let mover = session(&f, &b, &partitions).await;
-    b.inner.lock().await.fail_before_commit = 1;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .fail_before_commit = 1;
     assert!(
         mover
             .move_row(
@@ -540,12 +552,15 @@ async fn two_move_chain_follows_original_update_and_reopen_does_not_repeat() {
         Some("ticked")
     );
     let config = {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         clone_config(&inner.config)
     };
-    let before = crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
-        .await
-        .unwrap();
+    let before = crate::storage::rows(
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
+        "SELECT * FROM secure_followed",
+    )
+    .await
+    .unwrap();
     assert_eq!(before.len(), 2);
     drop(a);
     let a = EncryptedReplica::open(&a_path, f.app(), config)
@@ -559,9 +574,12 @@ async fn two_move_chain_follows_original_update_and_reopen_does_not_repeat() {
     );
     assert_eq!(
         before,
-        crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
-            .await
-            .unwrap()
+        crate::storage::rows(
+            &a.inner.lock(crate::replica::Class::Background).await.conn,
+            "SELECT * FROM secure_followed"
+        )
+        .await
+        .unwrap()
     );
 }
 
@@ -583,7 +601,7 @@ async fn payload(
     replica: &EncryptedReplica<TypedRows>,
     frame: &EncryptedFrame,
 ) -> Result<crate::wire::RowPayload, crate::Error> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let operation = frame.operation()?;
     let key = inner
         .config
@@ -639,7 +657,7 @@ async fn proof_replay_and_future_stamps_require_the_current_move_contract() {
         author: operation.header.extensions.author.unwrap_or(0),
         sequence: operation.header.extensions.author_sequence,
     };
-    let inner = b.inner.lock().await;
+    let inner = b.inner.lock(crate::replica::Class::Background).await;
     inner.check_carried(&write, &carried, &ceiling).unwrap();
     let mut future = carried.clone();
     future.stamps.values_mut().next().unwrap().clock = ceiling.clock + 1;
@@ -693,7 +711,7 @@ async fn each_commit_follows_marked_moves_without_scanning_stored_rows() {
     let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
     let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
     setup(&f, &a, &b, &partitions).await;
-    let inner = b.inner.lock().await;
+    let inner = b.inner.lock(crate::replica::Class::Background).await;
     let plan = crate::storage::collect_rows(
         inner
             .conn

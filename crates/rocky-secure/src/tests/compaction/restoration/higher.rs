@@ -17,11 +17,11 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
     higher.sign(&f.key);
     // These signed retained/log records are privileged negative injections.
     // Unknown own frames above G are still refused by ordinary intake.
-    f.replica.inner.lock().await.conn.execute(
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "INSERT INTO secure_operations(hash,scope,author,sequence,header,body,chain,status) SELECT ?1,scope,author,?2,?3,body,chain,status FROM secure_operations WHERE hash=?4",
         bindings(vec![SqlValue::Blob(higher.hash().as_bytes().to_vec()), SqlValue::Integer(higher.seq_num as i64), SqlValue::Blob(higher.to_bytes()), SqlValue::Blob(original.hash().as_bytes().to_vec())]),
     ).await.unwrap();
-    f.replica.inner.lock().await.conn.execute(
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "INSERT INTO secure_logs SELECT id,?1,?2,?3,?4,-1 FROM secure_scope_state WHERE scope=?5",
         bindings(vec![SqlValue::Blob(f.key.public_key().as_bytes().to_vec()), SqlValue::Integer(higher.seq_num as i64), SqlValue::Blob(higher.hash().as_bytes().to_vec()), SqlValue::Integer(higher.timestamp as i64), SqlValue::Blob(crate::encode(&scope).unwrap())]),
     ).await.unwrap();
@@ -34,7 +34,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
     higher.sign(&f.key);
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -49,7 +49,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
         .unwrap();
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -75,7 +75,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
     // Restore the privileged store extension before the ordinary audit.
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -86,7 +86,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
         .unwrap();
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -106,7 +106,11 @@ async fn admitted_historical_frames_do_not_need_a_fresh_unexpired_grant() {
     crate::CLOCK_SKEW.with(|skew| skew.set(skew.get() + 301 * rocky_credentials::DAY));
     // Exercise the shared author-admission caller within a rolled-back write
     // transaction: current-authority gates outside it still reject expired grants.
-    let inner = f.replica.inner.lock().await;
+    let inner = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
     let result = inner.admit_author(scope, None).await;
     let cleared = rows(&inner.conn, "SELECT count(*) FROM secure_evicted_logs")

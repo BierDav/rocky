@@ -390,11 +390,15 @@ impl NativeSession {
         message: RowMessage,
     ) -> Result<(), Error> {
         if !matches!(&message, RowMessage::MigrationQuery { .. }) {
-            replica.inner.lock().await.same_tip_peer(self.peer)?;
+            replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .same_tip_peer(self.peer)?;
         }
         match message {
             RowMessage::MigrationQuery { publication } => {
-                let inner = replica.inner.lock().await;
+                let inner = replica.inner.lock(crate::replica::Class::Background).await;
                 self.credentials
                     .verify_selectors(
                         inner.config.publisher,

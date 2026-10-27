@@ -18,13 +18,17 @@ async fn held_refresh_does_not_decode_live_or_continued_history() {
             insert(&f, &a, 9, "current").await;
         }
         let before = {
-            let inner = a.inner.lock().await;
+            let inner = a.inner.lock(crate::replica::Class::Background).await;
             inner.stored_header_memo_limits(0, 0);
             inner.stored_header_memo_stats().2
         };
         assert!(page(&a, f.public).await.unwrap().is_empty());
         assert_eq!(
-            a.inner.lock().await.stored_header_memo_stats().2,
+            a.inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .stored_header_memo_stats()
+                .2,
             before,
             "held lookup decoded unrelated signed history (continued={continued})"
         );
@@ -61,7 +65,7 @@ async fn abandoned_history_walks_bookmarks_once_per_source_and_refresh() {
             (f.public.domain, e.tip, e.author.unwrap(), e.author_sequence)
         })
         .collect();
-    let inner = a.inner.lock().await;
+    let inner = a.inner.lock(crate::replica::Class::Background).await;
     let (direct, shared, stats) = inner.refresh_reach_for_test(&inputs, false);
     assert_eq!(direct, vec![Ok("Held".into()), Ok("Held".into())]);
     assert_eq!(shared, direct);
@@ -130,7 +134,7 @@ async fn fixture() -> (
 
 async fn page(replica: &Replica, scope: ResourceScope) -> Result<Vec<EncryptedFrame>, Error> {
     let (key, credentials) = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -149,7 +153,7 @@ fn encoded(frames: &[EncryptedFrame]) -> BTreeSet<Vec<u8>> {
         .collect()
 }
 async fn snapshot(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut result = Vec::new();
     for table in [
         "secure_operations",
@@ -211,7 +215,7 @@ async fn metadata_close_is_discovered_lazily_per_author_and_sequence() {
             )
         })
         .collect();
-    let inner = a.inner.lock().await;
+    let inner = a.inner.lock(crate::replica::Class::Background).await;
     let (direct, reused, stats) = inner.refresh_reach_for_test(&checks, false);
     assert_eq!(direct, reused);
     assert_eq!(
@@ -276,13 +280,13 @@ async fn failed_later_hold_rolls_back_the_whole_refresh_then_retry_and_reopen_ag
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    a.inner.lock().await.conn.execute(&format!("CREATE TEMP TRIGGER fail_later_hold BEFORE UPDATE OF status ON secure_operations WHEN NEW.hash=X'{hex}' AND NEW.status='held' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM secure_held_frames WHERE hash=X'{first_hex}') THEN RAISE(ABORT,'first candidate not held') END; SELECT RAISE(ABORT,'later hold failure'); END"), ()).await.unwrap();
+    a.inner.lock(crate::replica::Class::Background).await.conn.execute(&format!("CREATE TEMP TRIGGER fail_later_hold BEFORE UPDATE OF status ON secure_operations WHEN NEW.hash=X'{hex}' AND NEW.status='held' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM secure_held_frames WHERE hash=X'{first_hex}') THEN RAISE(ABORT,'first candidate not held') END; SELECT RAISE(ABORT,'later hold failure'); END"), ()).await.unwrap();
     let before = snapshot(&a).await;
     let error = page(&a, f.public).await.unwrap_err();
     assert!(error.to_string().contains("later hold failure"), "{error}");
     assert_eq!(snapshot(&a).await, before);
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER fail_later_hold", ())
@@ -302,7 +306,13 @@ async fn failed_later_hold_rolls_back_the_whole_refresh_then_retry_and_reopen_ag
         encoded(&frames[2..])
     );
     a.audit(f.public).await.unwrap();
-    let key = a.inner.lock().await.config.node.clone();
+    let key = a
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .clone();
     drop(a);
     let reopened = open(&f, &dir.path().join("a.db"), &key).await;
     assert_eq!(reopened.followed_tip().await, next);
@@ -386,7 +396,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     ] {
         let sql = format!("UPDATE secure_position_sources SET {column}=? WHERE hash=? AND kind=0");
         a.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -396,7 +406,10 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
             .await
             .unwrap();
         // Direct SQL corruption bypasses the replica's refresh generations.
-        a.inner.lock().await.invalidate_held_refresh();
+        a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .invalidate_held_refresh();
         let before = snapshot(&a).await;
         let error = page(&a, f.public).await.unwrap_err();
         if column == "author" {
@@ -406,7 +419,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
         }
         assert_eq!(snapshot(&a).await, before);
         a.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -417,7 +430,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
             .unwrap();
     }
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -431,7 +444,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
         "live indexed positions must not open unrelated corrupt bodies"
     );
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -447,7 +460,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     .await
     .unwrap();
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -463,7 +476,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     );
     assert_eq!(snapshot(&a).await, before);
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -481,7 +494,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
         "candidate headers remain verified"
     );
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -509,7 +522,7 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
         .unwrap();
     let mut other = f.public.domain;
     other.domain.0[0] ^= 1;
-    let mut inner = a.inner.lock().await;
+    let mut inner = a.inner.lock(crate::replica::Class::Background).await;
     let original = &inner.graphs[&f.public.domain];
     let graph = TipGraph::new(other, original.genesis_schema);
     assert_eq!(graph.genesis(), original.genesis());
@@ -543,7 +556,12 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
     let mut bad = close;
     bad.statement.format = 0;
     malformed.seals.push(bad);
-    empty.inner.lock().await.graphs.insert(other, malformed);
+    empty
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .graphs
+        .insert(other, malformed);
     assert!(
         page(&empty, f.public).await.unwrap().is_empty(),
         "unqueried malformed graph is not eagerly validated"

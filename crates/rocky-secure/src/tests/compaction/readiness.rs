@@ -4,7 +4,7 @@ use super::*;
 use crate::KeptSeals;
 
 async fn count_scope(replica: &Replica, scope: ResourceScope) -> i64 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let rows = crate::storage::collect_rows(
         inner
             .conn
@@ -23,7 +23,7 @@ async fn count_scope(replica: &Replica, scope: ResourceScope) -> i64 {
     }
 }
 async fn snapshot(replica: &Replica) -> (Vec<Vec<SqlValue>>, i64) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let state = crate::storage::rows(&inner.conn, "SELECT * FROM secure_scope_state ORDER BY id")
         .await
         .unwrap();
@@ -109,7 +109,12 @@ async fn a_missing_granted_key_does_not_turn_an_unknown_payload_into_empty_state
     let sealed = seal(&lineage, &a).await.id().unwrap();
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    b.inner.lock().await.config.keys.clear();
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys
+        .clear();
     let report = b.compact(lineage.domain, 0).await.unwrap();
     assert!(report.waiting.is_some());
     assert_eq!(report.finalized, None);
@@ -354,7 +359,14 @@ async fn retained_keyless_ciphertext_satisfies_custody_without_marking_rows_appl
         .unwrap();
     }
     b.renew_credentials(chain).await.unwrap();
-    assert!(b.inner.lock().await.config.keys.is_empty());
+    assert!(
+        b.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys
+            .is_empty()
+    );
     for frame in frames {
         b.receive(frame).await.unwrap();
     }
@@ -401,13 +413,24 @@ async fn a_late_key_with_pending_payload_cannot_sign_an_empty_base() {
     seal(&lineage, &a).await;
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    let held_keys = std::mem::take(&mut b.inner.lock().await.config.keys);
+    let held_keys = std::mem::take(
+        &mut b
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     for frame in frames {
         b.receive(frame).await.unwrap();
     }
     assert_eq!(scalar(&b, "SELECT count(*) FROM secure_applied").await, 0);
     // Stop between installing crypto state and applying its pending payload.
-    b.inner.lock().await.config.keys = held_keys;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = held_keys;
     let report = b.compact(lineage.domain, 0).await.unwrap();
     assert!(report.waiting.is_some());
     assert!(
@@ -506,7 +529,14 @@ async fn a_key_arriving_after_keyless_finalization_verifies_the_scope_at_the_las
     let sealed = seal(&lineage, &a).await.id().unwrap();
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    let held_keys = std::mem::take(&mut b.inner.lock().await.config.keys);
+    let held_keys = std::mem::take(
+        &mut b
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     for frame in frames {
         b.receive(frame).await.unwrap();
     }
@@ -537,7 +567,11 @@ async fn a_key_arriving_after_keyless_finalization_verifies_the_scope_at_the_las
     }
     assert_eq!(snapshot(&b).await, before);
     assert_eq!(b.stored_and_memory_revision().await, revision);
-    b.inner.lock().await.config.keys = held_keys;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = held_keys;
     let pending = b.compact(lineage.domain, 0).await.unwrap();
     assert!(
         b.unlisted_checkpoints(lineage.domain)

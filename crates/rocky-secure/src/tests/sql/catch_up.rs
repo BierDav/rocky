@@ -38,7 +38,7 @@ fn write(t: &Typed, app: &TypedRows, before: Option<&[SqlValue]>, after: &[SqlVa
 async fn author_all(replica: &EncryptedReplica<TypedRows>, writes: Vec<RowWrite>, tag: &str) {
     let mut writes = writes.into_iter().enumerate().peekable();
     while writes.peek().is_some() {
-        let guard = replica.inner.lock().await;
+        let guard = replica.inner.lock(crate::replica::Class::Background).await;
         let mut tasks = tokio::task::JoinSet::new();
         for (index, write) in writes.by_ref().take(64) {
             let replica = replica.clone();
@@ -89,7 +89,7 @@ async fn pull_once(
     let config = |replica: &EncryptedReplica<TypedRows>| {
         let replica = replica.clone();
         async move {
-            let inner = replica.inner.lock().await;
+            let inner = replica.inner.lock(crate::replica::Class::Background).await;
             (inner.config.node.clone(), inner.config.credentials.clone())
         }
     };
@@ -151,7 +151,13 @@ async fn pull_once(
     report
 }
 async fn source_node_key(replica: &EncryptedReplica<TypedRows>) -> PublicKey {
-    replica.inner.lock().await.config.node.public_key()
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .public_key()
 }
 
 struct Measured {
@@ -278,7 +284,7 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
         let mut longest = Duration::ZERO;
         while !done.load(Ordering::SeqCst) {
             let asked = Instant::now();
-            drop(reader.inner.lock().await);
+            drop(reader.inner.lock(crate::replica::Class::Background).await);
             longest = longest.max(asked.elapsed());
             tokio::task::yield_now().await;
         }
@@ -490,7 +496,14 @@ async fn interrupted_catch_up(retry_receipt: bool) {
     assert!(interruptions >= 4, "{interruptions} interruptions");
 }
 async fn rows_of(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
-    crate::storage::rows(&replica.inner.lock().await.conn, sql)
-        .await
-        .unwrap()
+    crate::storage::rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        sql,
+    )
+    .await
+    .unwrap()
 }

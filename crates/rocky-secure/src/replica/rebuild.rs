@@ -19,7 +19,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// original signed bytes after it. This does not migrate application
     /// generations.
     pub async fn rebuild_projection(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
             return Err(denied("projection rebuild denied"));
         }

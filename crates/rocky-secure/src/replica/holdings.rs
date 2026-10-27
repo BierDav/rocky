@@ -4,7 +4,7 @@ use crate::network::holdings::{HoldingProof, key_proof};
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn holding_required(&self, scope: ResourceScope) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         // Known unpartitioned tables retain their grant-only rule.
         if inner.partitioned(scope) {
             return true;
@@ -22,7 +22,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         binding: Commitment,
         scopes: &[ResourceScope],
     ) -> Result<Vec<(ResourceScope, Vec<HoldingProof>)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut proofs = Vec::new();
         for scope in scopes {
             if !inner.partitioned(*scope) {
@@ -56,7 +56,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<(ResourceScope, rocky_core::PartitionTuple)>, Error> {
         let mut offers = self.custody_offers(peer, credentials, scopes).await?;
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let own = inner.config.node.public_key();
         for scope in scopes {
             let Some(tuple) = inner.partitions.get(scope) else {
@@ -82,7 +82,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         proofs: &[HoldingProof],
         tuple: Option<&rocky_core::PartitionTuple>,
     ) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.partitioned(scope) {
             return Ok(false);
         }

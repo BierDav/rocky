@@ -276,6 +276,10 @@ pub struct Transaction {
     connection: Connection,
 }
 impl Transaction {
+    #[cfg(feature = "qualification")]
+    pub fn measurement_id(&self) -> u64 {
+        self.connection.measurement_id()
+    }
     /// Runs a statement, discarding returned rows. Use `query` for RETURNING or SELECT.
     pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), SqlFailure> {
         let rows = self.query(sql, params).await?;

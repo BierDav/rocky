@@ -813,7 +813,7 @@ async fn importing_a_checkpoint_never_reuses_a_voided_author_position() {
     let scopes: Vec<_> = alice
         .1
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .config
         .keys
@@ -1188,7 +1188,7 @@ async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
     for frame in &commit.frames {
         let operation = frame.operation().unwrap();
         let key = {
-            let inner = bob.1.inner.lock().await;
+            let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
             inner
                 .config
                 .keys
@@ -1200,7 +1200,7 @@ async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
         let payload = bob
             .1
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .decode_row_payload(
                 frame,
@@ -1263,7 +1263,7 @@ async fn a_trusted_node_that_cannot_hold_an_entrys_scope_stores_and_acknowledges
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("cannot hold"), "{refused}");
-    let inner = dana.inner.lock().await;
+    let inner = dana.inner.lock(crate::replica::Class::Background).await;
     assert!(
         crate::storage::rows(&inner.conn, "SELECT 1 FROM secure_entries")
             .await

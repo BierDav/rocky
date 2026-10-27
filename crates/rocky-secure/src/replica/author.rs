@@ -434,7 +434,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         writes: &[RowWrite],
         body: &[u8],
     ) -> Result<EncryptedFrame, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .author_frame(writes, &[], now()?, |_| Ok(body.to_vec()))

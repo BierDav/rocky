@@ -726,6 +726,10 @@ impl<A: RowApplication> Inner<A> {
         let mut after = Vec::new();
         loop {
             let records = collect_rows(self.conn.query("SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256", bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone())])).await?).await?;
+            #[cfg(feature = "qualification")]
+            self.flusher
+                .measurements
+                .work(super::lock::WorkUnit::BaseRow, records.len() as u64);
             for row in &records {
                 let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = row.as_slice() else {
                     return Err(Error::Corrupt("checkpoint base row".into()));
@@ -1327,6 +1331,10 @@ impl<A: RowApplication> Inner<A> {
                 .await?,
         )
         .await?;
+        #[cfg(feature = "qualification")]
+        self.flusher
+            .measurements
+            .work(super::lock::WorkUnit::ReplayedFrame, records.len() as u64);
         let mut last = None;
         let finalized = self.seal_finalized(scope).await?;
         let mut paths = HashMap::new();
@@ -1712,7 +1720,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         policy: RetentionPolicy,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if policy.required.len() > 64
             || policy.behind.len() > 64
             || policy.copies > 64
@@ -1746,22 +1754,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Option<RetentionPolicy>, Error> {
-        self.inner.lock().await.retention_policy(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .retention_policy(scope)
+            .await
     }
     /// The retained-history bounds of this open replica.
     pub async fn retention_limits(&self) -> RetentionLimits {
-        self.inner.lock().await.limits
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .limits
     }
     /// Replaces the retained-history bounds of this open replica.
     pub async fn set_retention_limits(&self, limits: RetentionLimits) -> Result<(), Error> {
         if limits.hard_bytes == 0 {
             return Err(denied("invalid retention limits"));
         }
-        self.inner.lock().await.limits = limits;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .limits = limits;
         Ok(())
     }
     pub async fn checkpoint_status(&self, scope: ResourceScope) -> Result<CheckpointStatus, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut status = CheckpointStatus {
             checkpoint: None,
             uncovered: 0,
@@ -1817,7 +1835,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The operation a mutation handle committed, also after it was pruned,
     /// while the handle is inside `RetentionLimits::handles`.
     pub async fn lookup_mutation(&self, handle: Commitment) -> Result<Option<Hash>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut result = inner
             .conn
             .query(
@@ -1839,20 +1857,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
         signed: &SignedCheckpoint,
         time: u64,
     ) -> Result<(), Error> {
-        signed.verify_authority(&*self.inner.lock().await, time)
+        signed.verify_authority(
+            &*self.inner.lock(crate::replica::Class::Background).await,
+            time,
+        )
     }
     #[cfg(test)]
     pub(crate) async fn maintain_checkpoint_for_test(&self, scope: ResourceScope) {
-        self.inner.lock().await.maintain(&[scope].into()).await;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .maintain(&[scope].into())
+            .await;
     }
     #[cfg(test)]
     pub(crate) async fn inject_stage_fault(&self, stage: Stage, skip: usize) {
-        self.inner.lock().await.stage_fault = Some((stage, skip));
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .stage_fault = Some((stage, skip));
     }
     /// Exits the process inside the step's transaction instead of failing it.
     #[cfg(test)]
     pub(crate) async fn inject_stage_exit(&self, stage: Stage, skip: usize) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.stage_fault = Some((stage, skip));
         inner.stage_exit = true;
     }

@@ -164,7 +164,13 @@ async fn a_committed_relay_resumes_exact_bytes_after_reopen_without_admitting_th
     let head = fixture.mesh.log.head(tip_log(&fixture.lineage)).unwrap();
     assert_eq!(head.terminal.unwrap().digest, close.id().unwrap());
     let records = crate::storage::rows(
-        &fixture.alice.1.inner.lock().await.conn,
+        &fixture
+            .alice
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT bytes,dispatched FROM secure_close_relays",
     )
     .await

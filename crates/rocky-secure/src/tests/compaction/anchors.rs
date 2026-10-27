@@ -172,7 +172,7 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
     );
     a.finalize_path(lineage.domain).await.unwrap();
     let finalized = crate::storage::rows(
-        &a.inner.lock().await.conn,
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT seal FROM secure_finalized ORDER BY depth",
     )
     .await
@@ -345,7 +345,7 @@ async fn bounds_without_a_base_gain_coverage_before_the_settle_wipe() {
     let compacted = a.compact(lineage.domain, 1).await.unwrap();
     assert_eq!(compacted.compacted, Some(losing.id().unwrap()));
     assert!(compacted.pruned > 0);
-    let tag_history=crate::storage::collect_rows(a.inner.lock().await.conn.query("SELECT (SELECT count(*) FROM secure_seal_bounds b WHERE b.scope=s.id),(SELECT count(*) FROM secure_checkpoints c WHERE c.scope=s.id) FROM secure_scope_state s WHERE scope=?",[encode(&tags).unwrap()]).await.unwrap()).await.unwrap();
+    let tag_history=crate::storage::collect_rows(a.inner.lock(crate::replica::Class::Background).await.conn.query("SELECT (SELECT count(*) FROM secure_seal_bounds b WHERE b.scope=s.id),(SELECT count(*) FROM secure_checkpoints c WHERE c.scope=s.id) FROM secure_scope_state s WHERE scope=?",[encode(&tags).unwrap()]).await.unwrap()).await.unwrap();
     assert_eq!(
         tag_history,
         vec![vec![SqlValue::Integer(1), SqlValue::Integer(0)]]
@@ -365,7 +365,7 @@ async fn bounds_without_a_base_gain_coverage_before_the_settle_wipe() {
         None
     );
     let anchored: Vec<ResourceScope> = crate::storage::rows(
-        &a.inner.lock().await.conn,
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT s.scope FROM secure_seal_anchors a JOIN secure_scope_state s ON s.id=a.scope",
     )
     .await

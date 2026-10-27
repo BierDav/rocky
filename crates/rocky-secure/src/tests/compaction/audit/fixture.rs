@@ -63,7 +63,7 @@ pub(super) async fn singles(
 pub(in crate::tests) async fn snapshot<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let tables = rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name<>'secure_checkpoint_scratch' AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap();
     let mut state = Vec::new();
     for table in tables {
@@ -92,7 +92,7 @@ pub(in crate::tests) async fn snapshot<A: rocky_core::RowApplication>(
 }
 pub(super) async fn assert_clean(replica: &Replica) {
     assert_eq!(replica.audit_scratch_flags().await, (false, false));
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     assert!(
         rows(&inner.conn, "SELECT 1 FROM secure_checkpoint_scratch")
             .await
@@ -101,7 +101,7 @@ pub(super) async fn assert_clean(replica: &Replica) {
     );
 }
 pub(super) async fn trace_replay(replica: &Replica) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(

@@ -20,9 +20,22 @@ async fn reports_match_single_audits_with_bases_suffixes_and_no_base() {
             assert_eq!(report.checkpoint.is_some(), has_base);
         }
         let before = snapshot(&f.replica).await;
-        let passes = f.replica.inner.lock().await.audit_global_passes;
+        let passes = f
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .audit_global_passes;
         assert_eq!(f.replica.audit_scopes(&scopes).await.unwrap(), expected);
-        assert_eq!(f.replica.inner.lock().await.audit_global_passes - passes, 2);
+        assert_eq!(
+            f.replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .audit_global_passes
+                - passes,
+            2
+        );
         assert_clean(&f.replica).await;
         assert_eq!(snapshot(&f.replica).await, before);
         for (scope, report) in &expected {
@@ -60,7 +73,7 @@ async fn keyless_unknown_slots_and_invalid_inputs_are_honest() {
     };
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .config
         .keys
@@ -87,14 +100,26 @@ async fn keyless_unknown_slots_and_invalid_inputs_are_honest() {
         (0, 0, None, 0)
     );
     assert_eq!(f.replica.audit_scopes(&scopes).await.unwrap(), expected);
-    let passes = f.replica.inner.lock().await.audit_global_passes;
+    let passes = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .audit_global_passes;
     for invalid in [vec![], vec![items, items]] {
         assert!(matches!(
             f.replica.audit_scopes(&invalid).await,
             Err(Error::Rejected(_))
         ));
     }
-    assert_eq!(f.replica.inner.lock().await.audit_global_passes, passes);
+    assert_eq!(
+        f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .audit_global_passes,
+        passes
+    );
     assert_eq!(snapshot(&f.replica).await, before);
     assert_clean(&f.replica).await;
 }

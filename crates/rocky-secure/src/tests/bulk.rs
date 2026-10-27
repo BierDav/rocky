@@ -73,7 +73,12 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     .unwrap();
     let payload = frames(&source).await;
     assert!(payload.len() > 1);
-    target.inner.lock().await.limits.hard_bytes = 0;
+    target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .limits
+        .hard_bytes = 0;
     assert!(target.receive(payload[0].clone()).await.is_err());
     let mut forged = payload[0].clone();
     forged.migration.as_mut().unwrap().proof.index += 1;
@@ -131,7 +136,12 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
             .into_iter()
             .all(|r| matches!(r, Err(Error::Backpressure)))
     );
-    source.inner.lock().await.limits.hard_bytes = 0;
+    source
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .limits
+        .hard_bytes = 0;
     sql.run("BEGIN", vec![]).await.unwrap();
     sql.run("UPDATE items SET title='not exempt' WHERE key='k0'", vec![])
         .await
@@ -140,7 +150,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     target.audit(l.scope("items")).await.unwrap();
     let hash = payload[0].id().unwrap();
     {
-        let mut inner = target.inner.lock().await;
+        let mut inner = target.inner.lock(crate::replica::Class::Background).await;
         let failed: Result<(), Error> = transaction!(inner, |inner| {
             inner
                 .conn
@@ -155,7 +165,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     }
     assert_eq!(target.migration_storage().await.unwrap(), totals);
     {
-        let mut inner = target.inner.lock().await;
+        let mut inner = target.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -183,7 +193,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     }
     assert_eq!(target.migration_storage().await.unwrap(), totals);
     {
-        let mut inner = target.inner.lock().await;
+        let mut inner = target.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .conn
@@ -216,7 +226,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     }
     target
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .audit_migration_accounts()
         .await
@@ -278,7 +288,7 @@ async fn equivocation_stops_acquisition_without_allocating_another_extent() {
         assert!(r.is_err());
     }
     assert_eq!(target.migration_storage().await.unwrap().frames, 0);
-    let inner = target.inner.lock().await;
+    let inner = target.inner.lock(crate::replica::Class::Background).await;
     assert_eq!(
         crate::storage::rows(
             &inner.conn,

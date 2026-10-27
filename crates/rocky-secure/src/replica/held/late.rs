@@ -453,7 +453,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         chain: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.verify_chain_scopes(chain, peer, now()?, &[scope])?;
         if !inner.can_read_key(scope, &grants) {
             return Err(denied("held changes require whole-scope read authority"));
@@ -466,7 +466,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         chain: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let time = now()?;
         let grants = inner.verify_chain_scopes(chain, peer, time, &[scope])?;
         Ok(inner.can_read_key(scope, &grants)
@@ -482,7 +482,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
     ) -> Result<Commitment, Error> {
         self.authorize_held_reader(peer, chain, scope).await?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner
             .refresh_closed_held(now()?, Some(scope))
             .await)?;
@@ -515,7 +515,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("held frame page quota"));
         }
         self.authorize_held_reader(peer, chain, scope).await?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner
             .refresh_closed_held(now()?, Some(scope))
             .await)?;
@@ -547,7 +547,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// use `receive`; a relay never replaces their author's signature.
     pub async fn receive_held_frames(&self, frames: Vec<EncryptedFrame>) -> Result<(), Error> {
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             for frame in &frames {
                 inner.verify_frame_authority(frame, now()?)?;
                 if inner.frame_reach(frame)? != tips::FrameReach::Held {

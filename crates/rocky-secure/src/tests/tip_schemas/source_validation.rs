@@ -210,7 +210,7 @@ async fn a_signed_later_foreign_source_field_cannot_hide_behind_removal() {
         before
     );
     assert!(receiver.held_changes().await.is_err());
-    let inner = receiver.inner.lock().await;
+    let inner = receiver.inner.lock(crate::replica::Class::Background).await;
     for table in [
         "secure_held",
         "secure_held_frames",
@@ -389,7 +389,13 @@ async fn unsupported_and_wrong_manifest_factories_refuse_originals_without_insta
             assert_eq!(receiver.held_changes().await.unwrap()[0].rows.len(), 2);
         }
         assert_eq!(
-            receiver.inner.lock().await.app.manifest().hash(),
+            receiver
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .app
+                .manifest()
+                .hash(),
             lineage.definition(4).hash()
         );
     }
@@ -556,7 +562,7 @@ async fn a_later_invalid_source_member_leaves_the_removed_table_bundle_unstored(
         super::super::compaction::audit::snapshot(&reader).await,
         before
     );
-    let inner = reader.inner.lock().await;
+    let inner = reader.inner.lock(crate::replica::Class::Background).await;
     for table in [
         "secure_held",
         "secure_held_frames",

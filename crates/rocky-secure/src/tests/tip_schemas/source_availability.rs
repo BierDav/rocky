@@ -321,7 +321,13 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         .await
         .unwrap();
     assert_eq!(
-        target.inner.lock().await.app.manifest().hash(),
+        target
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .app
+            .manifest()
+            .hash(),
         lineage.definition(4).hash()
     );
     target.receive_held_frames(frames.clone()).await.unwrap();

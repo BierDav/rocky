@@ -33,7 +33,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The scope's verified replay base. A base sits only at a seal:
     /// `compact` forms it, an import installs one.
     pub async fn checkpoint(&self, scope: ResourceScope) -> Result<SignedCheckpoint, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(id) = inner.find_scope_id(scope).await?
             && let Some(record) = inner.checkpoint_record(id, true).await?
             && let Some(signed) = record.signed

@@ -24,6 +24,10 @@ impl<A: RowApplication> Inner<A> {
             let records = collect_rows(self.conn.query(
                 format!("SELECT row,fields FROM {} WHERE scope=? AND row>? ORDER BY row LIMIT ?", served.rows()),
                 bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?).await?;
+            #[cfg(feature = "qualification")]
+            self.flusher
+                .measurements
+                .work(super::super::lock::WorkUnit::BaseRow, records.len() as u64);
             for record in &records {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                     return Err(Error::Corrupt("checkpoint header row".into()));

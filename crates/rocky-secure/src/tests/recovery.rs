@@ -112,7 +112,12 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     let failing = write(&f, &a, f.public, 1).await;
     let other = write(&f, &b, f.public, 2).await;
     let failing_id = failing.id().unwrap();
-    target.inner.lock().await.poisoned.insert(failing_id);
+    target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .poisoned
+        .insert(failing_id);
     for result in target
         .receive_all(vec![failing.clone(), other.clone()])
         .await
@@ -129,7 +134,7 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     );
     // Advancing another log must not retry the failed head in this pass.
     {
-        let inner = target.inner.lock().await;
+        let inner = target.inner.lock(crate::replica::Class::Background).await;
         assert_eq!(
             crate::storage::rows(&inner.conn, "SELECT attempts FROM secure_quarantine")
                 .await
@@ -146,7 +151,12 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     };
     assert!(quarantined(&target.blockers().await.unwrap()));
     // Fixed, but nothing it depends on changed: it waits for its backoff.
-    target.inner.lock().await.poisoned.clear();
+    target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .poisoned
+        .clear();
     target.recover_locally().await.unwrap();
     assert!(quarantined(&target.blockers().await.unwrap()));
     // A key arrives: every quarantined frame is due again.
@@ -211,7 +221,12 @@ async fn maintenance_finalizes_one_seal_per_step() {
     assert!(status.uncompacted.is_empty(), "{status:?}");
     let scopes = BTreeSet::from([f.public]);
     for finalized in 1..=3 {
-        replica.inner.lock().await.maintain(&scopes).await;
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .maintain(&scopes)
+            .await;
         let status = replica.compaction_status(f.public.domain).await.unwrap();
         assert_eq!(status.uncompacted.len(), finalized, "{status:?}");
     }

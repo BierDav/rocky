@@ -324,7 +324,7 @@ async fn transfer(
     scope: ResourceScope,
 ) -> CiphertextPage {
     let (node, credentials) = {
-        let inner = target.inner.lock().await;
+        let inner = target.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -704,7 +704,13 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     let alice = t
         .open(&dir.path().join("a.db"), &node, t.full(), &both)
         .await;
-    let root = alice.inner.lock().await.config.credentials.0[0]
+    let root = alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .0[0]
         .id()
         .unwrap();
     let session = sql(&alice, &both).await;
@@ -947,7 +953,15 @@ async fn savepoint_rollback_and_cancellation_do_not_cache_uncommitted_frontiers(
     session.run("RELEASE child", vec![]).await.unwrap();
     session.cancel().await;
     session.run("ROLLBACK", vec![]).await.unwrap();
-    assert_eq!(replica.inner.lock().await.frontier_cache_stats().1, 0);
+    assert_eq!(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frontier_cache_stats()
+            .1,
+        0
+    );
     assert_eq!(replica.frontier(t.items).await.unwrap(), committed);
     assert_eq!(
         select(&session, "SELECT count(*) FROM items").await,
@@ -1567,10 +1581,17 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
         )
         .await;
     // The node chain is stored with its first operation.
-    let author_chain =
-        crate::wire::Chain::new(replica.inner.lock().await.config.credentials.clone())
-            .unwrap()
-            .digest();
+    let author_chain = crate::wire::Chain::new(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone(),
+    )
+    .unwrap()
+    .digest();
     assert_eq!(replica.chain_census().await, (BTreeSet::new(), 0));
     let session_sql = sql(&replica, &[fixture.items]).await;
     assert!(
@@ -2200,7 +2221,7 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
         writer.run("COMMIT", vec![]).await.unwrap();
     }
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         let indexed = collect_rows(
             inner
                 .conn
@@ -2242,7 +2263,7 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
             .rows,
         vec![vec![text("replacement")]]
     );
-    let inner = reopened.inner.lock().await;
+    let inner = reopened.inner.lock(crate::replica::Class::Background).await;
     let indexed = collect_rows(
         inner
             .conn
@@ -2455,7 +2476,7 @@ async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
     )
     .await
     .unwrap();
-    let writer = replica.inner.lock().await;
+    let writer = replica.inner.lock(crate::replica::Class::Background).await;
     let mut cursor = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         reader.cursor("SELECT title FROM items", vec![], CursorLimits::default()),
@@ -2501,4 +2522,44 @@ async fn ordinary_sql_commits_do_not_restart_held_history_scans() {
             .iter()
             .any(|sql| sql.starts_with("SELECT o.hash,p.scope"))
     );
+}
+
+#[cfg(feature = "qualification")]
+#[tokio::test]
+async fn sql_begin_and_writing_autocommit_are_interactive() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let directory = TempDir::new().unwrap();
+    let replica = t
+        .open(
+            &directory.path().join("classes.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = sql(&replica, &[t.items]).await;
+    insert(&sql, "INSERT INTO items VALUES('probe','first',0)", vec![])
+        .await
+        .unwrap();
+    let measurements = replica.lock_measurements();
+    for explicit in [true, false] {
+        measurements.start();
+        if explicit {
+            sql.run("BEGIN", vec![]).await.unwrap();
+        }
+        sql.run("UPDATE items SET done=1-done WHERE key='probe'", vec![])
+            .await
+            .unwrap();
+        if explicit {
+            sql.run("COMMIT", vec![]).await.unwrap();
+        }
+        let snapshot = measurements.stop();
+        let interactive: Vec<_> = snapshot
+            .holders
+            .keys()
+            .filter(|(_, class)| class == "Interactive")
+            .collect();
+        assert!(!interactive.is_empty(), "{snapshot:?}");
+        assert!(interactive[0].0.contains("replica/sql.rs:"));
+    }
 }

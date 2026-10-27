@@ -47,7 +47,7 @@ async fn acknowledge(
     scope: ResourceScope,
 ) {
     let (node, credentials) = {
-        let inner = from.inner.lock().await;
+        let inner = from.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),

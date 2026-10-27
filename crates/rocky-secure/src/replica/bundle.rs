@@ -820,7 +820,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         frames: &[EncryptedFrame],
     ) -> Result<String, Error> {
         let time = now()?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             let operation = frames[0].operation_ref()?;
             let payload = match inner.row_payload(&frames[0]) {

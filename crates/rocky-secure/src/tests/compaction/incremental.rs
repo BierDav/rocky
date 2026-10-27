@@ -27,7 +27,7 @@ async fn finalization_100000_rows_matches_full_rebuild_for_quiet_and_300_row_cut
         seeded.elapsed().as_secs_f64()
     );
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.conn.execute("CREATE TEMP TABLE finalization_rows_written(scope INTEGER NOT NULL,row BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID", ()).await.unwrap();
         for (event, reference) in [
             ("INSERT", "NEW"),
@@ -93,7 +93,7 @@ async fn finalization_100000_rows_matches_full_rebuild_for_quiet_and_300_row_cut
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DELETE FROM finalization_rows_written", ())
@@ -132,7 +132,7 @@ async fn finalization_100000_rows_matches_full_rebuild_for_quiet_and_300_row_cut
 }
 
 async fn timings(replica: &Replica) -> (Duration, Duration) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     assert!(inner.compare_finalization);
     (inner.finalization_time, inner.finalization_oracle_time)
 }
@@ -191,7 +191,7 @@ async fn audit_refuses_missing_row_positions_and_forged_birth_order() {
     .await;
     insert(&replica, "row", "original").await;
     let scope = lineage.scope("items");
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let saved = crate::storage::rows(&inner.conn, "SELECT * FROM secure_row_positions")
         .await
         .unwrap();
@@ -210,7 +210,7 @@ async fn audit_refuses_missing_row_positions_and_forged_birth_order() {
             .to_string()
             .contains("row positions differ")
     );
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(
@@ -235,7 +235,7 @@ async fn audit_refuses_missing_row_positions_and_forged_birth_order() {
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("UPDATE secure_birth_positions SET sequence=sequence-1", ())
@@ -243,7 +243,7 @@ async fn audit_refuses_missing_row_positions_and_forged_birth_order() {
         .unwrap();
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("UPDATE secure_scope_shapes SET records=records+1", ())
@@ -259,7 +259,7 @@ async fn audit_refuses_missing_row_positions_and_forged_birth_order() {
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("UPDATE secure_scope_shapes SET records=records-1", ())

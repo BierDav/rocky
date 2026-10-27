@@ -32,7 +32,7 @@ async fn a_signed_header_for_a_refuses_a_complete_source_image_for_b() {
     .unwrap();
     let payload = writer
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .decode_row_payload(&valid, &plaintext)
         .unwrap();
@@ -140,7 +140,13 @@ async fn a_signed_header_for_a_refuses_a_complete_source_image_for_b() {
             let (page, _) = reader
                 .held_frame_page(
                     node.public_key(),
-                    &writer.inner.lock().await.config.credentials.clone(),
+                    &writer
+                        .inner
+                        .lock(crate::replica::Class::Background)
+                        .await
+                        .config
+                        .credentials
+                        .clone(),
                     f.scope("A"),
                     None,
                     MAX_SECURE_FRAME,

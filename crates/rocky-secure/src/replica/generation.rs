@@ -127,7 +127,7 @@ impl<A: RowApplication> Inner<A> {
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn generations(&self) -> Result<GenerationStatus, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         Ok(GenerationStatus {
             manifest: inner.manifest,
             current: inner.generation(),

@@ -561,6 +561,11 @@ impl<A: RowApplication> Inner<A> {
         page: &OpenedPage,
         after: Option<Commitment>,
     ) -> Result<(), Error> {
+        #[cfg(feature = "qualification")]
+        self.flusher.measurements.work(
+            super::super::lock::WorkUnit::CheckpointRow,
+            page.rows.len() as u64,
+        );
         let statement = &staging.signed.statement;
         self.check_statement_marks(scope, &statement.identities)
             .await?;
@@ -1051,7 +1056,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         after: Option<PublicKey>,
     ) -> Result<PrunedPage, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         let mut logs = match inner.find_scope_id(scope).await? {
@@ -1072,7 +1077,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// True when a peer pruned operations this replica neither holds nor has
     /// pruned itself: the gap can only be closed by a rebootstrap.
     pub async fn behind_pruned(&self, pruned_prefix: &PrunedPage) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner.find_scope_id(pruned_prefix.scope).await?;
         for (author, sequence) in &pruned_prefix.logs {
             let own = match id {
@@ -1115,7 +1120,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<SignedCheckpoint>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let offered = inner.offered_checkpoint(peer, credentials, scope).await?;
         drop(flush_guard(inner, &self.inner).await?);
         Ok(offered)
@@ -1125,7 +1130,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         signed: &SignedCheckpoint,
     ) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(id) = inner.find_scope_id(signed.statement.scope).await? else {
             return Ok(false);
         };
@@ -1139,7 +1144,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     pub(crate) async fn owns_checkpoint_signer(&self, signed: &SignedCheckpoint) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.checkpoint_key(signed).is_some()
     }
     /// One page of the checkpoint's rows after `after`, sealed with the scope
@@ -1154,7 +1159,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<Commitment>,
         byte_quota: usize,
     ) -> Result<CheckpointPage, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         if !(4096..=MAX_SECURE_FRAME).contains(&byte_quota) {
@@ -1446,6 +1451,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if encode(&page)?.len() > byte_quota {
             return Err(denied("checkpoint page exceeds the byte quota"));
         }
+        #[cfg(feature = "qualification")]
+        inner.units("served_checkpoint_row", plain.rows.len() as u64);
         drop(flush_guard(inner, &self.inner).await?);
         Ok(page)
     }
@@ -1456,7 +1463,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         checkpoint: Commitment,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(id) = inner.find_scope_id(scope).await? else {
             return Ok(());
         };
@@ -1485,7 +1492,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Starts importing a peer's signed checkpoint for a scope this replica
     /// reads in whole. Nothing changes until `finish_rebootstrap`.
     pub async fn begin_rebootstrap(&self, signed: SignedCheckpoint) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.verify_import_statement(&signed).await?;
         let statement = &signed.statement;
         let scope = statement.scope;
@@ -1558,7 +1565,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Option<(Commitment, Option<Commitment>, bool)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(id) = inner.find_scope_id(scope).await? else {
             return Ok(None);
         };
@@ -1576,7 +1583,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Option<PublicKey>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(id) = inner.find_scope_id(scope).await? else {
             return Ok(None);
         };
@@ -1606,7 +1613,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let scope = page.scope;
         let (checkpoint, after) = (page.checkpoint, page.after);
         let (key, signed, cursor, publisher, crypto) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let (key, staging) = inner.expected_page(&page).await?;
             (
                 key,
@@ -1628,7 +1635,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|header| moves::header_digest(header))
             .collect();
         let known_headers = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let mut known = BTreeMap::new();
             for origin in &plain.origins {
                 let digest = moves::Origin::checkpoint_header(origin)?;
@@ -1651,7 +1658,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
         .await
         .map_err(|_| Error::Closed)??;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner
             .find_scope_id(scope)
             .await?
@@ -1680,7 +1687,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         checkpoint: Commitment,
     ) -> Result<u64, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(id) = inner.find_scope_id(scope).await? else {
             return Ok(0);
         };
@@ -1705,7 +1712,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<RebootstrapReport, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let time = now()?;
         let generation = inner
             .scope_key(scope)

@@ -122,7 +122,7 @@ async fn pulled_rows(replica: &Replica) -> i64 {
     .await
 }
 async fn pulled_stores(replica: &Replica) -> Vec<Vec<Vec<rocky_core::SqlValue>>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut stores = Vec::new();
     for table in [
         "secure_pulled",
@@ -327,7 +327,7 @@ async fn refused_when_tampered(
         copy_file(path, &copy);
         let replica = open(f, &copy, key).await.0;
         {
-            let mut inner = replica.inner.lock().await;
+            let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
             let values: Vec<_> = bindings
                 .iter()
                 .take(sql.matches('?').count())
@@ -793,7 +793,11 @@ async fn a_pulled_state_that_no_longer_passes_neither_starts_a_branch_nor_is_dro
     let domain = f.public.domain;
     // The signer's revocation reaches the set without the revalidation
     // learning it runs: reading availability must not count the state.
-    b.inner.lock().await.config.revocations = x.revoked(1);
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .revocations = x.revoked(1);
     let before = pulled_rows(b).await;
     let tip = b.followed_tip().await;
     let refused = b.follow_bookmark(domain, "dev").await.unwrap_err();
@@ -824,7 +828,13 @@ async fn needing(
     let f = &x.f;
     let key = PrivateKey::new();
     let (d, path) = x.bystander(name, &key).await;
-    let credentials = d.inner.lock().await.config.credentials.clone();
+    let credentials = d
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     x.a.receive_tip_statements(&crate::tests::all_tip_statements(&x.c).await)
         .await
         .unwrap();
@@ -891,7 +901,7 @@ async fn a_tampered_pulled_state_fails_install_as_corruption_and_stays() {
     let x = dev_pull(false).await;
     let (f, b) = (&x.f, &x.b);
     {
-        let inner = b.inner.lock().await;
+        let inner = b.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -1022,7 +1032,7 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     );
     let (e, path, key) = needing(&x, "expired", &valid).await;
     {
-        let inner = e.inner.lock().await;
+        let inner = e.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -1035,9 +1045,12 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     // An unrelated staged import of the scope at another seal.
     e.begin_rebootstrap(x.empty.clone()).await.unwrap();
     let staged = "SELECT quote(signed)||quote(sets)||complete||direct FROM secure_rebootstrap";
-    let staged_before = crate::storage::rows(&e.inner.lock().await.conn, staged)
-        .await
-        .unwrap();
+    let staged_before = crate::storage::rows(
+        &e.inner.lock(crate::replica::Class::Background).await.conn,
+        staged,
+    )
+    .await
+    .unwrap();
     drop(e);
     // Open and the full audit check only its integrity.
     let e = reopen(f, &path, &key).await;
@@ -1070,9 +1083,12 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
             .any(|need| need.scope == f.private)
     );
     assert_eq!(
-        crate::storage::rows(&e.inner.lock().await.conn, staged)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &e.inner.lock(crate::replica::Class::Background).await.conn,
+            staged
+        )
+        .await
+        .unwrap(),
         staged_before
     );
     e.finalize_path(domain).await.unwrap();
@@ -1199,7 +1215,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         retained
     );
     let stored = rows(
-        &d.inner.lock().await.conn,
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT signed FROM secure_checkpoints",
     )
     .await
@@ -1226,7 +1242,11 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         .await
         .unwrap();
     assert_eq!(
-        d.inner.lock().await.frame_reach(&covered).unwrap(),
+        d.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frame_reach(&covered)
+            .unwrap(),
         crate::replica::tips::FrameReach::Held
     );
     let revision = d.stored_and_memory_revision().await;
@@ -1235,7 +1255,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     assert_eq!(d.stored_and_memory_revision().await, revision);
     assert_eq!(
         rows(
-            &d.inner.lock().await.conn,
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT signed FROM secure_checkpoints"
         )
         .await
@@ -1288,7 +1308,7 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     assert_eq!(pulled_rows(&d).await, 1);
     let revision = d.stored_and_memory_revision().await;
     let operations = rows(
-        &d.inner.lock().await.conn,
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT * FROM secure_operations ORDER BY hash",
     )
     .await
@@ -1301,7 +1321,7 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     assert_eq!(d.stored_and_memory_revision().await, revision);
     assert_eq!(
         rows(
-            &d.inner.lock().await.conn,
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT * FROM secure_operations ORDER BY hash"
         )
         .await
@@ -1380,10 +1400,20 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     .unwrap();
     d.set_catalog_entry_for_test(manifest, Some(extra.clone()))
         .await;
-    let credentials = x.a.inner.lock().await.config.credentials.clone();
+    let credentials =
+        x.a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone();
     let claim = resigned(
         &x.empty,
-        &x.a.inner.lock().await.config.node,
+        &x.a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .node,
         &credentials,
         |s| {
             s.tip = tip;
@@ -1398,21 +1428,26 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     // A separate import at the root schema must survive this refusal.
     d.begin_rebootstrap(x.empty.clone()).await.unwrap();
     let staging = rows(
-        &d.inner.lock().await.conn,
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT * FROM secure_rebootstrap ORDER BY scope",
     )
     .await
     .unwrap();
     let unchanged = "SELECT * FROM secure_scope_state ORDER BY scope";
-    let state = rows(&d.inner.lock().await.conn, unchanged).await.unwrap();
+    let state = rows(
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
+        unchanged,
+    )
+    .await
+    .unwrap();
     let bases = rows(
-        &d.inner.lock().await.conn,
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT * FROM secure_checkpoints ORDER BY scope",
     )
     .await
     .unwrap();
     let guards = rows(
-        &d.inner.lock().await.conn,
+        &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT * FROM secure_evicted_logs ORDER BY scope",
     )
     .await
@@ -1424,7 +1459,7 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     assert_eq!(pulled_rows(&d).await, 0);
     assert_eq!(
         rows(
-            &d.inner.lock().await.conn,
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT * FROM secure_rebootstrap ORDER BY scope"
         )
         .await
@@ -1432,12 +1467,17 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
         staging
     );
     assert_eq!(
-        rows(&d.inner.lock().await.conn, unchanged).await.unwrap(),
+        rows(
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
+            unchanged
+        )
+        .await
+        .unwrap(),
         state
     );
     assert_eq!(
         rows(
-            &d.inner.lock().await.conn,
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT * FROM secure_checkpoints ORDER BY scope"
         )
         .await
@@ -1446,7 +1486,7 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     );
     assert_eq!(
         rows(
-            &d.inner.lock().await.conn,
+            &d.inner.lock(crate::replica::Class::Background).await.conn,
             "SELECT * FROM secure_evicted_logs ORDER BY scope"
         )
         .await
@@ -1525,7 +1565,12 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
         assert_eq!(b.finish_seal_pull(scope).await.unwrap(), second);
     }
     let cached = "SELECT quote(signed)||quote(sets)||quote(seal) FROM secure_pulled ORDER BY scope";
-    let before = rows(&b.inner.lock().await.conn, cached).await.unwrap();
+    let before = rows(
+        &b.inner.lock(crate::replica::Class::Background).await.conn,
+        cached,
+    )
+    .await
+    .unwrap();
     assert_eq!(before.len(), 2);
     // A branch opens at the first seal; its path does not pass the second.
     let opening = SignedTipOpening::sign(
@@ -1560,7 +1605,12 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     b.compact(domain, 0).await.unwrap();
     b.finish_seal_rebootstrap(domain).await.unwrap();
     assert_eq!(
-        rows(&b.inner.lock().await.conn, cached).await.unwrap(),
+        rows(
+            &b.inner.lock(crate::replica::Class::Background).await.conn,
+            cached
+        )
+        .await
+        .unwrap(),
         before
     );
     for scope in [f.public, f.private] {
@@ -1576,7 +1626,12 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     drop(b);
     let b = reopen(&f, &path, &keys[1]).await;
     assert_eq!(
-        rows(&b.inner.lock().await.conn, cached).await.unwrap(),
+        rows(
+            &b.inner.lock(crate::replica::Class::Background).await.conn,
+            cached
+        )
+        .await
+        .unwrap(),
         before
     );
 }
@@ -1645,7 +1700,13 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
         .await
         .unwrap();
     a.follow_bookmark(domain, "dev").await.unwrap();
-    let credentials = b.inner.lock().await.config.credentials.clone();
+    let credentials = b
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     a.admit_peer(x.b_key.public_key(), &credentials, b.followed_tip().await)
         .await
         .unwrap();

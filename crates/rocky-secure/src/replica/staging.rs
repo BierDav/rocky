@@ -238,10 +238,19 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Stages a local candidate; all signatures are prepared before this call.
     pub async fn stage_schema(&self, stage: SchemaStage) -> Result<(), Error> {
-        self.inner.lock().await.check_schema_stage(&stage).await?;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .check_schema_stage(&stage)
+            .await?;
         self.check_statements(&stage.statements).await?;
         #[cfg(test)]
-        let pause = self.inner.lock().await.schema_stage_pause.take();
+        let pause = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .schema_stage_pause
+            .take();
         #[cfg(test)]
         if let Some(pause) = pause {
             pause.reached.send(()).map_err(|_| Error::InjectedFailure)?;
@@ -252,10 +261,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     pub async fn private_schema(&self) -> Result<bool, Error> {
-        self.inner.lock().await.private_schema().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .private_schema()
+            .await
     }
     pub async fn staged_schema(&self) -> Result<Option<(SchemaStage, bool)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = rows(
             &inner.conn,
             "SELECT stage,state FROM secure_staged_schema WHERE state!='released'",
@@ -275,7 +288,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         publication: Commitment,
         finality: SealFinality,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
             inner
                 .conn
@@ -331,7 +344,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) {
         let (reached, ready) = tokio::sync::oneshot::channel();
         let (resume, wait) = tokio::sync::oneshot::channel();
-        self.inner.lock().await.schema_stage_pause = Some(StagePause {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .schema_stage_pause = Some(StagePause {
             reached,
             resume: wait,
         });

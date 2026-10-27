@@ -455,7 +455,15 @@ async fn an_excluded_parent_delete_replays_the_same_children_puppets_and_virtual
         .await
         .unwrap();
     device.replica.finalize_path(erp.domain).await.unwrap();
-    assert!(device.replica.inner.lock().await.finalization_oracle_time > std::time::Duration::ZERO);
+    assert!(
+        device
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .finalization_oracle_time
+            > std::time::Duration::ZERO
+    );
     assert_eq!(
         stored(&device, "SELECT * FROM orders ORDER BY id").await,
         children

@@ -29,7 +29,7 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
         )
         .await
         .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     assert_eq!(rows(&inner.conn, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='secure_operation_scan_headers'").await.unwrap(), vec![vec![SqlValue::Integer(1)]]);
     let query =
         "SELECT status,header FROM secure_operations INDEXED BY secure_operation_scan_headers";
@@ -66,7 +66,7 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     drop(inner);
     let backup = dir.path().join("retained-backup.db");
     replica.backup_into(&backup).await.unwrap();
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.flush().unwrap();
     let operation_pages = if rows(
         &inner.conn,
@@ -97,12 +97,21 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     drop(replica);
     let replica = open(&f, &path, &key).await;
     assert_eq!(
-        rows(&replica.inner.lock().await.conn, query).await.unwrap(),
+        rows(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            query
+        )
+        .await
+        .unwrap(),
         original
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP INDEX secure_operation_scan_headers", ())
@@ -112,7 +121,11 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     let replica = open(&f, &path, &key).await;
     assert_eq!(
         rows(
-            &replica.inner.lock().await.conn,
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT count(*) FROM sqlite_schema WHERE name='secure_operation_scan_headers'"
         )
         .await
@@ -166,7 +179,7 @@ async fn scan(
 ) -> Result<Positions, Error> {
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .scan_positions_for_test(
             domain,
@@ -178,7 +191,7 @@ async fn scan(
 }
 
 async fn state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut snapshot = Vec::new();
     for table in [
         "secure_finalized",
@@ -210,7 +223,7 @@ async fn state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
 async fn replace_header(replica: &Replica, bytes: &[u8]) {
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("UPDATE secure_operations SET header=?", [bytes.to_vec()])
@@ -242,7 +255,7 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
     assert_eq!(empty, (BTreeMap::new(), BTreeMap::new(), BTreeMap::new()));
     target
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .compute_tip_frontier(f.public)
         .await
@@ -281,7 +294,7 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
         rejected(
             target
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .compute_tip_frontier(f.public)
                 .await,
@@ -305,7 +318,11 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
         assert_eq!(state(&target).await, before);
     }
     // A cold excluded row and a different requested domain also fail before filtering.
-    target.inner.lock().await.stored_header_memo_limits(1, 1);
+    target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .stored_header_memo_limits(1, 1);
     replace_header(&target, &[0xff]).await;
     rejected(
         scan(&target, f.public.domain, &[f.public], &[], &[]).await,
@@ -354,7 +371,7 @@ async fn warm_syntax_keeps_pending_key_ready_and_status_predicates_live() {
     let scopes = [(f.public, None)];
     let held = BTreeSet::from([f.public]);
     let logged = held.clone();
-    let mut inner = target.inner.lock().await;
+    let mut inner = target.inner.lock(crate::replica::Class::Background).await;
     inner.stored_header_memo_limits(8, 1 << 20);
     let first = inner
         .scan_positions_for_test(f.public.domain, &scopes, &held, &logged)
@@ -464,7 +481,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
             .0
             .is_empty()
     );
-    let inner = target.inner.lock().await;
+    let inner = target.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("SAVEPOINT header_kinds", ())
@@ -489,7 +506,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
     assert_eq!(void.0[&author], BTreeSet::from([sequence]));
     assert_eq!(void.1[&(f.public, author)], sequence);
     assert!(void.2.is_empty());
-    let inner = target.inner.lock().await;
+    let inner = target.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("DELETE FROM secure_voids", ())
@@ -530,7 +547,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
         .0
         .is_empty()
     );
-    let inner = target.inner.lock().await;
+    let inner = target.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("ROLLBACK TO header_kinds", ())
@@ -554,7 +571,7 @@ async fn fresh_rows_rollback_and_bounded_fallback_never_reuse_position_results()
     target.receive(frames[1].clone()).await.unwrap();
     let both = scan(&target, f.public.domain, &[], &[], &[]).await.unwrap();
     assert_eq!(both.0.values().map(BTreeSet::len).sum::<usize>(), 2);
-    let mut inner = target.inner.lock().await;
+    let mut inner = target.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(
@@ -659,7 +676,7 @@ async fn shared_parsing_keeps_frontier_hash_author_and_live_status_checks() {
     scan(&target, f.public.domain, &[f.public], &[], &[])
         .await
         .unwrap();
-    let inner = target.inner.lock().await;
+    let inner = target.inner.lock(crate::replica::Class::Background).await;
     let frontier = inner.compute_tip_frontier(f.public).await.unwrap();
     assert_eq!((frontier.logs[0].held, frontier.logs[0].applied), (1, 0));
     inner

@@ -586,6 +586,14 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
     let b = Device::new(Database::open(open(&b_dir, &fill, network("b")))?)?;
     let member_open = clock.elapsed();
     eprintln!("STAGE rows={large} member_open={member_open:?}");
+    #[cfg(feature = "qualification")]
+    let lock_measurements = if large == LARGE {
+        let measurements = b.database.lock_measurements().await?;
+        measurements.start();
+        Some(measurements)
+    } else {
+        None
+    };
     let clock = std::time::Instant::now();
     let mut syncs = 0;
     let mut transfers = Vec::new();
@@ -610,6 +618,13 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
     }
     let pulled = clock.elapsed();
     eprintln!("STAGE rows={large} member_pull={pulled:?}");
+    #[cfg(feature = "qualification")]
+    if let Some(measurements) = lock_measurements {
+        eprintln!("P12 standalone=member_pull rows={large}");
+        let measurements = measurements.stop();
+        write_probe::holders(&measurements);
+        write_probe::unit_costs(&measurements);
+    }
     let member_wire_bytes = *network_bytes.borrow() - member_wire_start;
     eprintln!("WIRE rows={large} member_open_and_pull_bytes={member_wire_bytes}");
     sync(&a).await;
@@ -1021,3 +1036,7 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     a.close().await;
     Ok(())
 }
+
+#[cfg(feature = "qualification")]
+#[path = "migrations/write_probe.rs"]
+mod write_probe;

@@ -57,7 +57,7 @@ async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
         f.replica.receive(frame.clone()).await.unwrap();
     }
     let before = super::audit::snapshot(&f.replica).await;
-    f.replica.inner.lock().await.conn.execute("CREATE TEMP TRIGGER restoration_commit_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'restoration after delete'); END", ()).await.unwrap();
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_commit_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'restoration after delete'); END", ()).await.unwrap();
     assert!(
         f.replica
             .restored(scope)
@@ -69,7 +69,7 @@ async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
     assert_eq!(super::audit::snapshot(&f.replica).await, before);
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER restoration_commit_failure", ())
@@ -95,7 +95,7 @@ async fn author_admission_clears_only_with_the_whole_write_transaction() {
     let mut f = negatives::filled().await;
     let scope = f.lineage.scope("items");
     let before = super::audit::snapshot(&f.replica).await;
-    f.replica.inner.lock().await.conn.execute("CREATE TEMP TRIGGER restoration_author_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'author restoration after delete'); END", ()).await.unwrap();
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_author_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'author restoration after delete'); END", ()).await.unwrap();
     let error = identity_insert(
         &session(&f.replica).await,
         "INSERT INTO items(key,title) VALUES('new','target line')",
@@ -112,7 +112,7 @@ async fn author_admission_clears_only_with_the_whole_write_transaction() {
     assert_eq!(super::audit::snapshot(&f.replica).await, before);
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DROP TRIGGER restoration_author_failure", ())

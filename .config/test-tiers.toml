@@ -31,8 +31,10 @@ suite = "10s"
 [integration]
 per-test = "2s"
 suite = "5m"
+# Isolate the capture subscriber from concurrent callsite registration.
 filter = '''
     kind(test)
+    | (package(rocky-secure) & test(=replica::lock::tests::slow_holds_report_the_request_site_and_class))
     | (package(rocky-secure) & test(/^replica::checkpoint::backend_vectors::/))
     | (package(rocky-secure) & test(/^tests::/))
     | (package(rocky-secure) & test(/^replica::coordinated::abandoned::tests::/))

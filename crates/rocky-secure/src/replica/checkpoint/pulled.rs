@@ -24,7 +24,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Asks the next sync sessions to pull `seal`'s state from peers that
     /// keep it, until this node holds it.
     pub async fn want_seal(&self, domain: Scope, seal: Commitment) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner
             .graph_for(domain)?
             .seal_by_id(seal)
@@ -44,7 +44,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The seals still to pull, oldest request first; those now held are
     /// no longer wanted.
     pub async fn wanted_seals(&self, domain: Scope) -> Result<Vec<Commitment>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut wanted = Vec::new();
         for record in collect_rows(
             inner
@@ -93,7 +93,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         domain: Scope,
         seal: Commitment,
     ) -> Result<Vec<ResourceScope>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut scopes = Vec::new();
         for (scope, id) in inner.domain_scopes(domain).await? {
             if inner.base_seal(id).await? != Some(seal)
@@ -108,7 +108,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// seal's state: its pages stage as for an import, and
     /// `finish_seal_pull` keeps them aside. The scope's rows do not change.
     pub async fn begin_seal_pull(&self, signed: SignedCheckpoint) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         signed.verify_authority(&inner, now()?)?;
         let statement = &signed.statement;
         let scope = statement.scope;
@@ -163,7 +163,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Verifies the staged pages against the pulled checkpoint and keeps
     /// them aside as this replica's state at its seal, which it returns.
     pub async fn finish_seal_pull(&self, scope: ResourceScope) -> Result<Commitment, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner
             .find_scope_id(scope)
             .await?

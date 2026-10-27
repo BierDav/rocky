@@ -8,7 +8,7 @@ async fn checked(replica: &Replica, scope: ResourceScope, count: u64) {
         cached.logs.iter().map(|log| log.applied).sum::<u64>(),
         count
     );
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.checked_seal_path(scope.domain).unwrap();
     assert_eq!(cached, inner.compute_tip_frontier(scope).await.unwrap());
     assert_eq!(inner.frontier(scope).await.unwrap(), cached);
@@ -110,7 +110,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
         .await
         .unwrap();
     // The workspace stays at the same source; the winner changes in memory.
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     let original = inner.frontier(f.public).await.unwrap();
     inner.checked_seal_path(f.public.domain).unwrap();
     let writes: i64 = match rows(&inner.conn, "SELECT total_changes()").await.unwrap()[0][0] {
@@ -138,7 +138,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
     );
     drop(inner);
     main(&f, &replica).await;
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.checked_seal_path(f.public.domain).unwrap();
     for (index, policy) in policies.iter().enumerate() {
         inner.refresh_frontier_revocations(policy).await.unwrap();
@@ -170,7 +170,15 @@ async fn failed_graph_admission_restores_the_warmed_workspace() {
     checked(&replica, f.public, 1).await;
     replica.fail_publication_after(3).await;
     assert!(replica.receive_tip_statements(&statements).await.is_err());
-    assert_eq!(replica.inner.lock().await.frontier_cache_stats().1, 0);
+    assert_eq!(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frontier_cache_stats()
+            .1,
+        0
+    );
     assert_eq!(replica.tip_graph(f.public.domain).await.unwrap(), original);
     assert_eq!(replica.followed_tip().await, tip);
     checked(&replica, f.public, 1).await;
@@ -246,7 +254,7 @@ async fn rollback_and_retry_never_publish_transactional_frontiers() {
     insert(&f, &replica, 2, "two").await;
     let committed = replica.frontier(f.public).await.unwrap();
     assert_eq!(committed.logs[0].applied, 2);
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     let generation = inner.frontier_cache_stats().0;
     let failed: Result<(), Error> = transaction!(inner, |inner| {
         inner
@@ -309,7 +317,7 @@ async fn a_failed_commit_discards_the_transactional_frontier() {
     main(&f, &replica).await;
     insert(&f, &replica, 1, "one").await;
     let committed = replica.frontier(f.public).await.unwrap();
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("CREATE TEMP TABLE cache_parent(id INTEGER PRIMARY KEY)", ())
@@ -367,7 +375,7 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
         .await
         .unwrap();
     let before = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.stored_header_memo_limits(1 << 18, 32 * 1024 * 1024);
         inner.frontier_cache_stats()
     };
@@ -410,7 +418,11 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
         }
     }
     assert_eq!(count, 66);
-    let warmed = replica.inner.lock().await.frontier_cache_stats();
+    let warmed = replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .frontier_cache_stats();
     assert_eq!(warmed.2 - before.2, 1);
     assert_eq!(warmed.3 - before.3, 0);
     // A hit never bypasses authorization or the current peer tip.
@@ -440,11 +452,20 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
     insert(&f, &replica, 67, "new history").await;
     let fresh = replica.frontier(f.public).await.unwrap();
     assert_eq!(fresh.logs[0].held, 67);
-    let refreshed = replica.inner.lock().await.frontier_cache_stats();
+    let refreshed = replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .frontier_cache_stats();
     assert_eq!(refreshed.2, warmed.2 + 1);
     replica.frontier(f.public).await.unwrap();
     assert_eq!(
-        replica.inner.lock().await.frontier_cache_stats().2,
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frontier_cache_stats()
+            .2,
         refreshed.2
     );
 }

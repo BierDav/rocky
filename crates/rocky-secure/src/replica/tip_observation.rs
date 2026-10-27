@@ -183,7 +183,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// they walk a `continue` seal as late frames. A `close` would hold
     /// them where others applied them, so it refuses pruned history.
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
-        self.inner.lock().await.seal_frontier(scope, close).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .seal_frontier(scope, close)
+            .await
     }
     /// Where writes visible in the followed tip, under an earlier key epoch
     /// than their scope's current one, stand: members given only the
@@ -191,7 +195,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// by opening the frame. Scans only after such a frame applied or the
     /// followed tip moved, and again until they are covered.
     pub async fn earlier_epoch_writes(&self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.earlier_epoch_due() {
             return Ok(EarlierEpochWrites::Covered);
         }
@@ -204,7 +208,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Whether `unsealed_earlier_epochs` would scan.
     pub async fn earlier_epoch_due(&self) -> bool {
-        self.inner.lock().await.earlier_epoch_due()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .earlier_epoch_due()
     }
 }
 
@@ -279,7 +286,7 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn tip_observation(&self, scope: Scope) -> Result<TipObservation, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner.scope_graph(scope)?;
         let baseline = match graph.seal(inner.workspace.tip).map_err(credential)? {
             Some(seal) => seal.statement.frontier.clone(),
@@ -312,7 +319,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// This node's holdings, with the seals it keeps, and the tips peers'
     /// open links claim; peers report no holdings.
     pub async fn tip_nodes(&self, scope: Scope) -> Result<Vec<TipNodeObservation>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.scope_graph(scope)?;
         let local = PeerId::of(inner.config.node.public_key());
         let mut tips = BTreeSet::from([inner.workspace.tip]);
@@ -347,7 +354,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether the followed bookmark's line lacks a registered node, so
     /// writes wait for `register_line_node`.
     pub async fn line_node_needed(&self) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.workspace.followed.is_some() && inner.node_author.is_none()
     }
 }

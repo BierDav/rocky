@@ -121,7 +121,13 @@ fn ids(frames: &[EncryptedFrame]) -> Vec<Hash> {
     frames.iter().map(|frame| frame.id().unwrap()).collect()
 }
 async fn chain(replica: &Replica) -> CredentialChain {
-    replica.inner.lock().await.config.credentials.clone()
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone()
 }
 
 #[tokio::test]

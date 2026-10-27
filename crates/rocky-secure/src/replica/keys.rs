@@ -212,7 +212,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// same key again does nothing. Original signed bytes are never
     /// rewritten.
     pub async fn install_key_epoch(&self, key: KeyMaterial) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let time = now()?;
         let scope = key.scope;
         // Rows anchor only to parents whose partition this replica can open.
@@ -268,7 +268,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         drop(inner);
         self.settle().await?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         // A key installed after the projection was built, as at open, anchors
         // the children of this partition that were hidden without it.
         if opens
@@ -295,7 +295,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         generation: rocky_core::KeyEpoch,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(index) = inner
             .history
             .iter()
@@ -325,7 +325,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )>,
         Error,
     > {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut retained = Vec::new();
         for (scope, tuple) in &inner.partitions {
             let mut epochs = Vec::new();
@@ -348,7 +348,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// The installed key epochs of a scope, ascending; the last is current.
     pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut epochs: Vec<rocky_core::KeyEpoch> = inner
             .opening_keys()
             .filter(|key| key.scope == scope)

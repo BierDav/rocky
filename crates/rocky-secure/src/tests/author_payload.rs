@@ -53,7 +53,16 @@ async fn begin_two(sql: &crate::SecureSql<rocky_core::TypedRows>) -> Vec<i64> {
     identities
 }
 async fn records(replica: &Replica, query: &str) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn, query).await.unwrap()
+    rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        query,
+    )
+    .await
+    .unwrap()
 }
 async fn snapshot(replica: &Replica) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     super::compaction::audit::snapshot(replica).await
@@ -109,7 +118,7 @@ async fn refused_payload(earlier: u8) {
             .author();
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -153,7 +162,7 @@ async fn refused_payload(earlier: u8) {
     if earlier == 2 {
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -244,7 +253,7 @@ async fn check_births(
     .await;
     let mut stored = Vec::new();
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         for row in stored_bytes {
             let SqlValue::Blob(bytes) = &row[0] else {
                 panic!("stored row");

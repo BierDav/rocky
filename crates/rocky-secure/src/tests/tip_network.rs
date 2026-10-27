@@ -125,11 +125,17 @@ async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     served.unwrap();
     assert_eq!(ids(&a).await, ids(&b).await);
     assert_eq!(
-        a.inner.lock().await.peer_tip(bob.public_key()),
+        a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .peer_tip(bob.public_key()),
         Some(genesis)
     );
     assert_eq!(
-        b.inner.lock().await.peer_tip(alice.public_key()),
+        b.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .peer_tip(alice.public_key()),
         Some(successor)
     );
     assert_eq!(
@@ -217,11 +223,17 @@ async fn different_followed_tips_exchange_graph_union_and_refresh_peer_tips() {
     assert_ne!(a.followed_tip().await, b.followed_tip().await);
     assert_eq!(ids(&a).await, ids(&b).await);
     assert_eq!(
-        a.inner.lock().await.peer_tip(bob.public_key()),
+        a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .peer_tip(bob.public_key()),
         Some(branch)
     );
     assert_eq!(
-        b.inner.lock().await.peer_tip(alice.public_key()),
+        b.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .peer_tip(alice.public_key()),
         Some(successor)
     );
 }
@@ -244,7 +256,7 @@ async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_pref
     moved.statement.name = "forged".into();
     // Bypass the sender's admission deliberately; the receiving peer must verify.
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(

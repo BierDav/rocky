@@ -22,7 +22,11 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     .unwrap();
     replica.audit(fixture.items).await.unwrap();
     let names = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT id,name FROM secure_field_names ORDER BY id LIMIT 1",
     )
     .await
@@ -32,7 +36,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     };
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -52,7 +56,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -63,7 +67,11 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         .unwrap();
     replica.audit(fixture.items).await.unwrap();
     let origins = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT id,origin FROM secure_row_origins",
     )
     .await
@@ -74,7 +82,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     };
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -91,7 +99,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -102,7 +110,11 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         .unwrap();
     replica.audit(fixture.items).await.unwrap();
     let sets = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT id,authors FROM secure_row_authors",
     )
     .await
@@ -118,7 +130,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         .for_each(|signer| *signer = replacement);
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -138,7 +150,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -152,7 +164,11 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         .unwrap();
     replica.audit(fixture.items).await.unwrap();
     let creations = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT id,hash FROM secure_row_creations",
     )
     .await
@@ -163,7 +179,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     };
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -180,7 +196,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
     );
     replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -198,7 +214,11 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         ("secure_author_bindings", "bindings"),
     ] {
         let witnesses = crate::storage::rows(
-            &replica.inner.lock().await.conn,
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             &format!("SELECT digest,{column} FROM {table} LIMIT 1"),
         )
         .await
@@ -208,7 +228,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         };
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -225,7 +245,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         );
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -241,7 +261,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         let statement = format!("UPDATE {table} SET {column}=? WHERE digest=?");
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(&statement, [altered, digest.clone()])
@@ -255,7 +275,7 @@ async fn warmed_dictionaries_refuse_corruption_without_repairing_authoritative_s
         );
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(&statement, [original.clone(), digest.clone()])

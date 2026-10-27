@@ -14,7 +14,7 @@ struct Envelope {
 pub(in crate::tests) async fn state<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     // Rejection changes status buckets and the read epoch; projections and
     // authenticated indexes must otherwise stay exact.
     inner.audit_positions_for_test().await.unwrap();
@@ -66,7 +66,7 @@ async fn final_member_payloads_must_agree_on_held_resolution_before_any_material
         RowPayload::reauthor_body(
             source
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .decode_row_payload(&frames[1], &plaintext)
                 .unwrap()
@@ -80,7 +80,7 @@ async fn final_member_payloads_must_agree_on_held_resolution_before_any_material
     .unwrap();
     let source_payload = source
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .decode_row_payload(&frames[1], &plaintext)
         .unwrap();
@@ -118,7 +118,11 @@ async fn final_member_payloads_must_agree_on_held_resolution_before_any_material
         .unwrap();
     assert_eq!(
         rows(
-            &reader.inner.lock().await.conn,
+            &reader
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT status FROM secure_operations ORDER BY hash"
         )
         .await

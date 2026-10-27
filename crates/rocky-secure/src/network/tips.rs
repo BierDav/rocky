@@ -46,7 +46,7 @@ pub(super) enum TipMessage {
 impl NativeSession {
     /// Whether this admitted peer follows the local workspace's tip.
     pub async fn follows_same_tip<A: RowApplication>(&self, replica: &EncryptedReplica<A>) -> bool {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.peer_tip(self.peer) == Some(inner.workspace.tip)
     }
 

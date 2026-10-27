@@ -50,7 +50,7 @@ async fn read(replica: &Replica, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error>
 /// Persistent readiness state and the stored and in-memory revisions.
 async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
     let rows = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT (SELECT count(*) FROM secure_scope_state),(SELECT count(*) FROM secure_seal_anchors),(SELECT count(*) FROM secure_rebootstrap),(SELECT count(*) FROM secure_evicted_logs),(SELECT count(*) FROM secure_seal_bounds),(SELECT count(*) FROM secure_checkpoints)",
     )
     .await
@@ -239,7 +239,7 @@ async fn an_unauthenticated_staged_statement_proves_nothing_for_its_scope() {
         let mut forged = offered.clone();
         tamper(&mut forged.statement);
         j.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(

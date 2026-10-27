@@ -626,7 +626,11 @@ impl<A: RowApplication> SecureSession<A> {
         from: &[rocky_core::SqlValue],
         to: &[rocky_core::SqlValue],
     ) -> Result<Vec<EncryptedFrame>, Error> {
-        let mut inner = self.replica.inner.lock().await;
+        let mut inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.check_authority(Some(self.authority))?;
         inner.local_grants(now()?)?;
         let frames = transaction!(inner, |inner| {

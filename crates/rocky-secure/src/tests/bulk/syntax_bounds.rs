@@ -8,7 +8,7 @@ async fn actual_reconstruction_has_one_raw_bounded_slot_and_valid_uncached_fallb
     let frame = frames(&replica).await.remove(0);
     let mut other = signed.clone();
     other.statement.root[0] ^= 1;
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = snapshot(&inner).await;
     for capacity in [0, 1, 32768] {
         inner.migration_syntax_capacity(capacity);
@@ -54,7 +54,7 @@ async fn a_failed_attempt_keeps_only_syntax_and_retry_reads_and_credits_original
     let storage = replica.migration_storage().await.unwrap();
     let mut other = signed.clone();
     other.statement.root[0] ^= 1;
-    let mut inner = replica.inner.lock().await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.migration_syntax_capacity(32768);
     reconstruct(&inner, &frame).await.unwrap();
     inner

@@ -1180,14 +1180,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Local changes held because a newer generation removed what they
     /// write, each with the current values of the fields it writes.
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner.refresh_closed_held(now()?, None).await)?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.held_changes().await
     }
     /// Drops a held change; fails when it is not held.
     pub async fn drop_held(&self, id: Commitment) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner.resolve_held(id).await)?;
         inner.publish_revision().await
     }
@@ -1198,7 +1198,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Vec::new();
         }
         let results = {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             let time = match now() {
                 Ok(time) => time,
                 Err(error) => return records.iter().map(|_| Err(shared(&error))).collect(),

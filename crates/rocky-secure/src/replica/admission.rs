@@ -132,7 +132,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         node: PublicKey,
         chain: &CredentialChain,
     ) -> Result<(), Error> {
-        self.inner.lock().await.admit_chain(node, chain, now()?)
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .admit_chain(node, chain, now()?)
     }
     /// `admit_chain` for a session that opens, remembering the tip
     /// `manifest` the peer declared, which decides what it is sent.
@@ -142,7 +145,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         chain: &CredentialChain,
         tip: TipId,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.admit_chain(node, chain, now()?)?;
         inner.record_peer_tip(node, tip);
         Ok(())
@@ -150,12 +153,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The peers whose frontiers stay whatever the bound on
     /// unconfigured peers: the contacts this device keeps.
     pub async fn configure_peers(&self, peers: impl IntoIterator<Item = PublicKey>) {
-        self.inner.lock().await.configured = peers.into_iter().collect();
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .configured = peers.into_iter().collect();
     }
     /// Distinct peers with retained frontiers.
     #[cfg(test)]
     pub(crate) async fn recorded_peers(&self) -> usize {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(
             &inner.conn,
             "SELECT DISTINCT peer FROM secure_peer_frontiers",

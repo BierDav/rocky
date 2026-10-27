@@ -380,7 +380,11 @@ async fn deleting_a_sparse_readded_field_never_restores_its_old_value() {
     );
     let field = lineage.definition(5).item_id("field", "items.note");
     let records = crate::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT fields FROM secure_row_records",
     )
     .await
@@ -396,7 +400,7 @@ async fn deleting_a_sparse_readded_field_never_restores_its_old_value() {
     let canonical = encode(
         &replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .decode_record(bytes)
             .await

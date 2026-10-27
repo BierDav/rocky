@@ -11,7 +11,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     let cap = &signed.endorsement.chain.0[0].capability;
     let valid = cap.not_before + 1;
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.migration_syntax_capacity(32768);
         let before = snapshot(&inner).await;
         let cold = reconstruct(&inner, &frame).await.unwrap();
@@ -60,7 +60,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     .unwrap();
     let revoked = RevocationSet::try_from(vec![statement]).unwrap();
     replica.learn_revocations(&revoked).await.unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = snapshot(&inner).await;
     let warm = reconstruct(&inner, &frame).await.unwrap();
     assert!(inner.migration_syntax_stats().1 >= 2);
@@ -104,7 +104,7 @@ async fn warm_bad_signatures_parse_but_actual_acquisition_refuses_every_time() {
         (bad_endorsement, "invalid tip statement signature"),
         (bad_writer, "migration writer assignment"),
     ] {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         let before = snapshot(&inner).await;
         inner
             .check_stored_migration_for_test(&frame, time)
@@ -129,12 +129,15 @@ async fn warm_bad_signatures_parse_but_actual_acquisition_refuses_every_time() {
         restore(&inner).await;
         assert_eq!(snapshot(&inner).await, before);
         drop(inner);
-        let before = snapshot(&*replica.inner.lock().await).await;
+        let before = snapshot(&*replica.inner.lock(crate::replica::Class::Background).await).await;
         same_error(
             replica.admit_migration_publication(bad).await.unwrap_err(),
             crate::credential(rocky_credentials::Error::Denied(reason.into())),
         );
-        assert_eq!(snapshot(&*replica.inner.lock().await).await, before);
+        assert_eq!(
+            snapshot(&*replica.inner.lock(crate::replica::Class::Background).await).await,
+            before
+        );
     }
     replica.audit(l.scope("items")).await.unwrap();
 }
@@ -145,7 +148,7 @@ async fn warm_descriptor_uses_the_new_current_migration_minimum() {
     release(&replica, &signed).await;
     let frame = frames(&replica).await.remove(0);
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.migration_syntax_capacity(32768);
         let cold = reconstruct(&inner, &frame).await.unwrap();
         inner
@@ -167,7 +170,7 @@ async fn warm_descriptor_uses_the_new_current_migration_minimum() {
         )])
         .await
         .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = snapshot(&inner).await;
     let warm = reconstruct(&inner, &frame).await.unwrap();
     assert_eq!(inner.migration_syntax_stats().0, 1);

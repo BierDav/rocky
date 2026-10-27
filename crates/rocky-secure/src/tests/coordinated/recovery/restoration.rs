@@ -44,7 +44,12 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
     assert!(author.1.evict(scope).await.unwrap().operations > 0);
     author.1.set_role(Default::default()).await.unwrap();
     let guarded = sql_rows(
-        &author.1.inner.lock().await.conn,
+        &author
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT sequence,hash FROM secure_evicted_logs",
     )
     .await
@@ -61,7 +66,12 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
     author.1.restored(scope).await.unwrap();
     assert_eq!(
         sql_rows(
-            &author.1.inner.lock().await.conn,
+            &author
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT sequence,hash FROM secure_evicted_logs"
         )
         .await
@@ -73,7 +83,12 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
         crate::ReceiveStatus::Abandoned
     );
     let before = sql_rows(
-        &author.1.inner.lock().await.conn,
+        &author
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT hash,header,body,status FROM secure_operations WHERE status='abandoned'",
     )
     .await
@@ -90,7 +105,12 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
     author.1.restored(scope).await.unwrap();
     assert!(
         sql_rows(
-            &author.1.inner.lock().await.conn,
+            &author
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT * FROM secure_evicted_logs"
         )
         .await
@@ -99,14 +119,19 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
     );
     assert_eq!(
         sql_rows(
-            &author.1.inner.lock().await.conn,
+            &author
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT hash,header,body,status FROM secure_operations WHERE status='abandoned'"
         )
         .await
         .unwrap(),
         before
     );
-    assert!(sql_rows(&author.1.inner.lock().await.conn, "SELECT 1 FROM secure_applied a JOIN secure_operations o ON o.hash=a.hash WHERE o.status='abandoned'").await.unwrap().is_empty());
+    assert!(sql_rows(&author.1.inner.lock(crate::replica::Class::Background).await.conn, "SELECT 1 FROM secure_applied a JOIN secure_operations o ON o.hash=a.hash WHERE o.status='abandoned'").await.unwrap().is_empty());
     sync(&f.lineage, &f.alice.1, &author.1, &author.0).await;
     assert_eq!(
         rows(&author.1).await,
@@ -123,7 +148,11 @@ async fn an_evicted_original_returns_abandoned_and_completes_its_exact_guard() {
     let reopened = open(&fixture.lineage, &fixture.dir, "alice", &key).await;
     assert_eq!(
         sql_rows(
-            &reopened.inner.lock().await.conn,
+            &reopened
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT hash,header,body,status FROM secure_operations WHERE status='abandoned'"
         )
         .await

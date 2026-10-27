@@ -299,7 +299,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether `scope`'s existence base is a fold at a seal off the
     /// followed path, which a base of the path replaces.
     pub async fn existence_fold_off_path(&self, scope: ResourceScope) -> Result<bool, Error> {
-        self.inner.lock().await.fold_off_path(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .fold_off_path(scope)
+            .await
     }
     /// This replica's own folds at seals in `domain`, which the owner, a
     /// trusted identity or an issuer may sign for devices that fetch a base.
@@ -307,7 +311,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         domain: rocky_core::Scope,
     ) -> Result<Vec<ExistenceBaseStatement>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut statements = Vec::new();
         for row in rows(&inner.conn, "SELECT attachment FROM secure_existence_base").await? {
             let [SqlValue::Blob(bytes)] = row.as_slice() else {
@@ -328,7 +332,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         signed: rocky_credentials::SignedExistenceBase,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let scope = signed.statement.cut.scope;
         let attachment = ExistenceBaseAttachment {
             basis: ExistenceBasis::Signed(Box::new(signed)),

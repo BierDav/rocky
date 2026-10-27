@@ -23,7 +23,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(0);
         };
         let (graph, tips, publisher, revocations, node, chain) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let graph = inner.scope_graph(scope)?;
             // The followed tip and the nearest ones its line came through:
             // a coordinator keeps that many ended logs.
@@ -157,7 +157,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(None);
         }
         let (publisher, revocations, node, chain) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let author = inner
                 .node_author
                 .as_ref()
@@ -223,7 +223,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The node and author number used to acknowledge the composed log.
     pub async fn terminal_author(&self) -> Result<(PublicKey, u32), Error> {
         let coordinator = self.domain_log().ok_or_else(|| denied("no composed log"))?;
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(author) = inner
             .node_author
             .as_ref()
@@ -261,7 +261,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(credential)?
             .trusted
             .ok_or_else(|| denied("missing trusted grant"))?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let owned = node == inner.config.node.public_key()
             || inner
                 .line_nodes

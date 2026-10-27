@@ -37,7 +37,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether `scope` applied a frame whose author is revoked now: its
     /// rows are restored from a checkpoint, never kept from frames.
     pub async fn holds_revoked_frames(&self, scope: ResourceScope) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner.config.revocations.is_empty() {
             return Ok(false);
         }
@@ -70,7 +70,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Scopes whose eviction guard waits for this node's own log.
     async fn restoring(&self) -> Result<Vec<ResourceScope>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(&inner.conn, "SELECT scope FROM secure_evicted_logs")
             .await?
             .iter()
@@ -84,7 +84,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// verified base, listed in the graph at a seal of the followed path,
     /// holds their tip's state.
     async fn forget_covered_drops(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut forget = Vec::new();
         for record in rows(
             &inner.conn,

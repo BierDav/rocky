@@ -93,7 +93,11 @@ async fn insert(
 ) {
     let mut start = range.start;
     while start < range.end {
-        let guard = node.replica.inner.lock().await;
+        let guard = node
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         let mut pending = tokio::task::JoinSet::new();
         for _ in 0..64 {
             if start == range.end {
@@ -158,7 +162,7 @@ async fn all_rows(replica: &Replica, scope: ResourceScope) -> BTreeMap<Commitmen
     }
 }
 async fn stored_rows(replica: &Replica, scope: ResourceScope) -> i64 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut result = inner
         .conn
         .query(
@@ -183,7 +187,7 @@ async fn connect_with(
     let domain = *server
         .replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .graphs
         .keys()
@@ -638,7 +642,7 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
         device
             .replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .restoring(scope)
             .await

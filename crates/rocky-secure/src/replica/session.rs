@@ -61,7 +61,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scopes: BTreeSet<ResourceScope>,
     ) -> Result<SecureSession<A>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let status = inner.session_status(&scopes, now()?)?;
         Ok(SecureSession {
             replica: self.clone(),
@@ -118,7 +118,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Keys the new grants cannot read whole are evicted, and every session
     /// ends.
     pub async fn renew_credentials(&self, credentials: CredentialChain) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.resolve_chain(
             &credentials,
             inner.config.node.public_key(),
@@ -180,7 +180,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// is decrypted or authored. Authorized plaintext already stored stays
     /// at rest; deleting it is the deployment's decision.
     pub async fn logout(&self) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.config.keys.clear();
         inner.history.clear();
         inner.bump_authority();
@@ -292,13 +292,21 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> SecureSession<A> {
     /// The session's bindings, after checking it is still valid.
     pub async fn status(&self) -> Result<SessionStatus, Error> {
-        let inner = self.replica.inner.lock().await;
+        let inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.check_authority(Some(self.authority))?;
         inner.local_grants(now()?)?;
         Ok(self.status.clone())
     }
     pub async fn read(&self, scope: ResourceScope, row: Commitment) -> Result<Companion, Error> {
-        let inner = self.replica.inner.lock().await;
+        let inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.admit_session(&self.status, self.authority, scope)?;
         inner.companion(scope, row).await
     }
@@ -314,7 +322,11 @@ impl<A: RowApplication> SecureSession<A> {
                 limit: MAX_SNAPSHOT_ROWS,
             });
         }
-        let inner = self.replica.inner.lock().await;
+        let inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.admit_session(&self.status, self.authority, scope)?;
         inner.page(scope, after, max_rows, MAX_SNAPSHOT_BYTES).await
     }
@@ -407,7 +419,12 @@ impl<A: RowApplication> SecureTransaction<A> {
     /// permission-controlling fields are not republished, since mergeable
     /// writes to them are refused.
     pub async fn writes(&self) -> Result<Vec<RowWrite>, Error> {
-        let inner = self.session.replica.inner.lock().await;
+        let inner = self
+            .session
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         Ok(self
             .rows
             .iter()
@@ -436,7 +453,12 @@ impl<A: RowApplication> SecureTransaction<A> {
         row: Commitment,
         change: impl FnOnce(&mut Staged) -> Result<(), Error>,
     ) -> Result<Option<RowFields>, Error> {
-        let inner = self.session.replica.inner.lock().await;
+        let inner = self
+            .session
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         let grants = inner.admit_session(&self.session.status, self.session.authority, scope)?;
         if !self.rows.contains_key(&(scope, row)) {
             if self.rows.len() >= MAX_BUNDLE_ROWS {

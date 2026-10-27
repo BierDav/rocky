@@ -4,7 +4,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The whole scope, within `MAX_SNAPSHOT_ROWS` and `MAX_SNAPSHOT_BYTES`.
     /// Larger scopes are read with `snapshot_page`.
     pub async fn snapshot(&self, scope: ResourceScope) -> Result<SecureSnapshot, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let page = inner
             .page(scope, None, MAX_SNAPSHOT_ROWS, MAX_SNAPSHOT_BYTES)
             .await?;
@@ -36,7 +36,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             });
         }
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .page(scope, after, max_rows, MAX_SNAPSHOT_BYTES)
             .await
@@ -46,7 +46,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         row: Commitment,
     ) -> Result<Companion, Error> {
-        self.inner.lock().await.companion(scope, row).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .companion(scope, row)
+            .await
     }
     /// Forward original bytes only. Restart a pass after subscription changes or new insertions.
     pub async fn transfer_page(
@@ -60,7 +64,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // Frames leave the device: flush every commit they may include,
         // first without the replica so local statements do not wait for it.
         self.flush().await?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         inner.same_tip_peer(peer)?;
@@ -155,7 +159,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         id: Hash,
         applied: bool,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         let Some(frame) = inner.frame(id).await? else {
             // Pruned since the peer's page: there is nothing left to record.

@@ -12,7 +12,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         signed: SignedCheckpoint,
     ) -> Result<(Option<Commitment>, bool), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let scope = signed.statement.scope;
         inner.authorize_peer(peer, credentials, scope)?;
         signed.verify_authority(&inner, now()?)?;
@@ -52,7 +52,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         page: CheckpointPage,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let scope = page.scope;
         inner.authorize_peer(peer, credentials, scope)?;
         if inner.scope_key(scope).is_ok() {

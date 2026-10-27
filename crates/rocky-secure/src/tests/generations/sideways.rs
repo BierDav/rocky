@@ -101,12 +101,22 @@ async fn prepare(replica: &EncryptedReplica<TypedRows>, rebuild: Rebuild) {
             .await
             .unwrap(),
         Rebuild::Base => {}
-        Rebuild::Replay => replica.inner.lock().await.rebuild_switches = true,
+        Rebuild::Replay => {
+            replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .rebuild_switches = true
+        }
     }
 }
 /// Scopes switches rebuilt from kept rows so far.
 async fn rewound(replica: &EncryptedReplica<TypedRows>) -> usize {
-    replica.inner.lock().await.rewound
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .rewound
 }
 
 const NOTES: &str = "SELECT key,title,note FROM items ORDER BY key";
@@ -217,7 +227,7 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         scalar(&alice, "SELECT count(*) FROM secure_identity_ledger").await,
         2
     );
-    let journal = crate::storage::rows(&alice.inner.lock().await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap();
+    let journal = crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap();
     let before = rewound(&alice).await;
     follow(&lineage, &alice, (&identity, &alice_key), "main", 3).await;
     // Only the kept seal's own schema restores unfiltered.
@@ -231,7 +241,7 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         scalar(&alice, "SELECT count(*) FROM secure_identity_ledger").await,
         1
     );
-    assert_eq!(crate::storage::rows(&alice.inner.lock().await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap(), journal);
+    assert_eq!(crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap(), journal);
     assert!(alice.held_changes().await.unwrap().is_empty());
     assert_eq!(scalar(&alice, "SELECT count(*) FROM secure_voids").await, 0);
     if let Some(first) = kept {

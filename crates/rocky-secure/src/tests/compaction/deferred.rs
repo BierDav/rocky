@@ -13,13 +13,24 @@ async fn a_keyless_scope_without_covered_payload_has_a_truthful_zero_bound() {
     insert(&a, "one", "one").await;
     sync(&lineage, &a, &b, &keys[1]).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    let held = std::mem::take(&mut b.inner.lock().await.config.keys);
+    let held = std::mem::take(
+        &mut b
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     let sealed = seal(&lineage, &a).await.id().unwrap();
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     b.finalize_path(lineage.domain).await.unwrap();
-    let bounds=crate::storage::collect_rows(b.inner.lock().await.conn.query("SELECT b.position FROM secure_seal_bounds b JOIN secure_scope_state s ON s.id=b.scope WHERE s.scope=?",[encode(&lineage.scope("tags")).unwrap()]).await.unwrap()).await.unwrap();
+    let bounds=crate::storage::collect_rows(b.inner.lock(crate::replica::Class::Background).await.conn.query("SELECT b.position FROM secure_seal_bounds b JOIN secure_scope_state s ON s.id=b.scope WHERE s.scope=?",[encode(&lineage.scope("tags")).unwrap()]).await.unwrap()).await.unwrap();
     assert_eq!(bounds, vec![vec![SqlValue::Integer(0)]]);
-    b.inner.lock().await.config.keys = held;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = held;
     b.compact(lineage.domain, 0).await.unwrap();
     b.admit_peer(
         keys[0].public_key(),
@@ -59,7 +70,14 @@ async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
     })
     .await
     .unwrap();
-    let held = std::mem::take(&mut b.inner.lock().await.config.keys);
+    let held = std::mem::take(
+        &mut b
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     for frame in frames {
         b.receive(frame).await.unwrap();
     }
@@ -94,7 +112,11 @@ async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
     ])
     .await
     .unwrap();
-    b.inner.lock().await.config.keys = held;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = held;
     b.settle().await.unwrap();
     assert_eq!(scalar(&b, "SELECT count(*) FROM items").await, 1);
     b.admit_peer(
@@ -136,7 +158,14 @@ async fn deferred_intermediate_seals_are_never_signed_from_an_earlier_empty_base
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
     b.compact(lineage.domain, 0).await.unwrap();
-    let held = std::mem::take(&mut b.inner.lock().await.config.keys);
+    let held = std::mem::take(
+        &mut b
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     insert(&a, "one", "one").await;
     let frames = crate::tests::stored_frames(&a, "SELECT header,body FROM secure_operations").await;
     let intermediate = seal(&lineage, &a).await.id().unwrap();
@@ -154,7 +183,11 @@ async fn deferred_intermediate_seals_are_never_signed_from_an_earlier_empty_base
             .seal,
         Some(initial)
     );
-    b.inner.lock().await.config.keys = held;
+    b.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = held;
     b.settle().await.unwrap();
     b.finalize_path(lineage.domain).await.unwrap();
     b.compact(lineage.domain, 1).await.unwrap();

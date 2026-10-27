@@ -74,7 +74,12 @@ async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers(
         .await
         .unwrap();
     assert_eq!(replica.frontier(scope).await.unwrap(), original);
-    let before = replica.inner.lock().await.frontier_cache_stats().0;
+    let before = replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .frontier_cache_stats()
+        .0;
     // The schema is private, including after its local switch.
     assert!(replica.tip_statements(None, 32).await.is_err());
     let peer = PrivateKey::new();
@@ -114,14 +119,22 @@ async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers(
         .unwrap();
     assert_eq!(replica.followed_tip().await, source);
     assert!(replica.staged_schema().await.unwrap().is_none());
-    assert!(replica.inner.lock().await.frontier_cache_stats().0 > before);
+    assert!(
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frontier_cache_stats()
+            .0
+            > before
+    );
     let restored = replica.frontier(scope).await.unwrap();
     assert_eq!(restored, original);
     assert_eq!(
         restored,
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .compute_tip_frontier(scope)
             .await
@@ -362,9 +375,16 @@ async fn additive_switch_changes(rows: usize) -> (i64, usize) {
     let total = |replica: &crate::EncryptedReplica<rocky_core::TypedRows>| {
         let replica = replica.clone();
         async move {
-            match crate::storage::rows(&replica.inner.lock().await.conn, "SELECT total_changes()")
-                .await
-                .unwrap()[0][..]
+            match crate::storage::rows(
+                &replica
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .conn,
+                "SELECT total_changes()",
+            )
+            .await
+            .unwrap()[0][..]
             {
                 [rocky_core::SqlValue::Integer(changes)] => changes,
                 _ => panic!("total_changes"),

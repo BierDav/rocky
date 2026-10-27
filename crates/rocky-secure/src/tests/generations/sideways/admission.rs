@@ -98,7 +98,7 @@ async fn an_absent_tables_filtered_birth_restores_with_its_original_receipt() {
         crate::storage::collect_rows(
             alice
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .conn
                 .query(binding_query, [encode(&scope).unwrap()])
@@ -111,7 +111,11 @@ async fn an_absent_tables_filtered_birth_restores_with_its_original_receipt() {
     );
     alice.receive(frame.clone()).await.unwrap();
     let receipt = rows(
-        &alice.inner.lock().await.conn,
+        &alice
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_admission_entries WHERE kind=0",
     )
     .await
@@ -139,7 +143,11 @@ async fn an_absent_tables_filtered_birth_restores_with_its_original_receipt() {
     );
     assert_eq!(
         rows(
-            &alice.inner.lock().await.conn,
+            &alice
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT * FROM secure_admission_entries WHERE kind=0"
         )
         .await
@@ -166,13 +174,31 @@ async fn an_absent_tables_filtered_birth_restores_with_its_original_receipt() {
     alice.audit(scope).await.unwrap();
     // A duplicate appends nothing; the head only re-pins a later revision.
     let journal = "SELECT entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT allocation,identity,entry FROM secure_admission_claims";
-    let before = rows(&alice.inner.lock().await.conn, journal).await.unwrap();
+    let before = rows(
+        &alice
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        journal,
+    )
+    .await
+    .unwrap();
     alice.receive(frame.clone()).await.unwrap();
     assert_eq!(
-        rows(&alice.inner.lock().await.conn, journal).await.unwrap(),
+        rows(
+            &alice
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            journal
+        )
+        .await
+        .unwrap(),
         before
     );
-    let inner = alice.inner.lock().await;
+    let inner = alice.inner.lock(crate::replica::Class::Background).await;
     let binding = crate::storage::collect_rows(
         inner
             .conn

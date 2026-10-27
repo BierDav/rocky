@@ -79,7 +79,7 @@ async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
     let frame = frames(&replica).await.remove(0);
     let storage = replica.migration_storage().await.unwrap();
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         let before = snapshot(&inner).await;
         inner.migration_syntax_capacity(32768);
         let mut first = reconstruct(&inner, &frame).await.unwrap();
@@ -157,7 +157,7 @@ async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
     let replica = EncryptedReplica::open(&dir.path().join("source.db"), l.app(3), config)
         .await
         .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     // Open's tail reconstruction already made the first cold parse on the new Inner.
     assert_eq!(
         inner.migration_syntax_stats(),
@@ -176,7 +176,7 @@ async fn warm_reconstruction_preserves_sql_shapes_and_first_errors() {
     let (l, _, _, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;
     let frame = frames(&replica).await.remove(0);
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = snapshot(&inner).await;
     for (sql, error) in [
         (
@@ -237,7 +237,7 @@ async fn warm_reconstruction_keeps_parser_validation_and_uncached_errors() {
         format.to_bytes().unwrap(),
         extent.to_bytes().unwrap(),
     ];
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = snapshot(&inner).await;
     for bytes in cases {
         inner.migration_syntax_capacity(32768);
@@ -279,7 +279,7 @@ async fn warm_reconstruction_observes_publication_and_actual_proof_refusals() {
     let (l, _, _, replica, signed) = candidate_tables(2, true).await;
     release(&replica, &signed).await;
     let frame = frames(&replica).await.remove(0);
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.migration_syntax_capacity(32768);
     reconstruct(&inner, &frame).await.unwrap();
     let before = snapshot(&inner).await;

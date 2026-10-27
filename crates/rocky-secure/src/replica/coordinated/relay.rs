@@ -73,7 +73,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let graph = inner.relay_graph(&seal).await?;
             if graph
                 .line_minimum(seal.statement.tip)
@@ -99,7 +99,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(StagedCloseStatus::Pending);
         }
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let author = inner
                 .node_author
                 .as_ref()
@@ -125,7 +125,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .map_err(credential)?;
         }
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             transaction!(inner, |inner| {
                 let records = rows(&inner.conn, "SELECT seal FROM secure_close_relays").await?;
                 if records.len() >= MAX_INCOMING_RELAYS
@@ -156,7 +156,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Err(_) => return Ok(StagedCloseStatus::Pending),
         };
         let dispatched = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let records = collect_rows(
                 inner
                     .conn
@@ -186,7 +186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(StagedCloseStatus::Pending);
         }
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             // Recheck authority after catch-up, before marking dispatch durable.
             inner.relay_graph(&seal).await?;
             transaction!(inner, |inner| {
@@ -219,7 +219,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;
         let (graph, stored) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let graph = inner.relay_graph(&seal).await?;
             let records = collect_rows(
                 inner
@@ -256,7 +256,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .terminal_finality(&seal, &graph, coordinator.as_ref())
             .await?
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             let graph = inner.relay_graph(&seal).await?;
             graph
                 .verify_finality(

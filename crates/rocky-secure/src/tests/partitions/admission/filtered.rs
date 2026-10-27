@@ -38,7 +38,7 @@ fn removed(f: &Fixture) -> LogicalSchema {
 }
 
 pub(super) async fn security(f: &Fixture, replica: &EncryptedReplica<TypedRows>) -> SecureConfig {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     SecureConfig {
         publisher: f.publisher.public_key(),
         manifest: f.manifest.clone(),

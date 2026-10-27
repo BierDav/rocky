@@ -21,7 +21,7 @@ pub(crate) async fn check_frontier_cache<A: rocky_core::RowApplication>(
     scope: ResourceScope,
 ) {
     let first = replica.frontier(scope).await.unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let before = inner.frontier_cache_stats();
     assert_eq!(inner.frontier(scope).await.unwrap(), first);
     assert_eq!(inner.frontier_cache_stats(), before);
@@ -36,7 +36,7 @@ pub(crate) async fn stored_frames<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     sql: &str,
 ) -> Vec<EncryptedFrame> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut frames = Vec::new();
     for record in crate::storage::rows(&inner.conn, sql).await.unwrap() {
         let [
@@ -255,7 +255,7 @@ pub(crate) async fn link_up<A: rocky_core::RowApplication>(
     exchange_graphs(a, b, domain).await;
     for (server, client) in [(a, b), (b, a)] {
         let (node, credentials) = {
-            let inner = client.inner.lock().await;
+            let inner = client.inner.lock(crate::replica::Class::Background).await;
             (
                 inner.config.node.public_key(),
                 inner.config.credentials.clone(),
@@ -968,7 +968,11 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
         fixture.app().name("Native")
     );
     let acknowledged = crate::storage::rows(
-        &source.inner.lock().await.conn,
+        &source
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT applied FROM secure_peer_frontiers",
     )
     .await

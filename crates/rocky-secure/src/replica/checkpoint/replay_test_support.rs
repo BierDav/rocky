@@ -7,7 +7,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         frame: &EncryptedFrame,
         filtered: Option<usize>,
     ) -> Result<u64, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let operation = frame.operation_ref()?;
         // The malformed envelope must reach replay after a successful opening.
         let payload = inner.row_payload(frame)?;

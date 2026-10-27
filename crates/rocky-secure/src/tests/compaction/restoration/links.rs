@@ -65,7 +65,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
         let hash = header.hash();
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -82,7 +82,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
             .unwrap();
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -94,7 +94,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
         preserved(&f, error).await;
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -111,7 +111,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
             .unwrap();
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(

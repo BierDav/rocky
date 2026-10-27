@@ -29,7 +29,11 @@ fn row(key: &str, title: &str) -> (String, String) {
 }
 async fn abandoned_frames(replica: &Replica) -> i64 {
     match rocky_storage::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT COUNT(*) FROM secure_operations WHERE status='abandoned'",
     )
     .await
@@ -43,7 +47,11 @@ async fn abandoned_frames(replica: &Replica) -> i64 {
 /// Where `replica` indexes each coordinated frame it holds.
 async fn entry_frames(replica: &Replica) -> Vec<(TipLog, u64)> {
     rocky_storage::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT log,position FROM secure_entry_frames ORDER BY hash",
     )
     .await
@@ -389,7 +397,14 @@ async fn returning_devices_hold_abandoned_writes_and_ordinary_writes_after_them_
     );
     assert!(abandoned_frames(&carol.1).await > 0);
     assert_eq!(carol.1.held_changes().await.unwrap().len(), 1);
-    let credentials = carol.1.inner.lock().await.config.credentials.clone();
+    let credentials = carol
+        .1
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
     let (offered, next) = carol
         .1
         .held_frame_page(
@@ -403,7 +418,7 @@ async fn returning_devices_hold_abandoned_writes_and_ordinary_writes_after_them_
         .unwrap();
     assert!(next.is_none());
     let originals = {
-        let inner = carol.1.inner.lock().await;
+        let inner = carol.1.inner.lock(crate::replica::Class::Background).await;
         crate::storage::rows(&inner.conn, "SELECT frame FROM secure_held_frames")
             .await
             .unwrap()

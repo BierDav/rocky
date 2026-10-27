@@ -186,7 +186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
     pub(crate) async fn checkpoint_header_verifications(&self) -> u64 {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .crypto
             .header_verifications
@@ -194,7 +194,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     #[cfg(test)]
     pub(crate) async fn crypto_stats(&self) -> (u64, u64) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         (
             inner.crypto.opens.load(Ordering::Relaxed),
             inner.crypto.verifications.load(Ordering::Relaxed),
@@ -214,7 +214,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .await
         .map_err(|_| Error::Closed)?;
         let (crypto, keys, publisher, revocations) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             (
                 inner.crypto.clone(),
                 inner.opening_keys().cloned().collect::<Vec<_>>(),

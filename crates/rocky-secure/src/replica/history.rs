@@ -1110,7 +1110,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// are released at once; a newly named one is kept only if its state is
     /// still at hand: the live tables hold it.
     pub async fn keep_seals(&self, config: KeptSeals) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let domain = inner.workspace.followed.as_ref().map(|(scope, _)| *scope);
         transaction!(inner, |inner| {
             inner
@@ -1150,13 +1150,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     pub async fn kept_seal_config(&self) -> Result<KeptSeals, Error> {
-        self.inner.lock().await.kept_config().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .kept_config()
+            .await
     }
     /// The seals this node keeps, oldest first.
     pub async fn kept_seals(&self) -> Result<Vec<Commitment>, Error> {
         Ok(self
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .kept_marks()
             .await?
@@ -1170,14 +1174,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         domain: Scope,
         seal: Commitment,
     ) -> Result<Option<HeldSeal>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         inner.held_seal(domain, seal).await
     }
     /// The seal `bookmark` shows: its tip's own seal once sealed, else the
     /// seal its tip starts from.
     pub async fn bookmark_seal(&self, domain: Scope, bookmark: &str) -> Result<Commitment, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner.graph_for(domain)?;
         let tip = graph
             .bookmark(bookmark)
@@ -1187,7 +1191,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// What binds a read-only connection to kept `seal`.
     pub async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
-        self.inner.lock().await.seal_views(seal).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .seal_views(seal)
+            .await
     }
 }
 

@@ -490,7 +490,7 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Records the adapter's checked representation of the already installed schema.
     pub async fn record_current_schema(&self, record: Vec<u8>) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner
             .store_schema(&inner.definition, &record)
             .await)?;
@@ -498,11 +498,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Only schemas needed by the followed path, kept seals or held changes.
     pub async fn required_schemas(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
-        self.inner.lock().await.required_schemas().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .required_schemas()
+            .await
     }
     /// Missing definitions needed by the live switch, excluding independent views.
     pub async fn missing_live_schemas(&self) -> Result<BTreeSet<Commitment>, Error> {
-        self.inner.lock().await.missing_live_schemas().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .missing_live_schemas()
+            .await
     }
     /// The adapter has authenticated `record` by deriving `definition` from it.
     /// The replica independently checks its commitment against the required tip.
@@ -512,7 +520,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         definition: ApplicationManifest,
         record: Vec<u8>,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner
             .required_schemas()
             .await?
@@ -529,7 +537,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await
     }
     pub async fn tip_schema(&self, manifest: Commitment) -> Result<Option<Vec<u8>>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
             inner
                 .conn
@@ -547,7 +555,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
     }
     pub async fn pending_schema(&self) -> Result<Option<PendingSchema>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = rows(
             &inner.conn,
             "SELECT scope,bookmark,tip,manifest FROM secure_pending_schema WHERE id=1",
@@ -1141,7 +1149,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         config: SchemaConfig,
     ) -> Result<bool, Error> {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .switch_schema_now(tip, app, config, None)
             .await
@@ -1155,7 +1163,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         app: A,
         config: SchemaConfig,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
             inner
                 .conn
@@ -1249,7 +1257,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Drops catalog entries no local reader, retained publication or workspace needs.
     pub async fn drop_unrequired_schemas(&self) -> Result<Vec<Commitment>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut kept: BTreeSet<_> = inner
             .required_schemas()
             .await?
@@ -1296,7 +1304,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn schema_context(&self) -> Vec<u8> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let author = |author: &identity::NodeAuthor| {
             (
                 author.key.public_key(),

@@ -3,7 +3,11 @@ use super::*;
 use crate::storage::rows;
 
 async fn evidence(device: &Device) -> Vec<Vec<Vec<SqlValue>>> {
-    let inner = device.replica.inner.lock().await;
+    let inner = device
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     let mut result = Vec::new();
     for table in [
         "secure_finalized",
@@ -47,7 +51,11 @@ async fn conflicting_existence_counts_take_the_maximum_before_finalization() {
     let (seal, _) = super::seals::seal(&erp, &device).await;
     let scope = erp.scope("lists");
     let before = evidence(&device).await;
-    let inner = device.replica.inner.lock().await;
+    let inner = device
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     let id = match rows(&inner.conn, "SELECT id FROM secure_scope_state WHERE scope=(SELECT scope FROM secure_operations LIMIT 1)").await.unwrap()[0][0] {
         SqlValue::Integer(id) => id,
         _ => panic!("scope id"),

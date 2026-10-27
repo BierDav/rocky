@@ -10,7 +10,7 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
     let saved = crate::storage::collect_rows(
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .query(
@@ -23,20 +23,28 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
     .await
     .unwrap();
     let keys = rows(
-        &f.replica.inner.lock().await.conn,
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_row_keys",
     )
     .await
     .unwrap();
     let candidates = rows(
-        &f.replica.inner.lock().await.conn,
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_seal_candidates",
     )
     .await
     .unwrap();
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -58,7 +66,11 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
     assert_clean(&f.replica).await;
     assert!(
         !rows(
-            &f.replica.inner.lock().await.conn,
+            &f.replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT 1 FROM audit_replay_seen"
         )
         .await
@@ -68,7 +80,7 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
     for row in saved {
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -78,7 +90,11 @@ async fn later_scope_corruption_is_not_hidden_by_an_earlier_replay() {
             .await
             .unwrap();
     }
-    let inner = f.replica.inner.lock().await;
+    let inner = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     inner
         .conn
         .execute("DELETE FROM secure_row_keys", ())
@@ -136,7 +152,11 @@ async fn a_later_committed_replay_failure_cleans_scratch_and_retries_without_evi
     assert_eq!(snapshot(&f.replica).await, before);
     assert_eq!(
         rows(
-            &f.replica.inner.lock().await.conn,
+            &f.replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT count(DISTINCT scope) FROM audit_replay_seen"
         )
         .await
@@ -163,7 +183,11 @@ async fn the_final_global_pass_refuses_privileged_corruption_after_the_last_clea
     let f = AuditFixture::new(false).await;
     let scopes = [f.lineage.scope("items"), f.lineage.scope("tags")];
     let before = snapshot(&f.replica).await;
-    let inner = f.replica.inner.lock().await;
+    let inner = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     let last = crate::storage::collect_rows(
         inner
             .conn
@@ -189,9 +213,21 @@ async fn the_final_global_pass_refuses_privileged_corruption_after_the_last_clea
         error.to_string().contains("retained history counters"),
         "{error}"
     );
-    assert_eq!(f.replica.inner.lock().await.audit_global_passes - passes, 2);
+    assert_eq!(
+        f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .audit_global_passes
+            - passes,
+        2
+    );
     assert_clean(&f.replica).await;
-    let inner = f.replica.inner.lock().await;
+    let inner = f
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     inner
         .conn
         .execute("DROP TRIGGER audit_late_corruption", ())
@@ -216,7 +252,11 @@ async fn cleanup_errors_never_report_success_or_replace_the_primary_replay_error
         let f = AuditFixture::new(false).await;
         let scope = f.lineage.scope("items");
         let before = snapshot(&f.replica).await;
-        let inner = f.replica.inner.lock().await;
+        let inner = f
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.conn.execute("CREATE TEMP TRIGGER audit_cleanup_failure BEFORE DELETE ON secure_checkpoint_scratch BEGIN SELECT RAISE(ABORT,'audit cleanup failed'); END",()).await.unwrap();
         drop(inner);
         if primary {
@@ -235,7 +275,7 @@ async fn cleanup_errors_never_report_success_or_replace_the_primary_replay_error
         assert_eq!(snapshot(&f.replica).await, before);
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute("DROP TRIGGER audit_cleanup_failure", ())

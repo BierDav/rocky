@@ -209,5 +209,5 @@ impl HeldPrefix {
     }
 }
 pub(super) async fn held(replica: &Replica) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn,"SELECT hash,header,body,status,(SELECT count(*) FROM secure_applied a WHERE a.hash=o.hash),(SELECT count(*) FROM secure_voids v WHERE v.hash=o.hash) FROM secure_operations o ORDER BY sequence").await.unwrap()
+    rows(&replica.inner.lock(crate::replica::Class::Background).await.conn,"SELECT hash,header,body,status,(SELECT count(*) FROM secure_applied a WHERE a.hash=o.hash),(SELECT count(*) FROM secure_voids v WHERE v.hash=o.hash) FROM secure_operations o ORDER BY sequence").await.unwrap()
 }

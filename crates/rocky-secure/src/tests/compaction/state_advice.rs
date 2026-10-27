@@ -92,7 +92,12 @@ async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
         .is_none()
     );
     // Missing read keys must not prevent serving retained ciphertext frames.
-    a.inner.lock().await.config.keys.clear();
+    a.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys
+        .clear();
     let page = a
         .range_page(
             keys[1].public_key(),

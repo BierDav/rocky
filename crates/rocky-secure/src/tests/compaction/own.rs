@@ -3,7 +3,7 @@ use super::*;
 use crate::storage::{bindings, rows};
 
 async fn snapshot(replica: &Replica) -> Vec<Vec<SqlValue>> {
-    rows(&replica.inner.lock().await.conn, "SELECT 'r',scope,row,fields FROM secure_row_records UNION ALL SELECT 'p',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'o',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'l',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'e',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'c',identity,entry,provenance FROM secure_admission_claims UNION ALL SELECT 'h',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'b',scope,signed,sets FROM secure_checkpoints UNION ALL SELECT 's',scope,signed,cursor FROM secure_rebootstrap UNION ALL SELECT 'v',revision,0,0 FROM secure_metadata").await.unwrap()
+    rows(&replica.inner.lock(crate::replica::Class::Background).await.conn, "SELECT 'r',scope,row,fields FROM secure_row_records UNION ALL SELECT 'p',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'o',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'l',scope,author,sequence FROM secure_identity_ledger UNION ALL SELECT 'e',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'c',identity,entry,provenance FROM secure_admission_claims UNION ALL SELECT 'h',context,head,head_signature FROM secure_admission_context UNION ALL SELECT 'b',scope,signed,sets FROM secure_checkpoints UNION ALL SELECT 's',scope,signed,cursor FROM secure_rebootstrap UNION ALL SELECT 'v',revision,0,0 FROM secure_metadata").await.unwrap()
 }
 
 #[tokio::test]
@@ -42,7 +42,7 @@ async fn a_signed_own_floor_must_cover_own_rows_before_a_direct_page_or_install(
     );
     let scope = lineage.scope("items");
     // A malicious issuer can sign an internally inconsistent own maximum.
-    source.inner.lock().await.conn.execute(
+    source.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "UPDATE secure_checkpoints SET signed=? WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
         bindings(vec![SqlValue::Blob(lowered.to_bytes().unwrap()),SqlValue::Blob(encode(&scope).unwrap())]),
     ).await.unwrap();
@@ -77,7 +77,7 @@ async fn a_signed_own_floor_must_cover_own_rows_before_a_direct_page_or_install(
         scalar(&direct, "SELECT count(*) FROM secure_row_records").await,
         0
     );
-    source.inner.lock().await.conn.execute(
+    source.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "UPDATE secure_checkpoints SET signed=? WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
         bindings(vec![SqlValue::Blob(signed.to_bytes().unwrap()),SqlValue::Blob(encode(&scope).unwrap())]),
     ).await.unwrap();
@@ -113,7 +113,7 @@ async fn a_signed_own_floor_must_cover_own_rows_before_a_direct_page_or_install(
     staged.stage_checkpoint_page(page).await.unwrap();
     staged
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(

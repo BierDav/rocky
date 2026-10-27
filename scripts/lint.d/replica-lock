@@ -1,0 +1,22 @@
+# shellcheck shell=sh disable=SC2034
+tools=python3
+check() {
+    python3 - <<'PY'
+from pathlib import Path
+import re
+
+patterns = [
+    r'\.inner\s*(?:\.clone\(\)\s*)?\.lock(?:_owned)?\(\s*\)',
+    r'(?<!Guard<)Mutex\s*<\s*Inner\s*<',
+    r'Mutex::new\(inner\)',
+]
+violations = []
+for path in Path('crates/rocky-secure/src').rglob('*.rs'):
+    text = path.read_text()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            violations.append(f'{path}:{text.count(chr(10), 0, match.start()) + 1}: uninstrumented replica mutex')
+if violations:
+    raise SystemExit('\n'.join(violations))
+PY
+}

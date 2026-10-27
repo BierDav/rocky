@@ -861,7 +861,7 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Declares this replica's role and the full replica nodes it relies on.
     pub async fn set_role(&self, config: RoleConfig) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if config.full_nodes.len() > 64
             || config.custody > config.full_nodes.len()
             || config
@@ -901,17 +901,25 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     pub async fn role(&self) -> Result<RoleConfig, Error> {
-        self.inner.lock().await.role().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .role()
+            .await
     }
     /// The scope's recorded holding; `None` until it was subscribed, left
     /// or evicted.
     pub async fn subscription(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
-        self.inner.lock().await.holding(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .holding(scope)
+            .await
     }
     /// Holds the scope from now on; an evicted scope comes back empty and
     /// fills by sync or rebootstrap.
     pub async fn subscribe(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.local_grants(now()?)?.iter().any(|grant| {
             grant.scope == scope
                 && grant.rows == RowSelection::All
@@ -927,7 +935,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Stops holding new frames of the scope. Rows already held stay; they
     /// are neither deleted nor reported complete.
     pub async fn unsubscribe(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         match inner.holding(scope).await? {
             Some(Holding::Evicting | Holding::Evicted) => Ok(()),
             _ => transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await),
@@ -940,14 +948,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         endpoint: (i64, Option<Hash>),
     ) -> Result<Option<(i64, Option<Hash>)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.merge_restoration_guard(scope, endpoint).await?;
         inner.eviction_guard(scope).await
     }
     /// Ends the restoration of a resubscribed or replayed scope after a
     /// complete catch-up from a peer, once the own log it dropped is back.
     pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.holds(scope).await? {
             return Ok(());
         }
@@ -983,7 +991,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Scopes with a recorded subscription state, in scope order.
     pub async fn subscriptions(&self) -> Result<Vec<(ResourceScope, Holding)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut scopes = Vec::new();
         for record in rows(
             &inner.conn,
@@ -1016,7 +1024,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<ResourceScope>,
         proved: Option<&BTreeSet<ResourceScope>>,
     ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.peer_grants(peer, credentials)?;
         let mut scopes = BTreeSet::new();
         for sql in [
@@ -1055,7 +1063,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// The contiguous prefix of every log of `scope` this replica holds.
     pub async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
-        self.inner.lock().await.frontier(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frontier(scope)
+            .await
     }
     /// Frames `request` lacks, at most 32 and `byte_quota` bytes, after
     /// `after`; or the signal that the peer must rebootstrap.
@@ -1068,7 +1080,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         byte_quota: usize,
     ) -> Result<RangePage, Error> {
         let (page, commit, flusher) = {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             let page = inner
                 .range(peer, credentials, request, after, byte_quota)
                 .await?;
@@ -1088,7 +1100,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         frontier: &ScopeFrontier,
     ) -> Result<(), Error> {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .record_frontier(peer, credentials, frontier)
             .await
@@ -1101,14 +1113,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
     ) -> Result<(), Error> {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .authorize_peer(peer, credentials, scope)
     }
     /// Role, holding, retained window, custody coverage and peer lag of
     /// every known scope.
     pub async fn replica_status(&self) -> Result<ReplicaStatus, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let role = inner.role().await?;
         let mut scopes = BTreeSet::new();
         for sql in [
@@ -1243,7 +1255,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for frontier in frontiers {
             frontier.validate()?;
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if peer == inner.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
@@ -1278,7 +1290,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
     ) -> Result<Vec<ResourceScope>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner.peer_tip(peer) != Some(inner.workspace.tip) {
             return Ok(Vec::new());
         }

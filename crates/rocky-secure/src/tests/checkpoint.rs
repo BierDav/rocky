@@ -139,7 +139,17 @@ async fn compacted(f: &Fixture, replica: &Replica) -> SignedCheckpoint {
     replica.checkpoint(f.public).await.unwrap()
 }
 async fn count(replica: &Replica, sql: &str) -> i64 {
-    match rows(&replica.inner.lock().await.conn, sql).await.unwrap()[0][0] {
+    match rows(
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        sql,
+    )
+    .await
+    .unwrap()[0][0]
+    {
         rocky_core::SqlValue::Integer(count) => count,
         _ => panic!("not a count"),
     }
@@ -340,7 +350,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     assert!(sync(&f, &a, (&b, &b_key, &b_credentials)).await.is_empty());
     // A checkpoint that no longer verifies blocks pruning.
     let signed = {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         // The public base; the keyless private scope has its own.
         let stored = rows(
             &inner.conn,
@@ -370,7 +380,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         20
     );
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -1261,7 +1271,13 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
         .await
         .unwrap();
     let signed = compacted(&f, &writer).await;
-    let expires = writer.inner.lock().await.config.credentials.expires();
+    let expires = writer
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .expires();
     target
         .verify_checkpoint_at_for_test(&signed, expires - 1)
         .await
@@ -1308,11 +1324,25 @@ async fn maintenance_waits_for_a_scope_being_imported() {
     // The owner's intent holds back a scope that holds no rows yet.
     let (c, _) = open(&f, &dir.path().join("c.db"), &PrivateKey::new()).await;
     c.set_importing([f.public].into()).await;
-    assert!(c.inner.lock().await.importing(f.public).await.unwrap());
+    assert!(
+        c.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .importing(f.public)
+            .await
+            .unwrap()
+    );
     c.author(handle(7), insert(&f, 7, "own"), vec![])
         .await
         .unwrap();
-    assert!(!c.inner.lock().await.importing(f.public).await.unwrap());
+    assert!(
+        !c.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .importing(f.public)
+            .await
+            .unwrap()
+    );
 }
 
 /// The page of `signed` after `after`, as `source` serves it to `peer`.
@@ -1494,7 +1524,7 @@ async fn a_direct_page_never_overwrites_an_existing_row() {
         duplicate = rows.last().unwrap().0.clone();
     });
     {
-        let inner = b.inner.lock().await;
+        let inner = b.inner.lock(crate::replica::Class::Background).await;
         // Simulate a conflicting stored row without touching the import cursor.
         inner
             .conn

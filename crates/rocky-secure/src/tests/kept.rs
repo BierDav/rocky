@@ -547,7 +547,7 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
 
 /// What a switch must reproduce: stored rows, scope digests and the table.
 async fn workspace_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut state = Vec::new();
     for sql in [
         "SELECT scope,row,fields FROM secure_row_records ORDER BY scope,row",
@@ -574,7 +574,7 @@ fn same_state(left: &[Vec<Vec<SqlValue>>], right: &[Vec<Vec<SqlValue>>]) {
 /// Rows the engine changed while following `bookmark`.
 async fn follow_changing(lineage: &Lineage, replica: &Replica, bookmark: &str) -> u64 {
     let changes = async || {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.conn.connection().total_changes().unwrap()
     };
     let before = changes().await;
@@ -670,7 +670,11 @@ async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_si
 
     // A rebuild from the replay base reaches the same states, writing
     // every row.
-    replica.inner.lock().await.rebuild_switches = true;
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .rebuild_switches = true;
     let rebuilt_dev = follow_changing(&lineage, &replica, "dev").await;
     same_state(&workspace_state(&replica).await, &on_dev);
     let rebuilt_main = follow_changing(&lineage, &replica, "main").await;
@@ -794,7 +798,11 @@ async fn branch_writes_across_switches(lineage: Lineage) {
     if lineage.existence {
         assert!(scalar(&replica, "SELECT count(*) FROM secure_existence_log").await >= 6);
     }
-    replica.inner.lock().await.rebuild_switches = true;
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .rebuild_switches = true;
     for (bookmark, fast) in ["dev", "main"].into_iter().zip(&fast[1..]) {
         replica
             .follow_bookmark(lineage.domain, bookmark)
@@ -870,7 +878,7 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
     assert!(b.wanted_seals(lineage.domain).await.unwrap().is_empty());
     assert_eq!(scalar(&a, "SELECT count(*) FROM secure_served").await, 2);
     let served = crate::storage::rows(
-        &a.inner.lock().await.conn,
+        &a.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT s.scope,v.signed FROM secure_served v JOIN secure_scope_state s ON s.id=v.scope",
     )
     .await

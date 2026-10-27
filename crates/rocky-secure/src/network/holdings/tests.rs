@@ -10,11 +10,11 @@ async fn pair<C: RowApplication, S: RowApplication>(
     server: &EncryptedReplica<S>,
 ) -> (NativeSession, NativeSession) {
     let (cn, cc) = {
-        let i = client.inner.lock().await;
+        let i = client.inner.lock(crate::replica::Class::Background).await;
         (i.config.node.clone(), i.config.credentials.clone())
     };
     let (sn, sc) = {
-        let i = server.inner.lock().await;
+        let i = server.inner.lock(crate::replica::Class::Background).await;
         (i.config.node.clone(), i.config.credentials.clone())
     };
     super::link::testing::sessions((client, cn, cc), (server, sn, sc))
@@ -82,7 +82,7 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
     let (mut c, mut s) = pair(&client, &server).await;
     assert!(c.follows_same_tip(&client).await);
     let (node, credentials) = {
-        let inner = client.inner.lock().await;
+        let inner = client.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -94,7 +94,7 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
         .await
         .unwrap();
     let (node, credentials) = {
-        let inner = server.inner.lock().await;
+        let inner = server.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -246,7 +246,7 @@ async fn transcript_case(custody: bool) {
         ..scope
     };
     let (node, credentials) = {
-        let inner = member.inner.lock().await;
+        let inner = member.inner.lock(crate::replica::Class::Background).await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
     for (known, missing) in requests(scope).into_iter().zip(requests(unknown)) {
@@ -522,7 +522,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
         };
         assert!(matches!(states.as_slice(), [FrontierReply::Refused(_)]));
     }
-    let inner = stranger.inner.lock().await;
+    let inner = stranger.inner.lock(crate::replica::Class::Background).await;
     let registered = crate::storage::rows(&inner.conn, "SELECT scope FROM secure_partitions")
         .await
         .unwrap();
@@ -579,7 +579,7 @@ async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_ses
     let root = tempfile::tempdir().unwrap();
     let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
     let (node, credentials) = {
-        let inner = server.inner.lock().await;
+        let inner = server.inner.lock(crate::replica::Class::Background).await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
     for expected in [node.public_key(), PrivateKey::new().public_key()] {
@@ -626,7 +626,11 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     assert_eq!(base.statement.partition, Some(f.tuple("customers", 1)));
     let sealed = base.statement.seal.unwrap();
     let no_frames: Vec<_> = crate::storage::rows(
-        &server.inner.lock().await.conn,
+        &server
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT signed FROM secure_checkpoints",
     )
     .await
@@ -648,7 +652,10 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
         .unwrap();
     crate::tests::exchange_graphs(&server, &custodian, f.domain).await;
     let (node, credentials) = {
-        let inner = custodian.inner.lock().await;
+        let inner = custodian
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),

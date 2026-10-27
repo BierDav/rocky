@@ -22,7 +22,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .to_str()
             .ok_or_else(|| denied("the backup target is not a UTF-8 path"))?
             .to_string();
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
         inner
             .conn
@@ -52,7 +52,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// The signing identities this file was restored from, oldest first.
     pub async fn predecessors(&self) -> Result<Vec<PublicKey>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut found = Vec::new();
         for row in rows(
             &inner.conn,

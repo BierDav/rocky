@@ -316,15 +316,21 @@ async fn malformed_forged_or_unauthorized_no_frames_records_are_refused() {
     let refused = |signed: SignedCheckpoint| {
         let c = &c;
         async move {
-            let before = rows(&c.inner.lock().await.conn, "SELECT total_changes()")
-                .await
-                .unwrap();
+            let before = rows(
+                &c.inner.lock(crate::replica::Class::Background).await.conn,
+                "SELECT total_changes()",
+            )
+            .await
+            .unwrap();
             assert!(c.begin_rebootstrap(signed).await.is_err());
             assert!(c.rebootstrap_progress(f.private).await.unwrap().is_none());
             assert_eq!(
-                rows(&c.inner.lock().await.conn, "SELECT total_changes()")
-                    .await
-                    .unwrap(),
+                rows(
+                    &c.inner.lock(crate::replica::Class::Background).await.conn,
+                    "SELECT total_changes()"
+                )
+                .await
+                .unwrap(),
                 before
             );
         }
@@ -516,7 +522,7 @@ async fn a_tampered_stored_no_frames_base_fails_open_and_full_audit() {
     a.audit(f.private).await.unwrap();
     // A stored base row under the keyless no-frames base.
     {
-        let mut inner = a.inner.lock().await;
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(

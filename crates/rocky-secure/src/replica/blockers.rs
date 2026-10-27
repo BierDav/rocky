@@ -506,6 +506,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// from stored state. The gates that refuse reads, writes and imports
     /// answer from the same predicates.
     pub async fn blockers(&self) -> Result<Vec<Blocker>, Error> {
-        self.inner.lock().await.blockers().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .blockers()
+            .await
     }
 }

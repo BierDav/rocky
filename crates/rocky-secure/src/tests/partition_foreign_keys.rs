@@ -287,7 +287,7 @@ impl Fixture {
     }
 }
 async fn visible(replica: &EncryptedReplica<TypedRows>, table: &str) -> Vec<Vec<SqlValue>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::collect_rows(
         inner
             .conn
@@ -308,7 +308,7 @@ async fn sync_existence(
     scope: ResourceScope,
 ) {
     let (node, credentials) = {
-        let inner = to.inner.lock().await;
+        let inner = to.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -396,7 +396,7 @@ async fn partitioned_children_follow_keyless_parent_liveness_and_restore() {
     assert_eq!(visible(&other, "items").await.len(), 2);
     assert_eq!(visible(&reader, "products").await.len(), 0);
     {
-        let mut inner = writer.inner.lock().await;
+        let mut inner = writer.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner
             .clear_typed(f.scope("products", 0))
             .await)

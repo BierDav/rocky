@@ -98,7 +98,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         frames: &[EncryptedFrame],
     ) -> Result<(), Error> {
         let time = now()?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             for frame in frames {
                 assert!(matches!(
@@ -111,6 +111,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Enqueues `work` as contiguous requests and returns their results in order.
     pub(super) async fn submit(&self, work: Vec<(Work, usize)>, exposed: bool) -> Vec<Reply> {
+        let class = if work
+            .iter()
+            .any(|(work, _)| matches!(work, Work::Author { .. } | Work::Bundle { .. }))
+        {
+            Class::Interactive
+        } else {
+            Class::Background
+        };
         let mut pending = Vec::with_capacity(work.len());
         {
             let mut queue = self.queue();
@@ -136,7 +144,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 *slot = Some(result.unwrap_or(Err(Error::RetryExhausted)));
                 None
             }
-            guard = self.inner.lock() => Some(guard),
+            guard = self.inner.lock(class) => Some(guard),
         };
         let mut guard = guard;
         let mut first = true;
@@ -145,7 +153,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             // flush, so readers and other leaders run in between.
             let mut inner = match guard.take() {
                 Some(guard) => guard,
-                None => self.inner.lock().await,
+                None => self.inner.lock(class).await,
             };
             if std::mem::take(&mut first) {
                 // One scheduler pass lets concurrent callers join; no timer.
@@ -155,13 +163,26 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if group.is_empty() {
                 break;
             }
+            #[cfg(feature = "qualification")]
+            {
+                inner.units(
+                    "encoded_byte",
+                    group.iter().map(|request| request.weight as u64).sum(),
+                );
+                if group
+                    .iter()
+                    .all(|request| matches!(request.work, Work::Receive(_)))
+                {
+                    inner.units("received_frame", group.len() as u64);
+                }
+            }
             let (exposed, scopes, settling) = inner.commit_group(group).await;
             if let Some(exposed) = exposed {
                 let flusher = inner.flusher.clone();
                 drop(inner);
                 // The blocking flush owns the replies even if this leader is cancelled.
                 exposed.answer(flusher).await;
-                inner = self.inner.lock().await;
+                inner = self.inner.lock(crate::replica::Class::Background).await;
             }
             // Replies are out; one bounded step keeps retained history in check.
             inner.maintain(&scopes).await;
@@ -171,7 +192,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 // releases the replica between them.
                 drop(inner);
                 let settled = self.settle().await;
-                let inner = self.inner.lock().await;
+                let inner = self.inner.lock(crate::replica::Class::Background).await;
                 let exposed = inner.answer_settled(settling, settled).await;
                 if let Some(exposed) = exposed {
                     let flusher = inner.flusher.clone();
@@ -633,7 +654,21 @@ impl<A: RowApplication> Inner<A> {
                 .connection()
                 .set_busy_timeout(TRUNCATE_WAIT)
                 .is_ok();
+        #[cfg(feature = "qualification")]
+        let started = std::time::Instant::now();
         let checkpoint = rows(&self.conn, sql).await;
+        #[cfg(feature = "qualification")]
+        if let Ok(result) = &checkpoint {
+            let pages = match result.first().map(Vec::as_slice) {
+                Some([_, _, SqlValue::Integer(done)]) => (*done).max(0) as u64,
+                _ => 0,
+            };
+            self.flusher.measurements.checkpoint(
+                if truncate { "truncate" } else { "passive" },
+                pages,
+                started.elapsed(),
+            );
+        }
         if waits {
             let _ = self
                 .conn

@@ -621,7 +621,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Fresh verification of retained history and global admission evidence,
     /// plus keyed rows, base and suffix replay. Holds the replica lock throughout.
     pub async fn audit(&self, scope: ResourceScope) -> Result<AuditReport, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.invalidate_records();
         inner.audit_global_start().await?;
         let (id, report) = inner.audit_history(scope).await?;
@@ -631,7 +631,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
     #[cfg(test)]
     pub(crate) async fn audit_scratch_flags(&self) -> (bool, bool) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         (inner.rebuilding_tip, inner.tip_base)
     }
 
@@ -649,7 +649,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if scopes.iter().any(|scope| !unique.insert(*scope)) {
             return Err(denied("audit scopes must be unique"));
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.invalidate_records();
         inner.audit_global_start().await?;
         let (id, report) = inner.audit_history(*first).await?;

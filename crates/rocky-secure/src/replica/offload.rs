@@ -51,7 +51,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 limit: MAX_SNAPSHOT_ROWS,
             });
         }
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.same_tip_peer(peer)?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         if !inner.can_read_key(scope, &grants) {
@@ -109,7 +109,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<Commitment>,
         package: &EncryptedPackage,
     ) -> Result<RemotePage, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
             return Err(denied("remote read needs whole-scope read authority"));
         }

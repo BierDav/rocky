@@ -123,7 +123,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The digests of the stored chains, and how many retained operations
     /// name a chain that is not stored.
     pub(crate) async fn chain_census(&self) -> (BTreeSet<Commitment>, usize) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let stored = rows(&inner.conn, "SELECT digest FROM secure_chains")
             .await
             .unwrap()

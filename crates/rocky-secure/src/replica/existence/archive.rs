@@ -76,7 +76,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         expected: Option<Commitment>,
     ) -> Result<Option<ExistenceBaseAttachment>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
         let base = match expected {
             Some(id) => inner.archived_existence_base(scope, id).await?,

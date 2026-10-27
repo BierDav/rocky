@@ -762,12 +762,16 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The pending projection plan, if a typed schema change is under way.
     pub async fn projection_plan(&self) -> Result<Option<ProjectionPlan>, Error> {
-        self.inner.lock().await.plan_status().await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .plan_status()
+            .await
     }
     /// Runs a pending plan step by step; other work proceeds between steps.
     pub(crate) async fn run_plan(&self) -> Result<(), Error> {
         loop {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if !inner.plan_step().await? {
                 return Ok(());
             }
@@ -775,7 +779,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     #[cfg(test)]
     pub(crate) async fn inject_plan_fault(&self, stage: PlanStage, after: usize) {
-        self.inner.lock().await.plan_fault = Some((stage, after));
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .plan_fault = Some((stage, after));
     }
 }
 

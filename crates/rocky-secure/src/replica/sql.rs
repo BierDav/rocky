@@ -35,7 +35,7 @@ pub struct SecureCommit {
 /// The replica held for one transaction. Dropping it rolls back whatever
 /// the engine still has open, so a cancelled call cannot leave a
 /// transaction behind.
-struct Held<A: RowApplication>(OwnedMutexGuard<Inner<A>>);
+struct Held<A: RowApplication>(Guard<OwnedMutexGuard<Inner<A>>>);
 impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
         let inner = &mut *self.0;
@@ -145,7 +145,11 @@ impl<A: RowApplication> SecureSession<A> {
         options: SqlOptions,
     ) -> Result<SecureSql<A>, Error> {
         let mut sql = self.sql(options).await?;
-        let inner = self.replica.inner.lock().await;
+        let inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         let records = collect_rows(
             inner
                 .conn
@@ -171,7 +175,11 @@ impl<A: RowApplication> SecureSession<A> {
     /// A SQL connection over the replica's installed typed tables.
     pub async fn sql(&self, options: SqlOptions) -> Result<SecureSql<A>, Error> {
         options.validate()?;
-        let inner = self.replica.inner.lock().await;
+        let inner = self
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.check_authority(Some(self.authority))?;
         let typed = inner
             .workspace
@@ -668,7 +676,7 @@ impl<A: RowApplication> SecureSql<A> {
                         self.session
                             .replica
                             .inner
-                            .lock()
+                            .lock(statement_class(sql))
                             .await
                             .partition_statement(sql, &params, &self.session.status)
                             .await?
@@ -690,7 +698,7 @@ impl<A: RowApplication> SecureSql<A> {
                             self.session
                                 .replica
                                 .inner
-                                .lock()
+                                .lock(crate::replica::Class::Background)
                                 .await
                                 .availability(&analyzed.tables, &self.session.status)
                                 .await?
@@ -715,7 +723,7 @@ impl<A: RowApplication> SecureSql<A> {
         target: Target,
     ) -> Result<SecureRows, Error> {
         {
-            let inner = self.session.replica.inner.lock().await;
+            let inner = self.session.replica.inner.lock(statement_class(sql)).await;
             let deadline = Instant::now() + self.options.transaction_timeout;
             match self.step(&inner, lease, sql, params.clone(), false, deadline)? {
                 Ok(Run::Writes) => {}
@@ -733,7 +741,13 @@ impl<A: RowApplication> SecureSql<A> {
         self.finish(lease, target, Some(rows), Kind::Plain).await
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
-        let inner = self.session.replica.inner.clone().lock_owned().await;
+        let inner = self
+            .session
+            .replica
+            .inner
+            .clone()
+            .lock_owned(Class::Interactive)
+            .await;
         inner.invalidate_frontiers();
         admit(&inner, &self.session)?;
         // Each written scope's own blockers refuse its frames at commit.
@@ -1077,7 +1091,12 @@ impl<A: RowApplication> SecureSql<A> {
             let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
             drop(held);
             flusher.run(committed_at).await?;
-            let mut inner = self.session.replica.inner.lock().await;
+            let mut inner = self
+                .session
+                .replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await;
             inner.maintain(&scopes).await;
             inner.checkpoint_if_due().await;
         }
@@ -1477,6 +1496,19 @@ impl<A: RowApplication> SecureSql<A> {
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn fail_next_sql_commit(&self) {
-        self.inner.lock().await.fail_sql_commit = true;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .fail_sql_commit = true;
+    }
+}
+
+fn statement_class(sql: &str) -> Class {
+    if crate::statement::analyze(sql, |_| None)
+        .is_ok_and(|statement| statement.kind != crate::statement::Kind::Read)
+    {
+        Class::Interactive
+    } else {
+        Class::Background
     }
 }

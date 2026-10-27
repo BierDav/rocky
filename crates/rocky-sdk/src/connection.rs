@@ -772,7 +772,13 @@ impl Registry {
         node: Arc<Node>,
         options: ConnectionOptions,
     ) -> Result<u64, Failure> {
-        let state = State::new(node, options).await?;
+        #[cfg(feature = "qualification")]
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let creating = State::new(node, options);
+        #[cfg(feature = "qualification")]
+        let creating = rocky_secure::with_measurement_connection(id, creating);
+        let state = creating.await?;
+        #[cfg(not(feature = "qualification"))]
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.connections
             .lock()

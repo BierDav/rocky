@@ -444,7 +444,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if head.terminal.is_some() {
             return Err(CoordinatedError::Sealed);
         }
-        let (position, running, genesis, _) = self.inner.lock().await.log_state(log).await?;
+        let (position, running, genesis, _) = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .log_state(log)
+            .await?;
         let running = match running.or(genesis) {
             Some(running) => running,
             None if position == 0 => head.genesis,
@@ -549,7 +554,10 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
     pub(crate) async fn fail_publication_after(&self, step: u8) {
-        self.inner.lock().await.publication_fault = Some(step);
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .publication_fault = Some(step);
     }
 }
 

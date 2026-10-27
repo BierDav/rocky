@@ -1932,7 +1932,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether a held scope needs a served replay base, including empty
     /// concrete partitions learned after the newest seal was finalized.
     pub async fn unserved_bases(&self, domain: Scope) -> Result<bool, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         for (scope, _) in inner.readiness_scopes(domain).await? {
             if inner.served_checkpoint(scope).await?.is_none() {
@@ -1946,7 +1946,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<(Vec<Commitment>, bool), Error> {
-        self.inner.lock().await.listed_replacements(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .listed_replacements(scope)
+            .await
     }
     /// Finalizes every seal of the followed path whose frames this replica
     /// holds, then makes the newest finalized seal that is final, or has at
@@ -1970,7 +1974,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         result
     }
     async fn compact_inner(&self, domain: Scope, keep: usize) -> Result<CompactReport, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let (_, waiting) = inner.finalize_ready(domain).await?;
         // Without a newer seal, the base is signed again where it stands
@@ -2017,7 +2021,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Finalizes every seal of the followed path whose frames this replica
     /// holds, as maintenance does, and keeps those the configuration names.
     pub async fn finalize_path(&self, domain: Scope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         inner.finalize_ready(domain).await?;
         inner = flush_guard(inner, &self.inner).await?;
@@ -2025,7 +2029,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Whether any held scope still needs a replay base at `seal`.
     pub async fn needs_base_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         for (_, id) in inner.domain_scopes(domain).await? {
             if inner.base_seal(id).await? != Some(seal) {
                 return Ok(true);
@@ -2035,7 +2039,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 
     pub async fn compaction_status(&self, domain: Scope) -> Result<CompactionStatus, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let finalized = inner.finalized(domain).await?;
         let waiting = inner.finalization_waits(domain).await?;

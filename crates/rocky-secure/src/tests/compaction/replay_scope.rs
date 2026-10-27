@@ -35,7 +35,7 @@ async fn replay_binds_the_header_and_every_original_write_before_filtering() {
             .unwrap();
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .decode_row_payload(
                 &frames[0],

@@ -201,7 +201,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         name: &str,
     ) -> Result<rocky_core::RowIdentity, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let typed = inner
             .workspace
             .typed
@@ -361,7 +361,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         tuple: PartitionTuple,
         frame: Option<&EncryptedFrame>,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(frame) = frame {
             if inner.partitions.get(&scope) == Some(&tuple) {
                 return Ok(());
@@ -404,7 +404,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     pub async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
-        self.inner.lock().await.table_complete(table).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .table_complete(table)
+            .await
     }
 }
 impl<A: RowApplication> Inner<A> {
@@ -622,7 +626,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
         limit: usize,
     ) -> Result<Vec<Vec<ResourceScope>>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut groups = BTreeMap::<(rocky_core::Scope, Commitment), Vec<ResourceScope>>::new();
         for scope in scopes {
             let address = if let (Some(typed), Some(tuple)) =
@@ -723,7 +727,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
     ) -> Result<Vec<(ResourceScope, PartitionTuple)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         // One chain verification per batch. A peer without custody gets no
         // offer.
         let Ok((_, selectors)) = credentials.verify_selectors(
@@ -766,7 +770,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         offers: &[(ResourceScope, PartitionTuple)],
     ) -> Result<(), Error> {
         let offered = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let own = inner.config.node.public_key();
             let mut offered = Vec::new();
             for (scope, tuple) in offers {
@@ -794,7 +798,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if offers.len() > scopes.len() {
             return Err(denied("partition offers outside the frontier batch"));
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut accepted = Vec::new();
         for (scope, tuple) in offers {
             if !scopes.contains(scope) {

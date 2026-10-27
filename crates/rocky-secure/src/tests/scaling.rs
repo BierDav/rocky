@@ -409,7 +409,7 @@ async fn read_and_replay_queries_use_indexes() {
     )
     .await
     .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for sql in [
         "SELECT 1 FROM secure_operations WHERE scope=x'00' AND status='pending' LIMIT 1",
         "SELECT hash,header FROM secure_operations WHERE scope=x'00' AND status='applied' AND hash>x'' ORDER BY hash LIMIT 32",
@@ -616,7 +616,7 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
     .unwrap();
     uncached
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .disable_metadata_cache_for_test();
     let rows = 1..=32;
@@ -647,6 +647,8 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
         .author([2; 32], updated.collect(), vec![])
         .await
         .unwrap();
+    let author_before = crate::sqlite::statements();
+    crate::sqlite::trace_statements(true);
     let one = source
         .author(
             [3; 32],
@@ -655,6 +657,32 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
         )
         .await
         .unwrap();
+    let author_trace = crate::sqlite::trace_statements(false);
+    let author_count = crate::sqlite::statements() - author_before;
+    let mut by_table = BTreeMap::<String, Vec<&str>>::new();
+    for sql in &author_trace {
+        let words: Vec<_> = sql.split_whitespace().collect();
+        let table = words
+            .windows(2)
+            .find_map(|pair| {
+                matches!(
+                    pair[0].to_ascii_uppercase().as_str(),
+                    "FROM" | "INTO" | "UPDATE"
+                )
+                .then(|| pair[1].split('(').next().unwrap_or(pair[1]).to_owned())
+            })
+            .unwrap_or_else(|| "transaction/control".into());
+        by_table.entry(table).or_default().push(sql);
+    }
+    println!("P12 author_statements={author_count}");
+    for (table, statements) in by_table {
+        println!("P12 author_table={table} statements={}", statements.len());
+        if std::env::var_os("ROCKY_TRACE_AUTHOR").is_some() {
+            for sql in statements {
+                println!("P12_AUTHOR_SQL table={table} {sql}");
+            }
+        }
+    }
     let mut counts = Vec::new();
     let mut baseline = Vec::new();
     for (frame, rows) in [(many, 32), (one, 1)] {
@@ -715,7 +743,7 @@ async fn lthash_100000_matches_phase_start() {
     )
     .await
     .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
     let digest = inner
         .fixed_100000_row_digest(f.public.domain)
@@ -745,7 +773,7 @@ async fn frame_metadata_observes_writes_and_rollback() {
     )
     .await
     .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let role = inner.role().await.unwrap();
     let holding = inner.holding(f.public).await.unwrap();
     let before = crate::sqlite::statements();
@@ -905,7 +933,7 @@ async fn the_writer_bounds_both_main_and_temporary_page_caches() {
     )
     .await
     .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut caches = Vec::new();
     for schema in ["main", "temp"] {
         let result = rows(&inner.conn, &format!("PRAGMA {schema}.cache_size"))
@@ -930,4 +958,59 @@ async fn the_writer_bounds_both_main_and_temporary_page_caches() {
         rows(&inner.conn, "PRAGMA temp_store").await.unwrap(),
         vec![vec![SqlValue::Integer(0)]]
     );
+}
+
+#[cfg(feature = "qualification")]
+#[tokio::test]
+async fn author_transaction_and_bundle_acquisitions_are_interactive() {
+    let f = Fixture::new();
+    let directory = TempDir::new().unwrap();
+    let source = EncryptedReplica::open(
+        directory.path().join("classes.db"),
+        f.app(),
+        f.config(&PrivateKey::new(), f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let measurements = source.lock_measurements();
+    for bundle in [false, true] {
+        measurements.start();
+        let changes = vec![change(
+            f.public,
+            1,
+            if bundle {
+                Some(f.app().name("first"))
+            } else {
+                None
+            },
+            Some(f.app().name(if bundle { "second" } else { "first" })),
+        )];
+        if bundle {
+            source
+                .author_bundle(
+                    [2; 32],
+                    changes.into_iter().map(RowWrite::changed).collect(),
+                    vec![],
+                )
+                .await
+                .unwrap();
+        } else {
+            source.author([1; 32], changes, vec![]).await.unwrap();
+        }
+        let snapshot = measurements.stop();
+        assert!(
+            snapshot
+                .holders
+                .keys()
+                .any(|(site, class)| site.contains("replica/group.rs:") && class == "Interactive"),
+            "{snapshot:?}"
+        );
+        assert!(
+            snapshot
+                .holders
+                .keys()
+                .any(|(_, class)| class == "Background"),
+            "post-flush maintenance: {snapshot:?}"
+        );
+    }
 }

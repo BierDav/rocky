@@ -30,7 +30,7 @@ struct Reply {
 }
 impl Peer {
     async fn capture(f: &Fixture, replica: &EncryptedReplica<TypedRows>, path: &Path) -> Self {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         Self {
             path: path.to_owned(),
             schema: f.schema.clone(),
@@ -143,7 +143,7 @@ async fn peer_worker() {
         "SELECT header,body FROM secure_operations ORDER BY sequence",
     )
     .await;
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let follows = crate::storage::rows(&inner.conn, "SELECT * FROM secure_followed")
         .await
         .unwrap()

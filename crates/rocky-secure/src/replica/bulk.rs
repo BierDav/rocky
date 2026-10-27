@@ -294,7 +294,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         signed: SignedMigrationPublication,
     ) -> Result<(), Error> {
         signed.to_bytes().map_err(credential)?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         signed
             .verify(
                 inner.config.publisher,
@@ -323,7 +323,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         publication: Commitment,
     ) -> Result<Option<SignedMigrationPublication>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner.private_schema().await? {
             return Ok(None);
         }
@@ -337,7 +337,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         publication: Commitment,
     ) -> Result<Option<(MigrationPublicationStatement, CredentialChain)>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records=collect_rows(inner.conn.query("SELECT statement,writer FROM secure_migration_publications WHERE publication=? AND conflict IS NULL AND signed IS NULL",[publication.to_vec()]).await?).await?;
         match records.first().map(Vec::as_slice) {
             Some([SqlValue::Blob(s), SqlValue::Blob(writer)]) => {
@@ -370,7 +370,7 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Release has the same durable boundary as the private graph and frames.
     pub async fn release_uncoordinated_schema(&self, publication: Commitment) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
             inner
                 .conn
@@ -399,7 +399,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Storage charged to authenticated migration history, separate from ordinary history.
     pub async fn migration_storage(&self) -> Result<MigrationStorage, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let totals=rows(&inner.conn,"SELECT coalesce(sum(retained_frames),0),coalesce(sum(retained_bytes),0) FROM secure_migration_publications").await?;
         let support=rows(&inner.conn,"SELECT (SELECT coalesce(sum(length(statement)+coalesce(length(signed),0)+length(writer)+coalesce(length(conflict),0)+length(publication)+length(tip)),0) FROM secure_migration_publications)+(SELECT coalesce(sum(length(proof)+length(hash)+length(publication)+16),0) FROM secure_migration_frames)+(SELECT coalesce(sum(length(hash)+length(publication)+24),0) FROM secure_migration_nodes)").await?;
         let mut support_bytes = number(&support[0][0])?;
@@ -442,7 +442,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn migration_tip_required(&self, tip: TipId) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         Ok(inner
             .required_schemas()
             .await?
@@ -450,7 +450,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .any(|(required, _)| *required == tip))
     }
     pub(crate) async fn missing_migration_publications(&self) -> Result<Vec<TipId>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut missing = Vec::new();
         let required: BTreeSet<_> = inner
             .required_schemas()
@@ -491,7 +491,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn fail_flushes(&self, n: usize) {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .flusher
             .failures

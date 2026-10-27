@@ -32,7 +32,11 @@ async fn live(replica: &EncryptedReplica<Employees>, scope: ResourceScope) -> us
 }
 async fn operations(replica: &EncryptedReplica<Employees>) -> usize {
     rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT hash FROM secure_operations",
     )
     .await
@@ -219,7 +223,7 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     // members are found through the first frame's sealed entries.
     source
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DELETE FROM secure_bundle_handles", ())
@@ -479,7 +483,13 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         )
         .await
         .unwrap();
-    let root = replica.inner.lock().await.config.credentials.0[0]
+    let root = replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .0[0]
         .id()
         .unwrap();
     replica

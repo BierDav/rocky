@@ -1,6 +1,7 @@
 # features_12: writes that never wait
 
-Status: planned (2026-10-27). No phase has started. Phase briefs record
+Status: phase 1 complete (2026-10-27); [evidence and qualification limits](01-see-the-wait-evidence.md).
+L1 uses an already writable member, as approved by the owner. Phase briefs record
 their own status; evidence goes beside each brief as
 `NN-<name>-evidence.md`. Source code and tests define current behavior.
 
@@ -49,7 +50,7 @@ add a new local state.
 | Background lock hold, steady state (p99 / max) | unbounded for some holders | desktop ≤ 10 / 50 ms; phone ≤ 25 / 100 ms | 2 |
 | Background holders an interactive request waits behind | FIFO, unbounded | at most one bounded step | 3 |
 | Single-row receive, SQL statements | 83 | ≤ 45 | 4 |
-| Single-row local author, SQL statements | not measured | ≤ half of the phase 1 count | 4 |
+| Single-row local author, SQL statements | 87 (phase 1) | ≤ half of the phase 1 count | 4 |
 | Issuer 100k migration fill (open running the migration) | 239.6 s (paired, loaded host) | ≤ 70 s; publication to a peer ≤ 110% of paired baseline | 5 |
 | Issuer WAL during the 100k migration | grows with the transaction | never above 64 MiB | 5 |
 
@@ -178,7 +179,7 @@ provisional stamps.
 
 | Phase | Brief | Depends on | Effort | Required result |
 | --- | --- | --- | --- | --- |
-| 1 | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
+| 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
 | 2 | [Bounded holds](02-bounded-holds.md) | 1 | 2 w | Every steady-state background holder bounded; passive checkpoint off the lock |
 | 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step |
 | 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |

@@ -42,7 +42,7 @@ async fn audit_rejects_altered_position_indexes() {
     ] {
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(alter, ())
@@ -54,7 +54,7 @@ async fn audit_rejects_altered_position_indexes() {
         );
         replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(restore, ())
@@ -84,7 +84,7 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
         )
         .await
         .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.conn.execute("SAVEPOINT ranges", ()).await.unwrap();
     let mut header = frame.operation().unwrap().header;
     let start = header.extensions.author_sequence;
@@ -231,7 +231,7 @@ async fn positions_10000_waiting_seal_and_invalidated_frontier_take_five_millise
         last = Some(frame.operation().unwrap().header);
     }
     let last = last.unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     assert_eq!(
         rows(&inner.conn, "SELECT count(*) FROM secure_operations")
             .await
@@ -332,7 +332,7 @@ async fn audit_rejects_a_range_table_with_the_wrong_shape() {
         .await
         .unwrap();
     {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute("DROP TABLE secure_position_ranges", ())

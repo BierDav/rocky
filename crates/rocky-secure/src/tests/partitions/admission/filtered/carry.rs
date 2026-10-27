@@ -60,7 +60,7 @@ async fn a_filtered_foreign_carry_records_one_observation_below_the_destinations
     reader.receive_tip_statements(&statements).await.unwrap();
     reader
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .put_identity_mark(
             f.scope("B"),
@@ -82,7 +82,7 @@ async fn a_filtered_foreign_carry_records_one_observation_below_the_destinations
     let receipt = crate::storage::collect_rows(
         reader
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .query(query, [carry.id().unwrap().as_bytes().to_vec()])
@@ -152,7 +152,7 @@ async fn a_filtered_foreign_carry_records_one_observation_below_the_destinations
         crate::storage::collect_rows(
             reader
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .conn
                 .query(query, [carry.id().unwrap().as_bytes().to_vec()])
@@ -168,7 +168,11 @@ async fn a_filtered_foreign_carry_records_one_observation_below_the_destinations
     reader.audit(f.scope("A")).await.unwrap();
     reader.audit(f.scope("B")).await.unwrap();
     let journal = rows(
-        &reader.inner.lock().await.conn,
+        &reader
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_admission_entries ORDER BY entry",
     )
     .await
@@ -186,7 +190,11 @@ async fn a_filtered_foreign_carry_records_one_observation_below_the_destinations
     assert_eq!(items(&f, &reader).await, expected);
     assert_eq!(
         rows(
-            &reader.inner.lock().await.conn,
+            &reader
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT * FROM secure_admission_entries ORDER BY entry"
         )
         .await

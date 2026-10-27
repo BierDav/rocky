@@ -276,7 +276,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         readers: BTreeMap<String, Commitment>,
     ) -> Result<(), Error> {
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             inner.validate_typed(&schema, domain)?;
             let typed = Typed::new(schema.clone(), domain, &readers)?;
             let allowed = inner.readable_names(&typed)?;
@@ -317,7 +317,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         schema
             .require_row_identity()
             .map_err(|error| Error::Incompatible(error.to_string()))?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.validate_typed(&schema, domain)?;
         let typed = inner
             .authorized_projection(Typed::new(schema.clone(), domain, &readers)?)

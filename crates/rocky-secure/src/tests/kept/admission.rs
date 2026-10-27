@@ -17,7 +17,7 @@ async fn resigned_bytes(
         )
         .await
         .unwrap();
-    let inner = keeper.inner.lock().await;
+    let inner = keeper.inner.lock(crate::replica::Class::Background).await;
     for table in ["secure_served", "secure_served_rows"] {
         inner.conn.execute(format!("DELETE FROM {table} WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)"),[encode(&scope).unwrap()]).await.unwrap();
     }
@@ -33,7 +33,11 @@ async fn resigned_bytes(
         .unwrap()
         .unwrap();
     let rows = crate::storage::rows(
-        &keeper.inner.lock().await.conn,
+        &keeper
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_served_rows ORDER BY scope,row",
     )
     .await

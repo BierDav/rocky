@@ -115,7 +115,11 @@ async fn checkpoint_birth_headers_survive_resume_and_forward_once_per_stream() {
         0
     );
     let headers = crate::storage::rows(
-        &receiver.inner.lock().await.conn,
+        &receiver
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT digest,header FROM secure_creation_headers ORDER BY digest LIMIT 1",
     )
     .await
@@ -124,7 +128,7 @@ async fn checkpoint_birth_headers_survive_resume_and_forward_once_per_stream() {
         panic!("creation header");
     };
     for replacement in [None, Some(vec![0xff])] {
-        let inner = receiver.inner.lock().await;
+        let inner = receiver.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -152,7 +156,7 @@ async fn checkpoint_birth_headers_survive_resume_and_forward_once_per_stream() {
         );
         receiver
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(

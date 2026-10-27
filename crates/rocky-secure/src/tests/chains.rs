@@ -58,7 +58,7 @@ async fn insert(replica: &Replica, f: &Fixture, row: u16) -> EncryptedFrame {
         .unwrap()
 }
 async fn count(replica: &Replica, sql: &str) -> usize {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::rows(&inner.conn, sql).await.unwrap().len()
 }
 /// `client` dials `server` with the chains the replicas were opened with.

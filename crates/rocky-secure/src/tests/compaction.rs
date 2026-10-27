@@ -129,7 +129,7 @@ async fn churn(replica: &Replica, cycles: usize, prefix: &str) {
     }
 }
 pub(super) async fn scalar(replica: &Replica, sql: &str) -> i64 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     match crate::storage::rows(&inner.conn, sql)
         .await
         .unwrap()
@@ -493,7 +493,7 @@ pub(super) async fn import_checkpoint_report(
 }
 /// The highest-sequence retained operation of `scope`.
 pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> Hash {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
             .conn
@@ -513,7 +513,7 @@ pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> H
 }
 /// `replica`'s live identity mark of `author` in `scope`.
 pub(super) async fn live_mark(replica: &Replica, scope: ResourceScope, author: u32) -> u32 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
             .conn
@@ -880,7 +880,7 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
         assert!(report.pruned > 0);
         let verified = crate::storage::collect_rows(
             a.inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .conn
                 .query(

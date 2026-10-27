@@ -312,7 +312,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// table. Register before reading the initial snapshot. Authority and
     /// readiness changes wake every observer with `Cause::Authority`.
     pub async fn observe_tables(&self, tables: Option<&[&str]>) -> Result<TableObserver, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let events = inner
             .workspace
             .queries
@@ -549,7 +549,12 @@ impl<A: RowApplication> SecureSql<A> {
             });
         };
         let (path, actions) = {
-            let inner = self.session.replica.inner.lock().await;
+            let inner = self
+                .session
+                .replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await;
             inner.check_authority(Some(self.session.authority))?;
             // SQLite defers the check; Rocky performs the declared action.
             // References may share a column, such as a partition column, so

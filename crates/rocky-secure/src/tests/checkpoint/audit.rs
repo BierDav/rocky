@@ -14,7 +14,7 @@ async fn omitted_keyless_no_frames_records_are_checked_on_every_batch() {
     assert!(a.checkpoint(f.private).await.unwrap().statement.no_frames());
     assert!(a.key_epochs(f.private).await.is_empty());
     a.audit_scopes(&[f.public]).await.unwrap();
-    let inner = a.inner.lock().await;
+    let inner = a.inner.lock(crate::replica::Class::Background).await;
     inner.conn.execute("INSERT INTO secure_checkpoint_pages SELECT id,X'00',NULL,X'00' FROM secure_scope_state WHERE scope=?",[encode(&f.private).unwrap()]).await.unwrap();
     drop(inner);
     assert!(
@@ -25,7 +25,7 @@ async fn omitted_keyless_no_frames_records_are_checked_on_every_batch() {
             .contains("no-frames checkpoint")
     );
     a.inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DELETE FROM secure_checkpoint_pages", ())

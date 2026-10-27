@@ -307,7 +307,7 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     assert_eq!(a.recorded_peers().await, kept);
     // The two kept whatever the bound, and the most recent strangers, stay.
     let present = async |key: &PrivateKey| {
-        let inner = a.inner.lock().await;
+        let inner = a.inner.lock(crate::replica::Class::Background).await;
         let mut rows = inner
             .conn
             .query(

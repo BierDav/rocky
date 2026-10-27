@@ -227,9 +227,17 @@ async fn every_scope_of_an_abandoned_bundle_rolls_back_atomically_and_after_reop
     f.resolve(&f.bob).await;
     assert_eq!(rows(&f.bob.1).await, [row("bundle", "item")]);
     let evidence = "SELECT 'P',scope,author,sequence FROM secure_identity_marks UNION ALL SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims";
-    let permanent = crate::storage::rows(&f.bob.1.inner.lock().await.conn, evidence)
-        .await
-        .unwrap();
+    let permanent = crate::storage::rows(
+        &f.bob
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        evidence,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         crate::tests::compaction::scalar(&f.bob.1, "SELECT count(*) FROM secure_identity_ledger")
             .await,
@@ -263,9 +271,17 @@ async fn every_scope_of_an_abandoned_bundle_rolls_back_atomically_and_after_reop
     assert_eq!(abandoned_frames(&f.bob.1).await, 0);
     assert_eq!(rows(&f.bob.1).await, [row("bundle", "item")]);
     assert_eq!(
-        crate::storage::rows(&f.bob.1.inner.lock().await.conn, evidence)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &f.bob
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            evidence
+        )
+        .await
+        .unwrap(),
         permanent
     );
     assert_eq!(
@@ -288,9 +304,17 @@ async fn every_scope_of_an_abandoned_bundle_rolls_back_atomically_and_after_reop
     assert!(select(&f.bob.1, "SELECT * FROM tags").await.is_empty());
     assert_eq!(abandoned_frames(&f.bob.1).await, 2);
     assert_eq!(
-        crate::storage::rows(&f.bob.1.inner.lock().await.conn, evidence)
-            .await
-            .unwrap(),
+        crate::storage::rows(
+            &f.bob
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            evidence
+        )
+        .await
+        .unwrap(),
         permanent
     );
     assert_eq!(
@@ -453,7 +477,7 @@ async fn complementary_local_and_peer_bundles_are_collected_as_one_contiguous_pr
     local
         .1
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .config
         .keys
@@ -797,7 +821,11 @@ async fn verified_recovery_proof_admits_after_coordinator_retention_and_without_
 
 async fn journal_batches(replica: &Replica) -> Vec<Vec<TipStatement>> {
     rocky_storage::storage::rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT statements FROM secure_pending_tips ORDER BY batch",
     )
     .await

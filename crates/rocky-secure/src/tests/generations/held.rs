@@ -211,7 +211,7 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     assert_eq!(operation.header.extensions.generation, key.generation);
     let opened = carol
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .decode_row_payload(
             frame,
@@ -228,7 +228,11 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     assert!(!opened.creations().is_empty());
     assert_eq!(
         rows(
-            &carol.inner.lock().await.conn,
+            &carol
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT id FROM secure_held_resolved"
         )
         .await

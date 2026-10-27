@@ -260,8 +260,20 @@ mod tests {
         let server = EncryptedReplica::open(dir.path().join("server"), app, config(&server_key))
             .await
             .unwrap();
-        let client_chain = client.inner.lock().await.config.credentials.clone();
-        let server_chain = server.inner.lock().await.config.credentials.clone();
+        let client_chain = client
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone();
+        let server_chain = server
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone();
         let (mut c, mut s) = super::link::testing::sessions(
             (&client, client_key, client_chain),
             (&server, server_key, server_chain),

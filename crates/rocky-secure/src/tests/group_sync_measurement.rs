@@ -12,7 +12,7 @@ pub(crate) mod fixture;
 use fixture::Fixture;
 
 async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let rows = crate::storage::rows(&inner.conn, "PRAGMA page_count")
         .await
         .unwrap();
@@ -35,11 +35,11 @@ async fn sync(
     scopes: &[ResourceScope],
 ) -> Vec<ResourceScope> {
     let (writer_node, writer_credentials) = {
-        let inner = writer.inner.lock().await;
+        let inner = writer.inner.lock(crate::replica::Class::Background).await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
     let (reader_node, reader_credentials) = {
-        let inner = reader.inner.lock().await;
+        let inner = reader.inner.lock(crate::replica::Class::Background).await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
     let mut visited = BTreeSet::new();
@@ -111,7 +111,7 @@ async fn sync(
 }
 
 async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], partitions: i64) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for name in names {
         let rows = crate::storage::rows(
             &inner.conn,
@@ -156,7 +156,7 @@ impl Drop for Profile {
 /// Bytes of the frames a catch-up received: headers, encrypted payloads,
 /// and the credential chains stored once beside them.
 async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let stored = crate::storage::rows(&inner.conn, "SELECT header,body FROM secure_operations")
         .await
         .unwrap();
@@ -312,9 +312,16 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     let checkpoint = started.elapsed();
     drop(sampled);
     // Each record carries the signer's whole chain.
-    let chain = crate::encode(&writer.inner.lock().await.config.credentials)
-        .unwrap()
-        .len();
+    let chain = crate::encode(
+        &writer
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials,
+    )
+    .unwrap()
+    .len();
     let record: usize = checkpoints
         .iter()
         .map(|signed| signed.to_bytes().unwrap().len())
@@ -354,7 +361,11 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     let reopen = started.elapsed();
     assert_rows(&reopened, &names, partitions).await;
     let retained = crate::storage::rows(
-        &reopened.inner.lock().await.conn,
+        &reopened
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT scope,count(*) FROM secure_operations GROUP BY scope",
     )
     .await

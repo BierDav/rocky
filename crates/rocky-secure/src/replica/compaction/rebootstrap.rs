@@ -315,7 +315,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// The held scopes of `domain` whose replay base must move to a seal of
     /// the followed path, with the checkpoints the graph lists for them.
     pub async fn seal_rebootstraps(&self, domain: Scope) -> Result<Vec<SealRebootstrap>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         inner.seal_rebootstraps(domain).await
     }
@@ -324,7 +324,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// sends again. Refused where existence records were released at a
     /// seal off the path.
     pub async fn replay_at_seals(&self, scope: ResourceScope, reset: bool) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let need = inner
             .seal_rebootstraps(scope.domain)
             .await?
@@ -362,7 +362,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// compacted seal that lost is forgotten and the rows are rebuilt at
     /// the followed tip. Returns whether none waits.
     pub async fn finish_seal_rebootstrap(&self, domain: Scope) -> Result<bool, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let settled = transaction!(inner, |inner| inner.settle_seal_rebootstrap(domain).await)?;
         inner = flush_guard(inner, &self.inner).await?;
@@ -376,7 +376,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         domain: Scope,
     ) -> Result<Vec<CheckpointRecordStatement>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner.graph_for(domain)?;
         let mut records = Vec::new();
         for (scope, id) in inner.domain_scopes(domain).await? {

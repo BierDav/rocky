@@ -25,7 +25,11 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
         crate::ReceiveStatus::Held
     );
     let records = rows(
-        &f.replica.inner.lock().await.conn,
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT sequence,record FROM secure_voids ORDER BY sequence",
     )
     .await
@@ -43,7 +47,7 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     // Privileged corruption controls: a signed header alone does not replace its record.
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -57,7 +61,7 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     assert_eq!(super::super::audit::snapshot(&f.replica).await, corrupt);
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -68,7 +72,7 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
         .unwrap();
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -85,7 +89,7 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     assert_eq!(super::super::audit::snapshot(&f.replica).await, corrupt);
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -99,7 +103,11 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
         .unwrap();
     let held_before = held(&f.replica).await;
     let voids_before = rows(
-        &f.replica.inner.lock().await.conn,
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_voids ORDER BY sequence",
     )
     .await
@@ -116,7 +124,11 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     assert_eq!(held(&f.replica).await, held_before);
     assert_eq!(
         rows(
-            &f.replica.inner.lock().await.conn,
+            &f.replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT * FROM secure_voids ORDER BY sequence"
         )
         .await

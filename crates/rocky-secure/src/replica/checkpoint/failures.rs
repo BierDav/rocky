@@ -16,7 +16,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         checkpoint: Commitment,
     ) -> Result<u8, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let found = collect_rows(
             inner
                 .conn
@@ -41,7 +41,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         checkpoint: Commitment,
     ) -> Result<u8, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .conn

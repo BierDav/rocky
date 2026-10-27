@@ -544,7 +544,7 @@ impl Lineage {
 }
 pub(super) async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
     let scopes = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.config.keys.iter().map(|key| key.scope).collect()
     };
     replica
@@ -649,7 +649,7 @@ async fn frames(
     scope: ResourceScope,
 ) -> Vec<EncryptedFrame> {
     let (node, credentials, tip) = {
-        let inner = target.inner.lock().await;
+        let inner = target.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
@@ -753,7 +753,7 @@ async fn a_local_plan_survives_an_interruption_at_every_step() {
             vec![vec![text("changed")]]
         );
         let indexes = {
-            let inner = replica.inner.lock().await;
+            let inner = replica.inner.lock(crate::replica::Class::Background).await;
             rows(
                 &inner.conn,
                 "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='items' AND name NOT LIKE 'sqlite_%'",
@@ -791,7 +791,7 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
         vec![vec![SqlValue::Integer(10)]]
     );
     let plan = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         rows(
             &inner.conn,
             "EXPLAIN QUERY PLAN SELECT key FROM items WHERE title='title 3'",

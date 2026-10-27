@@ -7,7 +7,7 @@ use crate::tests::stored_frames;
 
 /// Whether any stored record of `table` holds the id `field`.
 async fn holds(replica: &EncryptedReplica<TypedRows>, table: &str, field: Commitment) -> bool {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for row in rows(&inner.conn, &format!("SELECT fields FROM {table}"))
         .await
         .unwrap()
@@ -528,7 +528,7 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     let stored = |scope: ResourceScope| {
         let alice = &alice;
         async move {
-            let inner = alice.inner.lock().await;
+            let inner = alice.inner.lock(crate::replica::Class::Background).await;
             collect_rows(
                 inner
                     .conn
@@ -632,7 +632,11 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
         let replica = replica.clone();
         async move {
             rows(
-                &replica.inner.lock().await.conn,
+                &replica
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .conn,
                 "SELECT id FROM secure_field_names WHERE name='items.note'",
             )
             .await

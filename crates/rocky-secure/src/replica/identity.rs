@@ -107,7 +107,7 @@ impl NodeAuthor {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Registers the local node key for credential-bound control signatures.
     pub async fn register_credential_signer(&self, key: PrivateKey) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner
             .config
             .credentials
@@ -1052,7 +1052,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         seal: Commitment,
     ) -> Option<Vec<(u32, u32)>> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner.find_scope_id(scope).await.unwrap()?;
         let (_, bound) = inner.kept_rewind(seal).await.unwrap()?.at(id)?;
         inner

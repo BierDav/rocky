@@ -601,7 +601,7 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The placement requests this replica wants answered.
     pub async fn wanted_placements(&self) -> Result<Vec<PlacementRequest>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some((domain, _)) = inner.workspace.followed.clone() else {
             return Ok(Vec::new());
         };
@@ -616,7 +616,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         request: PlacementRequest,
     ) -> Result<PlacementPage, Error> {
         self.inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .placement_page(peer, credentials, proved, request)
             .await
@@ -629,7 +629,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         request: PlacementRequest,
         page: PlacementPage,
     ) -> Result<usize, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         match page {
             PlacementPage::Headers { headers, chains } => {
                 let stored = inner.receive_placements(request, headers, chains).await?;
@@ -659,7 +659,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Pairs of different signed headers seen at one node position.
     pub async fn equivocations(&self) -> Result<usize, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         match rows(&inner.conn, "SELECT count(*) FROM secure_equivocations")
             .await?
             .first()

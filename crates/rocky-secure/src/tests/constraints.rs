@@ -730,7 +730,7 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
 
     // Clearing the parents' table as eviction does hides every child with it.
     {
-        let mut inner = fresh.inner.lock().await;
+        let mut inner = fresh.inner.lock(crate::replica::Class::Background).await;
         let lists = shop.lists;
         transaction!(inner, |inner| inner.clear_typed(lists).await).unwrap();
     }
@@ -746,7 +746,7 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
 #[tokio::test]
 async fn author_bindings_are_stored_once_and_travel_with_checkpoint_pages() {
     async fn sets(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         crate::storage::rows(
             &inner.conn,
             "SELECT digest,bindings FROM secure_author_bindings ORDER BY digest",

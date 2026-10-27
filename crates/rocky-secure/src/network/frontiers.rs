@@ -111,7 +111,7 @@ impl NativeSession {
                     .collect();
                 replica
                     .inner
-                    .lock()
+                    .lock(crate::replica::Class::Background)
                     .await
                     .record_frontiers(self.peer, &self.credentials, &remote)
                     .await?;

@@ -32,7 +32,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     for status in ["pending", "rejected"] {
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -48,7 +48,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     }
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -60,7 +60,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     preserved(&f, true).await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -71,7 +71,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
         .unwrap();
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -83,7 +83,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     preserved(&f, true).await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -105,7 +105,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     let wrong = Hash::new(b"not the recorded original endpoint");
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -117,7 +117,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     preserved(&f, false).await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -128,7 +128,11 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
         .unwrap();
     // A raw higher-log claim is corruption, not a signed bridge through H.
     let ids = {
-        let inner = f.replica.inner.lock().await;
+        let inner = f
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         collect_rows(
             inner
                 .conn
@@ -149,7 +153,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     let clock = f.frames[2].operation_ref().unwrap().header.timestamp;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -167,7 +171,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     preserved(&f, false).await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DELETE FROM secure_logs WHERE scope=?", [id])
@@ -244,7 +248,11 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
     let f = HeldPrefix::new(3).await;
     let scope = f.lineage.scope("items");
     let saved = rows(
-        &f.replica.inner.lock().await.conn,
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT * FROM secure_placements",
     )
     .await
@@ -256,7 +264,7 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
         let header = &operation.header;
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(
@@ -280,7 +288,7 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
     f.waits().await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute("DELETE FROM secure_placements", ())
@@ -289,7 +297,7 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
     for record in saved {
         f.replica
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .conn
             .execute(

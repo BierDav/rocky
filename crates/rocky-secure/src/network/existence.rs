@@ -209,7 +209,13 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<(usize, usize), Error> {
-        if replica.inner.lock().await.same_tip_peer(self.peer).is_err() {
+        if replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .same_tip_peer(self.peer)
+            .is_err()
+        {
             return Ok((0, 0));
         }
         if !self.pull_existence_base(replica, scope, None).await? {
@@ -290,7 +296,11 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: ExistenceMessage,
     ) -> Result<(), Error> {
-        replica.inner.lock().await.same_tip_peer(self.peer)?;
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .same_tip_peer(self.peer)?;
         match message {
             ExistenceMessage::BaseOffer { scope, expected } => {
                 let attachment = replica

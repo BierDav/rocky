@@ -4,7 +4,7 @@ use crate::storage::{bindings, rows};
 use rocky_core::SqlValue;
 
 async fn unchanged_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let tables = rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'secure_%' AND name NOT IN ('secure_equivocations','secure_placements') ORDER BY name").await.unwrap();
     let mut state = Vec::new();
     for table in tables {
@@ -24,7 +24,7 @@ async fn unchanged_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
 async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_suffix() {
     let pair = pair().await;
     let replica = &pair.alice;
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = rows(
         &inner.conn,
         "SELECT header FROM secure_operations ORDER BY sequence",
@@ -93,7 +93,7 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
         .unwrap();
     drop(inner);
     let before = unchanged_state(replica).await;
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for incoming in [&first, &other] {
         inner
             .conn
@@ -179,7 +179,7 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
         .unwrap();
     drop(inner);
     assert_eq!(unchanged_state(replica).await, before);
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("DELETE FROM secure_voids", ())

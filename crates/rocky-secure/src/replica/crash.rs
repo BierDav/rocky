@@ -51,13 +51,16 @@ impl CrashPoint {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Arms `point` for the next step that reaches it; `None` disarms.
     pub async fn arm_crash(&self, point: Option<CrashPoint>) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.crash = point;
         inner.crashed = None;
     }
     /// The armed point that fired since it was armed.
     pub async fn crashed(&self) -> Option<CrashPoint> {
-        self.inner.lock().await.crashed
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .crashed
     }
 }
 

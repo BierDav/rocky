@@ -12,7 +12,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if !crate::apply_allowed() {
                 return Err(Error::InjectedFailure);
             }
-            if !self.inner.lock().await.apply_step(now()?).await? {
+            let mut inner = self.inner.lock(Class::Background).await;
+            #[cfg(feature = "qualification")]
+            let frames = inner.applied_frames;
+            let more = inner.apply_step(now()?).await?;
+            #[cfg(feature = "qualification")]
+            {
+                let frames = inner.applied_frames - frames;
+                inner.units("applied_frame", frames);
+            }
+            if !more {
                 return Ok(());
             }
         }

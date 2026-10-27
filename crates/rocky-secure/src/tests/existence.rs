@@ -349,7 +349,11 @@ async fn rows(sql: &SecureSql<TypedRows>, statement: &str) -> Vec<Vec<SqlValue>>
 }
 /// Every typed row of `table`, support rows included, as the file holds it.
 async fn stored(device: &Device, sql: &str) -> Vec<Vec<SqlValue>> {
-    let inner = device.replica.inner.lock().await;
+    let inner = device
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     collect_rows(inner.conn.query(sql.to_string(), ()).await.unwrap())
         .await
         .unwrap()
@@ -975,7 +979,11 @@ async fn holders_and_non_holders_agree_when_a_held_parent_is_hidden_or_evicted()
     // Evicting the customers scope leaves the orders on puppets.
     let customers = erp.scope("customers");
     {
-        let mut inner = a.replica.inner.lock().await;
+        let mut inner = a
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         transaction!(inner, |inner| inner.clear_typed(customers).await).unwrap();
     }
     let listed = "SELECT id FROM orders ORDER BY id";
@@ -1016,7 +1024,11 @@ async fn warmed_header_scans_keep_existence_and_placement_counts_distinct() {
     let scope = erp.scope("lists");
     let scopes = [(scope, None)];
     let held = BTreeSet::from([scope]);
-    let inner = device.replica.inner.lock().await;
+    let inner = device
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
     inner.stored_header_memo_limits(8, 1 << 20);
     let warm = inner
         .scan_positions_for_test(erp.domain, &scopes, &held, &BTreeSet::new())

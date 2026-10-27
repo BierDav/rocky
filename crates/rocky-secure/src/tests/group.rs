@@ -53,7 +53,7 @@ async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let replica = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for (pragma, expected) in [
         ("PRAGMA journal_mode", SqlValue::Text("wal".into())),
         ("PRAGMA synchronous", SqlValue::Integer(1)),
@@ -846,7 +846,12 @@ async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
         result = &mut author => panic!("reply preceded the flush: {result:?}"),
         result = entered => result.unwrap(),
     }
-    let available = replica.inner.try_lock().is_ok();
+    let available = tokio::time::timeout(
+        std::time::Duration::ZERO,
+        replica.inner.lock(crate::replica::Class::Background),
+    )
+    .await
+    .is_ok();
     resume.send(()).unwrap();
     assert!(available, "fsync held the replica lock");
     assert!(author.await.is_ok());

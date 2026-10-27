@@ -10,7 +10,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// idempotency handles and node reservations remain. Local writes need
     /// acknowledged custody; retained dependencies and checkpoints prevent removal.
     pub async fn drop_tip(&self, tip: TipId) -> Result<u64, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner
             .graphs
             .values()

@@ -102,7 +102,13 @@ async fn a_matching_source_refuses_a_later_update_with_another_business_key() {
             .unwrap();
         let source_tip = frame.operation_ref().unwrap().header.extensions.tip;
         assert_eq!(
-            receiver.inner.lock().await.app.manifest().hash(),
+            receiver
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .app
+                .manifest()
+                .hash(),
             app.manifest().hash()
         );
         assert_eq!(
@@ -138,7 +144,7 @@ async fn a_matching_source_refuses_a_later_update_with_another_business_key() {
                 super::super::compaction::audit::snapshot(&receiver).await,
                 before
             );
-            let inner = receiver.inner.lock().await;
+            let inner = receiver.inner.lock(crate::replica::Class::Background).await;
             for table in [
                 "secure_held",
                 "secure_held_frames",

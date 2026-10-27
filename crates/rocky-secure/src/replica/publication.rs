@@ -291,7 +291,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         publication: Commitment,
     ) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some((migration, _, _)) = inner.migration_record(publication).await? else {
             return Ok(true);
         };
@@ -341,7 +341,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Every staged publication this replica committed, with how many of
     /// its leading bundles a peer reported holding.
     pub async fn publications(&self) -> Result<Vec<Publication>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut publications = Vec::new();
         for record in rows(
             &inner.conn,

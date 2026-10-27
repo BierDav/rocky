@@ -314,7 +314,7 @@ impl Link {
             after = next;
         }
         {
-            let inner = replica.inner.lock().await;
+            let inner = replica.inner.lock(crate::replica::Class::Background).await;
             for grant in inner.local_grants(now()?)?.iter() {
                 if grant.rows == rocky_core::RowSelection::All
                     && (grant.rights.contains(&rocky_core::Right::Read)
@@ -453,7 +453,7 @@ pub async fn scope_token<A: RowApplication>(
     scope: ResourceScope,
 ) -> Result<Commitment, Error> {
     let (bytes, flusher, commit) = {
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         let frontier = inner.frontier(scope).await?;
         let logs: Vec<_> = frontier
             .logs

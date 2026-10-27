@@ -693,7 +693,10 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The log of `domain`'s tip this replica follows.
     pub async fn followed_log(&self, domain: Scope) -> TipLog {
-        self.inner.lock().await.tip_log(domain)
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .tip_log(domain)
     }
     /// Catches this node up on `log`, which it follows, and joins its
     /// in-sync set at the exact committed position and hash, unless it is a
@@ -706,7 +709,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<LogHead, CoordinatedError> {
-        if self.inner.lock().await.log_state(log).await?.0 == 0 {
+        if self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .log_state(log)
+            .await?
+            .0
+            == 0
+        {
             self.hold_sealed_entries(log, coordinator, peers).await?;
         }
         let status = self.resolve(log, coordinator, peers).await?;
@@ -725,7 +736,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if head.pending.is_some() {
             return Err(CoordinatedError::Conflict);
         }
-        let (position, running, _, _) = self.inner.lock().await.log_state(log).await?;
+        let (position, running, _, _) = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .log_state(log)
+            .await?;
         // The coordinator drops only ended logs: one that forgot entries
         // this node holds ended, though its seal has not arrived yet.
         if head.epoch == 0 && position > head.commit {
@@ -739,7 +755,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !head.member(&me) {
             self.configure_line(log, &head, coordinator).await?;
             let sequence = {
-                let mut inner = self.inner.lock().await;
+                let mut inner = self.inner.lock(crate::replica::Class::Background).await;
                 let sequence = transaction!(inner, |inner| inner.next_sequence(log).await)?;
                 drop(flush_guard(inner, &self.inner).await?);
                 sequence
@@ -780,7 +796,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Refuses a slot while a committed entry's frames wait for dependencies.
     pub(super) async fn require_applied(&self, log: TipLog) -> Result<(), CoordinatedError> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         // A pruned frame was applied; a stored one must be. The stored
         // status suffices: no frame is decoded or verified again.
         for entry in inner.entries(log, &["committed"]).await? {
@@ -827,7 +843,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedCommit, CoordinatedError> {
         let own = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             inner.entries(log, &["staged", "assigned"]).await?
         };
         let Some(mut entry) = own.into_iter().next() else {
@@ -915,7 +931,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         match decided {
             Decision::Committed => {
                 self.admit_carry(entry.carry.as_ref()).await?;
-                self.inner.lock().await.publication_fault(4)?;
+                self.inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .publication_fault(4)?;
                 self.commit_own(log, &entry, &ids).await?;
                 Ok(CoordinatedCommit {
                     position: pending.position,
@@ -944,7 +963,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
     ) -> Result<(Vec<EncryptedFrame>, Option<Decision>), CoordinatedError> {
         let (frames, voids, carry) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let frames = inner.own_frames(ids).await?;
             let voids = inner.voids_before(&frames).await?;
             let carry = inner
@@ -1031,7 +1050,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "the coordinator assigned another entry".into(),
             ));
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .record(
@@ -1045,7 +1064,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
     async fn commit_own(&self, log: TipLog, entry: &Entry, ids: &[Hash]) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .commit_entry(log, entry.position, entry.hash, ids, None)
@@ -1065,7 +1084,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let bundle = entry
             .bundle
             .ok_or_else(|| Error::Corrupt("own entry without its bundle".into()))?;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             for id in &ids {
                 for sql in [
@@ -1116,7 +1135,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             inner.check_entry_coordinates(&entry, &ids)?;
             // Its acknowledgment promises to apply it once committed: a node
             // that cannot hold every frame's scope stores nothing.
@@ -1129,7 +1148,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             transaction!(inner, |inner| {
                 inner
                     .conn
@@ -1164,7 +1183,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(result) => Ok(result),
             // Not the pending entry: nothing will commit it.
             Err(error) if coordination(error.clone()) != CoordinatedError::Unavailable => {
-                let mut inner = self.inner.lock().await;
+                let mut inner = self.inner.lock(crate::replica::Class::Background).await;
                 transaction!(inner, |inner| {
                     inner
                         .conn
@@ -1194,7 +1213,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let result = tracing::Instrument::instrument(
             async {
                 let _deciding = self.domain_log.deciding.lock().await;
-                if self.inner.lock().await.log_state(log).await?.0 == 0 {
+                if self
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .log_state(log)
+                    .await?
+                    .0
+                    == 0
+                {
                     self.hold_sealed_entries(log, coordinator, peers).await?;
                 }
                 self.resolve(log, coordinator, peers).await
@@ -1212,14 +1239,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedStatus, CoordinatedError> {
         let head = coordinator.log_head(log).await.map_err(coordination)?;
-        self.inner.lock().await.learn_genesis(log, &head).await?;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .learn_genesis(log, &head)
+            .await?;
         let me = coordinator.node();
         // A staged entry whose append a restart lost: its first outcome
         // decides. One this process proposes next is left to `propose`.
         let proposing = self.domain_log.proposing().contains(&log);
         let staged = match proposing {
             true => Vec::new(),
-            false => self.inner.lock().await.entries(log, &["staged"]).await?,
+            false => {
+                self.inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .entries(log, &["staged"])
+                    .await?
+            }
         };
         for entry in staged {
             // A lost append reply may leave the exact committed bundle staged.
@@ -1254,7 +1291,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         // A write a seal carried here retries once this node follows the tip.
-        let carried = self.inner.lock().await.entries(log, &["carried"]).await?;
+        let carried = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .entries(log, &["carried"])
+            .await?;
         if !proposing && !carried.is_empty() {
             settled(self.retry_carried(log, coordinator, peers).await)?;
         }
@@ -1262,7 +1304,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut caught_up = false;
         let undecided = self
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .entries(log, &["assigned", "stored"])
             .await?;
@@ -1294,7 +1336,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
                 Decision::Aborted => {
-                    let mut inner = self.inner.lock().await;
+                    let mut inner = self.inner.lock(crate::replica::Class::Background).await;
                     transaction!(inner, |inner| {
                         inner
                             .conn
@@ -1310,12 +1352,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Decision::Committed
                     if self
                         .inner
-                        .lock()
+                        .lock(crate::replica::Class::Background)
                         .await
                         .recovery(log)?
                         .is_some_and(|recovery| recovery.abandons(entry.position)) => {}
                 Decision::Committed => {
-                    let (position, _, _, _) = self.inner.lock().await.log_state(log).await?;
+                    let (position, _, _, _) = self
+                        .inner
+                        .lock(crate::replica::Class::Background)
+                        .await
+                        .log_state(log)
+                        .await?;
                     if position + 1 < entry.position && !caught_up {
                         self.catch_up(log, &head, peers, entry.position - 1).await?;
                         caught_up = true;
@@ -1329,11 +1376,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // ends before it, or at the prefix the owner's recovery retained.
         let mut through = head.commit - u64::from(head.terminal.is_some());
         if head.terminal.is_some()
-            && let Some(recovery) = self.inner.lock().await.recovery(log)?
+            && let Some(recovery) = self
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .recovery(log)?
         {
             through = through.min(recovery.retained.position);
         }
-        let (position, _, _, _) = self.inner.lock().await.log_state(log).await?;
+        let (position, _, _, _) = self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .log_state(log)
+            .await?;
         if position < through {
             self.catch_up(log, &head, peers, through).await?;
         }
@@ -1342,7 +1398,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Applies one committed entry this replica stores or proposed.
     async fn apply_committed(&self, log: TipLog, entry: &Entry) -> Result<(), CoordinatedError> {
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             let (position, _, _, _) = inner.log_state(log).await?;
             if entry.position <= position {
                 // Catching up may have committed it already.
@@ -1369,7 +1425,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         } else {
             decode_bounded(&entry.frames, MAX_SECURE_BYTES)?
         };
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             inner
                 .commit_entry(log, entry.position, entry.hash, &ids, None)
@@ -1418,12 +1474,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut endorsed: BTreeMap<u64, Commitment> = BTreeMap::new();
         let retained = self
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .recovery(log)?
             .map(|recovery| recovery.retained);
         loop {
-            let (position, running, _, _) = self.inner.lock().await.log_state(log).await?;
+            let (position, running, _, _) = self
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .log_state(log)
+                .await?;
             if position >= through {
                 return Ok(());
             }
@@ -1500,7 +1561,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             for entry in entries {
                 self.admit_carry(entry.carry.as_ref()).await?;
                 self.receive_entry(entry.frames, &entry.voids).await?;
-                let mut inner = self.inner.lock().await;
+                let mut inner = self.inner.lock(crate::replica::Class::Background).await;
                 for id in &entry.ids {
                     if inner.frame(*id).await?.is_none() && inner.stub(*id).await?.is_none() {
                         return Err(CoordinatedError::Behind);
@@ -1525,7 +1586,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         log: TipLog,
         after: u64,
     ) -> Result<Vec<CommittedEntry>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let (_, _, genesis, _) = inner.log_state(log).await?;
         let mut entries = Vec::new();
         let mut before = None;
@@ -1620,7 +1681,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// This replica's progress on `log`.
     pub async fn coordinated_status(&self, log: TipLog) -> Result<CoordinatedStatus, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let (position, _, _, _) = inner.log_state(log).await?;
         Ok(CoordinatedStatus {
             position,
@@ -1664,7 +1725,7 @@ impl<A: RowApplication> EntryPeers for Collected<'_, A> {
             let held = self
                 .replica
                 .inner
-                .lock()
+                .lock(crate::replica::Class::Background)
                 .await
                 .collectible_entries(None, log, after)
                 .await?;

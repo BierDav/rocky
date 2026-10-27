@@ -98,7 +98,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
     // its frontier at 2 does not reveal the exact hash at 1.
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -113,7 +113,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
     super::negatives::preserved(&f, false).await;
     f.replica
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(

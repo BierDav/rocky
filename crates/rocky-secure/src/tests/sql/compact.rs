@@ -54,7 +54,7 @@ async fn seven_field_fifty_byte_rows_meet_wire_and_storage_gates_and_keep_birth_
         frame.body_bytes(),
     )
     .unwrap();
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let payload = inner.decode_row_payload(frame, &plaintext).unwrap();
     assert_eq!(payload.writes().len(), 32);
     let bindings: Vec<_> = frame
@@ -269,7 +269,7 @@ async fn a_full_sixty_four_frame_bundle_keeps_membership_within_the_frame_budget
             frame.body_bytes(),
         )
         .unwrap();
-        let inner = replica.inner.lock().await;
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
         let payload = inner.decode_row_payload(frame, &plaintext).unwrap();
         assert_eq!(payload.membership().unwrap().members.len(), 64);
         assert_eq!(payload.writes().len(), 32);

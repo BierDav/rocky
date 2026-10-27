@@ -1684,7 +1684,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scope: ResourceScope,
         identities: [rocky_core::RowIdentity; 2],
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             let (allocation, _) = inner.bound_allocation(scope).await?;
             let mut verified = FrameClaims::default();

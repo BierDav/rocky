@@ -47,11 +47,25 @@ async fn restoration_requires_the_retained_partition_tuple_without_a_current_tab
     );
     writer.receive_tip_statements(&statements).await.unwrap();
     switch(&f, &writer, "dev", &absent).await;
-    assert!(!writer.inner.lock().await.tables.contains(&scope.table));
+    assert!(
+        !writer
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .tables
+            .contains(&scope.table)
+    );
     assert_eq!(count(&writer, "SELECT 1 FROM secure_operations").await, 1);
-    let logs = rows(&writer.inner.lock().await.conn, "SELECT * FROM secure_logs")
-        .await
-        .unwrap();
+    let logs = rows(
+        &writer
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        "SELECT * FROM secure_logs",
+    )
+    .await
+    .unwrap();
     // Privileged stored-envelope corruption, not an admissible frame:
     // keep SQL hash/index/guard coherent so only the historical tuple is bad.
     let mut malformed = header.clone();
@@ -63,7 +77,7 @@ async fn restoration_requires_the_retained_partition_tuple_without_a_current_tab
         .merge_restoration_for_test(scope, (0, Some(malformed.hash())))
         .await
         .unwrap();
-    let inner = writer.inner.lock().await;
+    let inner = writer.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("DELETE FROM secure_logs", ())
@@ -98,7 +112,7 @@ async fn restoration_requires_the_retained_partition_tuple_without_a_current_tab
         crate::tests::compaction::audit::snapshot(&writer).await,
         before
     );
-    let inner = writer.inner.lock().await;
+    let inner = writer.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(
@@ -128,7 +142,7 @@ async fn restoration_requires_the_retained_partition_tuple_without_a_current_tab
     // fixture; this is not a claim of normal guard discharge.
     writer
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .conn
         .execute(
@@ -137,7 +151,7 @@ async fn restoration_requires_the_retained_partition_tuple_without_a_current_tab
         )
         .await
         .unwrap();
-    let inner = writer.inner.lock().await;
+    let inner = writer.inner.lock(crate::replica::Class::Background).await;
     for log in logs {
         inner
             .conn

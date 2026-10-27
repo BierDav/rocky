@@ -91,7 +91,13 @@ struct Pair {
 }
 
 async fn chain(replica: &Replica) -> CredentialChain {
-    replica.inner.lock().await.config.credentials.clone()
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone()
 }
 /// Asks `source` for every placement `target` wants, as `target`'s session.
 async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
@@ -157,7 +163,7 @@ async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_cust
     let key = pair
         .alice
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .config
         .keys
@@ -167,7 +173,12 @@ async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_cust
         .clone();
     {
         // Retained crypto state is not a current custody grant.
-        let mut inner = pair.bob.1.inner.lock().await;
+        let mut inner = pair
+            .bob
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
         inner.config.keys.push(key);
         assert!(inner.holds(scope).await.unwrap());
         inner.conn.execute(
@@ -206,7 +217,14 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     let seal = seal(&lineage, &alice).await.id().unwrap();
     crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
     // The grant still requires real payloads when no opening key is available.
-    let keys = std::mem::take(&mut bob.inner.lock().await.config.keys);
+    let keys = std::mem::take(
+        &mut bob
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .keys,
+    );
     let mark = alice.seal_frontier(lineage.domain, false).await.unwrap()[0];
     let request = PlacementRequest {
         seal,
@@ -224,7 +242,11 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
         scalar(&bob, "SELECT count(*) FROM secure_placements").await,
         0
     );
-    bob.inner.lock().await.config.keys = keys;
+    bob.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = keys;
     assert_eq!(
         bob.compact(lineage.domain, 0).await.unwrap().compacted,
         None
@@ -358,7 +380,13 @@ async fn forged_out_of_range_held_scope_staged_and_revoked_placements_are_refuse
             .is_err()
     );
     // A genuine signature does not authorize a different domain or row format.
-    let signer = alice.inner.lock().await.config.node.clone();
+    let signer = alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .clone();
     for wrong_domain in [true, false] {
         let mut altered: p2panda_core::Header<crate::wire::Extensions> =
             decode(&headers[0].0).unwrap();
@@ -396,7 +424,7 @@ async fn forged_out_of_range_held_scope_staged_and_revoked_placements_are_refuse
     );
     // An uncommitted coordinated frame is not shown.
     {
-        let inner = alice.inner.lock().await;
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -411,7 +439,7 @@ async fn forged_out_of_range_held_scope_staged_and_revoked_placements_are_refuse
     };
     assert!(none.is_empty());
     {
-        let inner = alice.inner.lock().await;
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute("DELETE FROM secure_staged", ())
@@ -460,7 +488,14 @@ async fn a_placement_from_a_revoked_author_is_refused() {
         )
         .await
         .unwrap();
-    let node = pair.alice.inner.lock().await.config.node.public_key();
+    let node = pair
+        .alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .public_key();
     let user = PrivateKey::from_bytes(&rocky_core::commitment("lineage.user", node.as_bytes()));
     let revocations = crate::tests::revoking(
         pair.lineage.publisher(),
@@ -484,7 +519,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     // Alice's next `items` frame takes the next position. Bob holds a
     // placement there whose header is another frame's.
     let placed: Vec<u8> = {
-        let inner = bob.1.inner.lock().await;
+        let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         match crate::storage::rows(&inner.conn, "SELECT header FROM secure_placements LIMIT 1")
             .await
             .unwrap()
@@ -498,7 +533,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     let header: p2panda_core::Header<crate::wire::Extensions> = decode(&placed).unwrap();
     let author = header.extensions.author.unwrap();
     let next = {
-        let inner = bob.1.inner.lock().await;
+        let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         let mut highest = 0;
         for record in crate::storage::rows(&inner.conn, "SELECT header FROM secure_placements")
             .await
@@ -513,7 +548,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
         highest + 1
     };
     {
-        let inner = bob.1.inner.lock().await;
+        let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         inner
             .conn
             .execute(
@@ -584,7 +619,7 @@ async fn sync_scope(
 }
 /// The author number `node` signs its frames held by `replica` with.
 async fn author_number(replica: &Replica, node: PublicKey) -> u32 {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::rows(&inner.conn, "SELECT header FROM secure_operations")
         .await
         .unwrap();
@@ -652,7 +687,7 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
     // A third tag reaches the relay only as Alice's signed void.
     tag(&alice, "t3").await;
     let voided = {
-        let inner = alice.inner.lock().await;
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
         match crate::storage::rows(
             &inner.conn,
             "SELECT header FROM secure_operations ORDER BY rowid DESC LIMIT 1",
@@ -675,8 +710,20 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
     let sealed = seal(&lineage, &relay).await.id().unwrap();
     crate::tests::exchange_graphs(&relay, &bob, lineage.domain).await;
     sync(&lineage, &relay, &bob, &keys[2]).await;
-    let alice_node = alice.inner.lock().await.config.node.public_key();
-    let relay_node = relay.inner.lock().await.config.node.public_key();
+    let alice_node = alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .public_key();
+    let relay_node = relay
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .node
+        .public_key();
     let requests = bob.wanted_placements().await.unwrap();
     let (alice_author, relay_author) = (
         author_number(&alice, alice_node).await,

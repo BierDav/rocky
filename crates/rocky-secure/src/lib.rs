@@ -170,3 +170,8 @@ pub use replica::{check_replica_format, local_row_counts};
 
 /// One-way reference used by durable peer metadata.
 pub use rocky_credentials::PeerId;
+
+#[cfg(feature = "qualification")]
+pub use replica::{
+    HolderMeasurements, LockMeasurements, Measurements, with_measurement_connection,
+};

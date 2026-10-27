@@ -28,7 +28,7 @@ async fn an_omitted_removed_partition_ledger_is_still_verified() {
     assert!(
         !reader
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .tables
             .contains(&f.scope("A").table)
@@ -36,7 +36,7 @@ async fn an_omitted_removed_partition_ledger_is_still_verified() {
     assert!(!reader.key_epochs(f.scope("A")).await.is_empty());
     reader.audit_scopes(&[f.scope("B")]).await.unwrap();
     let before = crate::tests::compaction::audit::snapshot(&reader).await;
-    let inner = reader.inner.lock().await;
+    let inner = reader.inner.lock(crate::replica::Class::Background).await;
     let saved = rows(&inner.conn, "SELECT * FROM secure_identity_ledger")
         .await
         .unwrap();
@@ -50,7 +50,7 @@ async fn an_omitted_removed_partition_ledger_is_still_verified() {
             .contains("identity ledger or summary differs"),
         "{error}"
     );
-    let inner = reader.inner.lock().await;
+    let inner = reader.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute("DELETE FROM secure_identity_ledger", ())
@@ -77,7 +77,7 @@ async fn an_omitted_removed_partition_ledger_is_still_verified() {
 type Journal = Vec<(&'static str, Vec<Vec<SqlValue>>)>;
 
 pub(super) async fn journal(replica: &EncryptedReplica<TypedRows>) -> Journal {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut saved = Vec::new();
     for table in [
         "secure_admission_entries",
@@ -96,7 +96,7 @@ pub(super) async fn journal(replica: &EncryptedReplica<TypedRows>) -> Journal {
 }
 
 async fn replace(replica: &EncryptedReplica<TypedRows>, saved: Journal) {
-    let inner = replica.inner.lock().await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for (table, records) in saved {
         inner
             .conn
@@ -137,7 +137,11 @@ pub(super) async fn refuses_missing_continuation(
     assert_eq!(replica.audit_scratch_flags().await, (false, false));
     assert!(
         rows(
-            &replica.inner.lock().await.conn,
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
             "SELECT 1 FROM secure_checkpoint_scratch"
         )
         .await

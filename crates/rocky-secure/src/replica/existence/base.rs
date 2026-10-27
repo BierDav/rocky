@@ -156,7 +156,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Option<ExistenceBaseAttachment>, Error> {
-        self.inner.lock().await.existence_base(scope).await
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .existence_base(scope)
+            .await
     }
     pub async fn existence_base_offer(
         &self,
@@ -164,7 +168,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<Option<ExistenceBaseAttachment>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
         let base = inner
             .existence_base(scope)
@@ -182,7 +186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<i64>,
         limit: usize,
     ) -> Result<ExistenceBasePage, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
         if inner.archived_existence_base(scope, base).await?.is_none() {
             return Err(denied("existence base changed; restart transfer"));
@@ -210,7 +214,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         base: ExistenceBaseAttachment,
     ) -> Result<(Option<i64>, bool), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.verify_existence_base(&base)?;
         let scope = encode(&base.scope)?;
         transaction!(inner, |inner| {
@@ -250,7 +254,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if page.rows.len() > MAX_EXISTENCE_PAGE {
             return Err(denied("existence base page quota"));
         }
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             let blob = encode(&scope)?;
             let held = rows_with(&inner.conn, "SELECT attachment,cursor,count,digest,complete FROM secure_existence_stage WHERE scope=?", vec![SqlValue::Blob(blob.clone())]).await?;
@@ -312,7 +316,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Discards transfer progress without touching the installed state.
     pub async fn abort_existence_base(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             for table in ["secure_existence_stage", "secure_existence_stage_rows"] {
                 inner
@@ -327,7 +331,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     pub async fn finish_existence_base(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| {
             let blob = encode(&scope)?;
             let held = rows_with(

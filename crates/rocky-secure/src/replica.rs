@@ -1,4 +1,8 @@
 mod admission;
+mod lock;
+pub(crate) use lock::{Class, Guard, ReplicaLock};
+#[cfg(feature = "qualification")]
+pub use lock::{HolderMeasurements, LockMeasurements, Measurements, with_measurement_connection};
 mod apply;
 mod author;
 mod backup;
@@ -492,6 +496,8 @@ pub(super) struct Inner<A> {
 /// group's flush runs after the replica lock is released and readers and the
 /// next group do not wait behind it.
 pub(super) struct Flusher {
+    #[cfg(feature = "qualification")]
+    measurements: LockMeasurements,
     #[cfg(test)]
     pause: std::sync::Mutex<
         Option<(
@@ -515,11 +521,20 @@ pub(super) struct Flusher {
 impl Flusher {
     async fn run(self: Arc<Self>, commit: u64) -> Result<(), Error> {
         if self.durable() >= commit {
+            #[cfg(feature = "qualification")]
+            self.measurements.flush(std::time::Duration::ZERO);
             return Ok(());
         }
-        tokio::task::spawn_blocking(move || self.flush(commit))
+        #[cfg(feature = "qualification")]
+        let started = std::time::Instant::now();
+        #[cfg(feature = "qualification")]
+        let measurements = self.measurements.clone();
+        let result = tokio::task::spawn_blocking(move || self.flush(commit))
             .await
-            .map_err(|_| Error::Closed)?
+            .map_err(|_| Error::Closed)?;
+        #[cfg(feature = "qualification")]
+        measurements.flush(started.elapsed());
+        result
     }
 
     pub(super) fn durable(&self) -> u64 {
@@ -590,9 +605,9 @@ impl Flusher {
 /// Releases the writer while forcing durability. Rechecking the commit after
 /// reacquiring prevents a serving call from including a newer unflushed write.
 async fn flush_guard<'a, A: RowApplication>(
-    mut inner: tokio::sync::MutexGuard<'a, Inner<A>>,
-    owner: &'a Mutex<Inner<A>>,
-) -> Result<tokio::sync::MutexGuard<'a, Inner<A>>, Error> {
+    mut inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
+    owner: &'a ReplicaLock<Inner<A>>,
+) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
     let authority = inner.authority;
     loop {
         let (flusher, commit) = (inner.flusher.clone(), inner.commit);
@@ -607,7 +622,7 @@ async fn flush_guard<'a, A: RowApplication>(
         }
         drop(inner);
         flusher.run(commit).await?;
-        inner = owner.lock().await;
+        inner = owner.lock(Class::Background).await;
         if inner.authority != authority {
             return Err(Error::Conflict);
         }
@@ -629,7 +644,7 @@ type LocalSelectors = ((u64, u64), Selectors);
 
 /// Encrypted protocol files use an explicit API; trusted files cannot be opened here.
 pub struct EncryptedReplica<A> {
-    pub(super) inner: Arc<Mutex<Inner<A>>>,
+    pub(super) inner: Arc<ReplicaLock<Inner<A>>>,
     queue: Arc<group::Queue>,
     revisions: watch::Receiver<u64>,
     /// The coordinated log this trusted node acknowledges stored entries to.
@@ -646,6 +661,10 @@ impl<A> Clone for EncryptedReplica<A> {
     }
 }
 impl<A> EncryptedReplica<A> {
+    #[cfg(feature = "qualification")]
+    pub fn lock_measurements(&self) -> LockMeasurements {
+        self.inner.measurements()
+    }
     /// Makes this replica a trusted node of a coordinated log: peers may
     /// store entries on it, which it acknowledges through `log`.
     pub fn set_domain_log(&self, log: Option<Arc<dyn rocky_core::DomainLog>>) {
@@ -905,6 +924,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let flusher = Arc::new(Flusher {
             #[cfg(test)]
             pause: Default::default(),
+            #[cfg(feature = "qualification")]
+            measurements: LockMeasurements::default(),
             wal: wal.clone(),
             durable: AtomicU64::new(0),
             #[cfg(test)]
@@ -992,7 +1013,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             wal,
             // A reopened file may hold commits a crashed process never flushed.
             commit: 1,
-            flusher,
+            flusher: flusher.clone(),
             changes: 0,
             wal_limits: (group::WAL_CHECKPOINT_BYTES, group::WAL_LIMIT_BYTES),
             wal_mark: 0,
@@ -1193,7 +1214,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verify_open().await?;
         let opening_revocations = inner.opening_revocations.take();
         let replica = Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(ReplicaLock::new(
+                inner,
+                #[cfg(feature = "qualification")]
+                flusher.measurements.clone(),
+            )),
             queue: Arc::default(),
             revisions,
             domain_log: Arc::default(),
@@ -1214,22 +1239,41 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) {
         let (entered, waiting) = tokio::sync::oneshot::channel();
         let (resume, resumed) = std::sync::mpsc::channel();
-        *self.inner.lock().await.flusher.pause.lock().unwrap() = Some((entered, resumed));
+        *self
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .flusher
+            .pause
+            .lock()
+            .unwrap() = Some((entered, resumed));
         (waiting, resume)
     }
     /// Wakes after a frame group commits, including keyless custody receipt.
     /// Duplicate incoming frames do not wake it; exports still require a flush.
     pub async fn observe_frames(&self) -> watch::Receiver<()> {
-        self.inner.lock().await.frames.subscribe()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .frames
+            .subscribe()
     }
     /// Ends authority-bound network links without polling.
     pub async fn observe_authority(&self) -> watch::Receiver<u64> {
-        self.inner.lock().await.authority_events.subscribe()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .authority_events
+            .subscribe()
     }
     /// Changes when keys, grants, schemas, the tip graph or the followed
     /// tip changed: what local recovery and quarantined frames depend on.
     pub async fn observe_recovery(&self) -> watch::Receiver<i64> {
-        self.inner.lock().await.recovery_events.subscribe()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .recovery_events
+            .subscribe()
     }
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()
@@ -1237,7 +1281,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Changes after every stored checkpoint page, so import progress can
     /// be shown as it moves.
     pub async fn observe_imports(&self) -> watch::Receiver<u64> {
-        self.inner.lock().await.imported.subscribe()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .imported
+            .subscribe()
     }
     /// Concurrent calls share one transaction and one flush; each request
     /// keeps its own savepoint, admission checks and result. The frame may be
@@ -1363,7 +1411,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
             }
             let verified = {
-                let inner = self.inner.lock().await;
+                let inner = self.inner.lock(crate::replica::Class::Background).await;
                 match now() {
                     Ok(time) => inner.check_migration_frame(&frame, time).await.map(|_| ()),
                     Err(error) => Err(error),
@@ -1378,7 +1426,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let contradicted = match frame.operation_ref() {
                 Ok(operation) => {
                     self.inner
-                        .lock()
+                        .lock(crate::replica::Class::Background)
                         .await
                         .refuse_no_frames_contradiction(&operation.header)
                         .await
@@ -1399,7 +1447,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         #[cfg(test)]
         {
-            let gate = self.inner.lock().await.receive_gate.take();
+            let gate = self
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .receive_gate
+                .take();
             if let Some((reached, resume)) = gate {
                 let _ = reached.send(());
                 let _ = resume.await;
@@ -1422,7 +1475,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// replica, so statements and reads proceed meanwhile.
     pub async fn flush(&self) -> Result<u64, Error> {
         let (flusher, commit) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             (inner.flusher.clone(), inner.commit)
         };
         if flusher.durable() < commit {
@@ -1436,13 +1489,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Before the last handle closes the file: refreshes the planner's
     /// statistics where SQLite finds them stale. Best effort.
     pub async fn optimize(&self) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
     }
     /// Runs maintenance queued by buffered SQL commits: one bounded checkpoint or
     /// pruning step for their scopes, and a WAL checkpoint when due.
     pub async fn maintain(&self) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let scopes = std::mem::take(&mut inner.deferred_maintenance);
         let span = tracing::debug_span!("maintain", scopes = scopes.len());
         tracing::Instrument::instrument(
@@ -1459,14 +1512,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Names the scopes the owner is about to import from a checkpoint,
     /// replacing the previous set. A scope with a staged import counts too.
     pub async fn set_importing(&self, scopes: BTreeSet<ResourceScope>) {
-        self.inner.lock().await.importing = scopes;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .importing = scopes;
     }
     /// The last commit known to survive power loss.
     pub async fn durable_commit(&self) -> u64 {
-        self.inner.lock().await.flusher.durable()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .flusher
+            .durable()
     }
     pub async fn install_key(&self, key: KeyMaterial) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner
             .config
             .keys
@@ -1505,7 +1565,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await
     }
     pub async fn evict_key(&self, scope: ResourceScope) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.config.keys.retain(|key| key.scope != scope);
         inner.history.retain(|key| key.scope != scope);
         inner.bump_authority();
@@ -1515,7 +1575,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// writes again. Handles are retained as `RetentionLimits` describes.
     /// A handle whose write the owner's recovery abandoned reports that.
     pub async fn handle_committed(&self, handle: Commitment) -> Result<bool, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut result = inner
             .conn
             .query(
@@ -1534,7 +1594,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Flushes first: the status may be acknowledged to the sender.
     pub async fn receipt_status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
         inner.status(id).await
     }
@@ -1546,7 +1606,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         revocations: &RevocationSet,
     ) -> Result<Vec<SignedRevocation>, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut merged = inner.config.revocations.clone();
         let added = merged
             .merge(
@@ -1616,7 +1676,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         own: &CredentialChain,
     ) -> Result<Option<SignedRevocation>, Error> {
         let (publisher, app) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
             (inner.config.publisher, inner.definition.app)
         };
         let mut revoking = None;
@@ -1638,15 +1698,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// The revocations this replica holds.
     pub async fn revocations(&self) -> RevocationSet {
-        self.inner.lock().await.config.revocations.clone()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .revocations
+            .clone()
     }
     /// The digest of the live revocations, which a session hello carries.
     pub async fn revocation_digest(&self) -> Result<Commitment, Error> {
-        self.inner.lock().await.revocation_digest()
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .revocation_digest()
     }
     #[cfg(test)]
     pub(crate) async fn inject_failure(&self, retries: usize, failures: usize) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.retry_before_commit = retries;
         inner.fail_before_commit = failures;
     }
@@ -1655,7 +1723,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         supplied: RevocationSet,
     ) -> Result<RevocationSet, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.config.revocations = supplied.clone();
         transaction!(inner, |inner| {
             inner.load_revocations(&supplied, None).await?;
@@ -1669,7 +1737,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     #[cfg(test)]
     pub(crate) async fn inject_group_fault(&self, fault: Option<group::GroupFault>) {
-        self.inner.lock().await.group_fault = fault;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .group_fault = fault;
     }
     /// Pauses the next receive after its early checks; returns a signal that
     /// it reached the pause and the sender that resumes it.
@@ -1682,28 +1753,43 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) {
         let (reached, at_gate) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
-        self.inner.lock().await.receive_gate = Some((reached, resumed));
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .receive_gate = Some((reached, resumed));
         (at_gate, resume)
     }
     #[cfg(test)]
     pub(crate) async fn group_commits(&self) -> usize {
-        self.inner.lock().await.group_commits
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .group_commits
     }
     #[cfg(test)]
     pub(crate) async fn checkpoints(&self) -> usize {
-        self.inner.lock().await.checkpoints
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .checkpoints
     }
     #[cfg(test)]
     pub(crate) async fn set_wal_limits(&self, checkpoint: u64, limit: u64) {
-        self.inner.lock().await.wal_limits = (checkpoint, limit);
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .wal_limits = (checkpoint, limit);
     }
     #[cfg(test)]
     pub(crate) async fn set_busy_hook(&self, hook: Option<Box<dyn FnMut(usize) + Send + Sync>>) {
-        self.inner.lock().await.busy_hook = hook;
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .busy_hook = hook;
     }
     #[cfg(test)]
     pub(crate) async fn watermark(&self) -> (u64, u64, usize) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         (
             inner.commit,
             inner.flusher.durable(),
@@ -1714,7 +1800,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn copy_at_flush(&self, directory: Option<PathBuf>) {
         *self
             .inner
-            .lock()
+            .lock(crate::replica::Class::Background)
             .await
             .flusher
             .copy
@@ -1723,7 +1809,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     #[cfg(test)]
     pub(crate) async fn stored_and_memory_revision(&self) -> (u64, u64) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
         (inner.stored_revision().await.unwrap(), inner.revision)
     }
     #[cfg(test)]
@@ -1731,7 +1817,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<bool, Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner
             .find_scope_id(scope)
             .await?
@@ -1747,7 +1833,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         manifest: Commitment,
         definition: Option<rocky_core::ApplicationManifest>,
     ) -> Option<rocky_core::ApplicationManifest> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.invalidate_context();
         match definition {
             Some(definition) => inner.catalog.insert(manifest, definition),

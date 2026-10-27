@@ -105,6 +105,8 @@ enum Command {
     },
     Disconnect(u64, oneshot::Sender<()>),
     Coordinate(Option<Arc<dyn rocky_core::DomainLog>>, oneshot::Sender<()>),
+    #[cfg(feature = "qualification")]
+    LockMeasurements(oneshot::Sender<rocky_secure::LockMeasurements>),
     Observe(
         Option<Vec<String>>,
         oneshot::Sender<Result<rocky_runtime::TableObserver, Failure>>,
@@ -184,6 +186,11 @@ impl Worker {
     }
 }
 impl Database {
+    /// Replica-local measurement support for release qualification probes.
+    #[cfg(feature = "qualification")]
+    pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
+        Ok(self.shared.request(Command::LockMeasurements).await?)
+    }
     /// Creates a domain in an empty directory, owned by this node's
     /// identity, whose key is the publisher key. Credentials last
     /// `credential_ttl` seconds, 30 days by default.
@@ -528,6 +535,10 @@ pub struct Connection {
     closed: AtomicBool,
 }
 impl Connection {
+    #[cfg(feature = "qualification")]
+    pub fn measurement_id(&self) -> u64 {
+        self.id
+    }
     /// A number for a new statement handle of this connection.
     pub fn statement(&self) -> u64 {
         self.statements.fetch_add(1, Ordering::Relaxed)
@@ -1539,7 +1550,11 @@ async fn run(
                             | connection::Call::Next { statement } => Some(*statement),
                             _ => None,
                         };
-                        let result = connection::serve(state.clone(), call).await;
+                        let serving = connection::serve(state.clone(), call);
+                        #[cfg(feature = "qualification")]
+                        let serving =
+                            rocky_secure::with_measurement_connection(connection, serving);
+                        let result = serving.await;
                         if reply.send(result).is_err()
                             && let Some(statement) = statement
                         {
@@ -1558,6 +1573,10 @@ async fn run(
             Command::Coordinate(log, reply) => {
                 node.coordinate(log);
                 let _ = reply.send(());
+            }
+            #[cfg(feature = "qualification")]
+            Command::LockMeasurements(reply) => {
+                let _ = reply.send(node.replica.lock_measurements());
             }
             Command::Observe(tables, reply) => {
                 tasks.spawn_local(async move {

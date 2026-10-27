@@ -40,7 +40,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
                 .await
                 .unwrap();
         {
-            let mut inner = replica.inner.lock().await;
+            let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
             let records = rows(
                 &inner.conn,
                 "SELECT signed FROM secure_checkpoints WHERE signed IS NOT NULL",
@@ -88,7 +88,7 @@ async fn unsupported_replica_formats_refuse_before_writes() {
                 .await
                 .unwrap();
         {
-            let mut inner = replica.inner.lock().await;
+            let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
             inner
                 .conn
                 .execute(
@@ -142,7 +142,7 @@ async fn damaged_replica_schema_refuses_before_writes() {
                 .await
                 .unwrap();
         {
-            let mut inner = replica.inner.lock().await;
+            let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
             inner.conn.execute(damaged, ()).await.unwrap();
             inner.flush().unwrap();
         }
@@ -184,7 +184,11 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
         .unwrap();
     let before = replica.snapshot(f.public).await.unwrap();
     let operations = rows(
-        &replica.inner.lock().await.conn,
+        &replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
         "SELECT hash FROM secure_operations",
     )
     .await
@@ -206,7 +210,11 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
         );
         assert_eq!(
             rows(
-                &replica.inner.lock().await.conn,
+                &replica
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .conn,
                 "SELECT hash FROM secure_operations"
             )
             .await
@@ -300,7 +308,11 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         assert!(error.to_string().contains(message), "{error}");
         assert!(
             rows(
-                &replica.inner.lock().await.conn,
+                &replica
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .conn,
                 "SELECT hash FROM secure_operations"
             )
             .await

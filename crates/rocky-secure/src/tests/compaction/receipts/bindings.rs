@@ -145,7 +145,7 @@ async fn damaged_frame(
     let operation = frame.operation_ref().unwrap();
     let key = source
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .config
         .keys
@@ -163,7 +163,7 @@ async fn damaged_frame(
     assert_eq!(envelope.version, 1);
     let payload = source
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .decode_row_payload(frame, &plaintext)
         .unwrap();
@@ -263,7 +263,7 @@ async fn binding_memo_requests_and_per_proof_errors_match_the_uncached_verifier(
         .unwrap();
     let payload = source
         .inner
-        .lock()
+        .lock(crate::replica::Class::Background)
         .await
         .decode_row_payload(
             &frame,

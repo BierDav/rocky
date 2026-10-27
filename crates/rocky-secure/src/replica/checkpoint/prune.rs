@@ -56,7 +56,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             blocked: None,
         };
         loop {
-            let mut inner = flush_guard(self.inner.lock().await, &self.inner).await?;
+            let mut inner = flush_guard(
+                self.inner.lock(crate::replica::Class::Background).await,
+                &self.inner,
+            )
+            .await?;
             let step = inner.prune_step(scope).await?;
             report.pruned += step.pruned;
             report.blocked = step.blocked;

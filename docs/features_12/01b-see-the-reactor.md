@@ -97,7 +97,7 @@ attributed to a named site.
   or the remaining gap is explained in evidence.
 - Each poll above the steady-state hold target (desktop 10 ms, phone
   25 ms) is attributed to a named task and listed. Phase 2 bounds the
-  SQLite ones. Transition ones go to [phase 7](07-transitions.md).
+  SQLite ones. Transition ones go to [phase 7](../features_13/10-bounded-transitions.md).
 - `./scripts/check`, the Kotlin check and the shopping app check pass.
 
 ## Not in scope

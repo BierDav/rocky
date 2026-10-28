@@ -1,6 +1,10 @@
 # features_12: writes that never wait
 
-Status: phases 1 and 1b complete (2026-10-27).
+Status: phases 1 and 1b complete (2026-10-27); phase 2 in progress.
+Replanned 2026-10-28: features_12 ends with phase 2. Phases 3–7 moved,
+with their still useful parts, to [features_13](../features_13/README.md),
+which replaces register merging with replayed intents. The goals and
+settled items below that name phases 3–7 are carried there.
 [Phase 1 evidence and limits](01-see-the-wait-evidence.md) and
 [reactor qualification and attribution limits](01b-see-the-reactor-evidence.md).
 Replanned 2026-10-27 after the [phase 2 inventory](02-bounded-holds-evidence.md#replanning-2026-10-27):
@@ -17,7 +21,7 @@ That includes receiving frames and checkpoint pages, settling,
 maintenance, pruning and checkpointing the WAL. Transitions that replace
 a scope's state wholesale (checkpoint installation, rebootstrap, live
 schema switch, compaction and finalization rewrites) don't start while
-a write waits. Making them bounded is a [later decision](07-transitions.md). Nothing that features_11 gained for sync gets slower to buy it.
+a write waits. Making them bounded is a [later decision](../features_13/10-bounded-transitions.md). Nothing that features_11 gained for sync gets slower to buy it.
 Opening after a 100k-row schema migration stops being dominated by SQLite
 spilling one giant transaction.
 
@@ -123,6 +127,14 @@ These resolve the questions raised while planning. Phases don't reopen
 them. A phase that finds one unworkable stops and reports the evidence
 instead of choosing differently.
 
+- **Phase 2's fan-out exception (decided 2026-10-28).** The constraint
+  resolver's dependent fan-out (`resolve`, `Pass::dependents`) may exceed
+  the input-row bound. It stays atomic; test support counts its induced
+  typed-row changes and asserts they equal the dependent count; its cost
+  at 1k and 10k children is measured and reported separately from the
+  steady-state targets. features_13 phase 2 starts it only when the gate
+  is quiet, and features_13 phase 8 deletes it with the resolver. No
+  other holder is exempt.
 - **Interactive writes commit buffered.** `Database::transaction` in the
   Rust SDK uses `Durability::Buffered`, matching the Kotlin binding. A
   caller that needs a flushed commit opens a connection with
@@ -143,7 +155,7 @@ instead of choosing differently.
   checkpoint installation, rebootstrap replay, live schema switch,
   projection rebuild, compaction and finalization rewrites, and tip
   workspace rebuilding. It keeps its single transaction until
-  [phase 7](07-transitions.md), and phase 3 delays its start while
+  [phase 7](../features_13/10-bounded-transitions.md), and phase 3 delays its start while
   interactive work waits.
 - **One reactor thread stays.** The `LocalSet` reactor is kept.
   CPU-bound work that touches no SQLite connection moves to the existing
@@ -194,7 +206,7 @@ instead of choosing differently.
 ## Revisit deferred authoring
 
 Interactive deferred authoring becomes a candidate brief only if one of
-these holds after phase 6:
+these holds after features_13 phase 9 (qualification):
 
 - The phone L1–L4 p95 gate still misses, and the phase 1b breakdown shows
   the authoring step (not lock wait, reactor delay or flush) as the
@@ -213,38 +225,18 @@ provisional stamps.
 | --- | --- | --- | --- | --- |
 | 1 (complete) | [See the wait](01-see-the-wait.md) | none | 1 w | Lock wrapper, write probe, load scenarios, baseline evidence |
 | 1b (complete) | [See the reactor](01b-see-the-reactor.md) | 1 | 3–5 d | Reactor stalls attributed; interactive path free of background detours |
-| 2 (replanned, inventory done) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
-| 3 | [Interactive first](03-interactive-first.md) | 2 | 1 w | Two-class gate; interactive writes wait for at most one step; transitions start only when quiet |
-| 4 | [Cheaper commits](04-cheaper-commits.md) | 1 | 1–2 w | Buffered Rust default; author and single-row receive statements cut |
-| 5 | [Staged migration publication](05-staged-migration-publication.md) | 1 | 2 w | Bounded migration authoring; issuer 100k ≤ 70 s |
-| 6 | [Qualification](06-qualification.md) | 1b, 2, 3, 4, 5 | 3–5 d | Device gates, sync non-regression, final evidence, phase 7 trigger evaluated |
-| 7 (deferred) | [Bounded transitions](07-transitions.md) | 6 and its trigger | design first | Transitions published in bounded steps; may change the replica format |
+| 2 (in progress) | [Bounded holds](02-bounded-holds.md) | 1b | 2 w | Every steady-state holder bounded; passive checkpoint off the lock and reactor |
+| 3–7 | moved to [features_13](../features_13/README.md) | | | Interactive first, buffered default and statement budgets, staged migration publication, qualification, bounded transitions |
 
 ```mermaid
 flowchart LR
     P1["1 See the wait"] --> P1b["1b See the reactor"]
     P1b --> P2["2 Bounded holds"]
-    P2 --> P3["3 Interactive first"]
-    P1 --> P4["4 Cheaper commits"]
-    P1 --> P5["5 Staged migration publication"]
-    P3 --> P6["6 Qualification"]
-    P4 --> P6
-    P5 --> P6
-    P6 -.->|trigger| P7["7 Bounded transitions"]
+    P2 --> F13["features_13"]
 ```
 
-Order: phase 1 first and alone, because every bound and target depends
-on its numbers. Then three lanes run in parallel:
-
-- phase 1b, then 2, then 3, in the reactor, the replica's locking, group
-  and maintenance code
-- phase 4, in authoring, receive and the SDK default; its buffered-default
-  slice lands first
-- phase 5, in SQL publication and SDK schema publication
-
-When two lanes touch the same file, the later one rebases; neither
-reverts the other. Phase 6 runs after the lanes. Phase 7 runs only if
-phase 6 or a product decision triggers it.
+Phase 2 is the last phase of this roadmap. When it lands, continue with
+[features_13](../features_13/README.md).
 
 ## Agent execution contract
 

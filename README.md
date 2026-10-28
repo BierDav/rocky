@@ -3,7 +3,8 @@
 Rocky provides local-first SQLite storage, encrypted peer replication,
 credentials, coordinated writes and optional iroh networking.
 
-Implementation follows [features_12](docs/features_12/README.md).
+Implementation follows [features_12](docs/features_12/README.md) through its
+phase 2, then [features_13](docs/features_13/README.md).
 See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests,
 module declarations and tests to navigate the implementation.
 

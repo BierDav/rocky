@@ -89,6 +89,8 @@ pub struct SecureSql<A: RowApplication> {
     /// The kept seal its reads see instead of the live tables.
     pub(super) seal: Option<Arc<super::SealViews>>,
     parents: BTreeMap<String, String>,
+    #[cfg(any(test, feature = "intent-shapes"))]
+    shape: std::sync::Mutex<crate::shapes::Pending>,
 }
 impl<A: RowApplication> Drop for SecureSql<A> {
     fn drop(&mut self) {
@@ -228,6 +230,8 @@ impl<A: RowApplication> SecureSession<A> {
             cursors: Arc::default(),
             seal: None,
             parents: BTreeMap::new(),
+            #[cfg(any(test, feature = "intent-shapes"))]
+            shape: Default::default(),
         })
     }
 }
@@ -254,6 +258,12 @@ impl<A: RowApplication> SecureSql<A> {
             return Err(denied("move requires an idle SQL session"));
         }
         let frames = self.session.move_row(handle, table, id, from, to).await?;
+        #[cfg(any(test, feature = "intent-shapes"))]
+        {
+            let mut shape = self.shape();
+            shape.begin();
+            shape.committed(crate::shapes::Origin::Move);
+        }
         Ok(SecureCommit { handle, frames })
     }
     /// Executes related SQL and a move as one bundle. Commands may delete cascade
@@ -650,6 +660,8 @@ impl<A: RowApplication> SecureSql<A> {
                 }
                 self.engine(&lease, &format!("RELEASE rocky_user_{index}"))?;
                 lease.savepoints.truncate(index);
+                #[cfg(any(test, feature = "intent-shapes"))]
+                self.shape().release(index);
                 Ok(empty(&lease, SqlState::Active))
             }
             Control::RollbackTo(name) => {
@@ -670,9 +682,13 @@ impl<A: RowApplication> SecureSql<A> {
                 }
                 lease.identities = lease.savepoints[index].2.clone();
                 lease.savepoints.truncate(index + 1);
+                #[cfg(any(test, feature = "intent-shapes"))]
+                self.shape().rollback_to(index);
                 Ok(empty(&lease, SqlState::Active))
             }
             Control::Statement => {
+                #[cfg(any(test, feature = "intent-shapes"))]
+                self.shape().statement(sql, &params);
                 let checked = match &lease.held {
                     Some(held) => {
                         held.0
@@ -815,6 +831,8 @@ impl<A: RowApplication> SecureSql<A> {
         lease.savepoints.clear();
         lease.implicit = false;
         lease.turn += 1;
+        #[cfg(any(test, feature = "intent-shapes"))]
+        self.shape().begin();
         lease.deadline = Instant::now() + self.options.transaction_timeout;
         self.cancelled.store(false, Ordering::Relaxed);
         // The watcher waits on the runtime's clock; `deadline` bounds the
@@ -859,6 +877,8 @@ impl<A: RowApplication> SecureSql<A> {
         lease
             .savepoints
             .push((name, mark, lease.identities.clone()));
+        #[cfg(any(test, feature = "intent-shapes"))]
+        self.shape().savepoint();
         Ok(())
     }
     fn engine(&self, lease: &Lease<A>, sql: &str) -> Result<(), Error> {
@@ -941,6 +961,10 @@ impl<A: RowApplication> SecureSql<A> {
             ran => {
                 let answer = self.answer(lease, ran, SqlState::Active);
                 lease.held = Some(held);
+                #[cfg(any(test, feature = "intent-shapes"))]
+                if answer.is_ok() {
+                    self.shape().succeeded();
+                }
                 answer
             }
         }
@@ -1055,6 +1079,8 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         qualification_kill("before");
+        #[cfg(any(test, feature = "intent-shapes"))]
+        let origin = self.origin(&target, commit);
         let sealed = self.seal(inner, &lease.plan, target, commit).await;
         inner.strict_projection = false;
         let committed = match sealed? {
@@ -1077,6 +1103,8 @@ impl<A: RowApplication> SecureSql<A> {
             return Err(Error::InjectedFailure);
         }
         conn.run_now("COMMIT").map_err(Error::from)?;
+        #[cfg(any(test, feature = "intent-shapes"))]
+        self.shape().committed(origin);
         #[cfg(feature = "qualification")]
         qualification_kill("after");
         inner.note_commit().await;
@@ -1183,6 +1211,8 @@ impl<A: RowApplication> SecureSql<A> {
             if !self.session.status.writable.contains(&scope) {
                 return Err(denied("row partition is outside this session"));
             }
+            #[cfg(any(test, feature = "intent-shapes"))]
+            self.shape().row(typed.rows.schema(), &table.name, anchor);
             let fields = |image: &Vec<SqlValue>| typed.rows.fields(&projected.table, image);
             if touched.deleted && before.is_some() && after.is_some() {
                 for (old, new) in [(before.as_ref(), None), (None, after.as_ref())] {
@@ -1476,6 +1506,25 @@ fn qualification_kill(point: &str) {
     }
 }
 
+#[cfg(any(test, feature = "intent-shapes"))]
+impl<A: RowApplication> SecureSql<A> {
+    fn shape(&self) -> std::sync::MutexGuard<'_, crate::shapes::Pending> {
+        self.shape
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn origin(&self, target: &Target, commit: Kind) -> crate::shapes::Origin {
+        use crate::shapes::Origin;
+        match (target, commit) {
+            (Target::Publication(_), _) => Origin::Migration,
+            _ if !self.parents.is_empty() => Origin::Migration,
+            (Target::Move { .. }, _) => Origin::Move,
+            (_, Kind::Coordinated(_)) => Origin::Coordinated,
+            (_, Kind::Reauthors(_)) => Origin::Reauthoring,
+            _ => Origin::Plain,
+        }
+    }
+}
 #[cfg(test)]
 impl<A: RowApplication> SecureSql<A> {
     pub(crate) async fn transactional_frontier(

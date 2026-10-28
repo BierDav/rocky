@@ -1,6 +1,9 @@
 # 3. Intent shapes
 
-Status: planned. Owner: test support in `rocky-secure` and `rocky-sdk`,
+Status: measurements and validation finished (2026-10-29); completion gate
+blocked by timing-budget and shopping qualification failures.
+See [evidence](03-intent-shapes-evidence.md).
+Owner: test support in `rocky-secure` and `rocky-sdk`,
 plus the example applications. Depends on nothing; touches no engine
 code. Effort: three to five days. Follow the
 [execution contract](README.md#agent-execution-contract).

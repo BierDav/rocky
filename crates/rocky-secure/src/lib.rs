@@ -7,6 +7,8 @@ use rocky_storage::{
 };
 pub mod network;
 mod replica;
+#[cfg(any(test, feature = "intent-shapes"))]
+pub mod shapes;
 mod store;
 mod wire;
 #[cfg(any(test, feature = "qualification"))]

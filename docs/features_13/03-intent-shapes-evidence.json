@@ -1,0 +1,185 @@
+{
+  "sources": {
+    "sdk-application": {
+      "transactions": 5,
+      "without_replicated_rows": 0,
+      "migrations": 0,
+      "internal": 1,
+      "classes": {
+        "keyed": 4,
+        "predicate": 1
+      },
+      "statements": 304,
+      "max_statements": 300,
+      "writes": 304,
+      "collapses": 0,
+      "algebra": {
+        "fresh_insert": 4
+      },
+      "algebra_only": 4,
+      "refusals": {},
+      "peak_per_minute": 5
+    },
+    "sdk-coordinated": {
+      "transactions": 15,
+      "without_replicated_rows": 0,
+      "migrations": 1,
+      "internal": 4,
+      "classes": {
+        "coordinated": 14,
+        "constrained": 1
+      },
+      "statements": 29,
+      "max_statements": 2,
+      "writes": 15,
+      "collapses": 0,
+      "algebra": {
+        "fresh_insert": 15
+      },
+      "algebra_only": 15,
+      "refusals": {},
+      "peak_per_minute": 15
+    },
+    "sdk-group_secrets": {
+      "transactions": 14,
+      "without_replicated_rows": 0,
+      "migrations": 1,
+      "internal": 83,
+      "classes": {
+        "constrained": 13,
+        "keyed": 1
+      },
+      "statements": 14,
+      "max_statements": 1,
+      "writes": 14,
+      "collapses": 0,
+      "algebra": {
+        "assign": 1,
+        "fresh_insert": 13
+      },
+      "algebra_only": 14,
+      "refusals": {},
+      "peak_per_minute": 14
+    },
+    "sdk-partitions": {
+      "transactions": 9,
+      "without_replicated_rows": 0,
+      "migrations": 1,
+      "internal": 2,
+      "classes": {
+        "constrained": 4,
+        "keyed": 5
+      },
+      "statements": 7,
+      "max_statements": 1,
+      "writes": 9,
+      "collapses": 0,
+      "algebra": {
+        "fresh_insert": 7
+      },
+      "algebra_only": 7,
+      "refusals": {},
+      "peak_per_minute": 9
+    },
+    "sdk-shared_lists": {
+      "transactions": 38,
+      "without_replicated_rows": 1,
+      "migrations": 3,
+      "internal": 14,
+      "classes": {
+        "constrained": 21,
+        "keyed": 16,
+        "predicate": 1
+      },
+      "statements": 38,
+      "max_statements": 1,
+      "writes": 38,
+      "collapses": 0,
+      "algebra": {
+        "keyed_delete": 1,
+        "fresh_insert": 36
+      },
+      "algebra_only": 37,
+      "refusals": {},
+      "peak_per_minute": 38
+    },
+    "sdk-shopping_release": {
+      "transactions": 20,
+      "without_replicated_rows": 1,
+      "migrations": 0,
+      "internal": 7,
+      "classes": {
+        "constrained": 11,
+        "keyed": 9
+      },
+      "statements": 18,
+      "max_statements": 1,
+      "writes": 20,
+      "collapses": 0,
+      "algebra": {
+        "assign": 1,
+        "keyed_delete": 2,
+        "fresh_insert": 15
+      },
+      "algebra_only": 18,
+      "refusals": {},
+      "peak_per_minute": 20
+    },
+    "shopping-qualification": {
+      "transactions": 51,
+      "without_replicated_rows": 1,
+      "migrations": 4,
+      "internal": 23,
+      "classes": {
+        "coordinated": 1,
+        "constrained": 35,
+        "keyed": 12,
+        "predicate": 3
+      },
+      "statements": 83,
+      "max_statements": 3,
+      "writes": 55,
+      "collapses": 2,
+      "algebra": {
+        "assign": 2,
+        "keyed_delete": 2,
+        "fresh_insert": 43
+      },
+      "algebra_only": 45,
+      "refusals": {},
+      "peak_per_minute": 13
+    }
+  },
+  "total": {
+    "transactions": 152,
+    "without_replicated_rows": 3,
+    "migrations": 10,
+    "internal": 134,
+    "classes": {
+      "coordinated": 15,
+      "constrained": 85,
+      "keyed": 47,
+      "predicate": 5
+    },
+    "statements": 493,
+    "max_statements": 300,
+    "writes": 455,
+    "collapses": 2,
+    "algebra": {
+      "assign": 4,
+      "keyed_delete": 5,
+      "fresh_insert": 133
+    },
+    "algebra_only": 140,
+    "refusals": {},
+    "peak_per_minute": 38
+  },
+  "decisions": {
+    "fast_path_operations": [
+      "fresh_insert"
+    ],
+    "refused_stop_sources": [],
+    "shopping_peak_per_minute": 13,
+    "routine_seal_transactions": 1024
+  }
+}

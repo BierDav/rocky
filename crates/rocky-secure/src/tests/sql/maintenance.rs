@@ -169,3 +169,66 @@ async fn sql_status_checks_use_interactive_acquisitions() {
         );
     }
 }
+
+#[tokio::test]
+async fn orphaned_pulled_payload_cleanup_is_bounded_and_resumes_after_reopen() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("orphaned-pull.db");
+    let node = PrivateKey::new();
+    let mut replica = t.open(&path, &node, t.full(), &[t.items]).await;
+    {
+        let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@commit inner, |inner| {
+            for key in 1..=9u8 {
+                inner.conn.execute("INSERT INTO secure_pulled_rows VALUES(999,?,?)", [vec![key; 32], vec![]]).await?;
+                inner.conn.execute("INSERT INTO secure_pulled_stubs VALUES(999,?,0)", [vec![key; 32]]).await?;
+                inner.conn.execute("INSERT INTO secure_pulled_pages VALUES(999,?,NULL,?)", [vec![key; 32], vec![0; 64]]).await?;
+            }
+            Ok(())
+        }).unwrap();
+    }
+    let count = |replica: EncryptedReplica<TypedRows>| async move {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        let records = crate::storage::rows(&inner.conn, "SELECT (SELECT count(*) FROM secure_pulled_rows)+(SELECT count(*) FROM secure_pulled_stubs)+(SELECT count(*) FROM secure_pulled_pages)").await.unwrap();
+        match records.as_slice() {
+            [row] => match row.as_slice() {
+                [SqlValue::Integer(count)] => *count,
+                _ => panic!("count"),
+            },
+            _ => panic!("count"),
+        }
+    };
+    let mut before = 27;
+    let mut reopened = false;
+    let mut steps = 0;
+    loop {
+        let measurements = replica.lock_measurements();
+        measurements.start();
+        let more = replica.maintenance_step_for_test().await.unwrap();
+        let measured = measurements.stop();
+        let work: u64 = measured
+            .holders
+            .values()
+            .flat_map(|holder| holder.units.get("maintenance_record").into_iter().flatten())
+            .map(|(rows, _)| rows)
+            .sum();
+        assert!(work <= 1, "one input record per acquisition");
+        let after = count(replica.clone()).await;
+        assert!(before - after <= 1, "one payload deletion per acquisition");
+        before = after;
+        steps += 1;
+        assert!(steps < 100);
+        if !reopened && after == 23 {
+            drop(replica);
+            replica = t.open(&path, &node, t.full(), &[t.items]).await;
+            reopened = true;
+        }
+        if !more {
+            break;
+        }
+    }
+    assert!(reopened);
+    assert_eq!(before, 0);
+    replica.audit(t.items).await.unwrap();
+}

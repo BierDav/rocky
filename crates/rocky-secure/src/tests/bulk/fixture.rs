@@ -10,18 +10,27 @@ pub(super) async fn candidate(n: usize) -> Candidate {
     candidate_tables(n, false).await
 }
 pub(super) async fn candidate_tables(n: usize, tags: bool) -> Candidate {
-    candidate_kind(n, tags, false).await.0
+    candidate_kind(n, tags, false, false).await.0
 }
 pub(super) async fn issuer_candidate() -> (Candidate, PrivateKey) {
-    let (candidate, issuer) = candidate_kind(1, false, true).await;
+    let (candidate, issuer) = candidate_kind(1, false, true, false).await;
     (candidate, issuer.unwrap())
 }
-async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Option<PrivateKey>) {
-    let l = if issuer {
+pub(super) async fn logged_candidate(n: usize) -> Candidate {
+    candidate_kind(n, false, false, true).await.0
+}
+async fn candidate_kind(
+    n: usize,
+    tags: bool,
+    issuer: bool,
+    existence: bool,
+) -> (Candidate, Option<PrivateKey>) {
+    let mut l = if issuer {
         Lineage::pinned(139)
     } else {
         Lineage::new()
     };
+    l.existence = existence;
     let issuer = issuer.then(|| PrivateKey::from_bytes(&[140; 32]));
     let signer = issuer.as_ref().unwrap_or(l.publisher());
     let endorsement = issuer

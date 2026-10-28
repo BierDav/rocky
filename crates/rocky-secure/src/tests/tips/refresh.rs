@@ -1,4 +1,4 @@
-//! One refresh borrows graph facts; every header and transaction stays distinct.
+//! Refresh steps borrow graph facts; signed transactions stay distinct.
 use super::*;
 use rocky_core::SqlValue;
 use rocky_credentials::TipGraph;
@@ -252,7 +252,7 @@ async fn metadata_close_is_discovered_lazily_per_author_and_sequence() {
 }
 
 #[tokio::test]
-async fn failed_later_hold_rolls_back_the_whole_refresh_then_retry_and_reopen_agree() {
+async fn failed_later_hold_keeps_committed_bundles_then_retry_and_reopen_agree() {
     let (f, dir, a, frames, statement) = fixture().await;
     let close = SignedSeal::sign(statement, &f.publisher).unwrap();
     a.receive_tip_statements(&[TipStatement::Seal(close.clone())])
@@ -281,10 +281,58 @@ async fn failed_later_hold_rolls_back_the_whole_refresh_then_retry_and_reopen_ag
         .map(|byte| format!("{byte:02x}"))
         .collect();
     a.inner.lock(crate::replica::Class::Background).await.conn.execute(&format!("CREATE TEMP TRIGGER fail_later_hold BEFORE UPDATE OF status ON secure_operations WHEN NEW.hash=X'{hex}' AND NEW.status='held' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM secure_held_frames WHERE hash=X'{first_hex}') THEN RAISE(ABORT,'first candidate not held') END; SELECT RAISE(ABORT,'later hold failure'); END"), ()).await.unwrap();
-    let before = snapshot(&a).await;
+    let before_rows = a.snapshot(f.public).await.unwrap();
+    let measurements = a.lock_measurements();
+    measurements.start();
     let error = page(&a, f.public).await.unwrap_err();
     assert!(error.to_string().contains("later hold failure"), "{error}");
-    assert_eq!(snapshot(&a).await, before);
+    assert_eq!(a.snapshot(f.public).await.unwrap().rows, before_rows.rows);
+    let held = a.inner.lock(crate::replica::Class::Background).await;
+    assert_eq!(
+        rows(
+            &held.conn,
+            "SELECT hash FROM secure_held_frames ORDER BY hash"
+        )
+        .await
+        .unwrap(),
+        vec![vec![SqlValue::Blob(first.as_bytes().to_vec())]]
+    );
+    for (hash, status) in [(first, "held"), (later, "applied")] {
+        assert_eq!(
+            crate::storage::collect_rows(
+                held.conn
+                    .query(
+                        "SELECT status FROM secure_operations WHERE hash=?",
+                        [hash.as_bytes().to_vec()]
+                    )
+                    .await
+                    .unwrap()
+            )
+            .await
+            .unwrap(),
+            vec![vec![SqlValue::Text(status.into())]]
+        );
+    }
+    drop(held);
+    let measured = measurements.stop();
+    for holder in measured.holders.values() {
+        assert!(
+            holder
+                .units
+                .get("held_refresh_record")
+                .into_iter()
+                .flatten()
+                .all(|(count, _)| *count <= 64)
+        );
+        assert!(
+            holder
+                .units
+                .get("held_refresh_frame")
+                .into_iter()
+                .flatten()
+                .all(|(count, _)| *count <= 1)
+        );
+    }
     a.inner
         .lock(crate::replica::Class::Background)
         .await
@@ -469,12 +517,26 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
         )
         .await
         .unwrap();
-    let before = snapshot(&a).await;
+    let before_rows = a.snapshot(f.public).await.unwrap().rows;
     assert!(
         page(&a, f.public).await.is_err(),
         "held candidates must open and verify original frames"
     );
-    assert_eq!(snapshot(&a).await, before);
+    assert_eq!(a.snapshot(f.public).await.unwrap().rows, before_rows);
+    assert_eq!(
+        scalar(
+            &a,
+            &format!(
+                "SELECT count(*) FROM secure_held_frames WHERE hash=X'{}'",
+                hash.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        )
+        .await,
+        0,
+        "a corrupt candidate never commits its held record"
+    );
     a.inner
         .lock(crate::replica::Class::Background)
         .await
@@ -566,4 +628,232 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
         page(&empty, f.public).await.unwrap().is_empty(),
         "unqueried malformed graph is not eagerly validated"
     );
+}
+
+#[tokio::test]
+async fn held_refresh_pages_live_metadata_without_opening_its_bodies() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let a = open(
+        &f,
+        &dir.path().join("bounded-refresh.db"),
+        &PrivateKey::new(),
+    )
+    .await;
+    main(&f, &a).await;
+    for row in 1..=160u8 {
+        a.author_buffered(
+            [row; 32],
+            vec![change(f.public, row, None, Some(f.app().name("history")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    a.flush().await.unwrap();
+    let measurements = a.lock_measurements();
+    measurements.start();
+    assert!(page(&a, f.public).await.unwrap().is_empty());
+    let measured = measurements.stop();
+    let records: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| {
+            holder
+                .units
+                .get("held_refresh_record")
+                .into_iter()
+                .flatten()
+        })
+        .map(|(count, _)| *count)
+        .collect();
+    assert_eq!(records.iter().sum::<u64>(), 160);
+    assert!(records.iter().all(|count| *count <= 64));
+    assert!(records.len() >= 3);
+    assert!(
+        measured
+            .holders
+            .values()
+            .all(|holder| !holder.units.contains_key("held_refresh_frame"))
+    );
+    let inner = a.inner.lock(crate::replica::Class::Background).await;
+    let plan = crate::storage::collect_rows(inner.conn.query(
+        "EXPLAIN QUERY PLAN SELECT o.hash,p.scope,p.tip,p.author,p.sequence,o.sequence,o.status FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.author=? AND o.scope=? AND o.sequence>? ORDER BY o.sequence LIMIT 64",
+        crate::storage::bindings(vec![SqlValue::Blob(inner.config.node.public_key().as_bytes().to_vec()), SqlValue::Blob(crate::encode(&f.public).unwrap()), SqlValue::Integer(-1)]),
+    ).await.unwrap()).await.unwrap();
+    assert!(
+        !plan
+            .iter()
+            .flatten()
+            .any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("TEMP B-TREE"))),
+        "{plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn held_tokens_and_pages_bound_raw_rows_and_validate_their_source() {
+    let (f, _dir, a, frames, statement) = fixture().await;
+    a.receive_tip_statements(&[TipStatement::Seal(
+        SignedSeal::sign(statement, &f.publisher).unwrap(),
+    )])
+    .await
+    .unwrap();
+    assert_eq!(
+        encoded(&page(&a, f.public).await.unwrap()),
+        encoded(&frames[2..])
+    );
+    let (peer, credentials, expected, raw_count) = {
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@commit inner, |inner| {
+            for index in 0..100u8 {
+                let mut key = vec![0; 32];
+                key[31] = index;
+                inner.conn.execute("INSERT INTO secure_held_frames VALUES(?,?,?,?)", crate::storage::bindings(vec![SqlValue::Blob(key), SqlValue::Blob(vec![0xff;32]), SqlValue::Blob(crate::encode(&f.public)?), SqlValue::Blob(vec![])])).await?;
+            }
+            Ok(())
+        }).unwrap();
+        let hashes: Vec<_> = rows(&inner.conn, "SELECT f.hash FROM secure_held_frames f JOIN secure_held h ON h.id=f.id ORDER BY f.hash").await.unwrap().into_iter().map(|row| match row.as_slice() { [SqlValue::Blob(hash)] => hash.clone(), _ => panic!("hash") }).collect();
+        let expected =
+            rocky_core::commitment("rocky.held-token.v1", &crate::encode(&hashes).unwrap());
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+            expected,
+            102u64,
+        )
+    };
+    let measurements = a.lock_measurements();
+    measurements.start();
+    assert_eq!(
+        a.held_token(peer, &credentials, f.public).await.unwrap(),
+        expected
+    );
+    let measured = measurements.stop();
+    let work: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| holder.units.get("held_token_record").into_iter().flatten())
+        .map(|(count, _)| *count)
+        .collect();
+    assert_eq!(work.iter().sum::<u64>(), raw_count * 2);
+    assert!(work.iter().all(|count| *count <= 64));
+    let mut after = None;
+    let mut received = Vec::new();
+    let mut pages = 0;
+    measurements.start();
+    loop {
+        let (mut frames, next) = a
+            .held_frame_page(peer, &credentials, f.public, after, MAX_SECURE_FRAME)
+            .await
+            .unwrap();
+        received.append(&mut frames);
+        pages += 1;
+        if next.is_none() {
+            break;
+        }
+        assert!(next > after);
+        after = next;
+    }
+    assert!(pages > 1);
+    assert_eq!(encoded(&received), encoded(&frames[2..]));
+    assert!(
+        measurements
+            .stop()
+            .holders
+            .values()
+            .flat_map(|holder| holder.units.get("held_page_record").into_iter().flatten())
+            .all(|(count, _)| *count <= 33)
+    );
+    let (reached, waiting) = tokio::sync::oneshot::channel();
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    a.pause_held_token_for_test(reached, paused).await;
+    let token = a.held_token(peer, &credentials, f.public);
+    let change = async {
+        waiting.await.unwrap();
+        let mut inner = a.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("UPDATE secure_held SET change=change", ())
+            .await
+            .unwrap();
+        inner.note_commit().await;
+        drop(inner);
+        resume.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(token, change);
+    assert!(matches!(result, Err(Error::RetryExhausted)));
+    assert_eq!(
+        a.held_token(peer, &credentials, f.public).await.unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
+    let (f, dir, a, _, statement) = fixture().await;
+    let writer = open(
+        &f,
+        &dir.path().join("listing-writer.db"),
+        &PrivateKey::new(),
+    )
+    .await;
+    let bundle = writer
+        .author(
+            [55; 32],
+            (5..=7)
+                .map(|id| change(f.public, id, None, Some(f.app().name("bundled"))))
+                .collect(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.receive(bundle).await.unwrap(), ReceiveStatus::Applied);
+    a.receive_tip_statements(&[TipStatement::Seal(
+        SignedSeal::sign(statement, &f.publisher).unwrap(),
+    )])
+    .await
+    .unwrap();
+    let expected = a.held_changes().await.unwrap();
+    assert_eq!(expected.len(), 3);
+    assert!(expected.iter().any(|change| change.rows.len() == 3));
+    let projection = a.snapshot(f.public).await.unwrap().rows;
+    let measurements = a.lock_measurements();
+    measurements.start();
+    assert_eq!(a.held_changes().await.unwrap(), expected);
+    let measured = measurements.stop();
+    let work: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| holder.units.get("held_listing_row").into_iter().flatten())
+        .map(|(count, _)| *count)
+        .collect();
+    assert_eq!(work.iter().sum::<u64>(), 8);
+    assert!(work.iter().all(|count| *count == 1));
+
+    for (sql, invalidates) in [
+        ("UPDATE secure_metadata SET revision=revision", false),
+        ("UPDATE secure_held SET change=change", true),
+        ("UPDATE secure_rows SET row=row", true),
+    ] {
+        let (reached, waiting) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        a.pause_held_listing_for_test(reached, paused).await;
+        let listing = a.held_changes();
+        let change = async {
+            waiting.await.unwrap();
+            let mut inner = a.inner.lock(crate::replica::Class::Background).await;
+            inner.conn.execute(sql, ()).await.unwrap();
+            inner.note_commit().await;
+            drop(inner);
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(listing, change);
+        if invalidates {
+            assert!(matches!(result, Err(Error::RetryExhausted)), "{sql}");
+        } else {
+            assert_eq!(result.unwrap(), expected);
+        }
+        assert_eq!(a.held_changes().await.unwrap(), expected);
+    }
+    assert_eq!(a.snapshot(f.public).await.unwrap().rows, projection);
 }

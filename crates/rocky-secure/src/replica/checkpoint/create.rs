@@ -81,67 +81,41 @@ impl<A: RowApplication> Inner<A> {
     /// wrote: forget stale pulled states and quarantine records, then
     /// finalize at most one seal of their domains. The group is already
     /// committed, so a failure is kept for the status and backs off.
-    pub(crate) async fn maintain(&mut self, scopes: &BTreeSet<ResourceScope>) {
-        if scopes.is_empty() {
-            return;
-        }
-        let Ok(time) = now() else { return };
+    pub(crate) async fn maintain(&mut self, scope: ResourceScope) -> bool {
+        let Ok(time) = now() else { return false };
         if self
             .maintenance_backoff
             .is_some_and(|(until, _)| time < until)
         {
-            return;
+            return false;
         }
-        match self.maintain_domains(scopes).await {
-            Ok(()) => {
+        let durable_source =
+            self.flusher.durable() >= self.commit || self.maintenance.commit == self.commit;
+        match self.maintain_domain(scope).await {
+            Ok(more) => {
                 self.maintenance_error = None;
                 self.maintenance_backoff = None;
+                self.maintenance.commit = if durable_source { self.commit } else { 0 };
+                more
             }
             Err(error) => {
                 self.maintenance_error = Some(error.to_string());
                 let failures = self.maintenance_backoff.map_or(0, |(_, failures)| failures);
                 let wait = (1u64 << failures.min(6)).min(60);
                 self.maintenance_backoff = Some((time.saturating_add(wait), failures + 1));
+                self.maintenance = Default::default();
+                false
             }
         }
     }
-    async fn maintain_domains(&mut self, scopes: &BTreeSet<ResourceScope>) -> Result<(), Error> {
-        transaction!(self, |inner| inner.forget_stale().await)?;
-        // A scope being imported waits: its own checkpoint would only
-        // repeat the one it imports.
-        let mut domains = BTreeSet::new();
-        for scope in scopes {
-            if self.scope_key(*scope).is_ok() && !self.importing(*scope).await? {
-                domains.insert(scope.domain);
-            }
+    async fn maintain_domain(&mut self, scope: ResourceScope) -> Result<bool, Error> {
+        if transaction!(self, |inner| inner.forget_stale_step().await)? {
+            return Ok(true);
         }
-        for domain in domains {
-            self.graph_for(domain)?;
-            if self.finalize_at_most(domain, 1).await?.0 > 0 {
-                return Ok(());
-            }
+        if self.scope_key(scope).is_ok() && !self.importing(scope).await? {
+            self.graph_for(scope.domain)?;
+            self.finalize_at_most(scope.domain, 1).await?;
         }
-        Ok(())
-    }
-    /// Inside the caller's transaction: pulled states that no longer pass
-    /// the import checks or that their scope's base already holds, and
-    /// quarantine records of frames that are no longer pending.
-    async fn forget_stale(&mut self) -> Result<(), Error> {
-        self.revalidate_pulled().await?;
-        for record in rows(&self.conn, "SELECT scope,seal FROM secure_pulled").await? {
-            let [SqlValue::Integer(id), SqlValue::Blob(seal)] = record.as_slice() else {
-                return Err(Error::Corrupt("pulled checkpoint".into()));
-            };
-            if self.base_seal(*id).await?.map(|base| base.to_vec()) == Some(seal.clone()) {
-                self.drop_pulled(*id).await?;
-            }
-        }
-        self.conn
-            .execute(
-                "DELETE FROM secure_quarantine WHERE hash NOT IN(SELECT hash FROM secure_operations WHERE status='pending')",
-                (),
-            )
-            .await?;
-        Ok(())
+        Ok(false)
     }
 }

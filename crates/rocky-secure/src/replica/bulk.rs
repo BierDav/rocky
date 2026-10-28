@@ -3,6 +3,7 @@ use super::*;
 use rocky_core::{MigrationProof, MigrationPublicationStatement};
 use rocky_credentials::SignedMigrationPublication;
 mod audit;
+mod storage;
 pub(super) mod syntax;
 mod tree;
 
@@ -396,37 +397,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.release_and_reload(&stage, None).await?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
-    }
-    /// Storage charged to authenticated migration history, separate from ordinary history.
-    pub async fn migration_storage(&self) -> Result<MigrationStorage, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let totals=rows(&inner.conn,"SELECT coalesce(sum(retained_frames),0),coalesce(sum(retained_bytes),0) FROM secure_migration_publications").await?;
-        let support=rows(&inner.conn,"SELECT (SELECT coalesce(sum(length(statement)+coalesce(length(signed),0)+length(writer)+coalesce(length(conflict),0)+length(publication)+length(tip)),0) FROM secure_migration_publications)+(SELECT coalesce(sum(length(proof)+length(hash)+length(publication)+16),0) FROM secure_migration_frames)+(SELECT coalesce(sum(length(hash)+length(publication)+24),0) FROM secure_migration_nodes)").await?;
-        let mut support_bytes = number(&support[0][0])?;
-        let mut after = Vec::<u8>::new();
-        loop {
-            let page=collect_rows(inner.conn.query("SELECT publication,statement FROM secure_migration_publications WHERE publication>? ORDER BY publication LIMIT 64",[after.clone()]).await?).await?;
-            if page.is_empty() {
-                break;
-            }
-            for record in page {
-                let [SqlValue::Blob(publication), SqlValue::Blob(statement)] = record.as_slice()
-                else {
-                    return Err(Error::Corrupt("migration support account".into()));
-                };
-                let s: MigrationPublicationStatement = decode(statement)?;
-                let support=collect_rows(inner.conn.query("SELECT coalesce(sum(length(record)+length(scope)+length(signer)+length(hash)+32),0) FROM secure_existence_log WHERE signer=? AND author=? AND position>=0 AND position<=?",bindings(vec![SqlValue::Blob(s.writer.to_vec()),SqlValue::Integer(i64::from(s.author)),SqlValue::Integer(s.frames.checked_sub(1).map_or(-1, |last| i64::try_from(last).unwrap_or(i64::MAX)))] )).await?).await?;
-                support_bytes = support_bytes
-                    .checked_add(number(&support[0][0])?)
-                    .ok_or_else(|| denied("migration support overflow"))?;
-                after = publication.clone();
-            }
-        }
-        Ok(MigrationStorage {
-            frames: number(&totals[0][0])?,
-            bytes: number(&totals[0][1])?,
-            support_bytes,
-        })
     }
     /// Proof-bearing transport admission; the ordinary receive API grants no exemption.
     pub async fn receive_migration_all(

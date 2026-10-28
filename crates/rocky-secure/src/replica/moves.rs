@@ -421,6 +421,28 @@ pub(super) struct MoveSource {
     pub(super) deletion_sequence: u64,
 }
 
+#[derive(Default)]
+pub(super) struct FollowPass {
+    pub(super) commit: u64,
+    pub(super) epoch: u64,
+    after: Option<(Vec<u8>, Vec<u8>)>,
+    row: Option<FollowRow>,
+}
+struct FollowRow {
+    key: (Vec<u8>, Vec<u8>),
+    destination: ResourceScope,
+    record: Materialized,
+    identity: i64,
+    proof: CreationProof,
+    signer: PublicKey,
+    link: Option<MoveSource>,
+    visited: BTreeSet<ResourceScope>,
+    sources: std::collections::VecDeque<MoveSource>,
+    source: Option<MoveSource>,
+    sequence: i64,
+    candidates: BTreeMap<Commitment, (Stamp, Vec<u8>, Hash)>,
+}
+
 impl<A: RowApplication> Inner<A> {
     /// Stores the bindings of a proof a row record is about to name.
     pub(super) async fn keep_bindings(&self, proof: &CreationProof) -> Result<(), Error> {
@@ -1177,215 +1199,335 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    pub(super) async fn follow_moves(&mut self, time: u64) -> Result<(), Error> {
-        if self.node_author.is_none() || self.local_grants(time).is_err() {
-            return Ok(());
+    pub(super) async fn follow_moves(&mut self, time: u64) -> Result<bool, Error> {
+        let mut pass = std::mem::take(&mut self.follow_pass);
+        let epoch = self.context_epoch.load(Ordering::Relaxed);
+        if pass.commit != self.commit || pass.epoch != epoch {
+            if let Some(row) = &mut pass.row
+                && (row.sources.pop_front().is_some()
+                    || row.visited.pop_first().is_some()
+                    || row.candidates.pop_first().is_some())
+            {
+                self.follow_pass = pass;
+                return Ok(true);
+            }
+            pass.row = None;
+            pass.after = None;
         }
-        let rows = collect_rows(self.conn.query(MOVE_SCAN, ()).await?).await?;
-        for row in rows {
+        let result = self.follow_move_step(&mut pass, time).await;
+        pass.commit = if result.is_ok() {
+            self.commit
+        } else {
+            u64::MAX
+        };
+        pass.epoch = self.context_epoch.load(Ordering::Relaxed);
+        self.follow_pass = pass;
+        result
+    }
+    async fn follow_move_step(&mut self, pass: &mut FollowPass, time: u64) -> Result<bool, Error> {
+        if self.node_author.is_none() || self.local_grants(time).is_err() {
+            return Ok(false);
+        }
+        let Some(current) = &mut pass.row else {
+            let records = match &pass.after {
+                Some((scope, row)) => collect_rows(self.conn.query(
+                    format!("{MOVE_SCAN} WHERE (m.scope,m.row)>(?,?) ORDER BY m.scope,m.row LIMIT 1"),
+                    [scope.clone(), row.clone()],
+                ).await?).await?,
+                None => rows(&self.conn, &format!("{MOVE_SCAN} ORDER BY m.scope,m.row LIMIT 1")).await?,
+            };
+            let Some(record) = records.into_iter().next() else {
+                pass.after = None;
+                return Ok(false);
+            };
             let [
                 SqlValue::Blob(scope),
                 SqlValue::Blob(storage_row),
                 SqlValue::Blob(bytes),
-            ] = row.as_slice()
+            ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("move scan".into()));
             };
             let destination: ResourceScope = decode(scope)?;
             let record = self.decode_record(bytes).await?;
+            let key = (scope.clone(), storage_row.clone());
             let Some(sealed) = record.moved_from.as_ref().filter(|_| !record.deleted) else {
-                continue;
+                pass.after = Some(key);
+                return Ok(true);
             };
             let Some(identity) = record.identity else {
-                continue;
+                pass.after = Some(key);
+                return Ok(true);
             };
-            let Some(author) = self.node_author.as_ref() else {
-                continue;
-            };
-            let signer = author.key.public_key();
-            let Some(proof) = &record.proof else {
-                return Err(denied("moved row lacks creation proof"));
-            };
-            let proof = self.carried_proof(proof).await?;
-            if !self.holds(destination).await? || !self.readable(destination).unwrap_or(false) {
-                continue;
-            }
-            let mut sources = Vec::new();
-            let mut visited = BTreeSet::from([destination]);
-            let mut link = self.open_move_source(destination, identity, sealed)?;
-            while let Some(source) = link {
-                if !visited.insert(source.scope) {
-                    return Err(denied("cyclic move links"));
-                }
-                link = match self
-                    .row(
-                        source.scope,
-                        storage_row
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| denied("invalid incarnation"))?,
-                    )
-                    .await?
-                {
-                    Some(row) => row
-                        .moved_from
-                        .as_ref()
-                        .map(|sealed| self.open_move_source(source.scope, identity, sealed))
-                        .transpose()?
-                        .flatten(),
-                    None => None,
-                };
-                sources.push(source);
-            }
-            let mut candidates = BTreeMap::<Commitment, (Stamp, Vec<u8>, Hash)>::new();
-            for source in sources {
-                let frames = collect_rows(self.conn.query("SELECT header,body FROM secure_operations WHERE scope=? AND author=? AND status='applied' ORDER BY sequence",
-                    [encode(&source.scope)?, signer.as_bytes().to_vec()]).await?).await?;
-                for row in frames {
-                    let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
-                        return Err(Error::Corrupt("own updates".into()));
-                    };
-                    let frame = self.chained_frame(header.clone(), body.clone()).await?;
-                    let operation = frame.operation_ref()?;
-                    let payload = self.row_payload(&frame)?;
-                    for write in payload.clone().into_writes() {
-                        if write.change.before.is_none()
-                            || write.change.after.is_none()
-                            || self
-                                .app
-                                .row_identity(&write.change)
-                                .map_err(|error| denied(&error))?
-                                .map(|id| id.integer())
-                                != Some(identity)
-                        {
-                            continue;
-                        }
-                        let default_stamp = Stamp {
-                            clock: operation.header.timestamp,
-                            author: operation.header.extensions.author.unwrap_or(0),
-                            sequence: operation.header.extensions.author_sequence,
-                        };
-                        for field in write.published_fields() {
-                            let Some(value) = write
-                                .change
-                                .after
-                                .as_ref()
-                                .and_then(|fields| fields.get(&field))
-                            else {
-                                continue;
-                            };
-                            let stamp = payload
-                                .carried(&write.change.row)
-                                .and_then(|carried| carried.stamps.get(&field))
-                                .unwrap_or(&default_stamp);
-                            if Some(stamp.author) != operation.header.extensions.author
-                                || record.stamps.get(&field).is_some_and(|old| old >= stamp)
-                            {
-                                continue;
-                            }
-                            if candidates.get(&field).is_none_or(|(old, _, _)| old < stamp) {
-                                candidates
-                                    .insert(field, (stamp.clone(), value.clone(), operation.hash));
-                            }
-                        }
-                    }
-                }
-            }
-            if candidates.is_empty() {
-                continue;
-            }
-            let mut after = record.fields.clone();
-            let mut stamps = BTreeMap::new();
-            let mut originals = Vec::new();
-            for (field, (stamp, value, original)) in candidates {
-                let seen = collect_rows(self.conn.query("SELECT 1 FROM secure_followed WHERE original=? AND scope=? AND field=?",
-                    [original.as_bytes().to_vec(), scope.clone(), field.to_vec()]).await?).await?;
-                if !seen.is_empty() {
-                    continue;
-                }
-                stamps.insert(field, stamp);
-                after.insert(field, value);
-                originals.push((original, field));
-            }
-            if stamps.is_empty() {
-                continue;
-            }
-            let change = RowChange {
-                scope: destination,
-                row: record.key.ok_or_else(|| denied("moved row key missing"))?,
-                before: Some(record.fields.clone()),
-                after: Some(after),
-            };
-            let write = RowWrite {
-                change,
-                assigned: stamps.keys().copied().collect(),
-            };
-            let author = self
+            let signer = self
                 .node_author
                 .as_ref()
-                .ok_or_else(|| denied("follow author missing"))?;
-            let tuple = self
-                .partitions
-                .get(&destination)
-                .ok_or_else(|| denied("follow partition missing"))?;
-            let grants = author.credentials.verify_partition_author(
-                self.config.publisher,
-                signer,
-                author.number,
+                .ok_or_else(|| denied("follow author missing"))?
+                .key
+                .public_key();
+            let proof = self
+                .carried_proof(
+                    record
+                        .proof
+                        .as_ref()
+                        .ok_or_else(|| denied("moved row lacks creation proof"))?,
+                )
+                .await?;
+            if !self.holds(destination).await? || !self.readable(destination).unwrap_or(false) {
+                pass.after = Some(key);
+                return Ok(true);
+            }
+            let link = self.open_move_source(destination, identity, sealed)?;
+            pass.row = Some(FollowRow {
+                key,
                 destination,
-                tuple,
-                &self.config.revocations,
-                time,
-            );
-            let Ok(grants) = grants else {
-                continue;
+                record,
+                identity,
+                proof,
+                signer,
+                link,
+                visited: BTreeSet::from([destination]),
+                sources: Default::default(),
+                source: None,
+                sequence: -1,
+                candidates: Default::default(),
+            });
+            return Ok(true);
+        };
+        if let Some(source) = current.link.take() {
+            if !current.visited.insert(source.scope) {
+                return Err(denied("cyclic move links"));
+            }
+            current.link = match self
+                .row(
+                    source.scope,
+                    current
+                        .key
+                        .1
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| denied("invalid incarnation"))?,
+                )
+                .await?
+            {
+                Some(row) => row
+                    .moved_from
+                    .as_ref()
+                    .map(|sealed| self.open_move_source(source.scope, current.identity, sealed))
+                    .transpose()?
+                    .flatten(),
+                None => None,
             };
-            if !write.permitted_by(&grants) {
+            current.sources.push_back(source);
+            return Ok(true);
+        }
+        if current.source.is_none() {
+            current.source = current.sources.pop_front();
+            current.sequence = -1;
+            if current.source.is_none() {
+                if current.visited.pop_first().is_some() {
+                    return Ok(true);
+                }
+                let row = pass
+                    .row
+                    .take()
+                    .ok_or_else(|| denied("missing follow row"))?;
+                pass.after = Some(row.key.clone());
+                self.publish_follow_row(row, time).await?;
+                return Ok(true);
+            }
+        }
+        let source = current
+            .source
+            .as_ref()
+            .ok_or_else(|| denied("missing follow source"))?;
+        let records = collect_rows(self.conn.query(
+            "SELECT sequence,header,body,status FROM secure_operations WHERE scope=? AND author=? AND sequence>? ORDER BY sequence LIMIT 1",
+            bindings(vec![SqlValue::Blob(encode(&source.scope)?), SqlValue::Blob(current.signer.as_bytes().to_vec()), SqlValue::Integer(current.sequence)]),
+        ).await?).await?;
+        let Some(record) = records.first() else {
+            current.source = None;
+            return Ok(true);
+        };
+        let [
+            SqlValue::Integer(sequence),
+            SqlValue::Blob(header),
+            SqlValue::Blob(body),
+            SqlValue::Text(status),
+        ] = record.as_slice()
+        else {
+            return Err(Error::Corrupt("own updates".into()));
+        };
+        current.sequence = *sequence;
+        if status != "applied" {
+            return Ok(true);
+        }
+        let frame = self.chained_frame(header.clone(), body.clone()).await?;
+        let operation = frame.operation_ref()?;
+        let payload = self.row_payload(&frame)?;
+        for write in payload.clone().into_writes() {
+            if write.change.before.is_none()
+                || write.change.after.is_none()
+                || self
+                    .app
+                    .row_identity(&write.change)
+                    .map_err(|error| denied(&error))?
+                    .map(|id| id.integer())
+                    != Some(current.identity)
+            {
                 continue;
             }
-            let carried = BTreeMap::from([(
-                (destination, write.change.row),
-                Carried {
-                    proof,
-                    authors: self.carried_authors(destination.domain, &stamps).await?,
-                    stamps,
-                    moved_from: None,
-                },
-            )]);
-            let input = rocky_core::commitment(
-                "rocky.follow-input.v1",
-                &encode(&(&originals, destination, &write, &carried))?,
-            );
-            let handle = rocky_core::commitment(
-                "rocky.follow-handle.v1",
-                &encode(&(&originals, destination))?,
-            );
-            self.conn.execute("SAVEPOINT follow", ()).await?;
-            let authored = Box::pin(self.author_bundle_carried(
-                (handle, input),
-                &[write],
-                &[],
-                time,
-                &carried,
-                None,
-            ))
-            .await;
-            if let Err(error) = authored {
-                self.conn.execute("ROLLBACK TO follow", ()).await?;
-                self.invalidate_context();
-                self.conn.execute("RELEASE follow", ()).await?;
-                return Err(error);
+            let default_stamp = Stamp {
+                clock: operation.header.timestamp,
+                author: operation.header.extensions.author.unwrap_or(0),
+                sequence: operation.header.extensions.author_sequence,
+            };
+            for field in write.published_fields() {
+                let Some(value) = write
+                    .change
+                    .after
+                    .as_ref()
+                    .and_then(|fields| fields.get(&field))
+                else {
+                    continue;
+                };
+                let stamp = payload
+                    .carried(&write.change.row)
+                    .and_then(|carried| carried.stamps.get(&field))
+                    .unwrap_or(&default_stamp);
+                if Some(stamp.author) != operation.header.extensions.author
+                    || current
+                        .record
+                        .stamps
+                        .get(&field)
+                        .is_some_and(|old| old >= stamp)
+                {
+                    continue;
+                }
+                if current
+                    .candidates
+                    .get(&field)
+                    .is_none_or(|(old, _, _)| old < stamp)
+                {
+                    current
+                        .candidates
+                        .insert(field, (stamp.clone(), value.clone(), operation.hash));
+                }
             }
-            for (original, field) in originals {
+        }
+        Ok(true)
+    }
+    async fn publish_follow_row(&mut self, row: FollowRow, time: u64) -> Result<(), Error> {
+        let FollowRow {
+            key: (scope, _),
+            destination,
+            record,
+            proof,
+            signer,
+            candidates,
+            ..
+        } = row;
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let mut after = record.fields.clone();
+        let mut stamps = BTreeMap::new();
+        let mut originals = Vec::new();
+        for (field, (stamp, value, original)) in candidates {
+            let seen = collect_rows(
                 self.conn
-                    .execute(
-                        "INSERT OR IGNORE INTO secure_followed VALUES(?,?,?)",
+                    .query(
+                        "SELECT 1 FROM secure_followed WHERE original=? AND scope=? AND field=?",
                         [original.as_bytes().to_vec(), scope.clone(), field.to_vec()],
                     )
-                    .await?;
+                    .await?,
+            )
+            .await?;
+            if !seen.is_empty() {
+                return Ok(());
             }
-            self.conn.execute("RELEASE follow", ()).await?;
+            stamps.insert(field, stamp);
+            after.insert(field, value);
+            originals.push((original, field));
         }
+        if stamps.is_empty() {
+            return Ok(());
+        }
+        let change = RowChange {
+            scope: destination,
+            row: record.key.ok_or_else(|| denied("moved row key missing"))?,
+            before: Some(record.fields.clone()),
+            after: Some(after),
+        };
+        let write = RowWrite {
+            change,
+            assigned: stamps.keys().copied().collect(),
+        };
+        let author = self
+            .node_author
+            .as_ref()
+            .ok_or_else(|| denied("follow author missing"))?;
+        let tuple = self
+            .partitions
+            .get(&destination)
+            .ok_or_else(|| denied("follow partition missing"))?;
+        let grants = author.credentials.verify_partition_author(
+            self.config.publisher,
+            signer,
+            author.number,
+            destination,
+            tuple,
+            &self.config.revocations,
+            time,
+        );
+        let Ok(grants) = grants else {
+            return Ok(());
+        };
+        if !write.permitted_by(&grants) {
+            return Ok(());
+        }
+        let carried = BTreeMap::from([(
+            (destination, write.change.row),
+            Carried {
+                proof,
+                authors: self.carried_authors(destination.domain, &stamps).await?,
+                stamps,
+                moved_from: None,
+            },
+        )]);
+        let input = rocky_core::commitment(
+            "rocky.follow-input.v1",
+            &encode(&(&originals, destination, &write, &carried))?,
+        );
+        let handle = rocky_core::commitment(
+            "rocky.follow-handle.v1",
+            &encode(&(&originals, destination))?,
+        );
+        self.conn.execute("SAVEPOINT follow", ()).await?;
+        let authored = Box::pin(self.author_bundle_carried(
+            (handle, input),
+            &[write],
+            &[],
+            time,
+            &carried,
+            None,
+        ))
+        .await;
+        if let Err(error) = authored {
+            self.conn.execute("ROLLBACK TO follow", ()).await?;
+            self.invalidate_context();
+            self.conn.execute("RELEASE follow", ()).await?;
+            return Err(error);
+        }
+        for (original, field) in originals {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_followed VALUES(?,?,?)",
+                    [original.as_bytes().to_vec(), scope.clone(), field.to_vec()],
+                )
+                .await?;
+        }
+        self.conn.execute("RELEASE follow", ()).await?;
         Ok(())
     }
 }

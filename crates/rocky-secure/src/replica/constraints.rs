@@ -1,7 +1,6 @@
 //! Unique indexes and foreign keys of mergeable tables. Each constrained
 //! table keeps its key winners in a private candidate table; the typed table
-//! holds the visible candidates as a pure function of them. See
-//! `docs/runtime/mergeable-constraints.md`.
+//! holds the visible candidates as a pure function of them.
 use super::typed::{Projected, Typed, quoted};
 use super::*;
 use rocky_core::{ConflictPolicy, DELETE_CASCADE, LogicalSchema};
@@ -162,6 +161,8 @@ pub(super) struct Seeds {
     forced: BTreeSet<(usize, Identity)>,
     /// Candidates that may depend on a change.
     queued: BTreeSet<(usize, Identity)>,
+    #[cfg(any(test, feature = "qualification"))]
+    dependents: BTreeSet<(usize, Identity)>,
     /// Natural-key slots whose candidate changed, by row key.
     slots: BTreeMap<(usize, ResourceScope, Commitment), Vec<SqlValue>>,
     /// Typed `id`s whose support row may have to appear or go.
@@ -493,6 +494,8 @@ struct Pass<'a, A> {
     visible: BTreeMap<(usize, Identity), bool>,
     loses: BTreeMap<(usize, Identity, usize), bool>,
     alive: BTreeMap<(usize, Identity), bool>,
+    #[cfg(any(test, feature = "qualification"))]
+    dependents: BTreeSet<(usize, Identity)>,
 }
 
 impl<'a, A: RowApplication> Pass<'a, A> {
@@ -505,6 +508,8 @@ impl<'a, A: RowApplication> Pass<'a, A> {
             visible: BTreeMap::new(),
             loses: BTreeMap::new(),
             alive: BTreeMap::new(),
+            #[cfg(any(test, feature = "qualification"))]
+            dependents: BTreeSet::new(),
         }
     }
     /// What the existence log of a logged table says about `id`.
@@ -825,7 +830,11 @@ impl<'a, A: RowApplication> Pass<'a, A> {
                     .map(|column| candidate.values[*column].clone())
                     .collect();
                 for row in self.query(child, &select, params).await? {
-                    found.extend(row.id(self.node(child)).map(|id| (child, id)));
+                    if let Some(id) = row.id(self.node(child)) {
+                        #[cfg(any(test, feature = "qualification"))]
+                        self.dependents.insert((child, id));
+                        found.push((child, id));
+                    }
                 }
             }
         }
@@ -938,6 +947,8 @@ impl<A: RowApplication> Inner<A> {
             .row_id(typed.domain.domain, &table.table, &slot_values)
             .map_err(Error::Corrupt)?;
         seeds.slots.insert((node, scope, row), key_values);
+        #[cfg(any(test, feature = "qualification"))]
+        seeds.dependents.extend(pass.dependents);
         *self.settling.lock().map_err(|_| corrupt("seeds"))? = seeds;
         Ok(())
     }
@@ -960,6 +971,12 @@ impl<A: RowApplication> Inner<A> {
             .as_ref()
             .ok_or_else(|| corrupt("constraints"))?;
         let mut pass = Pass::new(self, constraints);
+        #[cfg(any(test, feature = "qualification"))]
+        let inputs: BTreeSet<_> = seeds.slots.keys().copied().collect();
+        #[cfg(any(test, feature = "qualification"))]
+        {
+            pass.dependents = seeds.dependents;
+        }
         let mut support = seeds.support;
         let mut desired: DesiredRows = seeds
             .slots
@@ -1032,6 +1049,19 @@ impl<A: RowApplication> Inner<A> {
                     "a row of {} conflicts with a merged row it has not seen",
                     table.table.sql_name
                 )));
+            }
+            // Only child visibility changes outside the input slots qualify for
+            // the dependent fan-out exception; unique peers are not counted.
+            #[cfg(any(test, feature = "qualification"))]
+            if !inputs.contains(&(node, scope, row))
+                && stored.iter().chain(image.iter()).any(|values| {
+                    matches!(values.get(spec.id), Some(SqlValue::Integer(id))
+                        if pass.dependents.contains(&(node, Identity { scope, id: *id })))
+                })
+            {
+                self.flusher
+                    .measurements
+                    .work(super::lock::WorkUnit::DependentRow, 1);
             }
             self.touch(&table.table.sql_name);
             let held = rows_with(&self.conn, &table.select, key.clone())

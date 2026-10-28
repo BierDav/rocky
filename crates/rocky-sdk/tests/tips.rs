@@ -1272,8 +1272,8 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.sync().await.expect("pull sync");
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let pulled = a.sync().await.expect("pull sync");
+    let following = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut status = a.ok(json!({"type":"status"})).await;
         loop {
             let tips = ok(&a, "status", json!({})).await;
@@ -1285,7 +1285,14 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
                 .await;
         }
     })
-    .await?;
+    .await;
+    if let Err(error) = following {
+        return Err(format!(
+            "{error}; pull report: {pulled}; tips: {}",
+            ok(&a, "inspect", json!({})).await
+        )
+        .into());
+    }
     assert_eq!(a.titles().await, ["milk"]);
     assert_eq!(
         held(&ok(&a, "inspect", json!({})).await, &first),

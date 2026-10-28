@@ -1,8 +1,12 @@
 mod admission;
 mod lock;
+mod maintenance;
+mod wal;
 pub(crate) use lock::{Class, Guard, ReplicaLock};
 #[cfg(feature = "qualification")]
-pub use lock::{HolderMeasurements, LockMeasurements, Measurements, with_measurement_connection};
+pub use lock::{HolderMeasurements, with_measurement_connection};
+#[cfg(any(test, feature = "qualification"))]
+pub use lock::{LockMeasurements, Measurements};
 mod apply;
 mod author;
 mod backup;
@@ -302,7 +306,7 @@ mod byte_fields {
     }
 }
 pub(super) struct Inner<A> {
-    _owner: DatabaseOwner,
+    _owner: Arc<DatabaseOwner>,
     pub(super) conn: Arc<ScopedConnection>,
     pub(super) app: Arc<A>,
     /// `config.keys` holds the current key of every scope.
@@ -402,8 +406,12 @@ pub(super) struct Inner<A> {
     epochs_scanned: Option<TipId>,
     /// Rows applied frames wrote since open, for apply spans.
     rows_written: AtomicU64,
+    frames_written: AtomicU64,
     /// Pending frames apply passes applied since open.
     applied_frames: u64,
+    pending_pass: incoming::PendingPass,
+    follow_pass: moves::FollowPass,
+    context_epoch: AtomicU64,
     /// Scopes whose import writes verified pages straight into their rows;
     /// operations for them wait until the import ends.
     direct: BTreeSet<ResourceScope>,
@@ -423,11 +431,11 @@ pub(super) struct Inner<A> {
     changes: i64,
     /// Passive and truncating checkpoint sizes.
     wal_limits: (u64, u64),
-    /// WAL size at the last passive checkpoint.
-    wal_mark: u64,
+    pub(super) passive: Arc<wal::Passive>,
     pub(super) limits: RetentionLimits,
     /// The last failure of automatic checkpointing or pruning.
     maintenance_error: Option<String>,
+    maintenance: maintenance::Pass,
     /// When maintenance runs again after a failure, and how many failed.
     maintenance_backoff: Option<(u64, u32)>,
     /// Commit that made each scope's checkpoint current, by scope number.
@@ -440,6 +448,31 @@ pub(super) struct Inner<A> {
     /// The generation each admitted session peer declared in its hello:
     /// what it can admit. Chains name none.
     pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
+    #[cfg(test)]
+    checkpoint_export_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
+    checkpoint_store_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
+    migration_storage_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
+    held_listing_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
+    held_token_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
     #[cfg(any(test, feature = "qualification"))]
@@ -496,7 +529,7 @@ pub(super) struct Inner<A> {
 /// group's flush runs after the replica lock is released and readers and the
 /// next group do not wait behind it.
 pub(super) struct Flusher {
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
     #[cfg(test)]
     pause: std::sync::Mutex<
@@ -661,7 +694,7 @@ impl<A> Clone for EncryptedReplica<A> {
     }
 }
 impl<A> EncryptedReplica<A> {
-    #[cfg(feature = "qualification")]
+    #[cfg(any(test, feature = "qualification"))]
     pub fn lock_measurements(&self) -> LockMeasurements {
         self.inner.measurements()
     }
@@ -924,7 +957,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let flusher = Arc::new(Flusher {
             #[cfg(test)]
             pause: Default::default(),
-            #[cfg(feature = "qualification")]
+            #[cfg(any(test, feature = "qualification"))]
             measurements: LockMeasurements::default(),
             wal: wal.clone(),
             durable: AtomicU64::new(0),
@@ -937,6 +970,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             copy: Default::default(),
         });
+        let owner = Arc::new(owner);
+        let passive = wal::Passive::open(owner.clone())?;
         let readiness = blockers::Readiness::new(&conn)?;
         let metadata = metadata::Metadata::new(&conn)?;
         let mut inner = Inner {
@@ -1005,7 +1040,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             earlier_epoch: AtomicBool::new(false),
             epochs_scanned: None,
             rows_written: AtomicU64::new(0),
+            frames_written: AtomicU64::new(0),
             applied_frames: 0,
+            pending_pass: Default::default(),
+            follow_pass: Default::default(),
+            context_epoch: AtomicU64::new(0),
             direct: BTreeSet::new(),
             notifications,
             frames: watch::channel(()).0,
@@ -1016,14 +1055,25 @@ impl<A: RowApplication> EncryptedReplica<A> {
             flusher: flusher.clone(),
             changes: 0,
             wal_limits: (group::WAL_CHECKPOINT_BYTES, group::WAL_LIMIT_BYTES),
-            wal_mark: 0,
+            passive,
             limits: RetentionLimits::default(),
             maintenance_error: None,
+            maintenance: Default::default(),
             maintenance_backoff: None,
             verified_at: BTreeMap::new(),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
             peer_tips: BTreeMap::new(),
+            #[cfg(test)]
+            checkpoint_export_pause: None,
+            #[cfg(test)]
+            checkpoint_store_pause: None,
+            #[cfg(test)]
+            held_listing_pause: None,
+            #[cfg(test)]
+            migration_storage_pause: None,
+            #[cfg(test)]
+            held_token_pause: None,
             #[cfg(test)]
             stage_fault: None,
             #[cfg(any(test, feature = "qualification"))]
@@ -1216,7 +1266,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let replica = Self {
             inner: Arc::new(ReplicaLock::new(
                 inner,
-                #[cfg(feature = "qualification")]
+                #[cfg(any(test, feature = "qualification"))]
                 flusher.measurements.clone(),
             )),
             queue: Arc::default(),
@@ -1499,30 +1549,44 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn optimize(&self) {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
+        let passive = inner.passive.clone();
+        drop(inner);
+        passive.wait().await;
     }
     /// Runs maintenance queued by SQL commits: one bounded checkpoint or
     /// pruning step for their scopes, and a WAL checkpoint when due. Returns
     /// false, leaving work queued, if a newer commit still needs flushing.
     pub async fn maintain(&self) -> bool {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        // Maintenance reads the current state, not a snapshot of the scopes
-        // queued before the flush. Check again under the writer lock.
-        if inner.flusher.durable() < inner.commit {
-            return false;
-        }
-        let scopes = std::mem::take(&mut inner.deferred_maintenance);
-        let span = tracing::debug_span!("maintain", scopes = scopes.len());
-        tracing::Instrument::instrument(
-            async {
-                if !scopes.is_empty() {
-                    inner.maintain(&scopes).await;
-                }
+        loop {
+            let mut inner = self.inner.lock(Class::Background).await;
+            // Our own cleanup commits may continue. Another writer must first
+            // become durable before maintenance can use its current state.
+            if inner.flusher.durable() < inner.commit && inner.maintenance.commit != inner.commit {
+                return false;
+            }
+            let Some(scope) = inner.deferred_maintenance.first().copied() else {
                 inner.checkpoint_if_due().await;
-            },
-            span,
-        )
-        .await;
-        true
+                return true;
+            };
+            if !inner.maintain(scope).await {
+                inner.deferred_maintenance.remove(&scope);
+            }
+            drop(inner);
+            tokio::task::yield_now().await;
+        }
+    }
+    pub(crate) async fn maintain_scopes(&self, mut scopes: BTreeSet<ResourceScope>) {
+        while let Some(scope) = scopes.pop_first() {
+            loop {
+                let mut inner = self.inner.lock(Class::Background).await;
+                let more = inner.maintain(scope).await;
+                drop(inner);
+                if !more {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
     }
     /// Names the scopes the owner is about to import from a checkpoint,
     /// replacing the previous set. A scope with a staged import counts too.

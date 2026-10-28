@@ -496,6 +496,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         self.rows_written
             .fetch_add(materialized.len() as u64, Ordering::Relaxed);
+        self.frames_written.fetch_add(1, Ordering::Relaxed);
         let operation = frame.operation_ref()?;
         let decoded;
         let payload = match opened_payload {

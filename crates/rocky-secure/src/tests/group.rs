@@ -96,7 +96,7 @@ async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
 }
 
 #[tokio::test]
-async fn concurrent_authors_share_one_commit_and_keep_their_own_frames() {
+async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let node = PrivateKey::new();
@@ -117,8 +117,8 @@ async fn concurrent_authors_share_one_commit_and_keep_their_own_frames() {
         authored.insert(row, frame.unwrap());
     }
     let commits = replica.group_commits().await - before;
-    assert!(commits < 8, "{commits} commits for 8 requests");
-    assert_eq!(commits, 1);
+    assert_eq!(commits, 4);
+    assert_eq!(replica.watermark().await.2, 1);
     let sequences: BTreeSet<_> = authored
         .values()
         .map(|frame| frame.operation().unwrap().header.seq_num)
@@ -203,7 +203,7 @@ async fn failing_request_in_a_group_rolls_back_alone() {
     assert!(matches!(first, Err(Error::InjectedFailure)));
     assert!(matches!(second, Err(Error::Conflict)));
     assert_eq!(third.unwrap().operation().unwrap().header.seq_num, 0);
-    assert_eq!(replica.group_commits().await - before, 1);
+    assert_eq!(replica.group_commits().await - before, 2);
     let snapshot = replica.snapshot(f.public).await.unwrap();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.revision, 1);
@@ -260,7 +260,7 @@ async fn nothing_is_observable_when_the_group_does_not_commit() {
 }
 
 #[tokio::test]
-async fn a_received_page_shares_one_commit_and_refuses_frames_alone() {
+async fn a_received_page_shares_one_flush_and_refuses_frames_alone() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let source = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
@@ -282,7 +282,11 @@ async fn a_received_page_shares_one_commit_and_refuses_frames_alone() {
     let target = open(&f, &dir.path().join("b.db"), &target_key).await;
     let before = target.group_commits().await;
     let statuses = target.receive_all(page).await;
-    assert_eq!(target.group_commits().await - before, 1);
+    assert_eq!(
+        target.group_commits().await - before,
+        10_usize.div_ceil(crate::replica::group::RECEIVE_REQUESTS)
+    );
+    assert_eq!(target.watermark().await.2, 1);
     assert_eq!(statuses.len(), 11);
     for (index, status) in statuses.into_iter().enumerate() {
         if index == 4 {
@@ -293,6 +297,50 @@ async fn a_received_page_shares_one_commit_and_refuses_frames_alone() {
     }
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 10);
     assert_eq!(frames(&target, &f, &target_key).await, 10);
+}
+
+#[tokio::test]
+async fn a_ready_received_frame_never_exposes_pending_custody_to_a_reader() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let source = open(&f, &dir.path().join("ready-source.db"), &PrivateKey::new()).await;
+    let target = open(&f, &dir.path().join("ready-target.db"), &PrivateKey::new()).await;
+    let frame = source.author([1; 32], insert(&f, 1), vec![]).await.unwrap();
+    let hash = frame.id().unwrap();
+    let receiver = target.clone();
+    let receiving = tokio::spawn(async move { receiver.receive(frame).await });
+    let mut observed = false;
+    loop {
+        let inner = target.inner.lock(crate::replica::Class::Background).await;
+        let stored = crate::storage::collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT status FROM secure_operations WHERE hash=?",
+                    [hash.as_bytes().to_vec()],
+                )
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        if !stored.is_empty() {
+            assert_eq!(
+                stored,
+                vec![vec![SqlValue::Text("applied".into())]],
+                "ready custody became visible before application"
+            );
+            observed = true;
+        }
+        drop(inner);
+        if receiving.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(receiving.await.unwrap().unwrap(), ReceiveStatus::Applied);
+    assert!(observed);
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 1);
 }
 
 #[tokio::test]
@@ -376,8 +424,9 @@ async fn wal_stays_bounded_under_sustained_authoring() {
     assert!(replica.checkpoints().await > 0);
     // One group's frames may land after the last check.
     assert!(largest <= limit + 128 * 1024, "WAL reached {largest} bytes");
+    replica.optimize().await;
     drop(replica);
-    // Closing the only connection checkpoints and removes the WAL.
+    // Closing the connections checkpoints and removes the WAL.
     assert!(std::fs::metadata(&wal).map_or(0, |wal| wal.len()) == 0);
     let replica = open(&f, &path, &node).await;
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 200);
@@ -390,7 +439,7 @@ const CRASH_PHASES: [&str; 3] = ["inside-group", "before-commit", "after-commit"
 async fn group_crash_child() {
     let path = std::env::var("ROCKY_GROUP_CRASH_PATH").unwrap();
     let fault = match std::env::var("ROCKY_GROUP_CRASH_PHASE").unwrap().as_str() {
-        "inside-group" => GroupFault::ExitAfterRequests(2),
+        "inside-group" => GroupFault::ExitAfterRequests(1),
         "before-commit" => GroupFault::ExitBeforeCommit,
         _ => GroupFault::ExitAfterCommit,
     };
@@ -424,7 +473,7 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
         // Open verifies history, projection and dependency closure.
         let replica = open(&f, &path, &node).await;
         let committed = phase == "after-commit";
-        let expected = if committed { 4 } else { 0 };
+        let expected = if committed { 2 } else { 0 };
         let snapshot = replica.snapshot(f.public).await.unwrap();
         assert_eq!(snapshot.rows.len(), expected, "{phase}");
         assert_eq!(snapshot.revision, expected as u64, "{phase}");
@@ -543,7 +592,7 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
         b.receipt_status(frame.id().unwrap()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    // Exposed and buffered requests in one group share one commit and one flush.
+    // Exposed and buffered requests share one flush across their bounded commits.
     let (_, _, flushes) = a.watermark().await;
     let commits = a.group_commits().await;
     let (one, two, three) = tokio::join!(
@@ -552,7 +601,7 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
         a.author_buffered([6; 32], insert(&f, 6), vec![]),
     );
     assert!(one.is_ok() && two.is_ok() && three.is_ok());
-    assert_eq!(a.group_commits().await - commits, 1);
+    assert_eq!(a.group_commits().await - commits, 2);
     assert_eq!(a.watermark().await.2 - flushes, 1);
     assert!(covered(&a).await);
 }
@@ -855,4 +904,688 @@ async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
     resume.send(()).unwrap();
     assert!(available, "fsync held the replica lock");
     assert!(author.await.is_ok());
+}
+
+/// Admission, atomic application and empty settlement without maintenance or flush.
+#[tokio::test]
+#[ignore = "measurement"]
+async fn measure_separated_receive_steps() {
+    fn report(site: &str, rows: usize, frames: usize, samples: &mut [std::time::Duration]) {
+        samples.sort_unstable();
+        let percentile = |n: usize| samples[(samples.len() * n).div_ceil(100) - 1].as_micros();
+        println!(
+            "separated {site} rows={rows} frames={frames} samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+            samples.len(),
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            samples.last().unwrap().as_micros(),
+        );
+    }
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    for count in [1, ROWS_PER_FRAME, MAX_BUNDLE_ROWS] {
+        let source = open(
+            &f,
+            &dir.path().join(format!("source-{count}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        let writes = (0..count)
+            .map(|index| {
+                RowWrite::changed(RowChange {
+                    scope: f.public,
+                    row: rocky_core::commitment(
+                        "rocky.measure.bounded-holds",
+                        &index.to_le_bytes(),
+                    ),
+                    before: None,
+                    after: Some(f.app().name(&format!("employee-{index}"))),
+                })
+            })
+            .collect();
+        let frames = source.author_bundle([1; 32], writes, vec![]).await.unwrap();
+        let mut admissions = Vec::new();
+        let mut applications = Vec::new();
+        let mut settlements = Vec::new();
+        for sample in 0..if count == 1 { 64 } else { 12 } {
+            let target = open(
+                &f,
+                &dir.path().join(format!("target-{count}-{sample}.db")),
+                &PrivateKey::new(),
+            )
+            .await;
+            let (mut admitted, applied, settled) = target
+                .measure_receive_steps_for_test(&frames, 1)
+                .await
+                .unwrap();
+            admissions.append(&mut admitted);
+            applications.push(applied);
+            settlements.push(settled);
+            // One application publishes the whole transaction, never a partial bundle.
+            let inner = target.inner.lock(crate::replica::Class::Background).await;
+            assert_eq!(
+                rows(&inner.conn, "SELECT count(*) FROM secure_rows")
+                    .await
+                    .unwrap(),
+                vec![vec![SqlValue::Integer(count as i64)]],
+            );
+            drop(inner);
+            for frame in &frames {
+                assert_eq!(
+                    target.receipt_status(frame.id().unwrap()).await.unwrap(),
+                    ReceiveStatus::Applied
+                );
+            }
+        }
+        report("admission", count, frames.len(), &mut admissions);
+        report("application", count, frames.len(), &mut applications);
+        report("settle_empty", count, frames.len(), &mut settlements);
+        if count == MAX_BUNDLE_ROWS {
+            for batch in [2, 4, 8, 16, 32, 64] {
+                let mut admissions = Vec::new();
+                for sample in 0..12 {
+                    let target = open(
+                        &f,
+                        &dir.path().join(format!("batch-{batch}-{sample}.db")),
+                        &PrivateKey::new(),
+                    )
+                    .await;
+                    let (mut admitted, _, _) = target
+                        .measure_receive_steps_for_test(&frames, batch)
+                        .await
+                        .unwrap();
+                    admissions.append(&mut admitted);
+                }
+                report(
+                    &format!("admission_batch_{batch}"),
+                    count,
+                    frames.len(),
+                    &mut admissions,
+                );
+            }
+        }
+        if count == 1 {
+            let target = open(&f, &dir.path().join("warm.db"), &PrivateKey::new()).await;
+            target
+                .measure_receive_steps_for_test(&frames, 1)
+                .await
+                .unwrap();
+            let mut admissions = Vec::new();
+            let mut applications = Vec::new();
+            let mut settlements = Vec::new();
+            for sample in 1u8..=64 {
+                let writes = vec![RowWrite::changed(RowChange {
+                    scope: f.public,
+                    row: rocky_core::commitment(
+                        "rocky.measure.bounded-holds",
+                        &0usize.to_le_bytes(),
+                    ),
+                    before: Some(f.app().name(&format!("employee-{}", sample - 1))),
+                    after: Some(f.app().name(&format!("employee-{sample}"))),
+                })];
+                let frames = source
+                    .author_bundle([sample + 1; 32], writes, vec![])
+                    .await
+                    .unwrap();
+                let (mut admitted, applied, settled) = target
+                    .measure_receive_steps_for_test(&frames, 1)
+                    .await
+                    .unwrap();
+                admissions.append(&mut admitted);
+                applications.push(applied);
+                settlements.push(settled);
+                assert_eq!(
+                    target
+                        .receipt_status(frames[0].id().unwrap())
+                        .await
+                        .unwrap(),
+                    ReceiveStatus::Applied
+                );
+            }
+            report("warm_admission", 1, 1, &mut admissions);
+            report("warm_application", 1, 1, &mut applications);
+            report("warm_settle_empty", 1, 1, &mut settlements);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = open(&f, &dir.path().join("steps.db"), &PrivateKey::new()).await;
+    let initial_commit = replica.watermark().await.0;
+    replica
+        .inject_group_fault(Some(GroupFault::FailAfterCommits(2)))
+        .await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for row in 1u8..=8 {
+        let replica = replica.clone();
+        let changes = insert(&f, row);
+        tasks.spawn(async move { (row, replica.author([row; 32], changes, vec![]).await) });
+    }
+    let mut committed = BTreeMap::new();
+    let mut failed = 0;
+    while let Some(result) = tasks.join_next().await {
+        let (row, result) = result.unwrap();
+        match result {
+            Ok(frame) => {
+                committed.insert(row, frame.id().unwrap());
+            }
+            Err(Error::InjectedFailure) => failed += 1,
+            Err(error) => panic!("unexpected step failure: {error}"),
+        }
+    }
+    assert_eq!(committed.len(), 4);
+    assert_eq!(failed, 4);
+    assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 4);
+    let (commit, durable, flushes) = replica.watermark().await;
+    assert!(durable >= initial_commit + 2 && durable <= commit);
+    assert_eq!(flushes, 1);
+    replica.inject_group_fault(None).await;
+    for row in 1u8..=8 {
+        let frame = replica
+            .author([row; 32], insert(&f, row), vec![])
+            .await
+            .unwrap();
+        if let Some(expected) = committed.get(&row) {
+            assert_eq!(&frame.id().unwrap(), expected);
+        }
+    }
+    assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
+}
+
+#[tokio::test]
+async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = open(&f, &dir.path().join("passive.db"), &PrivateKey::new()).await;
+    replica
+        .author_buffered([1; 32], insert(&f, 1), vec![])
+        .await
+        .unwrap();
+    replica.set_wal_limits(0, u64::MAX).await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let before = inner.passive.completed();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (resume, paused) = std::sync::mpsc::channel();
+    inner.passive.pause(started, paused);
+    inner.checkpoint_if_due().await;
+    ready.await.unwrap();
+    let (scheduled, polled) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        scheduled.send(()).unwrap();
+    });
+    polled.await.unwrap();
+    assert_eq!(inner.passive.completed(), before);
+    resume.send(()).unwrap();
+    inner.passive.wait().await;
+    assert_eq!(inner.passive.completed(), before + 1);
+    // A second check at the same WAL size does not run another checkpoint.
+    inner.checkpoint_if_due().await;
+    inner.passive.wait().await;
+    assert_eq!(inner.passive.completed(), before + 1);
+}
+
+#[tokio::test]
+async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let replica = open(&f, &dir.path().join("truncate.db"), &PrivateKey::new()).await;
+    replica
+        .author_buffered([1; 32], insert(&f, 1), vec![])
+        .await
+        .unwrap();
+    replica.flush().await.unwrap();
+    replica.set_wal_limits(0, 0).await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let before = inner.checkpoints;
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let target = replica.clone();
+    let task = tokio::spawn(async move {
+        started.send(()).unwrap();
+        target.maintain().await
+    });
+    ready.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished());
+    assert_eq!(inner.checkpoints, before);
+    drop(inner);
+    assert!(task.await.unwrap());
+    assert_eq!(replica.checkpoints().await, before + 1);
+}
+
+#[tokio::test]
+async fn pending_discovery_and_application_are_bounded_across_log_heads() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let mut frames = Vec::new();
+    for row in 1u8..=4 {
+        let source = open(
+            &f,
+            &dir.path().join(format!("head-{row}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        frames.push(
+            source
+                .author([row; 32], insert(&f, row), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    let target = open(&f, &dir.path().join("heads.db"), &PrivateKey::new()).await;
+    target
+        .stage_bundle_before_apply_for_test(&frames)
+        .await
+        .unwrap();
+    let mut revision = target.observe_revision();
+    let mut applied = 0;
+    let mut steps = 0;
+    loop {
+        crate::sqlite::trace_statements(true);
+        let more = target.pending_step_for_test().await.unwrap();
+        let trace = crate::sqlite::trace_statements(false);
+        assert!(
+            trace
+                .iter()
+                .filter(|sql| sql
+                    .starts_with("SELECT sequence,hash,scope,author FROM secure_operations"))
+                .count()
+                <= 1
+        );
+        assert!(
+            trace
+                .iter()
+                .all(|sql| !sql.contains("min(sequence) AS sequence")
+                    && !sql.ends_with("FROM secure_quarantine"))
+        );
+        let next = *revision.borrow_and_update();
+        assert!(next - applied <= 1, "more than one application in a step");
+        applied = next;
+        steps += 1;
+        assert!(steps < 100);
+        if !more {
+            break;
+        }
+    }
+    assert!(steps > frames.len());
+    assert_eq!(applied, 4);
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
+}
+
+#[tokio::test]
+async fn a_write_invalidates_pending_discovery_before_application() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let mut frames = Vec::new();
+    for row in 1u8..=3 {
+        let source = open(
+            &f,
+            &dir.path().join(format!("invalidate-{row}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        frames.push(
+            source
+                .author([row; 32], insert(&f, row), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    let target = open(&f, &dir.path().join("invalidated.db"), &PrivateKey::new()).await;
+    target
+        .stage_bundle_before_apply_for_test(&frames)
+        .await
+        .unwrap();
+    assert!(target.pending_step_for_test().await.unwrap());
+    assert!(target.pending_step_for_test().await.unwrap());
+    target
+        .author_buffered([9; 32], insert(&f, 9), vec![])
+        .await
+        .unwrap();
+    let revision = target.observe_revision();
+    let after_write = *revision.borrow();
+    // The old discovered heads are discarded before any application can use them.
+    for _ in 0..2 {
+        assert!(target.pending_step_for_test().await.unwrap());
+        assert_eq!(*revision.borrow(), after_write);
+    }
+    target.settle().await.unwrap();
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
+}
+
+#[tokio::test]
+async fn pending_discovery_resumes_after_reopening() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let source = open(&f, &dir.path().join("resume-source.db"), &PrivateKey::new()).await;
+    let frames = vec![
+        source.author([1; 32], insert(&f, 1), vec![]).await.unwrap(),
+        source.author([2; 32], insert(&f, 2), vec![]).await.unwrap(),
+    ];
+    let path = dir.path().join("resume.db");
+    let node = PrivateKey::new();
+    let target = open(&f, &path, &node).await;
+    target
+        .stage_bundle_before_apply_for_test(&frames)
+        .await
+        .unwrap();
+    assert!(target.pending_step_for_test().await.unwrap());
+    drop(target);
+    let target = open(&f, &path, &node).await;
+    target.settle().await.unwrap();
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 2);
+    for frame in frames {
+        assert_eq!(
+            target.receipt_status(frame.id().unwrap()).await.unwrap(),
+            ReceiveStatus::Applied
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "combined receive calibration; run in release mode with --ignored --nocapture"]
+async fn measure_combined_receive_steps() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    for batch in [1, 2, 4] {
+        let source = open(
+            &f,
+            &dir.path().join(format!("combined-source-{batch}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        let mut first = Vec::new();
+        for row in 1..=batch {
+            // A separate scope of author handles per calibration size.
+            first.push(
+                source
+                    .author([batch * 16 + row; 32], insert(&f, batch * 16 + row), vec![])
+                    .await
+                    .unwrap(),
+            );
+        }
+        let mut cold = Vec::new();
+        for sample in 0..64 {
+            let target = open(
+                &f,
+                &dir.path()
+                    .join(format!("combined-cold-{batch}-{sample}.db")),
+                &PrivateKey::new(),
+            )
+            .await;
+            cold.push(
+                target
+                    .measure_ready_receive_for_test(&first)
+                    .await
+                    .unwrap()
+                    .as_micros() as u64,
+            );
+        }
+        let target = open(
+            &f,
+            &dir.path().join(format!("combined-warm-{batch}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        target.measure_ready_receive_for_test(&first).await.unwrap();
+        let mut previous: Vec<_> = (1..=batch)
+            .map(|row| f.app().name(&format!("row-{}", batch * 16 + row)))
+            .collect();
+        let mut warm = Vec::new();
+        for sample in 1..=128u8 {
+            let mut frames = Vec::new();
+            for row in 1..=batch {
+                let next = f.app().name(&format!("warm-{batch}-{row}-{sample}"));
+                let mut handle = [0; 32];
+                handle[..3].copy_from_slice(&[batch, row, sample]);
+                let frame = source
+                    .author(
+                        handle,
+                        vec![change(
+                            f.public,
+                            batch * 16 + row,
+                            Some(previous[usize::from(row - 1)].clone()),
+                            Some(next.clone()),
+                        )],
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                previous[usize::from(row - 1)] = next;
+                frames.push(frame);
+            }
+            warm.push(
+                target
+                    .measure_ready_receive_for_test(&frames)
+                    .await
+                    .unwrap()
+                    .as_micros() as u64,
+            );
+        }
+        let snapshot = target.snapshot(f.public).await.unwrap();
+        for row in 1..=batch {
+            assert_eq!(
+                snapshot.rows[&[batch * 16 + row; 32]],
+                previous[usize::from(row - 1)]
+            );
+        }
+        for (profile, mut samples) in [("cold", cold), ("warm", warm)] {
+            samples.sort_unstable();
+            let percentile = |n: usize| samples[(samples.len() * n).div_ceil(100) - 1];
+            eprintln!(
+                "combined_receive profile={profile} input_rows={batch} samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+                samples.len(),
+                percentile(50),
+                percentile(95),
+                percentile(99),
+                samples.last().unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn receive_steps_isolate_indivisible_frames_and_keep_one_flush() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let source = open(
+        &f,
+        &dir.path().join("bounded-source.db"),
+        &PrivateKey::new(),
+    )
+    .await;
+    let target = open(
+        &f,
+        &dir.path().join("bounded-target.db"),
+        &PrivateKey::new(),
+    )
+    .await;
+    let limit = crate::replica::group::RECEIVE_REQUESTS;
+    let mut page = Vec::new();
+    for row in 1..=limit as u8 {
+        page.push(
+            source
+                .author([row; 32], insert(&f, row), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    page.push(
+        source
+            .author(
+                [100; 32],
+                [insert(&f, 100), insert(&f, 101)].concat(),
+                vec![],
+            )
+            .await
+            .unwrap(),
+    );
+    for row in limit as u8 + 1..=2 * limit as u8 {
+        page.push(
+            source
+                .author([row; 32], insert(&f, row), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    let measurements = target.lock_measurements();
+    measurements.start();
+    let before = target.group_commits().await;
+    let statuses = target.receive_all(page).await;
+    assert!(
+        statuses
+            .into_iter()
+            .all(|status| matches!(status, Ok(ReceiveStatus::Applied)))
+    );
+    assert_eq!(target.group_commits().await - before, 3);
+    assert_eq!(target.watermark().await.2, 1);
+    assert_eq!(
+        target.snapshot(f.public).await.unwrap().rows.len(),
+        2 * limit + 2
+    );
+    let measured = measurements.stop();
+    let mut received: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| {
+            holder
+                .units
+                .get("received_frame")
+                .into_iter()
+                .flatten()
+                .map(|(count, _)| *count)
+        })
+        .collect();
+    received.sort_unstable();
+    assert_eq!(received, [1, limit as u64, limit as u64]);
+    let oversized: usize = measured
+        .holders
+        .values()
+        .map(|holder| holder.oversized_request_us.len())
+        .sum();
+    assert_eq!(
+        oversized, 1,
+        "ordinary grouped frames are not oversized requests"
+    );
+}
+
+#[tokio::test]
+async fn receive_retry_keeps_committed_steps_and_resumes_the_failed_suffix() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let source = open(&f, &dir.path().join("retry-source.db"), &PrivateKey::new()).await;
+    let target = open(&f, &dir.path().join("retry-target.db"), &PrivateKey::new()).await;
+    let limit = crate::replica::group::RECEIVE_REQUESTS;
+    let mut page = Vec::new();
+    for row in 1..=2 * limit as u8 + 1 {
+        page.push(
+            source
+                .author([row; 32], insert(&f, row), vec![])
+                .await
+                .unwrap(),
+        );
+    }
+    target
+        .inject_group_fault(Some(GroupFault::FailAfterCommits(1)))
+        .await;
+    let statuses = target.receive_all(page.clone()).await;
+    assert!(
+        statuses[..limit]
+            .iter()
+            .all(|status| matches!(status, Ok(ReceiveStatus::Applied)))
+    );
+    assert!(statuses[limit..].iter().all(Result::is_err));
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), limit);
+    target.inject_group_fault(None).await;
+    let statuses = target.receive_all(page).await;
+    assert!(
+        statuses[..limit]
+            .iter()
+            .all(|status| matches!(status, Ok(ReceiveStatus::Duplicate)))
+    );
+    assert!(
+        statuses[limit..]
+            .iter()
+            .all(|status| matches!(status, Ok(ReceiveStatus::Applied)))
+    );
+    assert_eq!(
+        target.snapshot(f.public).await.unwrap().rows.len(),
+        2 * limit + 1
+    );
+}
+
+#[tokio::test]
+async fn reclamation_releases_between_page_steps_and_resumes_after_reopen() {
+    use crate::replica::group::{RECLAIM_PAGES, RECLAIM_STEP};
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("reclamation.db");
+    let node = PrivateKey::new();
+    let replica = open(&f, &path, &node).await;
+    replica
+        .author([1; 32], insert(&f, 1), vec![])
+        .await
+        .unwrap();
+    {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("CREATE TABLE reclamation_fixture(bytes BLOB)", ())
+            .await
+            .unwrap();
+        inner.conn.execute(format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO reclamation_fixture SELECT zeroblob(4096) FROM n", RECLAIM_STEP + RECLAIM_PAGES), ()).await.unwrap();
+        inner
+            .conn
+            .execute("DROP TABLE reclamation_fixture", ())
+            .await
+            .unwrap();
+    }
+    let free = |replica: EncryptedReplica<Employees>| async move {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        let result = rows(&inner.conn, "PRAGMA freelist_count").await.unwrap();
+        let [SqlValue::Integer(free)] = result[0].as_slice() else {
+            panic!("free pages")
+        };
+        *free
+    };
+    let initial = free(replica.clone()).await;
+    assert!(initial > RECLAIM_STEP + RECLAIM_PAGES);
+    let measurements = replica.lock_measurements();
+    measurements.start();
+    replica.reclaim_free_pages_for_test().await;
+    let remaining = free(replica.clone()).await;
+    assert!((1..=RECLAIM_STEP).contains(&(initial - remaining)));
+    assert!(
+        remaining >= RECLAIM_PAGES,
+        "fixture must cross several steps"
+    );
+    let measured = measurements.stop();
+    let counts: Vec<_> = measured
+        .holders
+        .values()
+        .flat_map(|holder| {
+            holder
+                .units
+                .get("reclaimed_page")
+                .into_iter()
+                .flatten()
+                .map(|(count, _)| *count)
+        })
+        .collect();
+    assert_eq!(counts, [(initial - remaining) as u64]);
+    drop(replica);
+    let replica = open(&f, &path, &node).await;
+    // Open may reclaim the durable remainder before returning.
+    let mut previous = free(replica.clone()).await;
+    assert!(previous <= remaining);
+    while previous >= RECLAIM_PAGES {
+        replica.reclaim_free_pages_for_test().await;
+        let next = free(replica.clone()).await;
+        assert!((1..=RECLAIM_STEP).contains(&(previous - next)));
+        previous = next;
+    }
+    assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
 }

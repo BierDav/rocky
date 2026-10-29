@@ -198,6 +198,20 @@ impl<A: RowApplication> Inner<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
+    /// Whether the pass was current at `commit`. Local authoring adds only
+    /// applied operations of this node's own log: it neither adds pending
+    /// work nor makes waiting work ready, so a pass current before such a
+    /// commit stays current. Otherwise local writes between settle steps
+    /// could restart the pass forever.
+    pub(super) fn pending_pass_current(&self, commit: u64) -> bool {
+        self.pending_pass.commit == commit
+            && self.pending_pass.epoch == self.context_epoch.load(Ordering::Relaxed)
+    }
+    /// Keeps a pass that was current before a local authoring commit.
+    pub(super) fn keep_pending_pass(&mut self) {
+        self.pending_pass.commit = self.commit;
+        self.pending_pass.epoch = self.context_epoch.load(Ordering::Relaxed);
+    }
     /// One pending discovery, application or cleanup step. Progress is
     /// recomputed after another transaction changes its source state.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {

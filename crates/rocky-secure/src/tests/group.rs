@@ -1160,26 +1160,7 @@ async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
 async fn pending_discovery_and_application_are_bounded_across_log_heads() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
-    let mut frames = Vec::new();
-    for row in 1u8..=4 {
-        let source = open(
-            &f,
-            &dir.path().join(format!("head-{row}.db")),
-            &PrivateKey::new(),
-        )
-        .await;
-        frames.push(
-            source
-                .author([row; 32], insert(&f, row), vec![])
-                .await
-                .unwrap(),
-        );
-    }
-    let target = open(&f, &dir.path().join("heads.db"), &PrivateKey::new()).await;
-    target
-        .stage_bundle_before_apply_for_test(&frames)
-        .await
-        .unwrap();
+    let target = staged_heads(&f, &dir, "heads", 4).await;
     let mut revision = target.observe_revision();
     let mut applied = 0;
     let mut steps = 0;
@@ -1210,50 +1191,88 @@ async fn pending_discovery_and_application_are_bounded_across_log_heads() {
             break;
         }
     }
-    assert!(steps > frames.len());
+    assert!(steps > 4);
     assert_eq!(applied, 4);
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
 }
 
-#[tokio::test]
-async fn a_write_invalidates_pending_discovery_before_application() {
-    let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+/// Frames from distinct authors, stored without applying them.
+async fn staged_heads(
+    f: &Fixture,
+    dir: &TempDir,
+    name: &str,
+    heads: u8,
+) -> EncryptedReplica<Employees> {
     let mut frames = Vec::new();
-    for row in 1u8..=3 {
+    for row in 1..=heads {
         let source = open(
-            &f,
-            &dir.path().join(format!("invalidate-{row}.db")),
+            f,
+            &dir.path().join(format!("{name}-{row}.db")),
             &PrivateKey::new(),
         )
         .await;
         frames.push(
             source
-                .author([row; 32], insert(&f, row), vec![])
+                .author([row; 32], insert(f, row), vec![])
                 .await
                 .unwrap(),
         );
     }
-    let target = open(&f, &dir.path().join("invalidated.db"), &PrivateKey::new()).await;
+    let target = open(
+        f,
+        &dir.path().join(format!("{name}.db")),
+        &PrivateKey::new(),
+    )
+    .await;
     target
         .stage_bundle_before_apply_for_test(&frames)
         .await
         .unwrap();
-    assert!(target.pending_step_for_test().await.unwrap());
-    assert!(target.pending_step_for_test().await.unwrap());
     target
-        .author_buffered([9; 32], insert(&f, 9), vec![])
+}
+
+#[tokio::test]
+async fn stored_work_invalidates_pending_discovery_before_application() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let target = staged_heads(&f, &dir, "invalidated", 3).await;
+    assert!(target.pending_step_for_test().await.unwrap());
+    assert!(target.pending_step_for_test().await.unwrap());
+    let source = open(&f, &dir.path().join("late.db"), &PrivateKey::new()).await;
+    let late = source.author([4; 32], insert(&f, 4), vec![]).await.unwrap();
+    target
+        .stage_bundle_before_apply_for_test(&[late])
         .await
         .unwrap();
     let revision = target.observe_revision();
-    let after_write = *revision.borrow();
+    let after_store = *revision.borrow();
     // The old discovered heads are discarded before any application can use them.
     for _ in 0..2 {
         assert!(target.pending_step_for_test().await.unwrap());
-        assert_eq!(*revision.borrow(), after_write);
+        assert_eq!(*revision.borrow(), after_store);
     }
     target.settle().await.unwrap();
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
+}
+
+/// Regression: a local write between every settle step restarted the pass,
+/// so a receive waiting for settle never returned while writes continued.
+#[tokio::test]
+async fn local_writes_between_pending_steps_do_not_restart_the_pass() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let target = staged_heads(&f, &dir, "interleaved", 3).await;
+    let mut steps = 0u8;
+    while target.pending_step_for_test().await.unwrap() {
+        steps += 1;
+        assert!(steps < 100, "the pending pass never finished");
+        target
+            .author_buffered([100 + steps; 32], insert(&f, 100 + steps), vec![])
+            .await
+            .unwrap();
+    }
+    let rows = target.snapshot(f.public).await.unwrap().rows.len();
+    assert_eq!(rows, 3 + usize::from(steps));
 }
 
 #[tokio::test]

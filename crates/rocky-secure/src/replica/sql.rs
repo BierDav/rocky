@@ -34,13 +34,16 @@ pub struct SecureCommit {
 
 /// The replica held for one transaction. Dropping it rolls back whatever
 /// the engine still has open, so a cancelled call cannot leave a
-/// transaction behind.
-struct Held<A: RowApplication>(Guard<OwnedMutexGuard<Inner<A>>>);
+/// transaction behind. The flag keeps the pending pass after a plain commit.
+struct Held<A: RowApplication>(Guard<OwnedMutexGuard<Inner<A>>>, bool);
 impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
         let inner = &mut *self.0;
         inner.strict_projection = false;
         inner.invalidate_context();
+        if self.1 {
+            inner.keep_pending_pass();
+        }
         let conn = inner.conn.connection();
         if !conn.is_autocommit().unwrap_or(true) {
             let _ = conn.run_now("ROLLBACK");
@@ -816,7 +819,7 @@ impl<A: RowApplication> SecureSql<A> {
             .map(|(index, _)| index)
             .collect();
         lease.plan = Arc::new(plan);
-        let held = Held(inner);
+        let held = Held(inner, false);
         let conn = held.0.conn.connection();
         conn.run_now(sql).map_err(engine)?;
         lease.identities.clear();
@@ -1081,6 +1084,8 @@ impl<A: RowApplication> SecureSql<A> {
         qualification_kill("before");
         #[cfg(any(test, feature = "intent-shapes"))]
         let origin = self.origin(&target, commit);
+        // Only a plain bundle is local authoring alone.
+        let local = matches!(target, Target::Bundle(_)) && commit == Kind::Plain;
         let sealed = self.seal(inner, &lease.plan, target, commit).await;
         inner.strict_projection = false;
         let committed = match sealed? {
@@ -1107,7 +1112,9 @@ impl<A: RowApplication> SecureSql<A> {
         self.shape().committed(origin);
         #[cfg(feature = "qualification")]
         qualification_kill("after");
+        let current = local && inner.pending_pass_current(inner.commit);
         inner.note_commit().await;
+        held.1 = current;
         let scopes = committed
             .frames
             .iter()

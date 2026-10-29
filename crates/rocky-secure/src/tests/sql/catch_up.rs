@@ -494,6 +494,64 @@ async fn interrupted_catch_up(retry_receipt: bool) {
     // Eight operations take separate application transactions.
     assert!(interruptions >= 7, "{interruptions} interruptions");
 }
+/// Regression: a SQL commit between every settle step restarted the pending
+/// pass, so a receive waiting for it never returned while writes continued.
+#[tokio::test]
+async fn sql_commits_between_pending_steps_do_not_restart_the_pass() {
+    let t = Typed::new(UpdatePolicy::Changed);
+    let app = t.app();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let creator = PrivateKey::new();
+    let source = t
+        .open(&dir.path().join("creator.db"), &creator, t.full(), &both)
+        .await;
+    let created = (1..=3)
+        .map(|key| {
+            let id = RowIdentity::new(number(&creator), key).unwrap().integer();
+            write(&t, &app, None, &values(key as usize, 0, id))
+        })
+        .collect();
+    author_all(&source, created, "create").await;
+    let frames = crate::tests::stored_frames(
+        &source,
+        "SELECT header,body FROM secure_operations ORDER BY author,sequence",
+    )
+    .await;
+    let reader = t
+        .open(
+            &dir.path().join("reader.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    reader
+        .stage_bundle_before_apply_for_test(&frames)
+        .await
+        .unwrap();
+    let session = sql(&reader, &both).await;
+    let mut steps = 0;
+    while reader.pending_step_for_test().await.unwrap() {
+        steps += 1;
+        assert!(steps < 100, "the pending pass never finished");
+        insert(
+            &session,
+            "INSERT INTO salaries VALUES(?,1)",
+            vec![text(&format!("w{steps}"))],
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        rows_of(
+            &reader,
+            "SELECT count(*) FROM secure_operations WHERE status<>'applied'"
+        )
+        .await,
+        vec![vec![SqlValue::Integer(0)]]
+    );
+}
 async fn rows_of(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
     crate::storage::rows(
         &replica

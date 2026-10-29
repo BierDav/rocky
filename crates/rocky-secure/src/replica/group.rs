@@ -523,6 +523,8 @@ impl<A: RowApplication> Inner<A> {
             works.push(request.work);
             replies.push((request.reply, request.exposed));
         }
+        let kept = self.pending_pass_current(self.commit)
+            && !works.iter().any(|work| matches!(work, Work::Receive(_)));
         let outcome = match now() {
             Ok(time) => transaction!(@commit self, |inner| inner.run_group(&works, time).await)
                 .map(|outcome| (outcome, time)),
@@ -537,6 +539,9 @@ impl<A: RowApplication> Inner<A> {
                 return (None, BTreeSet::new(), Vec::new());
             }
         };
+        if kept {
+            self.keep_pending_pass();
+        }
         #[cfg(any(test, feature = "qualification"))]
         if let Err(error) = self.crash_at(|point| point == super::CrashPoint::GroupAfterCommit) {
             for (reply, _) in replies {

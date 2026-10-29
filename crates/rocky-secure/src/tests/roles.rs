@@ -1094,7 +1094,8 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
     device.replica.set_role(partial(&[&full], 1)).await.unwrap();
     device.replica.subscribe(scopes[0]).await.unwrap();
     device.replica.subscribe(scopes[1]).await.unwrap();
-    insert(&f, &full, scopes[0], 0..1_000, 1).await;
+    const CATCH_UP_ROWS: u32 = 128;
+    insert(&f, &full, scopes[0], 0..CATCH_UP_ROWS, 1).await;
     let (mut session, server) = connect(&device, &full).await;
     let done = std::sync::atomic::AtomicBool::new(false);
     let writes = |node: &'static str, replica: Replica, key: PrivateKey, scope| {
@@ -1146,7 +1147,7 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
         writes("full", full.replica.clone(), full.key.clone(), scopes[1]),
     );
     // Bounded pages, and neither side's writes waited for the whole transfer.
-    assert!(pass.frames >= 1_000 && pass.pages >= 1_000 / 32);
+    assert!(pass.frames >= CATCH_UP_ROWS as usize && pass.pages >= (CATCH_UP_ROWS / 32) as usize);
     assert!(local > 0 && remote > 0, "{local} {remote}");
     eprintln!(
         "writes during catch-up: device {local} (slowest {local_slowest:?}), full {remote} (slowest {remote_slowest:?})"

@@ -238,6 +238,14 @@ pub struct PartitionStatement {
     pub statement: Checked,
 }
 
+/// The table a write names as its target, lowercase; `None` for anything
+/// `split_intent` would refuse before looking at a target.
+pub fn written_table(sql: &str, views: &[rocky_core::LogicalView]) -> Option<String> {
+    target(&prepare(sql, views).ok()?.statement)
+        .ok()
+        .map(|(name, _)| name)
+}
+
 /// Refuses a replayed table's schema whose keys replicas would assign.
 pub fn check_replayed_table(create_sql: &str) -> Result<(), IntentRefusal> {
     if crate::scoped_connection::tokens(create_sql)

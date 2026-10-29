@@ -402,6 +402,8 @@ struct BundleBody {
     membership: Option<Membership>,
     reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
+    /// A replayed table's part of the bundle, instead of `writes`.
+    intent: Option<rocky_core::replay::Intent>,
 }
 #[derive(Serialize, Deserialize)]
 struct WitnessBody {
@@ -420,6 +422,7 @@ pub(crate) struct RowPayload {
     membership: Option<Membership>,
     reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
+    intent: Option<rocky_core::replay::Intent>,
     creations: Vec<(Commitment, Commitment)>,
 }
 impl RowPayload {
@@ -443,6 +446,7 @@ impl RowPayload {
             membership: self.membership.clone(),
             reauthors: self.reauthors,
             writes: self.writes.clone(),
+            intent: None,
         })
     }
     #[cfg(test)]
@@ -544,6 +548,21 @@ impl RowPayload {
             membership: None,
             reauthors: None,
             writes: changes.iter().cloned().map(RowWrite::changed).collect(),
+            intent: None,
+        })
+    }
+    pub(crate) fn intent_bundle(
+        membership: Membership,
+        intent: rocky_core::replay::Intent,
+    ) -> Result<Vec<u8>, Error> {
+        encode(&BundleBody {
+            version: 5,
+            proofs: BTreeMap::new(),
+            carried: BTreeMap::new(),
+            membership: Some(membership),
+            reauthors: None,
+            writes: Vec::new(),
+            intent: Some(intent),
         })
     }
     pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
@@ -554,6 +573,7 @@ impl RowPayload {
             membership: Some(membership),
             reauthors: None,
             writes,
+            intent: None,
         })
     }
     pub(crate) fn reauthor_body(
@@ -601,6 +621,9 @@ impl RowPayload {
     }
     pub(crate) fn writes(&self) -> &[RowWrite] {
         &self.writes
+    }
+    pub(crate) fn intent(&self) -> Option<&rocky_core::replay::Intent> {
+        self.intent.as_ref()
     }
     pub(crate) fn into_writes(self) -> Vec<RowWrite> {
         self.writes

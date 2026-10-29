@@ -58,6 +58,10 @@ impl<A: RowApplication> Inner<A> {
         grants: &[rocky_core::ResourceGrant],
         opened_payload: Option<&'p RowPayload>,
     ) -> Result<Materialization<'p>, Error> {
+        // Replay of received intents is features_13 phase 4 slice 4.
+        if writes.is_empty() && self.row_payload(frame)?.intent().is_some() {
+            return Err(denied("this replica does not replay intent frames yet"));
+        }
         if writes.is_empty() || writes.len() > 32 {
             return Err(denied("row change quota"));
         }

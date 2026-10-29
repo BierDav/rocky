@@ -31,6 +31,8 @@ sqlparser = { version = "0.63", default-features = false, features = ["std", "vi
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
+# Replayed tables install on the secure profile in tests before phase 4 completes.
+rocky-core = { workspace = true, features = ["intent-replay"] }
 serde_json = "1"
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 employees-app = { path = "../../examples/employees-app" }

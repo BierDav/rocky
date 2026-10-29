@@ -133,7 +133,7 @@ impl SourceRows {
         for entity in &definition.entities {
             let table: Table = serde_json::from_str(&entity.shape).map_err(|_| unsupported())?;
             if serde_json::to_string(&table).map_err(|_| unsupported())? != entity.shape
-                || table.class != TableClass::Mergeable
+                || !table.class.typed()
                 || table.name != entity.name
                 || table.key.is_empty()
             {

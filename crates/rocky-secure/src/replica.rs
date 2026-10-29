@@ -48,6 +48,7 @@ mod identity;
 pub(crate) use identity::Raise;
 mod author_sets;
 mod incoming;
+mod intents;
 mod keys;
 mod metadata;
 pub(crate) mod migrate;

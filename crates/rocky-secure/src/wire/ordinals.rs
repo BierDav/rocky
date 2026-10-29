@@ -30,6 +30,7 @@ struct Bundle {
     membership: Option<Membership>,
     reauthors: Option<serde_bytes::ByteArray<32>>,
     writes: Vec<Write>,
+    intent: Option<rocky_core::replay::Intent>,
 }
 
 fn ordinal(fields: &FieldOrdinals<'_>, field: Commitment) -> Result<u32, Error> {
@@ -166,6 +167,7 @@ pub(super) fn compact(
             membership: body.membership,
             reauthors: body.reauthors.map(Into::into),
             writes,
+            intent: body.intent,
         })?,
         creations: envelope.creations,
     })
@@ -189,6 +191,13 @@ pub(super) fn expand(
     let body: Bundle = decode(&envelope.body)?;
     if envelope.version != 1 || body.version != 6 {
         return Err(denied("unsupported bundle version"));
+    }
+    if let Some(intent) = &body.intent {
+        // An intent is one bundle member and carries no rows.
+        if !body.writes.is_empty() || body.membership.is_none() || !body.carried.is_empty() {
+            return Err(denied("an intent frame carries rows"));
+        }
+        intent.check().map_err(denied)?;
     }
     let fields = definition
         .field_ordinals(scope.table)
@@ -289,6 +298,7 @@ pub(super) fn expand(
         membership: body.membership,
         reauthors: body.reauthors.map(|id| id.into_array()),
         writes,
+        intent: body.intent,
         creations: envelope.creations,
     })
 }

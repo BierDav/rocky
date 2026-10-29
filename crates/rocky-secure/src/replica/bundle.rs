@@ -2,6 +2,7 @@
 //! and frames, applied atomically by each reader of the partitions it holds.
 use super::incoming::Outcome;
 use super::*;
+use rocky_core::replay::IntentStatement;
 
 /// Frames of one bundle. Each frame holds at most `ROWS_PER_FRAME` rows of
 /// one scope, which bounds a bundle's rows.
@@ -38,6 +39,16 @@ fn member_aad(
         count as u64,
         scope,
     ))
+}
+
+/// What a bundle handle commits to: a retry with the same handle must
+/// repeat exactly this input.
+pub(super) fn input_bytes(
+    writes: &[RowWrite],
+    dependencies: &[Hash],
+    intents: &BTreeMap<ResourceScope, Vec<IntentStatement>>,
+) -> Result<Vec<u8>, Error> {
+    encode(&(writes, dependencies, intents))
 }
 
 /// The durable identity of the transaction a node commits under `handle`.
@@ -96,6 +107,12 @@ fn partition<A: RowApplication>(writes: &[RowWrite], app: &A) -> Result<Vec<Vec<
     Ok(frames)
 }
 
+/// One bundle member as the author plans it.
+enum Frame {
+    Rows(Vec<RowWrite>),
+    Intent(Vec<IntentStatement>),
+}
+
 /// A required member as this replica holds it.
 enum Member {
     /// Not received yet.
@@ -140,7 +157,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<EncryptedFrame>, Error> {
         Box::pin(self.author_bundle_resolving(
             (handle, input),
-            writes,
+            (writes, BTreeMap::new()),
             dependencies,
             time,
             carried,
@@ -158,7 +175,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<EncryptedFrame>, Error> {
         Box::pin(self.author_bundle_resolving(
             (handle, input),
-            writes,
+            (writes, BTreeMap::new()),
             &[],
             time,
             &BTreeMap::new(),
@@ -166,10 +183,30 @@ impl<A: RowApplication> Inner<A> {
         ))
         .await
     }
-    async fn author_bundle_resolving(
+    /// A SQL transaction's bundle: row frames for mergeable tables and one
+    /// intent frame per partition its replayed writes reached.
+    pub(super) async fn author_sql_bundle(
         &mut self,
         (handle, input): (Commitment, Commitment),
         writes: &[RowWrite],
+        intents: BTreeMap<ResourceScope, Vec<IntentStatement>>,
+        time: u64,
+        entry: Option<u64>,
+    ) -> Result<Vec<EncryptedFrame>, Error> {
+        Box::pin(self.author_bundle_resolving(
+            (handle, input),
+            (writes, intents),
+            &[],
+            time,
+            &BTreeMap::new(),
+            (entry, None),
+        ))
+        .await
+    }
+    async fn author_bundle_resolving(
+        &mut self,
+        (handle, input): (Commitment, Commitment),
+        (writes, intents): (&[RowWrite], BTreeMap<ResourceScope, Vec<IntentStatement>>),
         dependencies: &[Hash],
         time: u64,
         carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
@@ -232,11 +269,31 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Result<Vec<_>, Error>>()?;
         ordered.sort_by_key(|(scope, identity, _)| (*scope, *identity));
         let writes: Vec<_> = ordered.into_iter().map(|(_, _, write)| write).collect();
-        let frames = partition(&writes, self.app.as_ref())?;
+        let mut frames: Vec<_> = match writes.is_empty() && !intents.is_empty() {
+            true => Vec::new(),
+            false => partition(&writes, self.app.as_ref())?
+                .into_iter()
+                .map(|writes| (writes[0].change.scope, Frame::Rows(writes)))
+                .collect(),
+        };
+        frames.extend(
+            intents
+                .into_iter()
+                .map(|(scope, statements)| (scope, Frame::Intent(statements))),
+        );
+        frames.sort_by_key(|(scope, _)| *scope);
+        if frames.len() > MAX_BUNDLE_FRAMES {
+            return Err(Error::Quota {
+                resource: "bundle frames",
+                limit: MAX_BUNDLE_FRAMES,
+            });
+        }
         // The application sees the exact transaction once, across scopes.
-        self.app
-            .validate_changes(&apply::exact(&writes))
-            .map_err(|message| denied(&message))?;
+        if !writes.is_empty() {
+            self.app
+                .validate_changes(&apply::exact(&writes))
+                .map_err(|message| denied(&message))?;
+        }
         let node = self
             .node_author
             .as_ref()
@@ -246,16 +303,19 @@ impl<A: RowApplication> Inner<A> {
         let transaction = transaction_id(node, &handle);
         let mut plan = Vec::with_capacity(frames.len());
         let mut next = BTreeMap::new();
-        for frame in &frames {
-            let scope = frame[0].change.scope;
+        // An intent scope has one member, which continues this tip.
+        let mut tips = BTreeMap::new();
+        for (scope, _) in &frames {
+            let scope = *scope;
             let author = Some(node);
             let sequence = match next.get(&scope) {
                 Some(sequence) => *sequence,
                 None => {
                     let id = self.scope_id(scope).await?;
-                    self.author_tip(scope, id, node)
-                        .await?
-                        .map_or(0, |log| log.sequence as u64 + 1)
+                    let tip = self.author_tip(scope, id, node).await?;
+                    let sequence = tip.as_ref().map_or(0, |log| log.sequence as u64 + 1);
+                    tips.insert(scope, tip);
+                    sequence
                 }
             };
             next.insert(scope, sequence + 1);
@@ -282,7 +342,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut routed = self.route_dependencies(dependencies, &plan).await?;
         let mut authored = Vec::with_capacity(count);
-        for (index, (writes, opening)) in frames.iter().zip(&plan).enumerate() {
+        for (index, ((_, frame), opening)) in frames.into_iter().zip(&plan).enumerate() {
             // External dependencies go to the first frame of their scope; the
             // later frames of a scope follow it in the author's log.
             let dependencies = routed.remove(&opening.scope).unwrap_or_default();
@@ -292,6 +352,30 @@ impl<A: RowApplication> Inner<A> {
                 members: members.clone(),
                 entry,
             };
+            let writes = match frame {
+                Frame::Rows(writes) => writes,
+                Frame::Intent(statements) => {
+                    if !dependencies.is_empty() || reauthors.is_some() {
+                        return Err(denied("an intent names no dependencies"));
+                    }
+                    let frame = self
+                        .author_intent_frame(
+                            (opening.scope, tips.remove(&opening.scope).flatten()),
+                            statements,
+                            time,
+                            |sequence, intent| {
+                                if sequence != opening.sequence {
+                                    return Err(Error::Corrupt("bundle sequence plan".into()));
+                                }
+                                RowPayload::intent_bundle(membership, intent)
+                            },
+                        )
+                        .await?;
+                    authored.push(frame);
+                    continue;
+                }
+            };
+            let writes = &writes;
             let stamped = writes
                 .iter()
                 .filter_map(|write| {

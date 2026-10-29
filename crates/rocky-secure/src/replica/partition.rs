@@ -529,21 +529,7 @@ impl<A: RowApplication> Inner<A> {
                     complete = false;
                     continue;
                 }
-                let values = logical
-                    .partition_by
-                    .iter()
-                    .map(|name| {
-                        let column = logical
-                            .column(name)
-                            .ok_or_else(|| denied("unknown partition column"))?;
-                        tuple
-                            .values()
-                            .get(&typed.rows.schema().field_id(logical, column))
-                            .ok_or_else(|| denied("missing partition column"))?
-                            .value()
-                            .map_err(|error| denied(&error.to_string()))
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
+                let values = partition_values(typed.rows.schema(), logical, tuple)?;
                 // Only this partition's own state holds it back.
                 if self.partition_waits(&readiness, *scope).await? {
                     complete = false;
@@ -849,4 +835,27 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         Ok(())
     }
+}
+
+/// A partition's values in `partition_by` order, as SQL sees them.
+pub(super) fn partition_values(
+    schema: &rocky_core::LogicalSchema,
+    logical: &rocky_core::LogicalTable,
+    tuple: &rocky_core::PartitionTuple,
+) -> Result<Vec<SqlValue>, Error> {
+    logical
+        .partition_by
+        .iter()
+        .map(|name| {
+            let column = logical
+                .column(name)
+                .ok_or_else(|| denied("unknown partition column"))?;
+            tuple
+                .values()
+                .get(&schema.field_id(logical, column))
+                .ok_or_else(|| denied("missing partition column"))?
+                .value()
+                .map_err(|error| denied(&error.to_string()))
+        })
+        .collect()
 }

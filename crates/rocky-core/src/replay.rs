@@ -1,10 +1,10 @@
 //! Intents of replayed tables: what a transaction ran, not the rows it made.
 //!
-//! An intent frame carries one partition's statements of a transaction with
-//! their bound values, the author's stamp and the base the author read.
+//! An intent carries one partition's statements of a transaction with their
+//! bound values and the base the author read; its frame carries the stamp.
 //! Replicas holding the partition replay intents in stamp order and drop a
 //! transaction whose replay fails, in every partition of its bundle.
-use crate::{PartitionTuple, SecureStamp, SqlValue};
+use crate::SqlValue;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Statements one intent may carry.
@@ -60,20 +60,17 @@ pub struct BaseMark {
     pub sequence: u64,
 }
 
-/// One partition's part of a transaction. It carries no row images.
+/// One partition's part of a transaction. It carries no row images; its
+/// frame's header names the stamp, tip and partition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IntentFrame {
-    /// Canonical replay order within the partition and tip.
-    pub stamp: SecureStamp,
-    /// The tip frontier the author read, by author.
+pub struct Intent {
+    /// The tip frontier the author read in the partition, by author.
     pub base: Vec<BaseMark>,
-    /// `None` for an unpartitioned table.
-    pub partition: Option<PartitionTuple>,
     pub statements: Vec<IntentStatement>,
 }
 
-impl IntentFrame {
-    /// Refuses a frame no author produces: no statements, too many, or a
+impl Intent {
+    /// Refuses an intent no author produces: no statements, too many, or a
     /// base that is not strictly ordered by author.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.statements.is_empty() || self.statements.len() > MAX_INTENT_STATEMENTS {
@@ -134,18 +131,12 @@ pub struct OutcomeRecord {
 mod tests {
     use super::*;
 
-    fn frame(statements: usize, base: &[(u32, u64)]) -> IntentFrame {
-        IntentFrame {
-            stamp: SecureStamp {
-                clock: 1,
-                author: 1,
-                sequence: 1,
-            },
+    fn frame(statements: usize, base: &[(u32, u64)]) -> Intent {
+        Intent {
             base: base
                 .iter()
                 .map(|&(author, sequence)| BaseMark { author, sequence })
                 .collect(),
-            partition: None,
             statements: (0..statements)
                 .map(|_| IntentStatement {
                     sql: "UPDATE t SET x=x+?".into(),

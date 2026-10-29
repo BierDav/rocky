@@ -42,12 +42,8 @@ pub enum TableClass {
     Replayed,
 }
 impl TableClass {
-    /// Rows with a key and register fields that replicas agree on.
+    /// Keyed rows other replicas hold: registers or replayed intents.
     pub fn typed(self) -> bool {
-        self == Self::Mergeable
-    }
-    /// Rows other replicas hold: registers or replayed intents.
-    pub fn replicated(self) -> bool {
         matches!(self, Self::Mergeable | Self::Replayed)
     }
 }
@@ -210,9 +206,7 @@ fn class_reference(
 ) -> Option<Incompatibility> {
     let column = || key.columns.first().cloned().unwrap_or_default();
     let replayed = |table: &LogicalTable| table.class == TableClass::Replayed;
-    if replayed(table) != replayed(target)
-        && (table.class.replicated() || target.class.replicated())
-    {
+    if replayed(table) != replayed(target) && (table.class.typed() || target.class.typed()) {
         return Some(Incompatibility::ClassReference(column()));
     }
     if replayed(table) && table.coordinated && !target.coordinated {
@@ -687,7 +681,7 @@ impl LogicalTable {
         if self.coordinated && self.class != TableClass::Replayed {
             return Err(Incompatibility::Coordinated);
         }
-        if !self.class.replicated() {
+        if !self.class.typed() {
             if !self.foreign_keys.is_empty()
                 || tokenize(&self.create_sql)
                     .unwrap_or_default()
@@ -909,7 +903,6 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
     let mut references: Vec<_> = table
         .foreign_keys
         .iter()
-        .filter(|_| table.class == TableClass::Mergeable)
         .map(|key| ReplicatedReference {
             columns: key.columns.iter().map(|column| name(column)).collect(),
             table: schema
@@ -1213,11 +1206,12 @@ impl LogicalSchema {
             return vec![error];
         }
         // Neither profile replays intents yet; features_13 phase 4 adds it
-        // to the secure profile.
+        // to the secure profile, built only for its tests until then.
+        let replaying = cfg!(feature = "intent-replay") && profile == Profile::Secure;
         let replayed: Vec<_> = self
             .tables
             .iter()
-            .filter(|table| table.class == TableClass::Replayed)
+            .filter(|table| table.class == TableClass::Replayed && !replaying)
             .map(|table| SchemaError::Incompatible {
                 table: table.sql_name.clone(),
                 reason: Incompatibility::Unsupported(TableClass::Replayed),
@@ -1365,7 +1359,7 @@ impl LogicalSchema {
             .filter(|table| found.contains(table.sql_name.as_str()))
             .collect()
     }
-    /// Mergeable tables: those with signed entities and fields.
+    /// Mergeable and replayed tables: those with signed entities and fields.
     pub fn typed(&self) -> impl Iterator<Item = &LogicalTable> {
         self.tables.iter().filter(|table| table.class.typed())
     }
@@ -1672,17 +1666,21 @@ mod tests {
             reason(Mergeable, Mergeable, [true, false]),
             Some(Incompatibility::Coordinated)
         );
-        // Until the replay engine lands, no profile installs one.
+        // Only the secure profile replays, and only behind `intent-replay`.
         let mut schema = schema();
         schema.tables[0].class = Replayed;
+        let refused = Err(SchemaError::Incompatible {
+            table: "items".into(),
+            reason: Incompatibility::Unsupported(Replayed),
+        });
         assert_eq!(schema.installable(), Ok(()));
-        assert_eq!(
-            schema.supported_on(Profile::Secure),
-            Err(SchemaError::Incompatible {
-                table: "items".into(),
-                reason: Incompatibility::Unsupported(Replayed),
-            })
-        );
+        assert_eq!(schema.supported_on(Profile::Trusted), refused);
+        let secure = if cfg!(feature = "intent-replay") {
+            Ok(())
+        } else {
+            refused
+        };
+        assert_eq!(schema.supported_on(Profile::Secure), secure);
     }
     #[test]
     fn schemas_that_cannot_converge_are_refused() {

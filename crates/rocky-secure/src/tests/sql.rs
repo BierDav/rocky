@@ -2,6 +2,7 @@
 use super::*;
 mod catch_up;
 mod compact;
+mod intents;
 mod maintenance;
 mod publication;
 use crate::sql::{AbortReason, SqlError, SqlOptions, SqlState};

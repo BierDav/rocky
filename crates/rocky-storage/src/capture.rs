@@ -122,7 +122,7 @@ impl Table {
         let described = CatalogTable {
             name: table.sql_name.clone(),
             class: table.class,
-            writable: matches!(table.class, TableClass::Mergeable | TableClass::LocalOnly),
+            writable: true,
             columns: table
                 .columns
                 .iter()
@@ -192,11 +192,8 @@ impl Table {
             physical: installed,
         })
     }
-    fn writable(&self) -> bool {
-        matches!(self.class, TableClass::Mergeable | TableClass::LocalOnly)
-    }
     fn captured(&self) -> bool {
-        self.class == TableClass::Mergeable
+        self.class.typed()
     }
     /// A hook or read row as the application sees it: one strict stored
     /// value per declared column.
@@ -417,10 +414,7 @@ impl Gate {
         let Some(plan) = &self.plan else {
             return true;
         };
-        let writable = |table: &str| {
-            plan.table(table)
-                .filter(|index| plan.tables[*index].writable())
-        };
+        let writable = |table: &str| plan.table(table);
         match access {
             Access::Neutral => true,
             Access::Other => false,
@@ -590,7 +584,7 @@ impl Sink {
         }
         match target {
             Some(index) if plan.tables[index].captured() => true,
-            Some(index) if plan.tables[index].writable() => {
+            Some(index) => {
                 if !self.local.contains(&index) {
                     self.local.push(index);
                 }

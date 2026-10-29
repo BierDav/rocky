@@ -87,7 +87,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         dependencies: Vec<Hash>,
         authority: Option<u64>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
-        let encoded = encode(&(&writes, &dependencies))?;
+        let encoded = super::bundle::input_bytes(&writes, &dependencies, &BTreeMap::new())?;
         if encoded.len() > MAX_BUNDLE_BYTES {
             return Err(Error::Quota {
                 resource: "bundle bytes",

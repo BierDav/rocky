@@ -1,5 +1,24 @@
 # 4. Intent replay: evidence
 
+## Slice 1: replay descriptors and intent wire types
+
+Status: done (2026-10-29).
+
+Landed `TableClass::Replayed` and the coordinated flag; install refusals
+`Incompatibility::{Coordinated, ClassReference, CoordinatedReference,
+Unsupported(Replayed)}`; and `rocky_core::replay` intent, base, outcome and
+drop types. `ROW_FORMAT` changes from 12 to 13 and replica `FILE_IDENTITY`
+from v39 to v40.
+
+Coverage includes mixed/coordinated reference refusals, unsupported replayed
+installation, invalid statement counts and base ordering, final-drop
+encoding, and unsupported replica/frame format refusals before writes.
+
+Checks: formatting, Clippy and lint passed. `./scripts/check --changed`
+passed all 219 unit and 1,471 integration tests functionally and exited 1
+only on tier time budgets, on a loaded 18-core host with the data volume
+about 96% full; the same overruns appear on the base.
+
 ## Slice 2: statement check and partition split
 
 Status: done (2026-10-29), in `rocky-storage` only.
@@ -78,3 +97,60 @@ cores from parallel agents:
   integration tests went over the 2 s budget (`a_writer_commits_within_the_write_limit_during_a_catch_up`
   was at 2.03 s alone). None of them reach the new module, and the only change
   to existing code is a refactor of `table()` that keeps its behavior.
+
+## Slice 3: authoring intent frames
+
+Status: done (2026-10-29), authoring only; receivers refuse intent frames
+until slice 4.
+
+- Replayed tables are typed: `TableClass::typed()` covers `Mergeable` and
+  `Replayed`, so they get scopes, keys, partitions, manifest entities and a
+  place in the replicated fingerprint (with their foreign keys). The SQL
+  capture writes and captures them like mergeable tables; the commit
+  publishes no row images for them.
+- Each write to a replayed table is split (`split_intent`) under the open
+  transaction before it runs, so reads of other partitions see the
+  statement's own snapshot. Copies map to partition scopes and must be
+  writable by the session. `ROLLBACK TO` drops the copies recorded after
+  its savepoint. A statement that changes a replayed table without copies
+  (one the splitter cannot name) is refused and poisons the transaction.
+- At commit the copies group per scope into one intent frame each, beside
+  the mergeable row frames, in one bundle (`author_sql_bundle`). Moves,
+  publications, re-authoring and coordinated writes with replayed changes
+  are refused.
+- The bundle body carries `intent: Option<Intent>` (base and statements)
+  instead of writes; the frame header already carries the stamp, tip and
+  partition, so `rocky_core::replay::Intent` dropped them. Decoding refuses
+  an intent body with rows, carried proofs or no membership.
+- Base and order: an intent frame depends on every author's last applied
+  frame in the scope (at most 64), names them as its base, and its clock
+  follows all of them, so canonical order puts it after what it read.
+- Install: the secure profile accepts replayed tables only with
+  `rocky-core/intent-replay`, which only `rocky-secure`'s tests enable,
+  until slice 9 lifts the refusal.
+
+Tests (`rocky-secure` `tests::sql::intents`):
+`replayed_writes_commit_as_intents_beside_mergeable_rows` (mixed bundle,
+savepoint rollback, local result, statement text and parameters, base and
+clock of the next intent),
+`nondeterministic_replayed_writes_are_refused_before_they_run`,
+`a_single_row_intent_authors_within_its_statement_budget`,
+`receivers_refuse_intent_frames_until_they_replay`.
+
+Statement counts for one single-row autocommit `UPDATE` (`BEGIN` through
+`COMMIT` / whole call including session admission around it):
+
+| Table | Transaction | Whole call |
+| --- | --- | --- |
+| Mergeable `items` | 74 | 112 |
+| Replayed `salaries` | 41 (≤ 43) | 79 |
+
+Left for later slices:
+
+- Receive and replay (slice 4). Until then a receiver rejects an intent
+  frame by name and applies nothing.
+- Admission on replayed effects, including the author's own rows (slice 4).
+- Replayed tables keep no row records yet: rebuild, restore and moves of
+  replayed rows need the replay engine (slices 4–5).
+- The base reads `secure_operations`; frames pruned under a checkpoint
+  drop out of it and rely on the seal that covers them (slice 5).

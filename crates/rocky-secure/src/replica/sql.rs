@@ -59,8 +59,9 @@ struct Lease<A: RowApplication> {
     plan: Arc<Plan>,
     writable: BTreeSet<usize>,
     held: Option<Held<A>>,
-    /// Caller names of open savepoints and their capture marks.
-    savepoints: Vec<(String, usize, Reserved)>,
+    /// Caller names of open savepoints, their capture marks, reservations
+    /// and recorded intents.
+    savepoints: Vec<(String, usize, Reserved, usize)>,
     /// A `SAVEPOINT` began the transaction; releasing it commits.
     implicit: bool,
     aborted: Option<AbortReason>,
@@ -69,6 +70,8 @@ struct Lease<A: RowApplication> {
     deadline: Instant,
     observed: sqlite::Observed,
     identities: Reserved,
+    /// Partition copies of the transaction's replayed writes, in order.
+    intents: Vec<super::intents::Recorded>,
 }
 
 /// Each table scope's author and the last sequence a transaction reserved.
@@ -228,6 +231,7 @@ impl<A: RowApplication> SecureSession<A> {
                 deadline: Instant::now(),
                 observed: sqlite::Observed::default(),
                 identities: BTreeMap::new(),
+                intents: Vec::new(),
             })),
             cancelled: Arc::default(),
             cursors: Arc::default(),
@@ -313,7 +317,7 @@ impl<A: RowApplication> SecureSql<A> {
                 if !matches!(classify(sql).map_err(Error::Sql)?, Control::Statement) {
                     return Err(refused("move changes must be ordinary SQL statements"));
                 }
-                self.statement(&mut lease, sql, params.clone(), false)?;
+                self.statement(&mut lease, sql, params.clone(), false, None)?;
             }
             self.finish(
                 &mut lease,
@@ -622,7 +626,7 @@ impl<A: RowApplication> SecureSql<A> {
             lease
                 .savepoints
                 .iter()
-                .rposition(|(savepoint, _, _)| savepoint.eq_ignore_ascii_case(name))
+                .rposition(|(savepoint, ..)| savepoint.eq_ignore_ascii_case(name))
                 .ok_or_else(|| refused(format!("no such savepoint: {name}")))
         };
         match control {
@@ -683,7 +687,10 @@ impl<A: RowApplication> SecureSql<A> {
                         .map_err(|_| Error::Corrupt("capture poisoned".into()))?
                         .truncate(mark);
                 }
-                lease.identities = lease.savepoints[index].2.clone();
+                let (identities, intents) =
+                    (lease.savepoints[index].2.clone(), lease.savepoints[index].3);
+                lease.identities = identities;
+                lease.intents.truncate(intents);
                 lease.savepoints.truncate(index + 1);
                 #[cfg(any(test, feature = "intent-shapes"))]
                 self.shape().rollback_to(index);
@@ -692,6 +699,7 @@ impl<A: RowApplication> SecureSql<A> {
             Control::Statement => {
                 #[cfg(any(test, feature = "intent-shapes"))]
                 self.shape().statement(sql, &params);
+                let original = (sql, params.clone());
                 let checked = match &lease.held {
                     Some(held) => {
                         held.0
@@ -732,9 +740,11 @@ impl<A: RowApplication> SecureSql<A> {
                     }
                 }
                 if active {
-                    self.statement(&mut lease, sql, params, false)
+                    let copies = self.intent_copies(&lease, original).await?;
+                    self.statement(&mut lease, sql, params, false, copies)
                 } else {
-                    self.autocommit(&mut lease, sql, params, target).await
+                    self.autocommit(&mut lease, (sql, params), original, target)
+                        .await
                 }
             }
         }
@@ -744,8 +754,8 @@ impl<A: RowApplication> SecureSql<A> {
     async fn autocommit(
         &self,
         lease: &mut Lease<A>,
-        sql: &str,
-        params: Vec<SqlValue>,
+        (sql, params): (&str, Vec<SqlValue>),
+        original: (&str, Vec<SqlValue>),
         target: Target,
     ) -> Result<SecureRows, Error> {
         {
@@ -757,7 +767,11 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         self.begin(lease, "BEGIN IMMEDIATE").await?;
-        let rows = match self.statement(lease, sql, params, true) {
+        let rows = match self.intent_copies(lease, original).await {
+            Ok(copies) => self.statement(lease, sql, params, true, copies),
+            Err(error) => Err(error),
+        };
+        let rows = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 lease.held = None;
@@ -823,6 +837,7 @@ impl<A: RowApplication> SecureSql<A> {
         let conn = held.0.conn.connection();
         conn.run_now(sql).map_err(engine)?;
         lease.identities.clear();
+        lease.intents.clear();
         conn.capture()?
             .lock()
             .map_err(|_| Error::Corrupt("capture poisoned".into()))?
@@ -879,7 +894,7 @@ impl<A: RowApplication> SecureSql<A> {
         };
         lease
             .savepoints
-            .push((name, mark, lease.identities.clone()));
+            .push((name, mark, lease.identities.clone(), lease.intents.len()));
         #[cfg(any(test, feature = "intent-shapes"))]
         self.shape().savepoint();
         Ok(())
@@ -896,6 +911,7 @@ impl<A: RowApplication> SecureSql<A> {
         sql: &str,
         params: Vec<SqlValue>,
         single: bool,
+        copies: Option<Vec<super::intents::Recorded>>,
     ) -> Result<SecureRows, Error> {
         let held = lease.held.take().ok_or(Error::Closed)?;
         let mark = held
@@ -917,6 +933,12 @@ impl<A: RowApplication> SecureSql<A> {
         };
         let ended = conn.is_autocommit().unwrap_or(true);
         let outside = touched.iter().any(|table| !lease.writable.contains(table));
+        // Only a split statement may change a replayed table; anything else
+        // would change rows no replica replays.
+        let unreplayed = copies.is_none()
+            && touched
+                .iter()
+                .any(|table| lease.plan.tables[*table].class == TableClass::Replayed);
         let mut poison = |reason: String, error: Error| {
             // `held` drops here and rolls back.
             if !single {
@@ -941,6 +963,12 @@ impl<A: RowApplication> SecureSql<A> {
                 "a statement wrote a table the session may not write".into(),
                 Error::Sql(SqlError::Denied),
             ),
+            _ if unreplayed => poison(
+                "a statement changed a replayed table outside its intent".into(),
+                Error::Sql(SqlError::Unsupported(
+                    "a statement changed a replayed table outside its intent".into(),
+                )),
+            ),
             Ok(Run::Oversized(true)) => poison(
                 "a writing statement returned more than its bound".into(),
                 Error::Quota {
@@ -964,6 +992,9 @@ impl<A: RowApplication> SecureSql<A> {
             ran => {
                 let answer = self.answer(lease, ran, SqlState::Active);
                 lease.held = Some(held);
+                if answer.is_ok() {
+                    lease.intents.extend(copies.into_iter().flatten());
+                }
                 #[cfg(any(test, feature = "intent-shapes"))]
                 if answer.is_ok() {
                     self.shape().succeeded();
@@ -1086,7 +1117,10 @@ impl<A: RowApplication> SecureSql<A> {
         let origin = self.origin(&target, commit);
         // Only a plain bundle is local authoring alone.
         let local = matches!(target, Target::Bundle(_)) && commit == Kind::Plain;
-        let sealed = self.seal(inner, &lease.plan, target, commit).await;
+        let intents = std::mem::take(&mut lease.intents);
+        let sealed = self
+            .seal(inner, &lease.plan, target, commit, &intents)
+            .await;
         inner.strict_projection = false;
         let committed = match sealed? {
             // `held` rolls the repeated transaction back.
@@ -1142,6 +1176,7 @@ impl<A: RowApplication> SecureSql<A> {
         plan: &Plan,
         target: Target,
         commit: Kind,
+        intents: &[super::intents::Recorded],
     ) -> Result<Sealed, Error> {
         let capture_error = |reason: String| Error::Sql(SqlError::Capture(reason));
         let conn = inner.conn.connection();
@@ -1372,6 +1407,11 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         admit(inner, &self.session)?;
+        let intents = super::intents::grouped(intents)?;
+        // Replayed writes travel only as a plain bundle's intents.
+        if !intents.is_empty() && (commit != Kind::Plain || !matches!(target, Target::Bundle(_))) {
+            return Err(denied("replayed writes commit only as a plain transaction"));
+        }
         let handle = match target {
             Target::Move {
                 handle,
@@ -1418,16 +1458,16 @@ impl<A: RowApplication> SecureSql<A> {
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);
             handle
         });
-        if writes.is_empty() && commit != Kind::Plain {
+        if writes.is_empty() && intents.is_empty() && commit != Kind::Plain {
             return Err(denied("re-authoring or a coordinated write writes rows"));
         }
-        if writes.is_empty() {
+        if writes.is_empty() && intents.is_empty() {
             return Ok(Sealed::Commit(SecureCommit {
                 handle,
                 frames: Vec::new(),
             }));
         }
-        let encoded = encode(&(&writes, Vec::<Hash>::new()))?;
+        let encoded = super::bundle::input_bytes(&writes, &[], &intents)?;
         if encoded.len() > MAX_BUNDLE_BYTES {
             return Err(Error::Quota {
                 resource: "bundle bytes",
@@ -1470,7 +1510,7 @@ impl<A: RowApplication> SecureSql<A> {
             }
             _ => {
                 inner
-                    .author_bundle(handle, input, &writes, &[], now()?, entry)
+                    .author_sql_bundle((handle, input), &writes, intents, now()?, entry)
                     .await?
             }
         };
@@ -1484,6 +1524,21 @@ impl<A: RowApplication> SecureSql<A> {
             Kind::Plain => {}
         }
         Ok(Sealed::Commit(SecureCommit { handle, frames }))
+    }
+}
+
+impl<A: RowApplication> SecureSql<A> {
+    /// The partition copies of a write to a replayed table, split on the
+    /// open transaction's snapshot before the statement runs.
+    async fn intent_copies(
+        &self,
+        lease: &Lease<A>,
+        (sql, params): (&str, Vec<SqlValue>),
+    ) -> Result<Option<Vec<super::intents::Recorded>>, Error> {
+        let held = lease.held.as_ref().ok_or(Error::Closed)?;
+        held.0
+            .intent_copies(sql, &params, &self.session.status)
+            .await
     }
 }
 

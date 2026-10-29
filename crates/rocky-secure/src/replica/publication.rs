@@ -251,7 +251,7 @@ impl<A: RowApplication> Inner<A> {
         let time = now()?;
         let mut frames = Vec::new();
         for (position, chunk) in chunks.iter().enumerate() {
-            let encoded = encode(&(chunk, Vec::<Hash>::new()))?;
+            let encoded = super::bundle::input_bytes(chunk, &[], &BTreeMap::new())?;
             if encoded.len() > MAX_BUNDLE_BYTES {
                 return Err(Error::Quota {
                     resource: "bundle bytes",

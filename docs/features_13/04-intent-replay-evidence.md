@@ -209,3 +209,57 @@ Left for later slices:
   the Kotlin binding.
 - Each replay binds the plan's physical columns again (two
   `pragma_table_info` reads); a cache would follow phase 9's rule.
+
+## Slice 5: undo records, rewind and redo
+
+Status: done (2026-10-29). Late transactions order after the sealed members
+of their partition; replay in a successor tip after a tip change is not
+exercised yet.
+
+- Every applied member keeps the before-images of the rows it changed in
+  its `secure_replayed` row (`undo`, written by the same statement that
+  records its order and outcome, so authoring stays at 43 statements). A
+  receiver takes them from the replay's capture; the author from its
+  session's capture at commit. They never leave the device.
+- An arrival ordered before unsealed applied transactions of its partition
+  rewinds them inside the bundle's transaction: latest first, each
+  member's changed rows are deleted, then its before-images inserted with
+  foreign keys deferred. Members of a rewound transaction in other held
+  partitions rewind with it, and so does what follows them there. The
+  arrival then replays, and the rewound transactions redo in canonical
+  order, each in its own savepoint with admission against its author's
+  current grants (an author that no longer verifies drops as `Admission`).
+  A redo can change an outcome: a later create that applied first drops
+  once the earlier one arrives.
+- The rewind runs inside the receive transaction under the replica lock,
+  so readers never see a rewound partition. `WaitReason::Rewind` is gone.
+- When a seal finalizes a scope through a position, the replayed
+  transactions it covers are marked sealed and lose their undo images; they
+  never rewind again and their drops report `sealed: true`. An arrival
+  ordered before a sealed transaction replays after the seal's members.
+
+Tests (`rocky-secure` `tests::sql::intents`):
+`concurrent_increments_replay_in_order_and_both_apply` (the later author now
+rewinds his raise, applies the earlier one and redoes his: every replica
+holds both increments and three undo records),
+`an_earlier_arrival_rewinds_and_redo_reevaluates_later_outcomes` (Bob's
+create and raise apply first; Alice's earlier create rewinds them, Bob's
+create redoes as a `Constraint` drop, his raise lands on Alice's row; a
+replica receiving in canonical order agrees), and
+`a_seal_ends_rewinds_and_makes_drops_final` (sealing through the applied
+prefix drops undo images and finalizes drops; a later arrival applies on
+top). The seal test drives `seal_replayed` directly; the compaction path
+calls it where it records seal bounds.
+
+Statement counts, one single-row transaction:
+
+| Path | Mergeable | Replayed |
+| --- | --- | --- |
+| Author (`BEGIN`…`COMMIT`) | 112 / 74 | 81 / 43 (≤ 43) |
+| Receive (`received_application`) | 93 / 39 | 85 / 31 (≤ 45) |
+
+Left for later slices:
+
+- Replay of a late transaction in a successor tip after a tip change, and
+  its `Schema` drop when its statements no longer compile there.
+- Rewind cost per transaction and the routine seal constant (slice 6).

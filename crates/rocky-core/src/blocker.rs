@@ -99,9 +99,6 @@ pub enum WaitReason {
     Undecryptable,
     /// Its scope's replay ledger waits for a base.
     Ledger,
-    /// It replays before transactions its partition already applied and
-    /// waits for the partition to rewind.
-    Rewind,
     /// Applying it failed with an error that is not a refusal.
     Failed,
     /// It is quarantined after a failure; it is retried on change or after
@@ -115,7 +112,7 @@ impl WaitReason {
     pub fn clears_by(self) -> ClearsBy {
         match self {
             Self::Schema | Self::ReadGrant => ClearsBy::Application,
-            Self::Ledger | Self::Rewind | Self::Failed | Self::Quarantined | Self::Unexamined => {
+            Self::Ledger | Self::Failed | Self::Quarantined | Self::Unexamined => {
                 ClearsBy::LocalWork
             }
             Self::DirectImport

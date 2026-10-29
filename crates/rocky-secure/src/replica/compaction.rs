@@ -1108,6 +1108,7 @@ impl<A: RowApplication> Inner<A> {
                     [change.id, depth, change.through],
                 )
                 .await?;
+            self.seal_replayed(change.id, change.through).await?;
         }
         for (_, id, rows) in drops {
             for (row, fields) in rows {

@@ -320,22 +320,156 @@ async fn concurrent_increments_replay_in_order_and_both_apply() {
     assert_eq!(amounts(&carol, &both).await, ann(12));
     assert_eq!(alice.receive(second).await.unwrap(), ReceiveStatus::Applied);
     assert_eq!(amounts(&alice, &both).await, ann(12));
-    // Bob already applied a later transaction: the earlier one waits to rewind.
+    // Bob already applied his later raise: it rewinds, the earlier one
+    // applies, and his redoes on top.
+    assert_eq!(bob.receive(first).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(amounts(&bob, &both).await, ann(12));
+    for replica in [&alice, &bob, &carol] {
+        assert_eq!(outcomes(replica).await, vec![None, None, None]);
+        assert_eq!(undo_records(replica).await, 3);
+    }
+}
+
+/// Before-images kept for unsealed applied members.
+async fn undo_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let rows = collect_rows(
+        inner
+            .conn
+            .query(
+                "SELECT COUNT(*) FROM secure_replayed WHERE undo IS NOT NULL",
+                (),
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    match rows[0][0] {
+        SqlValue::Integer(count) => count,
+        _ => unreachable!(),
+    }
+}
+
+/// Inserts `ann` with `amount`, committed alone.
+async fn create(
+    replica: &EncryptedReplica<TypedRows>,
+    both: &[ResourceScope],
+    amount: i64,
+) -> EncryptedFrame {
+    let frames = insert(
+        &sql(replica, both).await,
+        &format!("INSERT INTO salaries VALUES('ann',{amount})"),
+        vec![],
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap()
+    .frames;
+    frames.into_iter().next().unwrap()
+}
+
+#[tokio::test]
+async fn an_earlier_arrival_rewinds_and_redo_reevaluates_later_outcomes() {
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let open = |name: &'static str| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
+                .await
+        }
+    };
+    let (alice, bob, carol) = (open("a.db").await, open("b.db").await, open("c.db").await);
+    // Both create `ann`; Bob then raises his own row.
+    let earlier = create(&alice, &both, 10).await;
+    let later = create(&bob, &both, 20).await;
+    let raised = raise(&sql(&bob, &both).await, 5).await;
+    assert!(replay_stamp(&earlier) < replay_stamp(&later));
     assert_eq!(
-        bob.receive(first).await.unwrap(),
-        ReceiveStatus::PendingDependencies
+        amounts(&bob, &both).await,
+        vec![vec![text("ann"), SqlValue::Integer(25)]]
     );
-    // Its partition is incomplete until then, never read as Bob's alone.
-    assert!(matches!(
-        sql_error(
-            sql(&bob, &both)
+    // Alice's earlier create reaches Bob last: his create now fails its
+    // key and drops, and his raise replays on Alice's row.
+    assert_eq!(
+        bob.receive(earlier.clone()).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    let ann = |amount| vec![vec![text("ann"), SqlValue::Integer(amount)]];
+    assert_eq!(amounts(&bob, &both).await, ann(15));
+    assert_eq!(
+        outcomes(&bob).await,
+        vec![None, Some("constraint".into()), None]
+    );
+    // A dropped member keeps no undo; Carol, in the opposite order, agrees.
+    assert_eq!(undo_records(&bob).await, 2);
+    for frame in [later, raised, earlier] {
+        assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    assert_eq!(amounts(&carol, &both).await, ann(15));
+    assert_eq!(outcomes(&carol).await, outcomes(&bob).await);
+}
+
+#[tokio::test]
+async fn a_seal_ends_rewinds_and_makes_drops_final() {
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let open = |name: &'static str| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
                 .await
-                .run("SELECT amount FROM salaries", vec![])
-                .await
-        ),
-        SqlError::Unavailable { .. }
-    ));
-    assert_eq!(outcomes(&carol).await, vec![None, None, None]);
+        }
+    };
+    let (alice, bob, carol) = (open("a.db").await, open("b.db").await, open("c.db").await);
+    let earlier = create(&alice, &both, 10).await;
+    let later = create(&bob, &both, 20).await;
+    let raised = raise(&sql(&alice, &both).await, 1).await;
+    for frame in [earlier.clone(), later.clone()] {
+        assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    // A seal finalizes everything Carol applied so far.
+    carol.seal_replayed_for_test(t.salaries).await;
+    assert_eq!(undo_records(&carol).await, 0);
+    use rocky_core::replay::{DropReason, TransactionOutcome};
+    assert_eq!(
+        carol
+            .transaction_outcome(transaction(&t, &later))
+            .await
+            .unwrap(),
+        Some(TransactionOutcome::Dropped {
+            reason: DropReason::Constraint,
+            sealed: true,
+        })
+    );
+    // Alice's raise orders before nothing unsealed and applies on top.
+    assert_eq!(carol.receive(raised).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(
+        amounts(&carol, &both).await,
+        vec![vec![text("ann"), SqlValue::Integer(11)]]
+    );
+    assert_eq!(undo_records(&carol).await, 1);
+}
+
+fn transaction(t: &Typed, frame: &EncryptedFrame) -> rocky_core::Commitment {
+    crate::wire::RowPayload::decode_test(
+        &crate::wire::decrypt(
+            &t.key(frame.scope().unwrap()).key,
+            &encode(&frame.operation_ref().unwrap().header.extensions).unwrap(),
+            frame.body_bytes(),
+        )
+        .unwrap(),
+        frame,
+        &t.app(),
+    )
+    .unwrap()
+    .membership()
+    .unwrap()
+    .transaction
 }
 
 fn replay_stamp(frame: &EncryptedFrame) -> (u64, u32, u64) {
@@ -377,24 +511,8 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
         )
         .await;
     // Both create the same key; the later one fails its primary key.
-    let create = |replica, amount| {
-        let both = &both;
-        async move {
-            let frames = insert(
-                &sql(replica, both).await,
-                &format!("INSERT INTO salaries VALUES('ann',{amount})"),
-                vec![],
-            )
-            .await
-            .unwrap()
-            .committed
-            .unwrap()
-            .frames;
-            frames.into_iter().next().unwrap()
-        }
-    };
-    let earlier = create(&alice, 10).await;
-    let later = create(&bob, 20).await;
+    let earlier = create(&alice, &both, 10).await;
+    let later = create(&bob, &both, 20).await;
     let after = raise(&sql(&bob, &both).await, 5).await;
     for frame in [earlier.clone(), later.clone(), after] {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
@@ -408,22 +526,7 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
         outcomes(&carol).await,
         vec![None, Some("constraint".into()), None]
     );
-    let transaction = |frame: &EncryptedFrame| {
-        crate::wire::RowPayload::decode_test(
-            &crate::wire::decrypt(
-                &t.key(t.salaries).key,
-                &encode(&frame.operation_ref().unwrap().header.extensions).unwrap(),
-                frame.body_bytes(),
-            )
-            .unwrap(),
-            frame,
-            &t.app(),
-        )
-        .unwrap()
-        .membership()
-        .unwrap()
-        .transaction
-    };
+    let transaction = |frame| transaction(&t, frame);
     use rocky_core::replay::{DropReason, TransactionOutcome};
     assert_eq!(
         carol

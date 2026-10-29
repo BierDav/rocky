@@ -195,6 +195,29 @@ impl Table {
     fn captured(&self) -> bool {
         self.class.typed()
     }
+    /// Removes one row by its key.
+    pub fn delete_by_key(&self) -> String {
+        let by_key: Vec<String> = self
+            .key
+            .iter()
+            .map(|index| format!("{}=?", quoted(&self.names[*index])))
+            .collect();
+        format!(
+            "DELETE FROM {} WHERE {}",
+            quoted(&self.physical),
+            by_key.join(" AND ")
+        )
+    }
+    /// Inserts one row image in declared column order.
+    pub fn insert_image(&self) -> String {
+        let columns: Vec<String> = self.names.iter().map(|name| quoted(name)).collect();
+        format!(
+            "INSERT INTO {}({}) VALUES({})",
+            quoted(&self.physical),
+            columns.join(","),
+            vec!["?"; columns.len()].join(",")
+        )
+    }
     /// A hook or read row as the application sees it: one strict stored
     /// value per declared column.
     pub fn image(&self, values: &[Value]) -> Result<Vec<SqlValue>, String> {

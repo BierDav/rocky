@@ -110,8 +110,12 @@ fn partition<A: RowApplication>(writes: &[RowWrite], app: &A) -> Result<Vec<Vec<
 /// One bundle member as the author plans it.
 enum Frame {
     Rows(Vec<RowWrite>),
-    Intent(Vec<IntentStatement>),
+    Intent(Vec<IntentStatement>, Vec<super::replay::Undo>),
 }
+
+/// A SQL transaction's statements per partition its replayed writes
+/// reached, with the prior images of the rows they changed there.
+pub(super) type Intents = BTreeMap<ResourceScope, (Vec<IntentStatement>, Vec<super::replay::Undo>)>;
 
 /// A required member as this replica holds it.
 enum Member {
@@ -189,7 +193,7 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         (handle, input): (Commitment, Commitment),
         writes: &[RowWrite],
-        intents: BTreeMap<ResourceScope, Vec<IntentStatement>>,
+        intents: Intents,
         time: u64,
         entry: Option<u64>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
@@ -206,7 +210,7 @@ impl<A: RowApplication> Inner<A> {
     async fn author_bundle_resolving(
         &mut self,
         (handle, input): (Commitment, Commitment),
-        (writes, intents): (&[RowWrite], BTreeMap<ResourceScope, Vec<IntentStatement>>),
+        (writes, intents): (&[RowWrite], Intents),
         dependencies: &[Hash],
         time: u64,
         carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
@@ -279,7 +283,7 @@ impl<A: RowApplication> Inner<A> {
         frames.extend(
             intents
                 .into_iter()
-                .map(|(scope, statements)| (scope, Frame::Intent(statements))),
+                .map(|(scope, (statements, undo))| (scope, Frame::Intent(statements, undo))),
         );
         frames.sort_by_key(|(scope, _)| *scope);
         if frames.len() > MAX_BUNDLE_FRAMES {
@@ -354,11 +358,11 @@ impl<A: RowApplication> Inner<A> {
             };
             let writes = match frame {
                 Frame::Rows(writes) => writes,
-                Frame::Intent(statements) => {
+                Frame::Intent(statements, undo) => {
                     if !dependencies.is_empty() || reauthors.is_some() {
                         return Err(denied("an intent names no dependencies"));
                     }
-                    let recorded = membership.clone();
+                    let recorded = (membership.transaction, membership.index);
                     let frame = self
                         .author_intent_frame(
                             (opening.scope, tips.remove(&opening.scope).flatten()),
@@ -373,7 +377,7 @@ impl<A: RowApplication> Inner<A> {
                         )
                         .await?;
                     // The author's execution is the transaction's local replay.
-                    self.record_replayed(&frame, &recorded, None).await?;
+                    self.record_replayed(&frame, recorded, None, &undo).await?;
                     authored.push(frame);
                     continue;
                 }
@@ -647,19 +651,9 @@ impl<A: RowApplication> Inner<A> {
                     .await;
             }
         }
-        // Intents replay in canonical order; an earlier one waits to rewind.
-        for (frame, payload, _) in &members {
-            if payload.intent().is_some()
-                && !self
-                    .replays_in_order(&frame.operation_ref()?.header)
-                    .await?
-            {
-                return Ok(Outcome::Waiting(WaitReason::Rewind));
-            }
-        }
         self.conn.execute("SAVEPOINT bundle", ()).await?;
         let result = async {
-            Box::pin(self.replay_members(&members, membership)).await?;
+            Box::pin(self.replay_members(&members, membership, time)).await?;
             let mut actual = Vec::new();
             for (frame, payload, grants) in members
                 .iter()
@@ -712,51 +706,36 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Replays a bundle's intent members together: one that drops drops
-    /// the transaction in every partition held here.
+    /// Replays a bundle's intent members in their partitions' canonical
+    /// order and keeps them as applied log entries, whatever their outcome.
     async fn replay_members(
         &self,
-        members: &[(EncryptedFrame, RowPayload, Vec<rocky_core::ResourceGrant>)],
+        members: &[BundleMember],
         membership: &Membership,
+        time: u64,
     ) -> Result<(), Error> {
-        let intents: Vec<_> = members
-            .iter()
-            .filter_map(|(frame, payload, grants)| {
-                payload
-                    .intent()
-                    .map(|intent| (frame, payload, intent, grants))
-            })
-            .collect();
+        let mut intents = Vec::new();
+        for (frame, payload, grants) in members {
+            if let Some(intent) = payload.intent() {
+                let member = payload
+                    .membership()
+                    .ok_or_else(|| denied("an intent carries no membership"))?
+                    .index;
+                intents.push((frame, intent, grants.as_slice(), member));
+            }
+        }
         if intents.is_empty() {
             return Ok(());
         }
-        self.conn.execute("SAVEPOINT intents", ()).await?;
-        let mut dropped = None;
-        for (frame, _, intent, grants) in &intents {
-            dropped = self.replay_intent(frame, intent, grants)?;
-            if dropped.is_some() {
-                break;
-            }
-        }
-        if dropped.is_some() {
-            self.conn.execute("ROLLBACK TO intents", ()).await?;
-        }
-        self.conn.execute("RELEASE intents", ()).await?;
-        for (frame, payload, _, _) in intents {
-            self.record_replayed(frame, membership, dropped).await?;
+        Box::pin(self.replay_arrival(membership.transaction, &intents, time)).await?;
+        for (frame, payload, _) in members
+            .iter()
+            .filter(|(_, payload, _)| payload.intent().is_some())
+        {
             let key = self.member_key(&frame.operation_ref()?.header.extensions)?;
             self.record_key(key).await?;
             self.write_materialized(frame, Vec::new(), Default::default(), Some(payload))
                 .await?;
-            if dropped.is_none()
-                && let Some(table) = self
-                    .workspace
-                    .typed
-                    .as_ref()
-                    .and_then(|typed| typed.rows.table(&frame.scope().ok()?.table))
-            {
-                self.touch(&table.sql_name);
-            }
         }
         Ok(())
     }

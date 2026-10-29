@@ -1207,6 +1207,7 @@ impl<A: RowApplication> SecureSql<A> {
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
         let assigned_policy = typed.rows.schema().update_policy == UpdatePolicy::Assigned;
         let mut writes = Vec::new();
+        let mut undo = BTreeMap::<ResourceScope, Vec<super::replay::Undo>>::new();
         for touched in touched {
             let table = &plan.tables[touched.table];
             // The author admits its replayed effects as every replica will.
@@ -1215,14 +1216,22 @@ impl<A: RowApplication> SecureSql<A> {
                 let unchecked = inner.unchecked_replayed_admission;
                 #[cfg(not(test))]
                 let unchecked = false;
-                if let Some(change) = super::replay::replayed_change(conn, &typed, table, &touched)?
-                    && !unchecked
-                    && !change.permitted_by(&inner.local_grants(now()?)?)
-                {
+                let Some(change) = super::replay::replayed_change(conn, &typed, table, &touched)?
+                else {
+                    continue;
+                };
+                if !unchecked && !change.permitted_by(&inner.local_grants(now()?)?) {
                     return Err(denied(
                         "row/field transition denied; the replayed effects are not granted",
                     ));
                 }
+                undo.entry(change.scope)
+                    .or_default()
+                    .push(super::replay::Undo {
+                        table: table.name.clone(),
+                        key: touched.key,
+                        before: touched.before,
+                    });
                 continue;
             }
             if table.class != TableClass::Mergeable {
@@ -1484,6 +1493,13 @@ impl<A: RowApplication> SecureSql<A> {
             }));
         }
         let encoded = super::bundle::input_bytes(&writes, &[], &intents)?;
+        // The author's execution rewinds like a replay of it.
+        let intents: super::bundle::Intents = intents
+            .into_iter()
+            .map(|(scope, statements)| {
+                (scope, (statements, undo.remove(&scope).unwrap_or_default()))
+            })
+            .collect();
         if encoded.len() > MAX_BUNDLE_BYTES {
             return Err(Error::Quota {
                 resource: "bundle bytes",
@@ -1530,6 +1546,7 @@ impl<A: RowApplication> SecureSql<A> {
                     .await?
             }
         };
+
         match commit {
             Kind::Reauthors(_) => {}
             Kind::Coordinated(slot) => {

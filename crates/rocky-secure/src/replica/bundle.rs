@@ -358,6 +358,7 @@ impl<A: RowApplication> Inner<A> {
                     if !dependencies.is_empty() || reauthors.is_some() {
                         return Err(denied("an intent names no dependencies"));
                     }
+                    let recorded = membership.clone();
                     let frame = self
                         .author_intent_frame(
                             (opening.scope, tips.remove(&opening.scope).flatten()),
@@ -371,6 +372,8 @@ impl<A: RowApplication> Inner<A> {
                             },
                         )
                         .await?;
+                    // The author's execution is the transaction's local replay.
+                    self.record_replayed(&frame, &recorded, None).await?;
                     authored.push(frame);
                     continue;
                 }
@@ -644,10 +647,24 @@ impl<A: RowApplication> Inner<A> {
                     .await;
             }
         }
+        // Intents replay in canonical order; an earlier one waits to rewind.
+        for (frame, payload, _) in &members {
+            if payload.intent().is_some()
+                && !self
+                    .replays_in_order(&frame.operation_ref()?.header)
+                    .await?
+            {
+                return Ok(Outcome::Waiting(WaitReason::Rewind));
+            }
+        }
         self.conn.execute("SAVEPOINT bundle", ()).await?;
         let result = async {
+            Box::pin(self.replay_members(&members, membership)).await?;
             let mut actual = Vec::new();
-            for (frame, payload, grants) in &members {
+            for (frame, payload, grants) in members
+                .iter()
+                .filter(|(_, payload, _)| payload.intent().is_none())
+            {
                 let (rows, admission) = self
                     .materialize(frame, payload.writes(), grants, Some(payload))
                     .await?;
@@ -694,6 +711,54 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+    }
+    /// Replays a bundle's intent members together: one that drops drops
+    /// the transaction in every partition held here.
+    async fn replay_members(
+        &self,
+        members: &[(EncryptedFrame, RowPayload, Vec<rocky_core::ResourceGrant>)],
+        membership: &Membership,
+    ) -> Result<(), Error> {
+        let intents: Vec<_> = members
+            .iter()
+            .filter_map(|(frame, payload, grants)| {
+                payload
+                    .intent()
+                    .map(|intent| (frame, payload, intent, grants))
+            })
+            .collect();
+        if intents.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("SAVEPOINT intents", ()).await?;
+        let mut dropped = None;
+        for (frame, _, intent, grants) in &intents {
+            dropped = self.replay_intent(frame, intent, grants)?;
+            if dropped.is_some() {
+                break;
+            }
+        }
+        if dropped.is_some() {
+            self.conn.execute("ROLLBACK TO intents", ()).await?;
+        }
+        self.conn.execute("RELEASE intents", ()).await?;
+        for (frame, payload, _, _) in intents {
+            self.record_replayed(frame, membership, dropped).await?;
+            let key = self.member_key(&frame.operation_ref()?.header.extensions)?;
+            self.record_key(key).await?;
+            self.write_materialized(frame, Vec::new(), Default::default(), Some(payload))
+                .await?;
+            if dropped.is_none()
+                && let Some(table) = self
+                    .workspace
+                    .typed
+                    .as_ref()
+                    .and_then(|typed| typed.rows.table(&frame.scope().ok()?.table))
+            {
+                self.touch(&table.sql_name);
+            }
+        }
+        Ok(())
     }
     pub(super) async fn hold_closed_bundle(
         &self,

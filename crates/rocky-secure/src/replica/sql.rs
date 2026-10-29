@@ -1209,6 +1209,22 @@ impl<A: RowApplication> SecureSql<A> {
         let mut writes = Vec::new();
         for touched in touched {
             let table = &plan.tables[touched.table];
+            // The author admits its replayed effects as every replica will.
+            if table.class == TableClass::Replayed {
+                #[cfg(test)]
+                let unchecked = inner.unchecked_replayed_admission;
+                #[cfg(not(test))]
+                let unchecked = false;
+                if let Some(change) = super::replay::replayed_change(conn, &typed, table, &touched)?
+                    && !unchecked
+                    && !change.permitted_by(&inner.local_grants(now()?)?)
+                {
+                    return Err(denied(
+                        "row/field transition denied; the replayed effects are not granted",
+                    ));
+                }
+                continue;
+            }
             if table.class != TableClass::Mergeable {
                 continue;
             }

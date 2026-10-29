@@ -67,6 +67,7 @@ mod reads;
 mod rebuild;
 mod recovery;
 mod removal;
+mod replay;
 pub use removal::local_row_counts;
 mod restore;
 pub(super) mod roles;
@@ -503,6 +504,10 @@ pub(super) struct Inner<A> {
     pub(super) fail_before_commit: usize,
     #[cfg(test)]
     pub(super) fail_sql_commit: bool,
+    /// Authors replayed effects without checking them, as a replica that
+    /// skips its own admission would.
+    #[cfg(test)]
+    pub(super) unchecked_replayed_admission: bool,
     /// Tip switches rebuild from the replay base, as without kept seals.
     #[cfg(test)]
     pub(super) rebuild_switches: bool,
@@ -745,6 +750,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         coordinated::statements::SCHEMA,
         coordinated::relay::SCHEMA,
         bundle::SCHEMA,
+        replay::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
         moves::SCHEMA,
@@ -1102,6 +1108,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             fail_before_commit: 0,
             #[cfg(test)]
             fail_sql_commit: false,
+            #[cfg(test)]
+            unchecked_replayed_admission: false,
             #[cfg(test)]
             rebuild_switches: false,
             #[cfg(test)]

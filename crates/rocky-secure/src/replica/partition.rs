@@ -541,22 +541,7 @@ impl<A: RowApplication> Inner<A> {
             rules.insert(
                 logical.sql_name.to_ascii_lowercase(),
                 rocky_storage::partition_sql::TablePartitions {
-                    columns: logical
-                        .partition_by
-                        .iter()
-                        .map(|name| {
-                            let column = logical
-                                .column(name)
-                                .ok_or_else(|| denied("unknown partition column"))?;
-                            Ok(rocky_storage::partition_sql::PartitionColumn {
-                                name: name.clone(),
-                                key: rocky_core::KeyColumn {
-                                    affinity: column.affinity,
-                                    collation: column.collation,
-                                },
-                            })
-                        })
-                        .collect::<Result<Vec<_>, Error>>()?,
+                    columns: partition_columns(logical)?,
                     complete,
                     held,
                     waiting,
@@ -856,6 +841,28 @@ pub(super) fn partition_values(
                 .ok_or_else(|| denied("missing partition column"))?
                 .value()
                 .map_err(|error| denied(&error.to_string()))
+        })
+        .collect()
+}
+
+/// A table's partition columns as the SQL rewriter compares them.
+pub(super) fn partition_columns(
+    logical: &rocky_core::LogicalTable,
+) -> Result<Vec<rocky_storage::partition_sql::PartitionColumn>, Error> {
+    logical
+        .partition_by
+        .iter()
+        .map(|name| {
+            let column = logical
+                .column(name)
+                .ok_or_else(|| denied("unknown partition column"))?;
+            Ok(rocky_storage::partition_sql::PartitionColumn {
+                name: name.clone(),
+                key: rocky_core::KeyColumn {
+                    affinity: column.affinity,
+                    collation: column.collation,
+                },
+            })
         })
         .collect()
 }

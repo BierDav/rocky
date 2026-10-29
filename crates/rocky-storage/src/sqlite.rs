@@ -20,6 +20,13 @@ pub enum Error {
     Sqlite(rusqlite::Error),
     Type(String),
 }
+impl Error {
+    /// The engine refused a statement for violating a constraint.
+    pub fn is_constraint(&self) -> bool {
+        matches!(self, Self::Sqlite(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+    }
+}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

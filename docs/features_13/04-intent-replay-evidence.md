@@ -154,3 +154,58 @@ Left for later slices:
   replayed rows need the replay engine (slices 4–5).
 - The base reads `secure_operations`; frames pruned under a checkpoint
   drop out of it and rely on the seal that covers them (slice 5).
+
+## Slice 4: in-order receive and replay
+
+Status: done for in-order arrivals (2026-10-29). Early-ordered arrivals wait
+(`WaitReason::Rewind`) for slice 5.
+
+- A received bundle's intent members replay together inside the bundle's
+  savepoint, after an order check: each must follow the last transaction its
+  partition replayed (`secure_replayed`, by `SecureStamp`). An earlier one
+  waits, and reads of its partition refuse as incomplete meanwhile.
+- The receiver splits every statement again, confined to the frame's own
+  partition, and runs only those copies, with the session authorizer and
+  capture armed. A statement that no longer splits drops the transaction
+  as `Schema`; a constraint failure as `Constraint`; anything else the
+  engine refuses as `Engine`.
+- Admission runs on the replayed effects: every captured row's before and
+  after image must be permitted by the frame author's grants, in the
+  frame's own scope, else the transaction drops as `Admission`. The author
+  checks its own effects the same way at commit, so a session cannot keep
+  a local result replicas would drop.
+- A drop rolls back every intent member of the bundle; the frames still
+  apply as log entries, so the author's log continues. `secure_replayed`
+  records each member's order and outcome; the author records its own
+  transactions as applied at commit. `EncryptedReplica::transaction_outcome`
+  returns `Applied` or `Dropped { reason, final: false }`; finality needs
+  the seal coverage of slices 5–6.
+
+Tests (`rocky-secure` `tests::sql::intents`):
+`concurrent_increments_replay_in_order_and_both_apply` (two authors raise
+the same amount; a third replica and the earlier author get both
+increments; the later author's earlier arrival waits to rewind and its
+partition reads refuse), `a_failing_replay_drops_its_transaction_and_the_log_continues`
+(duplicate key drops as `Constraint`, a later raise replays on the winner,
+outcomes per replica), `replayed_effects_outside_the_authors_grants_drop_as_admission`,
+`a_single_row_intent_receives_within_its_statement_budget`.
+
+Statement counts, one single-row transaction (whole call / its own
+application or transaction):
+
+| Path | Mergeable | Replayed |
+| --- | --- | --- |
+| Author (`BEGIN`…`COMMIT`) | 112 / 74 | 80 / 42 (≤ 43) |
+| Receive (`received_application`) | 93 / 39 | 85 / 31 (≤ 45) |
+
+Left for later slices:
+
+- Rewind and redo for early-ordered arrivals, undo records, late
+  transactions (slice 5).
+- Bundles mixing replayed and mergeable members apply the mergeable rows
+  even when the intents drop; whole-transaction drops across members and
+  outcome records across partitions are slice 6.
+- Outcome exposure through `rocky-sdk` `Transaction::commit`, observers and
+  the Kotlin binding.
+- Each replay binds the plan's physical columns again (two
+  `pragma_table_info` reads); a cache would follow phase 9's rule.

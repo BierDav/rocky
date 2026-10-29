@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Print a test filter for packages and all their workspace consumers."""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+def consumers(packages, selected):
+    by_path = {str(Path(p["manifest_path"]).parent): p["name"] for p in packages}
+    selected = set(selected)
+    while True:
+        added = {p["name"] for p in packages if any(
+            by_path.get(d.get("path")) in selected for d in p["dependencies"])} - selected
+        if not added:
+            return sorted(selected)
+        selected.update(added)
+
+
+def changed_packages(packages, paths, root):
+    owners = [(Path(p["manifest_path"]).parent.relative_to(root), p["name"]) for p in packages]
+    selected = set()
+    for path in paths:
+        path = Path(path)
+        # Manifests, configuration and unknown inputs require the full workspace.
+        owner = next((name for directory, name in owners
+                      if path.is_relative_to(directory / "src")
+                      or path.is_relative_to(directory / "tests")
+                      or path.is_relative_to(directory / "examples")), None)
+        if owner is None:
+            return None
+        selected.add(owner)
+    return selected or None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("packages", nargs="*")
+    parser.add_argument("--changed", action="store_true", help="select from jj's current change")
+    args = parser.parse_args()
+    metadata = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True))
+    packages = metadata["packages"]
+    names = {p["name"] for p in packages}
+    if set(args.packages) - names:
+        parser.error("unknown workspace package: " + ", ".join(sorted(set(args.packages) - names)))
+    selected = set(args.packages)
+    if args.changed:
+        paths = subprocess.check_output(["jj", "diff", "--name-only"], text=True).splitlines()
+        changed = changed_packages(packages, paths, Path(metadata["workspace_root"]))
+        if changed is None:
+            print("check: full workspace (shared, unknown or unchanged inputs)", file=sys.stderr)
+            print("all()")
+            return
+        selected.update(changed)
+    if not selected:
+        print("all()")
+        return
+    selected = consumers(packages, selected)
+    print("check: packages and consumers: " + ", ".join(selected), file=sys.stderr)
+    print(" | ".join(f"package(={name})" for name in selected))
+
+
+if __name__ == "__main__":
+    main()

@@ -111,5 +111,77 @@ class SuiteExemption(unittest.TestCase):
                 self.assertEqual((wall, exempt), (13.0, 600.0))
 
 
+class MultiTier(unittest.TestCase):
+    def test_features_are_grouped_and_budgets_still_combine_both_builds(self):
+        events = []
+        sources = []
+        def source(build, cranelift):
+            obj = SimpleNamespace(name=build, list=lambda expr, ignored: [(None, build)])
+            sources.append(obj)
+            return obj
+        def run(source, config, tier, expr, tests):
+            self.assertEqual(expr, f"({tier}) & (package(=app))")
+            events.append((source.name, tier))
+            suite = {"binary-id": source.name}
+            return [(source, suite, "test", 0.001)], ["regression"] if tier == "unit" else [], 2.0, 0.0
+        config = SimpleNamespace(filters={"unit": "unit", "integration": "integration"})
+        states = {}
+        def finish(config, tier, state):
+            states[tier] = state
+            return bool(state["problems"])
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(tiers, "REPORTS", Path(directory)), \
+                patch.object(tiers, "Config", return_value=config), \
+                patch.object(tiers, "Source", side_effect=source), \
+                patch.object(tiers, "run_tier", side_effect=run), \
+                patch.object(tiers, "finish_tier", side_effect=finish), \
+                patch.object(tiers.sys, "argv", ["test-tiers", "unit", "integration",
+                                                   "--build=default", "--build=without-defaults",
+                                                   "--filter", "package(=app)"]), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+            tiers.main()
+        self.assertEqual(exit.exception.code, 1)
+        self.assertEqual(events, [("default", "unit"), ("default", "integration"),
+                                  ("without-defaults", "unit"), ("without-defaults", "integration")])
+        for state in states.values():
+            self.assertEqual(state["wall"], 4.0)
+            self.assertEqual(len(state["timed"]), 2)
+        self.assertEqual(len(states["unit"]["problems"]), 2)
+
+
+scope_loader = importlib.machinery.SourceFileLoader("check_scope", str(Path(__file__).with_name("check-scope")))
+scope_spec = importlib.util.spec_from_loader(scope_loader.name, scope_loader)
+scope = importlib.util.module_from_spec(scope_spec)
+scope_loader.exec_module(scope)
+
+
+class Scope(unittest.TestCase):
+    def packages(self):
+        return [
+            {"name": "core", "manifest_path": "/repo/crates/core/Cargo.toml", "dependencies": []},
+            {"name": "runtime", "manifest_path": "/repo/crates/runtime/Cargo.toml",
+             "dependencies": [{"name": "renamed", "path": "/repo/crates/core", "kind": "dev", "target": "cfg(windows)"}]},
+            {"name": "app", "manifest_path": "/repo/examples/app/Cargo.toml",
+             "dependencies": [{"path": "/repo/crates/runtime"}]},
+            {"name": "other", "manifest_path": "/repo/crates/other/Cargo.toml", "dependencies": []},
+        ]
+
+    def test_transitive_consumers_include_renamed_dev_and_platform_dependencies(self):
+        self.assertEqual(scope.consumers(self.packages(), {"core"}), ["app", "core", "runtime"])
+        self.assertEqual(scope.consumers(self.packages(), {"app"}), ["app"])
+
+    def test_source_and_test_changes_select_the_owner(self):
+        self.assertEqual(scope.changed_packages(self.packages(),
+            ["crates/core/src/lib.rs", "examples/app/tests/deleted.rs"], Path("/repo")), {"core", "app"})
+
+    def test_unknown_shared_and_manifest_inputs_fall_back_to_everything(self):
+        for paths in ([], ["Cargo.lock"], ["crates/core/Cargo.toml"], [".cargo/config.toml"],
+                      ["scripts/check"], ["crates/core/src/lib.rs", "vendor/lib.rs"],
+                      ["sdks/uniffi/src/lib.rs"]):
+            with self.subTest(paths=paths):
+                self.assertIsNone(scope.changed_packages(self.packages(), paths, Path("/repo")))
+
+
 if __name__ == "__main__":
     unittest.main()

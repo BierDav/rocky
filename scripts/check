@@ -1,9 +1,11 @@
 #!/bin/sh
-# Shared checks; see docs/development.md#shared-checks.
+# Workspace and scoped validation.
 #
 #   scripts/check                   formatting, clippy, the unit and integration tiers
 #   scripts/check --unit            the unit tier of the workspace build: the edit loop,
-#                                   on Cranelift if installed
+#                                   on LLVM; ROCKY_CRANELIFT=1 opts into its separate build
+#   scripts/check --package NAME    package and transitive workspace consumers
+#   scripts/check --changed         scope to jj's current change; unknown inputs run everything
 #   scripts/check --integration     only the integration tier
 #   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
 #   scripts/check --doc             also the doc tests
@@ -20,16 +22,20 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 tiers=
 build=
 archives=
 clippy=true
 doc=false
+packages=
+changed=
 while [ $# -gt 0 ]; do
     case "$1" in
     --unit | --integration | --e2e) tiers="$tiers ${1#--}" ;;
+    --package | -p) [ -n "${2:-}" ] || usage; packages="$packages $2"; shift ;;
+    --changed) changed=--changed ;;
     --build) build=true && archives=${2:-} && shift ;;
     --from) archives=${2:-} && shift ;;
     --no-clippy) clippy=false ;;
@@ -39,6 +45,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -z "$build" ] || [ -n "$archives" ] || usage
+# Archives always contain the complete validation matrix.
+[ -z "$archives" ] || { [ -z "$packages" ] && [ -z "$changed" ]; } || usage
+selection='all()'
+if [ -n "$packages$changed" ]; then
+    # shellcheck disable=SC2086 # workspace package names are separate arguments
+    selection=$(scripts/check-scope $changed $packages)
+fi
 
 cargo nextest --version >/dev/null 2>&1 || {
     echo "check: install cargo-nextest (https://nexte.st)" >&2
@@ -54,13 +67,17 @@ archive_args() { # name
     esac
 }
 
-run_tier() { # tier [test-tiers arguments...]
+run_tiers() { # tiers...
     if [ -n "$archives" ]; then
         scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst" \
             --archive "$archives/sdk-without-defaults.tar.zst"
     else
-        scripts/test-tiers "$@" --build=--workspace \
-            "--build=$(archive_args sdk-without-defaults)"
+        case "$selection" in
+        'all()' | *'package(=rocky-sdk)'*)
+            scripts/test-tiers "$@" --filter "$selection" --build=--workspace \
+                "--build=$(archive_args sdk-without-defaults)" ;;
+        *) scripts/test-tiers "$@" --filter "$selection" --build=--workspace ;;
+        esac
     fi
 }
 
@@ -84,23 +101,27 @@ if [ -n "$build" ]; then
     exit
 fi
 
-# The edit loop builds only the workspace, on Cranelift when installed. Cranelift
-# cannot unwind panics on every target; any other run uses the LLVM build that
-# CI and clippy share.
-if [ "$tiers" = " unit" ] && [ -z "$archives" ]; then
-    if scripts/cranelift installed; then
-        exec scripts/test-tiers unit --cranelift --build=--workspace
+# Keep workspace feature unification even for scoped tests: package builds
+# can grow a second set of dependency artifacts. Reuse the full check's LLVM build.
+# Cranelift remains an explicit opt-in. Unit tiers contain library and binary
+# tests; kind(test) targets belong to integration/e2e and need not be built here.
+if [ "$tiers" = " unit" ] && [ -z "$archives" ] && ! $doc; then
+    if [ "${ROCKY_CRANELIFT:-0}" = 1 ] && scripts/cranelift installed; then
+        exec scripts/test-tiers unit --cranelift --filter "$selection" "--build=--workspace --lib --bins"
     fi
-    exec scripts/test-tiers unit --build=--workspace
+    exec scripts/test-tiers unit --filter "$selection" "--build=--workspace --lib --bins"
 fi
 if [ -z "$tiers" ]; then
     tiers="unit integration"
     cargo fmt --all -- --check
-    [ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
+    if [ -z "$archives" ] && $clippy; then
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+    fi
 fi
 # Every tier runs, so one failure does not hide another's.
 status=0
-for tier in $tiers; do run_tier "$tier" || status=1; done
+# shellcheck disable=SC2086 # tiers are fixed names, not shell expressions
+run_tiers $tiers || status=1
 # nextest skips doc tests, which are opt-in so a check does not compile them.
 if $doc; then
     cargo test --workspace --doc --locked || status=1

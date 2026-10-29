@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Runs one test tier and enforces its budgets; see docs/development.md#test-budgets.
+"""Run test tiers with shared builds and enforce their combined budgets.
 
-  scripts/test-tiers TIER [--list] [--cranelift] [--build=ARGS]... [--archive FILE]...
+  scripts/test-tiers TIER... [--list] [--filter EXPR] [--cranelift] [--build=ARGS]... [--archive FILE]...
 
-TIER is unit, integration or e2e, as .config/test-tiers.toml defines them.
+Tiers are unit, integration or e2e, as .config/test-tiers.toml defines them.
 Each --build passes cargo build arguments (one string, such as "--workspace"),
 built with scripts/cranelift if --cranelift is given; each --archive names a
 nextest archive. The tier runs for each in turn; --list only prints its tests.
@@ -295,47 +295,57 @@ def run_tier(source, config, tier, expr, tests):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("tier", choices=TIERS)
+    parser.add_argument("tier", choices=TIERS, nargs="+")
     parser.add_argument("--build", action="append", default=[])
     parser.add_argument("--archive", action="append", default=[])
     parser.add_argument("--cranelift", action="store_true",
                         help="build with scripts/cranelift")
+    parser.add_argument("--filter", default="all()", help="intersect each tier with this test filter")
     parser.add_argument("--list", action="store_true", help="print the tier's tests and exit")
     args = parser.parse_args()
     config = Config()
-    tier = args.tier
     builds = args.build or ([] if args.archive else ["--workspace"])
     sources = [Source(build=b, cranelift=args.cranelift) for b in builds]
     sources += [Source(archive=a) for a in args.archive]
-    expr = config.filters[tier]
     REPORTS.mkdir(parents=True, exist_ok=True)
-
-    problems = []
-    timed_all, wall_total, exempt_total, factors = [], 0.0, 0.0, []
+    states = {tier: {"problems": [], "timed": [], "wall": 0.0, "exempt": 0.0, "factors": []}
+              for tier in dict.fromkeys(args.tier)}
+    # Finish all tiers before changing Cargo's feature configuration.
     for source in sources:
-        tests = source.list(expr, ignored="all" if tier == "e2e" else "default")
-        if args.list:
-            for suite, name in tests:
-                print(f"{suite['binary-id']} {name}")
-            continue
-        print(f"test-tiers: {tier}: {len(tests)} tests from {source.name}, "
-              f"load {load():.1f} on {CPUS} cores", flush=True)
-        if not tests:
-            continue
-        before = load()
-        timed, failed, wall, exempt_wall = run_tier(source, config, tier, expr, tests)
-        factors.append(load_factor(before, load()))
-        problems += [f"failed: {f}" for f in failed]
-        timed_all += timed
-        wall_total += wall
-        exempt_total += exempt_wall
-        with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
-            for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
-                report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
-
-    factor = min(factors, default=1.0)
+        for tier, state in states.items():
+            expr = f"({config.filters[tier]}) & ({args.filter})"
+            tests = source.list(expr, ignored="all" if tier == "e2e" else "default")
+            if args.list:
+                for suite, name in tests:
+                    print(f"{suite['binary-id']} {name}")
+                continue
+            print(f"test-tiers: {tier}: {len(tests)} tests from {source.name}, "
+                  f"load {load():.1f} on {CPUS} cores", flush=True)
+            if not tests:
+                continue
+            before = load()
+            timed, failed, wall, exempt_wall = run_tier(source, config, tier, expr, tests)
+            state["factors"].append(load_factor(before, load()))
+            state["problems"] += [f"failed: {f}" for f in failed]
+            state["timed"] += timed
+            state["wall"] += wall
+            state["exempt"] += exempt_wall
+            with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
+                for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
+                    report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
     if args.list:
         return
+    failed = False
+    for tier, state in states.items():
+        failed = finish_tier(config, tier, state) or failed
+    sys.exit(1 if failed else 0)
+
+
+def finish_tier(config, tier, state):
+    problems, timed_all = state["problems"], state["timed"]
+    wall_total, exempt_total, factors = state["wall"], state["exempt"], state["factors"]
+
+    factor = min(factors, default=1.0)
     # Local only: CI re-runs every test over budget.
     cache = REPORTS / f"confirmed-{tier}.json"
     confirmed = {}
@@ -359,7 +369,7 @@ def main():
                         f"over its {show(suite_budget)} budget")
     for problem in problems:
         print(f"test-tiers: {problem}", file=sys.stderr)
-    sys.exit(1 if problems else 0)
+    return bool(problems)
 
 
 if __name__ == "__main__":

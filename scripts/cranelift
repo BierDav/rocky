@@ -6,8 +6,8 @@
 #   scripts/cranelift installed      succeed when it is installed
 #   scripts/cranelift cargo ARGS...  run its cargo; `cargo nextest` works too
 #
-# It builds into target/cranelift. scripts/check and scripts/test-tiers use it
-# when installed, unless ROCKY_CRANELIFT=0.
+# It builds into target/cranelift. Opt in with ROCKY_CRANELIFT=1 for scripts/check
+# or --cranelift for scripts/test-tiers.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

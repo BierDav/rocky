@@ -586,15 +586,16 @@ impl<C> Record<C> {
 
 #[cfg(test)]
 impl<A: RowApplication> Inner<A> {
-    pub(crate) async fn fixed_100000_row_digest(
+    pub(crate) async fn fixed_row_digest(
         &self,
         domain: rocky_core::Scope,
+        rows: u64,
     ) -> Result<Commitment, Error> {
         let field = self.definition.fields[0].id;
         let signer = self.config.node.public_key();
         self.keep_stamp_author(domain, 1, signer).await?;
         let mut sets = checkpoint::Sets::new();
-        for index in 0..100_000_u64 {
+        for index in 0..rows {
             let row = rocky_core::commitment("rocky.phase9.fixture-row", &index.to_le_bytes());
             let stamp = Stamp {
                 clock: 1_700_000_000_000_000 + index,

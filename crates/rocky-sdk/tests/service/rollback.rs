@@ -91,14 +91,14 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         &[("m", &m), ("a", &a), ("t", &t)]
     ));
     // Cross the SDK's real 256-operation retention window before compacting.
+    // These routine writes do not need per-operation diagnostics; failures are
+    // still returned by the test and the phase remains traceable.
+    trace.before("setup.retention.writes");
     for index in 0..257 {
-        step!(
-            &format!("setup.retention.write[{index}]"),
-            a.write(&format!("later {index:03}"), 1000 + index, false)
-                .await,
-            &[("m", &m), ("a", &a), ("t", &t)]
-        );
+        a.write(&format!("later {index:03}"), 1000 + index, false)
+            .await?;
     }
+    trace.after();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         trace.m_sync = Some(step!(

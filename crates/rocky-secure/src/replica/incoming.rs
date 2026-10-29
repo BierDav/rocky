@@ -530,6 +530,8 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute("SAVEPOINT pending", ()).await?;
         let materialized = match &payload {
+            // An outcome record changes no rows itself.
+            Ok(payload) if payload.outcome().is_some() => Ok((Vec::new(), Default::default())),
             Ok(payload) => {
                 self.materialize(frame, payload.writes(), &grants, Some(payload))
                     .await
@@ -539,6 +541,12 @@ impl<A: RowApplication> Inner<A> {
         let result = match materialized {
             Ok((rows, admission)) => {
                 async {
+                    if let Some(record) = payload.as_ref().ok().and_then(RowPayload::outcome)
+                        && let Err(divergence) = self.apply_outcome(frame, record, time).await?
+                    {
+                        self.reject(operation.hash).await?;
+                        return Ok(Outcome::Rejected(divergence));
+                    }
                     self.record_key(key).await?;
                     self.write_materialized(frame, rows, admission, payload.as_ref().ok())
                         .await?;

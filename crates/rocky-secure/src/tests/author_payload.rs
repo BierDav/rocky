@@ -77,6 +77,7 @@ struct Bundle {
     reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
     intent: Option<rocky_core::replay::Intent>,
+    outcome: Option<rocky_core::replay::OutcomeRecord>,
 }
 
 async fn refused_payload(earlier: u8) {

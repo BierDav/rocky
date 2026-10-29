@@ -67,7 +67,7 @@ mod reads;
 mod rebuild;
 mod recovery;
 mod removal;
-mod replay;
+pub(crate) mod replay;
 pub use removal::local_row_counts;
 mod restore;
 pub(super) mod roles;
@@ -751,6 +751,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         coordinated::relay::SCHEMA,
         bundle::SCHEMA,
         replay::SCHEMA,
+        replay::outcomes::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
         moves::SCHEMA,

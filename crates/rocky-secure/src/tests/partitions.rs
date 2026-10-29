@@ -24,7 +24,10 @@ impl Fixture {
         Self::build_with(constrained, PrivateKey::new())
     }
     fn build_with(constrained: bool, publisher: PrivateKey) -> Self {
-        let mut definition = serde_json::json!({"format":6,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        Self::build_class(constrained, publisher, "mergeable")
+    }
+    fn build_class(constrained: bool, publisher: PrivateKey, class: &str) -> Self {
+        let mut definition = serde_json::json!({"format":6,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         if constrained {
             definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
             definition["tables"][0]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true,"on_conflict":"latest_wins"}]);
@@ -235,6 +238,7 @@ impl Fixture {
     }
 }
 mod admission;
+mod replayed;
 
 fn all() -> Vec<Right> {
     vec![

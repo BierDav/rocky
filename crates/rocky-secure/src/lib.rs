@@ -168,6 +168,7 @@ mod tests;
 pub use replica::checkpoint::IMPORT_ATTEMPTS;
 #[doc(hidden)]
 pub use replica::last_in_place_switch_changes;
+pub use replica::replay::ROUTINE_SEAL_TRANSACTIONS;
 pub use replica::{check_replica_format, local_row_counts};
 
 /// One-way reference used by durable peer metadata.

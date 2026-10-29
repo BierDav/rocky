@@ -57,19 +57,27 @@ projection come in phase 5; deletion of the old path comes in phase 8.
   holds.
 - **Outcome records cross partitions.** A replica can't replay a member
   in a partition it holds no key for. So after its local commit, a
-  replica that replays a member publishes a signed outcome record for
-  it, `Applied` or `Dropped` with its reason, into that member's own log.
-  The record names only the transaction and the member index, both
-  already visible through the bundle's membership. A replica holding
-  other members applies them provisionally and drops them when a
-  `Dropped` record arrives; it never waits for one. Every holder of a
-  partition computes the same outcome. Two records that disagree are
-  refused as divergence and reported with both engine identities; they
-  are never resolved by picking one.
+  replica that replays members of a transaction with several members
+  publishes a signed outcome record, `Applied` or `Dropped` with its
+  reason, into the log of each of those members it may write. The record
+  names the transaction, the members it replayed with the partition
+  prefix each followed, and its engine. The author holds every member, so
+  it publishes one at commit and again whenever a rewind changes its
+  outcome. A replica holding only some members applies them
+  provisionally and drops them while a record naming a member it does not
+  hold says `Dropped`; it never waits for one. Every holder of a
+  partition computes the same outcome. Two records of the same members
+  after the same prefixes that disagree are refused as divergence and
+  reported with both engine identities; they are never resolved by
+  picking one. Records never travel in a log of a partition the publisher
+  does not hold, so no replica learns of activity in a log it cannot
+  read.
 - **Seals need complete outcomes.** A seal covers a multi-partition
-  transaction only once outcome records for all its members are present
-  at the sealing device. Missing records keep the transaction in the
-  open tip, so its drops stay provisional.
+  transaction only once records name each of its members at the sealing
+  device. Before sealing, the owner publishes records for transactions it
+  holds whole that lack them, as when their author is gone. Missing
+  records keep the transaction in the open tip, so its drops stay
+  provisional; such transactions are reported as awaiting outcomes.
 - **Outcomes.** `TransactionToken` outcome: `Applied`, or
   `Dropped { reason, final }` with reason `Constraint`, `Admission`,
   `Schema` or `Engine`. Observers receive drops after the commit that

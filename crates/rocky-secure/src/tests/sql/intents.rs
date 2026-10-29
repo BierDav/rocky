@@ -31,7 +31,7 @@ fn opened(
 }
 
 #[tokio::test]
-async fn replayed_writes_commit_as_intents_beside_mergeable_rows() {
+async fn replayed_writes_commit_as_intents_and_never_beside_mergeable_rows() {
     let t = replayed();
     let dir = TempDir::new().unwrap();
     let both = [t.items, t.salaries];
@@ -40,6 +40,23 @@ async fn replayed_writes_commit_as_intents_beside_mergeable_rows() {
         .open(&dir.path().join("a.db"), &node, t.full(), &both)
         .await;
     let session = sql(&alice, &both).await;
+    // Mergeable rows could not drop with intents: they commit apart.
+    session.run("BEGIN", vec![]).await.unwrap();
+    insert(&session, "INSERT INTO salaries VALUES('bob',1)", vec![])
+        .await
+        .unwrap();
+    insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.commit([9; 32]).await,
+        Err(Error::Rejected(_))
+    ));
+    assert!(
+        select(&session, "SELECT key FROM salaries")
+            .await
+            .is_empty()
+    );
     session.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
     insert(&session, "INSERT INTO salaries VALUES('ann',10)", vec![])
         .await
@@ -59,9 +76,6 @@ async fn replayed_writes_commit_as_intents_beside_mergeable_rows() {
         .unwrap();
     session.run("ROLLBACK TO undo", vec![]).await.unwrap();
     session.run("RELEASE undo", vec![]).await.unwrap();
-    insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
-        .await
-        .unwrap();
     let frames = session
         .commit([1; 32])
         .await
@@ -69,7 +83,7 @@ async fn replayed_writes_commit_as_intents_beside_mergeable_rows() {
         .committed
         .unwrap()
         .frames;
-    assert_eq!(frames.len(), 2);
+    assert_eq!(frames.len(), 1);
 
     // The author's execution is its local result.
     assert_eq!(
@@ -685,4 +699,53 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
         "P4 receive_statements total/application mergeable={mergeable:?} replayed={replayed:?}"
     );
     assert!(replayed.1 <= 45, "{replayed:?} statements");
+}
+
+#[tokio::test]
+async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let open = |name: &'static str| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
+                .await
+        }
+    };
+    let (alice, bob, carol) = (open("a.db").await, open("b.db").await, open("c.db").await);
+    let created = create(&alice, &both, 0).await;
+    assert_eq!(
+        bob.receive(created.clone()).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    let earliest = raise(&sql(&alice, &both).await, 1000).await;
+    const LATER: i64 = 32;
+    let session = sql(&bob, &both).await;
+    let mut later = Vec::new();
+    for _ in 0..LATER {
+        later.push(raise(&session, 1).await);
+    }
+    for frame in std::iter::once(created).chain(later) {
+        assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(
+        carol.receive(earliest).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    let took = started.elapsed();
+    // Diagnostic only: the routine seal constant is chosen from this.
+    println!(
+        "P4 rewind transactions={LATER} total={took:?} per_transaction={:?}",
+        took / LATER as u32
+    );
+    assert_eq!(
+        amounts(&carol, &both).await,
+        vec![vec![text("ann"), SqlValue::Integer(1000 + LATER)]]
+    );
+    assert_eq!(
+        carol.unsealed_replayed_transactions().await.unwrap(),
+        LATER as u64 + 2
+    );
 }

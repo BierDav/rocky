@@ -8,8 +8,10 @@ use rocky_core::TableClass;
 use rocky_core::replay::{DropReason, Intent, TransactionOutcome};
 use rocky_storage::partition_sql::{TablePartitions, split_intent};
 
+pub(super) mod outcomes;
+
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,PRIMARY KEY(scope,clock,author,sequence)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,PRIMARY KEY(scope,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
 ];
 
@@ -125,7 +127,31 @@ fn reason_name(reason: DropReason) -> &'static str {
     }
 }
 
+/// Unsealed replayed transactions at which an owner seals routinely: a
+/// rewind undoes and redoes at most this many.
+pub const ROUTINE_SEAL_TRANSACTIONS: u64 = 128;
+
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Replayed transactions no seal covers yet: what an early arrival may
+    /// rewind.
+    pub async fn unsealed_replayed_transactions(&self) -> Result<u64, Error> {
+        let inner = self.inner.lock(Class::Background).await;
+        let rows = collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT COUNT(DISTINCT txn) FROM secure_replayed WHERE sealed=0",
+                    (),
+                )
+                .await?,
+        )
+        .await?;
+        match rows.first().map(Vec::as_slice) {
+            Some([SqlValue::Integer(count)]) => Ok(*count as u64),
+            _ => Err(Error::Corrupt("unsealed replayed count".into())),
+        }
+    }
+
     /// How a transaction with replayed writes stands here: `None` until a
     /// member of it has replayed. A drop is final once a seal covers it.
     pub async fn transaction_outcome(
@@ -313,11 +339,12 @@ impl<A: RowApplication> Inner<A> {
 
     /// A seal finalized `scope` through `through`: the transactions it
     /// covers never rewind again, their drops are final and their undo
-    /// records go.
+    /// records go. One of several members stays open until a record names
+    /// each of them.
     pub(super) async fn seal_replayed(&self, scope: i64, through: i64) -> Result<(), Error> {
         self.conn
             .execute(
-                "UPDATE secure_replayed SET sealed=1,undo=NULL WHERE scope=? AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position<=?)",
+                "UPDATE secure_replayed SET sealed=1,undo=NULL WHERE scope=? AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position<=?) AND (members=1 OR members=(SELECT COUNT(*) FROM secure_outcome_members m WHERE m.txn=secure_replayed.txn))",
                 [scope, scope, through],
             )
             .await?;
@@ -325,13 +352,26 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Replays one transaction's held intent members together: one that
-    /// drops drops the transaction in every partition held here. Records
-    /// the outcome and, when it applied, the undo of each member.
+    /// drops drops the transaction in every partition held here, and so
+    /// does another replica's record of a member not held here. Records
+    /// the outcome and, when it applied, the undo of each member; a
+    /// transaction of several members gets this replica's record.
     async fn replay_transaction(
         &self,
-        transaction: Commitment,
+        (transaction, members): (Commitment, u16),
         intents: &[Replaying<'_>],
+        time: u64,
     ) -> Result<(), Error> {
+        if members > 1 {
+            let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
+            if let Some(reason) = self.remote_drop(transaction, &held).await? {
+                for (frame, .., member) in intents {
+                    self.record_replayed(frame, (transaction, *member, members), Some(reason), &[])
+                        .await?;
+                }
+                return Ok(());
+            }
+        }
         self.conn.execute("SAVEPOINT intents", ()).await?;
         let mut undo = Vec::with_capacity(intents.len());
         let mut dropped = None;
@@ -351,7 +391,7 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("RELEASE intents", ()).await?;
         for (index, (frame, _, _, member)) in intents.iter().enumerate() {
             let undo = undo.get(index).map_or(&[][..], Vec::as_slice);
-            self.record_replayed(frame, (transaction, *member), dropped, undo)
+            self.record_replayed(frame, (transaction, *member, members), dropped, undo)
                 .await?;
             if dropped.is_none()
                 && let Some(table) = self
@@ -363,6 +403,14 @@ impl<A: RowApplication> Inner<A> {
                 self.touch(&table.sql_name);
             }
         }
+        if members > 1 {
+            let held: Vec<_> = intents
+                .iter()
+                .map(|(frame, .., member)| (*frame, *member))
+                .collect();
+            self.publish_outcome(transaction, &held, dropped, time)
+                .await?;
+        }
         Ok(())
     }
 
@@ -372,7 +420,7 @@ impl<A: RowApplication> Inner<A> {
     /// orders after the seal's members.
     pub(super) async fn replay_arrival(
         &self,
-        transaction: Commitment,
+        transaction: (Commitment, u16),
         intents: &[Replaying<'_>],
         time: u64,
     ) -> Result<(), Error> {
@@ -382,7 +430,12 @@ impl<A: RowApplication> Inner<A> {
             starts.push((self.scope_id(header.extensions.scope).await?, stamp(header)));
         }
         let redo = self.rewind(starts).await?;
-        self.replay_transaction(transaction, intents).await?;
+        self.replay_transaction(transaction, intents, time).await?;
+        self.redo(redo, time).await
+    }
+
+    /// Replays rewound transactions again, in canonical order.
+    async fn redo(&self, redo: Vec<Redo>, time: u64) -> Result<(), Error> {
         for redo in redo {
             let mut opened = Vec::with_capacity(redo.members.len());
             for (hash, member) in redo.members {
@@ -396,17 +449,22 @@ impl<A: RowApplication> Inner<A> {
                 opened.push((frame, payload, grants, member));
             }
             let mut intents = Vec::with_capacity(opened.len());
+            let mut members = 1;
             for (frame, payload, grants, member) in &opened {
                 let intent = payload
                     .intent()
                     .ok_or_else(|| Error::Corrupt("rewound frame carries no intent".into()))?;
+                members = payload
+                    .membership()
+                    .map_or(1, |membership| membership.members.len() as u16);
                 intents.push((frame, intent, grants, *member));
             }
+            let transaction = (redo.transaction, members);
             if intents.iter().any(|(_, _, grants, _)| grants.is_none()) {
                 for (frame, _, _, member) in &intents {
                     self.record_replayed(
                         frame,
-                        (redo.transaction, *member),
+                        (redo.transaction, *member, members),
                         Some(DropReason::Admission),
                         &[],
                     )
@@ -420,7 +478,7 @@ impl<A: RowApplication> Inner<A> {
                     (*frame, *intent, grants.as_deref().unwrap_or(&[]), *member)
                 })
                 .collect();
-            self.replay_transaction(redo.transaction, &intents).await?;
+            self.replay_transaction(transaction, &intents, time).await?;
         }
         Ok(())
     }
@@ -430,7 +488,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn record_replayed(
         &self,
         frame: &EncryptedFrame,
-        (transaction, member): (Commitment, u16),
+        (transaction, member, members): (Commitment, u16, u16),
         dropped: Option<DropReason>,
         undo: &[Undo],
     ) -> Result<(), Error> {
@@ -440,7 +498,7 @@ impl<A: RowApplication> Inner<A> {
         let id = self.scope_id(header.extensions.scope).await?;
         self.conn
             .execute(
-                "INSERT INTO secure_replayed VALUES(?,?,?,?,?,?,?,?,0,?)",
+                "INSERT INTO secure_replayed VALUES(?,?,?,?,?,?,?,?,?,0,?)",
                 bindings(vec![
                     SqlValue::Integer(id),
                     SqlValue::Integer(stamp.clock as i64),
@@ -449,6 +507,7 @@ impl<A: RowApplication> Inner<A> {
                     SqlValue::Blob(operation.hash.as_bytes().to_vec()),
                     SqlValue::Blob(transaction.to_vec()),
                     SqlValue::Integer(i64::from(member)),
+                    SqlValue::Integer(i64::from(members)),
                     dropped.map_or(SqlValue::Null, |reason| {
                         SqlValue::Text(reason_name(reason).into())
                     }),

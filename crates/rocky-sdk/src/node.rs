@@ -2237,6 +2237,7 @@ impl Node {
         self.sync_state.send_replace("syncing");
         // Finality records and member seals reach peers in this pass's
         // graph exchange.
+        self.seal_routinely().await;
         self.finalize_seals().await;
         self.publish_for_members().await;
         self.close_migrations().await?;

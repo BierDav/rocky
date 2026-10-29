@@ -263,3 +263,67 @@ Left for later slices:
 - Replay of a late transaction in a successor tip after a tip change, and
   its `Schema` drop when its statements no longer compile there.
 - Rewind cost per transaction and the routine seal constant (slice 6).
+
+## Slice 6: bundles across partitions, outcome records, routine seals
+
+Status: done (2026-10-29). The roadmap's settled text on outcome records
+was revised with this slice: records travel in the publisher's own held
+partitions, not in the log of the member they describe.
+
+- A transaction writes replayed tables or mergeable ones, not both: the
+  author refuses the mix at commit and a receiver rejects a bundle whose
+  members mix intents and rows, since mergeable rows cannot drop with a
+  replayed member. (Phase 8 removes `Mergeable`.)
+- A bundle is ready when every member this replica holds is present
+  (unchanged); held members replay together and drop together.
+- After replaying held members of a transaction with several members, a
+  replica with write rights in their partitions signs an outcome record
+  (`OutcomeRecord`: transaction, each held member with the partition
+  prefix it replayed after, `Applied` or `Dropped` with its reason, engine
+  identity) and appends it as a frame to each of those members' logs.
+  A replica stores the latest record per publisher. While a record that
+  names a member it does not hold says the transaction dropped, its own
+  members of it drop with that reason; a record that changes this rewinds
+  and redoes them. Two records of the same members after the same prefixes
+  that disagree are refused as divergence, naming both engines.
+- The author publishes its record at commit, in every member's log; a
+  rewind that redoes the transaction publishes again, superseding it.
+- A seal covers a replayed transaction of several members only once
+  records name every member (`secure_outcome_members`); otherwise it stays
+  open and its drop provisional. Before sealing, `seal_followed` has the
+  replica publish records for open transactions it holds whole that lack
+  them (`publish_missing_outcomes`); transactions a finalized seal reached
+  but that stay open are listed by `awaiting_outcomes`, and the routine
+  seal pass reports them as `replayed_awaiting_outcomes` activity.
+- Routine seals: the SDK sync pass has the owner seal the followed tip
+  (`seal_followed`) once `unsealed_replayed_transactions()` reaches
+  `ROUTINE_SEAL_TRANSACTIONS`; finalizing the seal ends those rewinds.
+- Rewind cost (diagnostic, unoptimized test build, desktop): one arrival
+  rewinding and redoing 32 single-row transactions took 6.2 ms, about
+  0.19 ms per transaction. `ROUTINE_SEAL_TRANSACTIONS = 128` bounds a full
+  rewind to about 25 ms here; assuming a phone ten times slower, about
+  0.25 s. Not measured on a phone.
+
+Tests: `rocky-secure` `tests::partitions::replayed::a_partial_holder_drops_its_member_when_a_full_holders_record_says_so`
+(a writer's two-partition create conflicts in B with an earlier create; a
+full holder drops it and publishes its record; a replica holding only A
+applies its member, then drops it on the record; the writer rewinds on the
+earlier create, drops the same way and accepts the record without
+divergence), `tests::partitions::replayed::a_seal_covers_a_transaction_once_every_member_has_a_record`
+(the author's commit record; a partial holder's seal leaves the
+transaction open until the author's record names the member it lacks; a
+lost record is published again by a replica holding the transaction
+whole, once),
+`tests::sql::intents::replayed_writes_commit_as_intents_and_never_beside_mergeable_rows`,
+`tests::sql::intents::a_rewind_across_the_open_tip_redoes_every_transaction`.
+Statement budgets unchanged: author 43, receive 31.
+
+Gaps:
+
+- A transaction whose partitions no replica with write rights holds
+  whole, once its author is gone, keeps no complete records: it stays
+  open and is reported as awaiting outcomes.
+- Divergence refusal has no test with a forged disagreeing record.
+- `awaiting_outcomes` and the routine seal are not exercised end to end
+  through a real seal and the SDK.
+- Outcome exposure through `rocky-sdk` and Kotlin is still open.

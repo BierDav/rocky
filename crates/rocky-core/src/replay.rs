@@ -115,16 +115,47 @@ pub enum TransactionOutcome {
     },
 }
 
-/// A replica's signed statement of how one bundle member replayed, written
-/// into that member's own log so replicas without its key can follow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Members one outcome record may name.
+pub const MAX_OUTCOME_MEMBERS: usize = 64;
+
+/// A replica's signed statement of how it replayed the members of a
+/// transaction it holds. It travels in each of those members' logs, so a
+/// replica holding only some of them drops its members when it says so.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeRecord {
     /// The bundle's transaction id.
     pub transaction: crate::Commitment,
-    /// The member's index in the bundle's membership.
-    pub member: u16,
+    /// Each member the publisher replayed, by index, with what its
+    /// partition applied before it: the last sequence per author.
+    pub replayed: Vec<(u16, Vec<BaseMark>)>,
     /// `None` when applied.
     pub dropped: Option<DropReason>,
+    /// The replaying engine, reported when two records disagree.
+    pub engine: String,
+}
+
+impl OutcomeRecord {
+    /// Refuses a record no replica produces.
+    pub fn check(&self) -> Result<(), &'static str> {
+        if self.replayed.is_empty()
+            || self.replayed.len() > MAX_OUTCOME_MEMBERS
+            || self.replayed.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err("outcome members");
+        }
+        if self.replayed.iter().any(|(_, prefix)| {
+            prefix.len() > MAX_OUTCOME_MEMBERS
+                || prefix
+                    .windows(2)
+                    .any(|pair| pair[0].author >= pair[1].author)
+        }) {
+            return Err("outcome prefix");
+        }
+        if self.engine.is_empty() || self.engine.len() > 64 {
+            return Err("outcome engine");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

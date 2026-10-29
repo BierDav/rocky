@@ -710,6 +710,9 @@ impl Node {
             ));
         }
         let signer = self.tip_signer(scope).await?;
+        // Records for transactions only this replica holds whole let the
+        // seal cover them.
+        self.replica.publish_missing_outcomes().await?;
         let seal = self.seal_statement(&signer, scope, tip, close).await?;
         let mut statements = vec![TipStatement::Seal(seal.clone())];
         let successor = seal.successor()?;

@@ -31,6 +31,7 @@ struct Bundle {
     reauthors: Option<serde_bytes::ByteArray<32>>,
     writes: Vec<Write>,
     intent: Option<rocky_core::replay::Intent>,
+    outcome: Option<rocky_core::replay::OutcomeRecord>,
 }
 
 fn ordinal(fields: &FieldOrdinals<'_>, field: Commitment) -> Result<u32, Error> {
@@ -168,6 +169,7 @@ pub(super) fn compact(
             reauthors: body.reauthors.map(Into::into),
             writes,
             intent: body.intent,
+            outcome: body.outcome,
         })?,
         creations: envelope.creations,
     })
@@ -198,6 +200,17 @@ pub(super) fn expand(
             return Err(denied("an intent frame carries rows"));
         }
         intent.check().map_err(denied)?;
+    }
+    if let Some(outcome) = &body.outcome {
+        // An outcome record stands alone in its frame.
+        if !body.writes.is_empty()
+            || body.membership.is_some()
+            || body.intent.is_some()
+            || !body.carried.is_empty()
+        {
+            return Err(denied("an outcome frame carries more than its record"));
+        }
+        outcome.check().map_err(denied)?;
     }
     let fields = definition
         .field_ordinals(scope.table)
@@ -299,6 +312,7 @@ pub(super) fn expand(
         reauthors: body.reauthors.map(|id| id.into_array()),
         writes,
         intent: body.intent,
+        outcome: body.outcome,
         creations: envelope.creations,
     })
 }

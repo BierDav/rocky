@@ -57,6 +57,34 @@ impl Node {
                 .record_changed("member_seal_failed", json!({"error": error.to_string()}));
         }
     }
+    /// The owner seals the followed tip once it holds
+    /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
+    /// rewind never undoes more; finalizing the seal ends their rewinds.
+    pub(super) async fn seal_routinely(&self) {
+        if !self.settings.lock().await.owner() || !self.signs_for_members().await {
+            return;
+        }
+        let sealed = async {
+            if self.replica.unsealed_replayed_transactions().await?
+                >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
+            {
+                self.seal_followed(self.domain().scope, false).await?;
+            }
+            let awaiting = self.replica.awaiting_outcomes().await?;
+            if !awaiting.is_empty() {
+                self.activity.record_changed(
+                    "replayed_awaiting_outcomes",
+                    json!({"transactions": awaiting.len()}),
+                );
+            }
+            Ok::<_, Failure>(())
+        }
+        .await;
+        if let Err(error) = sealed {
+            self.activity
+                .record_changed("routine_seal_failed", json!({"error": error.to_string()}));
+        }
+    }
     /// Whether this node seals for members: it signs tip statements and
     /// follows a bookmark.
     async fn signs_for_members(&self) -> bool {

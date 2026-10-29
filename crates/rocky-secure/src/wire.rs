@@ -404,6 +404,8 @@ struct BundleBody {
     writes: Vec<RowWrite>,
     /// A replayed table's part of the bundle, instead of `writes`.
     intent: Option<rocky_core::replay::Intent>,
+    /// How a replica replayed a transaction, alone in its frame.
+    outcome: Option<rocky_core::replay::OutcomeRecord>,
 }
 #[derive(Serialize, Deserialize)]
 struct WitnessBody {
@@ -423,6 +425,7 @@ pub(crate) struct RowPayload {
     reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
     intent: Option<rocky_core::replay::Intent>,
+    outcome: Option<rocky_core::replay::OutcomeRecord>,
     creations: Vec<(Commitment, Commitment)>,
 }
 impl RowPayload {
@@ -447,6 +450,7 @@ impl RowPayload {
             reauthors: self.reauthors,
             writes: self.writes.clone(),
             intent: None,
+            outcome: None,
         })
     }
     #[cfg(test)]
@@ -549,6 +553,7 @@ impl RowPayload {
             reauthors: None,
             writes: changes.iter().cloned().map(RowWrite::changed).collect(),
             intent: None,
+            outcome: None,
         })
     }
     pub(crate) fn intent_bundle(
@@ -563,6 +568,21 @@ impl RowPayload {
             reauthors: None,
             writes: Vec::new(),
             intent: Some(intent),
+            outcome: None,
+        })
+    }
+    pub(crate) fn outcome_record(
+        record: rocky_core::replay::OutcomeRecord,
+    ) -> Result<Vec<u8>, Error> {
+        encode(&BundleBody {
+            version: 5,
+            proofs: BTreeMap::new(),
+            carried: BTreeMap::new(),
+            membership: None,
+            reauthors: None,
+            writes: Vec::new(),
+            intent: None,
+            outcome: Some(record),
         })
     }
     pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
@@ -574,6 +594,7 @@ impl RowPayload {
             reauthors: None,
             writes,
             intent: None,
+            outcome: None,
         })
     }
     pub(crate) fn reauthor_body(
@@ -624,6 +645,9 @@ impl RowPayload {
     }
     pub(crate) fn intent(&self) -> Option<&rocky_core::replay::Intent> {
         self.intent.as_ref()
+    }
+    pub(crate) fn outcome(&self) -> Option<&rocky_core::replay::OutcomeRecord> {
+        self.outcome.as_ref()
     }
     pub(crate) fn into_writes(self) -> Vec<RowWrite> {
         self.writes

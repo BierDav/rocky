@@ -1433,9 +1433,16 @@ impl<A: RowApplication> SecureSql<A> {
         }
         admit(inner, &self.session)?;
         let intents = super::intents::grouped(intents)?;
-        // Replayed writes travel only as a plain bundle's intents.
+        // Replayed writes travel only as a plain bundle's intents. Rows of
+        // mergeable tables could not drop with them, so they never share a
+        // transaction.
         if !intents.is_empty() && (commit != Kind::Plain || !matches!(target, Target::Bundle(_))) {
             return Err(denied("replayed writes commit only as a plain transaction"));
+        }
+        if !intents.is_empty() && !writes.is_empty() {
+            return Err(denied(
+                "a transaction writes replayed tables or mergeable ones, not both",
+            ));
         }
         let handle = match target {
             Target::Move {

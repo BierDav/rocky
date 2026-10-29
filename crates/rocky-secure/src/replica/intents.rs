@@ -3,7 +3,7 @@
 //! the copies as intents instead of row images.
 use super::*;
 use rocky_core::TableClass;
-use rocky_core::replay::{BaseMark, Intent, IntentStatement};
+use rocky_core::replay::{BaseMark, IntentStatement};
 use rocky_storage::partition_sql::{SplitError, split_intent, written_table};
 
 /// One partition's copy of a statement the transaction ran.
@@ -103,28 +103,24 @@ impl<A: RowApplication> Inner<A> {
             .map(Some)
     }
 
-    /// Signs and stores one bundle member carrying `statements` for `scope`.
-    /// The rows are already in the SQL table: the author's execution is its
-    /// local result. The frame follows every author's last applied frame in
-    /// the scope, which is the base it names; `tip` is the author's own log
-    /// tip there.
-    pub(super) async fn author_intent_frame(
+    /// Signs and stores one frame of a replayed table's log for `scope`
+    /// that changes no rows itself: an intent, whose rows the author's
+    /// execution already wrote, or an outcome record. The frame follows
+    /// every author's last applied frame in the scope; `payload` gets its
+    /// sequence and that base. `tip` is the author's own log tip there.
+    /// The caller refuses what blocks authoring in the scope.
+    pub(super) async fn author_log_frame(
         &self,
         (scope, tip): (ResourceScope, Option<checkpoint::Log>),
-        statements: Vec<IntentStatement>,
         time: u64,
-        payload: impl FnOnce(u64, Intent) -> Result<Vec<u8>, Error>,
+        payload: impl FnOnce(u64, Vec<BaseMark>) -> Result<Vec<u8>, Error>,
     ) -> Result<EncryptedFrame, Error> {
         self.ensure_tip_writable(scope.domain)?;
-        let mut blocked = self.scope_blockers(scope).await?;
-        blocked.extend(self.dropped_tip_blockers().await?);
-        blocked.extend(self.line_node_blockers()?);
-        blockers::refuse(blocked)?;
         let partition = self.partitions.get(&scope).cloned();
         let signer = self
             .node_author
             .as_ref()
-            .ok_or_else(|| denied("a replayed write needs a table author"))?;
+            .ok_or_else(|| denied("a replayed table's log needs a table author"))?;
         let signing_key = &signer.key;
         match &partition {
             Some(tuple) => signer
@@ -198,8 +194,6 @@ impl<A: RowApplication> Inner<A> {
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;
-        let intent = Intent { base, statements };
-        intent.check().map_err(denied)?;
         let frame = author(
             signing_key,
             Extensions {
@@ -219,7 +213,7 @@ impl<A: RowApplication> Inner<A> {
             (sequence, backlink, clock),
             previous.into_iter().collect(),
             &RowPayload::compact(
-                &RowPayload::witness(payload(sequence, intent)?, Vec::new())?,
+                &RowPayload::witness(payload(sequence, base)?, Vec::new())?,
                 &self.definition,
                 scope,
             )?,
@@ -252,6 +246,14 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("INSERT INTO secure_node_tips VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET tip=excluded.tip", [encode(&scope.domain)?, signing_key.public_key().as_bytes().to_vec(), encode(&self.workspace.tip)?]).await?;
         self.record_key(key).await?;
         Ok(frame)
+    }
+
+    /// Refuses authoring an intent in `scope` while something blocks it.
+    pub(super) async fn refuse_intent_blockers(&self, scope: ResourceScope) -> Result<(), Error> {
+        let mut blocked = self.scope_blockers(scope).await?;
+        blocked.extend(self.dropped_tip_blockers().await?);
+        blocked.extend(self.line_node_blockers()?);
+        blockers::refuse(blocked)
     }
 
     /// Per author, the last applied frame of the scope's log.

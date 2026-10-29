@@ -20,6 +20,11 @@ pub enum Error {
     Sqlite(rusqlite::Error),
     Type(String),
 }
+/// The SQLite library this build runs, as replicas report it.
+pub fn engine() -> String {
+    format!("sqlite {}", rusqlite::version())
+}
+
 impl Error {
     /// The engine refused a statement for violating a constraint.
     pub fn is_constraint(&self) -> bool {

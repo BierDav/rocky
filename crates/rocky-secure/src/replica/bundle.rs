@@ -346,6 +346,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut routed = self.route_dependencies(dependencies, &plan).await?;
         let mut authored = Vec::with_capacity(count);
+        let mut replayed = Vec::new();
         for (index, ((_, frame), opening)) in frames.into_iter().zip(&plan).enumerate() {
             // External dependencies go to the first frame of their scope; the
             // later frames of a scope follow it in the author's log.
@@ -362,22 +363,29 @@ impl<A: RowApplication> Inner<A> {
                     if !dependencies.is_empty() || reauthors.is_some() {
                         return Err(denied("an intent names no dependencies"));
                     }
-                    let recorded = (membership.transaction, membership.index);
+                    let recorded = (
+                        membership.transaction,
+                        membership.index,
+                        membership.members.len() as u16,
+                    );
+                    self.refuse_intent_blockers(opening.scope).await?;
                     let frame = self
-                        .author_intent_frame(
+                        .author_log_frame(
                             (opening.scope, tips.remove(&opening.scope).flatten()),
-                            statements,
                             time,
-                            |sequence, intent| {
+                            |sequence, base| {
                                 if sequence != opening.sequence {
                                     return Err(Error::Corrupt("bundle sequence plan".into()));
                                 }
+                                let intent = rocky_core::replay::Intent { base, statements };
+                                intent.check().map_err(denied)?;
                                 RowPayload::intent_bundle(membership, intent)
                             },
                         )
                         .await?;
                     // The author's execution is the transaction's local replay.
                     self.record_replayed(&frame, recorded, None, &undo).await?;
+                    replayed.push(authored.len());
                     authored.push(frame);
                     continue;
                 }
@@ -425,6 +433,15 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
+        }
+        // The author holds every member: its record lets replicas holding
+        // only some of them follow, and lets a seal cover the transaction.
+        if count > 1 && !replayed.is_empty() {
+            let held: Vec<_> = replayed
+                .iter()
+                .map(|index| (&authored[*index], *index as u16))
+                .collect();
+            self.publish_outcome(transaction, &held, None, time).await?;
         }
         self.injected_commit_fault()?;
         Ok(authored)
@@ -641,6 +658,14 @@ impl<A: RowApplication> Inner<A> {
                 Err(error) => return self.reject_members(&hashes, &error.to_string()).await,
             }
         }
+        if members
+            .iter()
+            .any(|(_, payload, _)| payload.intent().is_some() != members[0].1.intent().is_some())
+        {
+            return self
+                .reject_members(&hashes, "a bundle mixes intents and rows")
+                .await;
+        }
         let resolution = members
             .first()
             .and_then(|(_, payload, _)| payload.reauthors());
@@ -727,7 +752,8 @@ impl<A: RowApplication> Inner<A> {
         if intents.is_empty() {
             return Ok(());
         }
-        Box::pin(self.replay_arrival(membership.transaction, &intents, time)).await?;
+        let transaction = (membership.transaction, membership.members.len() as u16);
+        Box::pin(self.replay_arrival(transaction, &intents, time)).await?;
         for (frame, payload, _) in members
             .iter()
             .filter(|(_, payload, _)| payload.intent().is_some())

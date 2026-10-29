@@ -22,8 +22,8 @@ trap 'if [ "$started" = yes ]; then xcrun simctl shutdown "$simulator"; fi' EXIT
 xcrun simctl bootstatus "$simulator" -b
 mkdir -p local/phase18-evidence
 xcrun simctl spawn "$simulator" "$binary" --ktest_logger=GTEST \
-    '--ktest_filter=rocky.SecretsTest.*:rocky.Ios*Test.*' > local/phase18-evidence/ios-test-budgets.log
-python3 scripts/ci/ios-test-budgets local/phase18-evidence/ios-test-budgets.log "$simulator" "$binary"
+    '--ktest_filter=rocky.SecretsTest.*:rocky.Ios*Test.*' > local/phase18-evidence/ios-test-results.log
+python3 scripts/ci/ios-test-results local/phase18-evidence/ios-test-results.log
 for point in before during after; do
     root=$(mktemp -d "${TMPDIR:-/tmp}/rocky-crash-$point.XXXXXX")
     export SIMCTL_CHILD_ROCKY_CRASH_ROOT="$root"

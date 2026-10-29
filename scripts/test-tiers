@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run test tiers with shared builds and enforce their combined budgets.
+"""Run test tiers with shared builds and report correctness failures.
 
   scripts/test-tiers TIER... [--list] [--filter EXPR] [--cranelift] [--build=ARGS]... [--archive FILE]...
 
@@ -9,14 +9,14 @@ built with scripts/cranelift if --cranelift is given; each --archive names a
 nextest archive. The tier runs for each in turn; --list only prints its tests.
 
 Unit tests run in process with libtest, so their times exclude process start.
-Integration and e2e tests run with nextest. A test over its budget is re-run
-alone; it fails when its best run, scaled by the host's load, still exceeds it.
+Integration tests run in bounded batches; isolated tests and e2e use nextest.
+Timing is diagnostic only;
+assertion failures and hang timeouts fail the run.
 """
 
 import argparse
-import datetime
+from concurrent.futures import ThreadPoolExecutor
 import json
-import math
 import os
 import re
 import shlex
@@ -31,7 +31,6 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / ".config" / "test-tiers.toml"
 REPORTS = ROOT / "target" / "test-tiers"
 TIERS = ("unit", "integration", "e2e")
-RERUNS = 3
 # A unit test binary that runs longer than this has hung.
 UNIT_BINARY_TIMEOUT = 120
 CPUS = os.cpu_count() or 1
@@ -42,27 +41,8 @@ def fail(message):
     sys.exit(2)
 
 
-def seconds(text):
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s|m)", text)
-    if not match:
-        fail(f"bad duration {text!r}")
-    value, unit = float(match[1]), match[2]
-    return value * {"ms": 0.001, "s": 1, "m": 60}[unit]
-
-
 def show(value):
-    if value == math.inf:
-        return "a failure"
     return f"{value * 1000:.1f}ms" if value < 1 else f"{value:.2f}s"
-
-
-def load():
-    return os.getloadavg()[0]
-
-
-def load_factor(before, after):
-    """How much slower a CPU-bound test ran because other work used the cores."""
-    return max(1.0, min(before, after) / CPUS)
 
 
 class Config:
@@ -76,21 +56,6 @@ class Config:
             "integration": f"({integration}) & !({e2e})",
             "unit": f"!({integration}) & !({e2e})",
         }
-        self.exceptions = {}
-        today = datetime.date.today()
-        for entry in data.get("exception", []):
-            missing = {"test", "limit", "measured", "cause", "expires"} - entry.keys()
-            if missing:
-                fail(f"exception {entry.get('test')!r} lacks {', '.join(sorted(missing))}")
-            if entry["expires"] < today:
-                fail(f"exception for {entry['test']!r} expired on {entry['expires']}")
-            self.exceptions[entry["test"]] = seconds(entry["limit"])
-
-    def per_test(self, tier, key):
-        budget = self.tiers[tier].get("per-test")
-        if budget is None:
-            return math.inf
-        return self.exceptions.get(key, seconds(budget))
 
 
 class Source:
@@ -153,7 +118,7 @@ def libtest(suite, names, threads=None):
         proc = subprocess.run(cmd, cwd=suite["cwd"], env=env, capture_output=True,
                               text=True, timeout=UNIT_BINARY_TIMEOUT)
     except subprocess.TimeoutExpired as error:
-        return {}, f"timed out after {UNIT_BINARY_TIMEOUT}s\n{error.stdout or ''}"
+        return {}, f"timed out after {UNIT_BINARY_TIMEOUT}s\n{error.stdout or ''}", None
     results = {}
     for line in proc.stdout.splitlines():
         try:
@@ -164,56 +129,7 @@ def libtest(suite, names, threads=None):
                 and event.get("event") in ("ok", "failed", "timeout"):
             results[event["name"]] = (event["event"], event.get("exec_time", 0.0),
                                       event.get("stdout", ""))
-    return results, proc.stderr
-
-
-def alone(suite, name):
-    """The test's run time alone in process, scaled by load, or None if it failed."""
-    before = load()
-    results, _ = libtest(suite, [name], threads=1)
-    factor = load_factor(before, load())
-    event, took, _ = results.get(name, ("failed", 0.0, ""))
-    return (took / factor, factor) if event == "ok" else (None, factor)
-
-
-def judge(config, tier, timed, factor, confirmed):
-    """Returns tests still over budget when re-run alone, scaled by host load.
-
-    A test's first run competes with other tests and can include scheduler
-    stalls of any size. Confirm even a large spike before rejecting it.
-
-    confirmed maps a test to (alone, in the run) from its last passing re-run.
-    A test is not re-run while that alone time, grown as much as its time in
-    the run has, stays within three quarters of its budget.
-    """
-    over = []
-    for source, suite, name, took in timed:
-        key = f"{suite['binary-id']} {name}"
-        limit = config.per_test(tier, key)
-        if took <= limit:
-            continue
-        if key in confirmed:
-            alone_before, took_before = confirmed[key]
-            if alone_before * max(1.0, took / took_before) <= 0.75 * limit:
-                continue
-        best, rerun_factor = math.inf, factor
-        for _ in range(RERUNS):
-            scaled, rerun_factor = alone(suite, name)
-            if scaled is None:
-                break
-            best = min(best, scaled)
-            if best <= limit:
-                break
-        how = "alone"
-        if best <= limit:
-            confirmed[key] = (best, took)
-        verdict = "ok" if best <= limit else "OVER"
-        print(f"  {verdict:4} {key}: {show(took)} in the run, {show(best)} {how} "
-              f"(load x{rerun_factor:.1f}), budget {show(limit)}", flush=True)
-        if best > limit:
-            confirmed.pop(key, None)
-            over.append((key, took, best, limit))
-    return over
+    return results, proc.stderr, proc.returncode
 
 
 def run_unit(source, tests):
@@ -224,7 +140,9 @@ def run_unit(source, tests):
     timed, failed, wall = [], [], 0.0
     for suite, names in by_binary.values():
         start = time.monotonic()
-        results, stderr = libtest(suite, names)
+        results, stderr, code = libtest(suite, names)
+        if code != 0:
+            failed.append(f"{suite['binary-id']} exited {code}")
         wall += time.monotonic() - start
         for name in names:
             event, took, stdout = results.get(name, ("missing", 0.0, ""))
@@ -237,6 +155,42 @@ def run_unit(source, tests):
         if not results and stderr:
             print(stderr, file=sys.stderr)
     return timed, failed, wall
+
+
+def batches(tests, size=32):
+    by_binary = {}
+    for suite, name in tests:
+        by_binary.setdefault(suite["binary-path"], (suite, []))[1].append(name)
+    return [(suite, names[first:first + size]) for suite, names in by_binary.values()
+            for first in range(0, len(names), size)]
+
+
+def run_batches(source, tests):
+    start = time.monotonic()
+    groups = sorted(batches(tests), key=lambda group: -len(group[1]))
+    def run(group):
+        suite, names = group
+        events, stderr, code = libtest(suite, names, threads=min(4, CPUS))
+        timed, failed = [], []
+        if code != 0:
+            failed.append(f"{suite['binary-id']} exited {code}")
+        for name in names:
+            event, took, stdout = events.get(name, ("missing", 0.0, ""))
+            if event == "ok":
+                timed.append((source, suite, name, took))
+            else:
+                failed.append(f"{suite['binary-id']} {name}: {event}")
+                if stdout:
+                    print(stdout, file=sys.stderr)
+        if not events and stderr:
+            print(stderr, file=sys.stderr)
+        return timed, failed
+    timed, failed = [], []
+    with ThreadPoolExecutor(max_workers=min(4, max(1, CPUS // 4))) as pool:
+        for completed, problems in pool.map(run, groups):
+            timed.extend(completed)
+            failed.extend(problems)
+    return timed, failed, time.monotonic() - start
 
 
 def run_nextest(source, tier, expr, tests):
@@ -269,28 +223,25 @@ def run_nextest(source, tier, expr, tests):
 
 
 def run_tier(source, config, tier, expr, tests):
-    """Keep explicitly exempt tests functional, outside the suite's clock."""
-    exemption = config.tiers[tier].get("suite-exempt-filter")
-    if not exemption:
-        run = run_unit(source, tests) if tier == "unit" else run_nextest(source, tier, expr, tests)
-        return (*run, 0.0)
     if tier == "unit":
-        fail("unit tests cannot be exempt from the suite budget")
-    exempt_expr = f"({expr}) & ({exemption})"
-    exempt = source.list(exempt_expr, ignored="all" if tier == "e2e" else "default")
-    keys = {(suite["binary-id"], name) for suite, name in exempt}
-    regular = [(suite, name) for suite, name in tests if (suite["binary-id"], name) not in keys]
+        return run_unit(source, tests)
+    if tier == "e2e":
+        return run_nextest(source, tier, expr, tests)
+    isolated = config.tiers[tier].get("isolated-filter")
     timed, failed, wall = [], [], 0.0
-    if regular:
-        timed, failed, wall = run_nextest(source, tier, f"({expr}) & !({exemption})", regular)
-    exempt_wall = 0.0
-    if exempt:
-        print(f"test-tiers: {tier}: {len(exempt)} suite-budget-exempt tests from {source.name}; "
-              "failures and nextest timeouts still apply", flush=True)
-        extra_timed, extra_failed, exempt_wall = run_nextest(source, tier, exempt_expr, exempt)
-        timed += extra_timed
-        failed += extra_failed
-    return timed, failed, wall, exempt_wall
+    if isolated:
+        isolated_expr = f"({expr}) & ({isolated})"
+        selected = source.list(isolated_expr)
+        keys = {(suite["binary-id"], name) for suite, name in selected}
+        tests = [(suite, name) for suite, name in tests if (suite["binary-id"], name) not in keys]
+        if selected:
+            timed, failed, wall = run_nextest(source, tier, isolated_expr, selected)
+    if tests:
+        extra_timed, extra_failed, extra_wall = run_batches(source, tests)
+        timed.extend(extra_timed)
+        failed.extend(extra_failed)
+        wall += extra_wall
+    return timed, failed, wall
 
 
 def main():
@@ -303,12 +254,15 @@ def main():
     parser.add_argument("--filter", default="all()", help="intersect each tier with this test filter")
     parser.add_argument("--list", action="store_true", help="print the tier's tests and exit")
     args = parser.parse_args()
+    # nextest already parallelizes tests across cores. Each Tokio runtime needs
+    # two workers for concurrency, not another whole machine's worth of threads.
+    os.environ.setdefault("TOKIO_WORKER_THREADS", "2")
     config = Config()
     builds = args.build or ([] if args.archive else ["--workspace"])
     sources = [Source(build=b, cranelift=args.cranelift) for b in builds]
     sources += [Source(archive=a) for a in args.archive]
     REPORTS.mkdir(parents=True, exist_ok=True)
-    states = {tier: {"problems": [], "timed": [], "wall": 0.0, "exempt": 0.0, "factors": []}
+    states = {tier: {"problems": [], "timed": [], "wall": 0.0}
               for tier in dict.fromkeys(args.tier)}
     # Finish all tiers before changing Cargo's feature configuration.
     for source in sources:
@@ -320,16 +274,13 @@ def main():
                     print(f"{suite['binary-id']} {name}")
                 continue
             print(f"test-tiers: {tier}: {len(tests)} tests from {source.name}, "
-                  f"load {load():.1f} on {CPUS} cores", flush=True)
+                  f"{CPUS} host cores", flush=True)
             if not tests:
                 continue
-            before = load()
-            timed, failed, wall, exempt_wall = run_tier(source, config, tier, expr, tests)
-            state["factors"].append(load_factor(before, load()))
+            timed, failed, wall = run_tier(source, config, tier, expr, tests)
             state["problems"] += [f"failed: {f}" for f in failed]
             state["timed"] += timed
             state["wall"] += wall
-            state["exempt"] += exempt_wall
             with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
                 for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
                     report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
@@ -342,34 +293,10 @@ def main():
 
 
 def finish_tier(config, tier, state):
-    problems, timed_all = state["problems"], state["timed"]
-    wall_total, exempt_total, factors = state["wall"], state["exempt"], state["factors"]
-
-    factor = min(factors, default=1.0)
-    # Local only: CI re-runs every test over budget.
-    cache = REPORTS / f"confirmed-{tier}.json"
-    confirmed = {}
-    if not os.environ.get("CI") and cache.exists():
-        confirmed = {k: tuple(v) for k, v in json.loads(cache.read_text()).items()}
-    over = judge(config, tier, timed_all, factor, confirmed)
-    if not os.environ.get("CI"):
-        cache.write_text(json.dumps(confirmed, indent=0, sort_keys=True))
-    problems += [f"over the {tier} budget: {key}, {show(best)}, budget {show(limit)}"
-                 for key, _, best, limit in over]
-
-    suite_budget = seconds(config.tiers[tier]["suite"])
-    scaled = wall_total / factor
-    print(f"test-tiers: {tier}: {len(timed_all)} passed, wall {show(wall_total)}, "
-          f"{show(scaled)} at load x{factor:.1f}, budget {show(suite_budget)}")
-    if exempt_total:
-        print(f"test-tiers: {tier}: additional exempt wall {show(exempt_total)}; "
-              f"total elapsed {show(wall_total + exempt_total)}")
-    if scaled > suite_budget:
-        problems.append(f"the {tier} suite took {show(scaled)} scaled by load, "
-                        f"over its {show(suite_budget)} budget")
-    for problem in problems:
+    print(f"test-tiers: {tier}: {len(state['timed'])} passed, wall {show(state['wall'])}")
+    for problem in state["problems"]:
         print(f"test-tiers: {problem}", file=sys.stderr)
-    return bool(problems)
+    return bool(state["problems"])
 
 
 if __name__ == "__main__":

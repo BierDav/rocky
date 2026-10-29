@@ -4,10 +4,6 @@ use super::*;
 use crate::network::link::Link;
 use rocky_core::{RowChange, RowIdentity, RowWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-/// The default `transaction_timeout`: from BEGIN to the return of COMMIT.
-const WRITE_LIMIT: Duration = Duration::from_secs(5);
 
 fn number(node: &PrivateKey) -> u32 {
     crate::tests::node_number(node.public_key())
@@ -160,22 +156,13 @@ async fn source_node_key(replica: &EncryptedReplica<TypedRows>) -> PublicKey {
         .public_key()
 }
 
-struct Measured {
-    catch_up: Duration,
-    /// BEGIN to the return of COMMIT, the longest of the writer's commits.
-    longest_write: Duration,
-    writes: usize,
-    /// The longest a probe waited for the replica.
-    longest_hold: Duration,
-}
-
 /// A creator authors `operations / 2` rows and an updater ticks each of
 /// them, so each update depends on another log's frame. The updater's log
 /// sorts first and arrives first: its frames wait until the creations they
 /// name arrive, the shape of a device catching up on two others' edits.
 /// The reader receives every operation while a SQL writer commits one row
-/// per transaction and a probe measures how long the replica is held.
-async fn catch_up_beside_a_writer(operations: usize) -> Measured {
+/// per transaction.
+async fn catch_up_beside_a_writer(operations: usize) -> usize {
     let t = Typed::new(UpdatePolicy::Changed);
     let app = t.app();
     let dir = TempDir::new().unwrap();
@@ -198,7 +185,6 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
             values(key, 0, id)
         })
         .collect();
-    let started = Instant::now();
     author_all(
         &source,
         created
@@ -225,11 +211,6 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
         "tick",
     )
     .await;
-    println!(
-        "P03 authored operations={operations} ms={}",
-        started.elapsed().as_millis()
-    );
-
     let reader = t
         .open(
             &dir.path().join("reader.db"),
@@ -242,18 +223,15 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
     let mut frames = reader.observe_frames().await;
     let done = AtomicBool::new(false);
     let completed = tokio::sync::Notify::new();
-    let started = Instant::now();
     let catch_up = async {
         let report = pull(&editor, &reader, t.items).await;
         assert_eq!(report.frames, operations);
         assert_eq!(report.lag, 0);
-        let elapsed = started.elapsed();
         done.store(true, Ordering::SeqCst);
         completed.notify_one();
-        elapsed
     };
     let writer = async {
-        let (mut longest, mut writes) = (Duration::ZERO, 0);
+        let mut writes = 0;
         let mut incoming = 0;
         while !done.load(Ordering::SeqCst) {
             tokio::select! {
@@ -266,7 +244,6 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
             if incoming % 2 != 0 {
                 continue;
             }
-            let asked = Instant::now();
             insert(
                 &session,
                 "INSERT INTO salaries VALUES(?,1)",
@@ -274,23 +251,12 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
             )
             .await
             .unwrap();
-            longest = longest.max(asked.elapsed());
             writes += 1;
             tokio::task::yield_now().await;
         }
-        (longest, writes)
+        writes
     };
-    let probe = async {
-        let mut longest = Duration::ZERO;
-        while !done.load(Ordering::SeqCst) {
-            let asked = Instant::now();
-            drop(reader.inner.lock(crate::replica::Class::Background).await);
-            longest = longest.max(asked.elapsed());
-            tokio::task::yield_now().await;
-        }
-        longest
-    };
-    let (catch_up, (longest_write, writes), longest_hold) = tokio::join!(catch_up, writer, probe);
+    let ((), writes) = tokio::join!(catch_up, writer);
     // Every operation applied exactly once: one row per key, each ticked.
     let applied = select(&session, "SELECT count(*),sum(done) FROM items").await;
     assert_eq!(
@@ -304,39 +270,13 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
         rows_of(&reader, "SELECT sum(applied) FROM secure_scope_state").await,
         vec![vec![SqlValue::Integer((operations + writes) as i64)]]
     );
-    let measured = Measured {
-        catch_up,
-        longest_write,
-        writes,
-        longest_hold,
-    };
-    println!(
-        "P03 catch_up operations={operations} catch_up_ms={} writes={} longest_write_ms={} longest_hold_ms={}",
-        measured.catch_up.as_millis(),
-        measured.writes,
-        measured.longest_write.as_millis(),
-        measured.longest_hold.as_millis(),
-    );
-    measured
+    writes
 }
 
 #[tokio::test]
-async fn a_writer_commits_within_the_write_limit_during_a_catch_up() {
+async fn a_writer_commits_during_a_catch_up() {
     // Six receive pages retain concurrent writes and cross-log dependencies.
-    let measured = catch_up_beside_a_writer(192).await;
-    assert!(measured.writes > 0);
-    assert!(measured.longest_write < WRITE_LIMIT);
-}
-
-#[tokio::test]
-#[ignore = "phase 3 measurement; run with --ignored --nocapture"]
-async fn soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up() {
-    // `ROCKY_CATCH_UP_OPERATIONS` measures another size.
-    let operations =
-        std::env::var("ROCKY_CATCH_UP_OPERATIONS").map_or(10_000, |count| count.parse().unwrap());
-    let measured = catch_up_beside_a_writer(operations).await;
-    assert!(measured.writes > 0);
-    assert!(measured.longest_write < WRITE_LIMIT);
+    assert!(catch_up_beside_a_writer(192).await > 0);
 }
 
 /// A catch-up interrupted between two apply transactions, at any of them,

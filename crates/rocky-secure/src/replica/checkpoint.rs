@@ -34,8 +34,6 @@ use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, PrunedPage, RebootstrapReport};
 #[cfg(test)]
-pub(crate) use transfer::{STORE_METADATA, STORE_ROWS_FOR_TEST};
-#[cfg(test)]
 pub(crate) use transfer::{
     forge_page, forge_page_bindings, forge_page_clocks, forge_page_legend, page_header_count,
 };

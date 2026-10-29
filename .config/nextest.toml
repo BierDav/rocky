@@ -5,20 +5,6 @@
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 2 }
 
-# The probe asserts fsync latency, which parallel tests would distort. It runs
-# first, alone, rather than waiting for every running test to finish.
-[[profile.default.overrides]]
-filter = 'package(rocky-coordinator) & test(/^raft_store::probe::/)'
-threads-required = "num-test-threads"
-priority = 100
-slow-timeout = { period = "60s", terminate-after = 10 }
-
-# This gate measures proof verification latency; competing soaks distort it.
-[[profile.default.overrides]]
-filter = 'package(rocky-secure) & test(/holdings_idle_200_partition_four_table_fixture/)'
-threads-required = "num-test-threads"
-priority = 95
-
 # The soak tests confirm thousands of commands in the e2e tier; the longest,
 # they start first.
 [[profile.default.overrides]]
@@ -32,8 +18,7 @@ filter = 'package(rocky-sdk) & test(/^simulation::tests::sweep_/)'
 priority = 89
 slow-timeout = { period = "60s", terminate-after = 20 }
 
-# The tiers' profiles; scripts/test-tiers judges their budgets from the JUnit
-# reports. The limits here only stop a test that hung or is far over budget.
+# Stop hung tests; elapsed time is otherwise diagnostic only.
 [profile.integration]
 fail-fast = false
 slow-timeout = { period = "10s", terminate-after = 3 }
@@ -48,28 +33,3 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 [profile.e2e.junit]
 path = "junit.xml"
 
-# Keep the migration gates' stage timings and complete member dbstat evidence.
-[[profile.e2e.overrides]]
-filter = 'binary_id(rocky-sdk::migrations)'
-success-output = "final"
-threads-required = "num-test-threads"
-priority = 97
-
-# Phase 1 measures millisecond queries after building a real 10k-frame log.
-[[profile.default.overrides]]
-filter = 'package(rocky-secure) & test(/positions_10000/)'
-threads-required = "num-test-threads"
-priority = 96
-
-# Phase 3 separates finalization latency from its explicit full-rebuild oracle.
-[[profile.default.overrides]]
-filter = 'package(rocky-secure) & test(/finalization_100000/)'
-threads-required = "num-test-threads"
-priority = 98
-slow-timeout = { period = "60s", terminate-after = 10 }
-
-[[profile.e2e.overrides]]
-filter = 'package(rocky-secure) & test(/finalization_100000/)'
-success-output = "final"
-threads-required = "num-test-threads"
-priority = 98

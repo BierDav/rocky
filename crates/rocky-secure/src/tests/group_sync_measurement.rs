@@ -4,9 +4,8 @@ use rocky_core::{
     SchemaDefinition, SqlValue, TypedRows,
 };
 use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
-use std::path::Path;
 
-use std::time::{Duration, Instant};
+use std::{path::Path, time::Instant};
 
 pub(crate) mod fixture;
 use fixture::Fixture;
@@ -123,36 +122,6 @@ async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], part
     }
 }
 
-/// Samples this process while a stage runs, when `ROCKY_PROFILE_DIR` names
-/// a directory: macOS `sample` writes `<stage>.txt` there when the stage ends.
-struct Profile(Option<std::process::Child>);
-fn profile(stage: &str) -> Profile {
-    let Ok(directory) = std::env::var("ROCKY_PROFILE_DIR") else {
-        return Profile(None);
-    };
-    let file = Path::new(&directory).join(format!("{stage}.txt"));
-    let sampler = std::process::Command::new("sample")
-        .args([&std::process::id().to_string(), "3600", "-mayDie", "-file"])
-        .arg(file)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    // `sample` attaches before it samples.
-    std::thread::sleep(Duration::from_millis(500));
-    Profile(Some(sampler))
-}
-impl Drop for Profile {
-    fn drop(&mut self) {
-        if let Some(mut sampler) = self.0.take() {
-            let _ = std::process::Command::new("kill")
-                .args(["-INT", &sampler.id().to_string()])
-                .status();
-            let _ = sampler.wait();
-        }
-    }
-}
-
 /// Bytes of the frames a catch-up received: headers, encrypted payloads,
 /// and the credential chains stored once beside them.
 async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
@@ -184,18 +153,7 @@ async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
     );
 }
 
-struct Measurement {
-    open: Duration,
-    register: Duration,
-    author: Duration,
-    catch_up: Duration,
-    idle: Duration,
-    checkpoint: Duration,
-    reopen: Duration,
-    metadata: f64,
-}
-
-async fn measure(tables: usize, partitions: i64) -> Measurement {
+async fn measure(tables: usize, partitions: i64) {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(tables);
     let names: Vec<_> = ["customers", "orders", "order_lines", "attachments"]
@@ -229,7 +187,6 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         .await
         .unwrap();
     let empty = database_bytes(&writer).await;
-    let sampled = profile(&format!("register_author_{tables}"));
     let started = Instant::now();
     for partition in 1..=partitions {
         f.keys(&writer, partition, &names).await;
@@ -253,7 +210,6 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     }
     writer.flush().await.unwrap();
     let author = started.elapsed();
-    drop(sampled);
     let reader = f
         .open(
             &root.path().join("reader.sqlite"),
@@ -286,11 +242,9 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
                 .map(|(name, partition)| f.scope(name, partition)),
         )
         .collect();
-    let sampled = profile(&format!("catch_up_{tables}"));
     let started = Instant::now();
     assert_eq!(sync(&writer, &reader, &scopes).await.len(), scopes.len());
     let catch_up = started.elapsed();
-    drop(sampled);
     let started = Instant::now();
     assert!(sync(&writer, &reader, &scopes).await.is_empty());
     let idle = started.elapsed();
@@ -301,7 +255,6 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     );
     assert_rows(&reader, &names, partitions).await;
     frame_bytes(&reader, tables).await;
-    let sampled = profile(&format!("checkpoint_{tables}"));
     let started = Instant::now();
     // One seal; compacting installs every scope's base there.
     seal_and_compact(&writer, &f.publisher, f.domain).await;
@@ -310,7 +263,6 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         checkpoints.push(writer.checkpoint(*scope).await.unwrap());
     }
     let checkpoint = started.elapsed();
-    drop(sampled);
     // Each record carries the signer's whole chain.
     let chain = crate::encode(
         &writer
@@ -402,16 +354,6 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         assert_eq!(report.checkpoint, Some(checkpoint.id().unwrap()));
         assert_eq!(report.replayed, 0);
     }
-    let result = Measurement {
-        open,
-        register,
-        author,
-        catch_up,
-        idle,
-        checkpoint,
-        reopen,
-        metadata,
-    };
     println!(
         "P09 partitions={partitions} tables={tables} scopes={} open_ms={} register_ms={} author_ms={} catch_up_ms={} idle_ms={} checkpoint_ms={} reopen_ms={} metadata_bytes_per_partition={metadata:.2}",
         scopes.len(),
@@ -423,48 +365,9 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         checkpoint.as_millis(),
         reopen.as_millis()
     );
-    result
 }
 
 #[tokio::test]
 async fn erp_group_sync_preserves_all_references_and_reopens() {
     measure(4, 2).await;
-}
-
-#[tokio::test]
-#[ignore = "phase 9 measurement; run with --ignored --nocapture"]
-async fn measure_200_partition_group_sync() {
-    let one = measure(1, 200).await;
-    let four = measure(4, 200).await;
-    for (name, one, four) in [
-        ("open", one.open, four.open),
-        ("register", one.register, four.register),
-        ("author", one.author, four.author),
-        ("catch_up", one.catch_up, four.catch_up),
-        ("idle", one.idle, four.idle),
-        ("checkpoint", one.checkpoint, four.checkpoint),
-        ("reopen", one.reopen, four.reopen),
-    ] {
-        println!(
-            "P09 additional_table {name}_ms={:.2}",
-            (four.as_secs_f64() - one.as_secs_f64()) * 1000.0 / 3.0
-        );
-    }
-    println!(
-        "P09 additional_table metadata_bytes_per_partition={:.2}",
-        (four.metadata - one.metadata) / 3.0
-    );
-}
-
-/// Full-size Phase 10 gate: every idle frontier carries session-bound proofs.
-#[tokio::test]
-#[ignore = "full-size e2e holding-proof qualification"]
-async fn holdings_idle_200_partition_four_table_fixture() {
-    let result = measure(4, 200).await;
-    println!("P10 four_table_idle_ms={}", result.idle.as_millis());
-    assert!(
-        result.idle < Duration::from_secs(10),
-        "idle with proofs: {:?}",
-        result.idle
-    );
 }

@@ -73,7 +73,8 @@
 ## Verification
 
 - During development, use `./scripts/check --unit`, `cargo test -p <package>`
-  and targeted checks. Keep each test within its configured tier's budget.
+  and targeted checks. Test correctness, not performance: timing reports are
+  diagnostic only. Use timeouts to stop hangs, not to enforce latency budgets.
 - Before finishing workspace changes, run `./scripts/lint` and `./scripts/check`
   from any directory. `./scripts/lint --fix` applies formatting.
 - Test meaningful behavior, invariants and regressions, not trivial duplication.

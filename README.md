@@ -18,7 +18,7 @@ module declarations and tests to navigate the implementation.
 For an edit, `./scripts/check --changed` validates the affected Rust packages
 and their workspace consumers; shared or unknown inputs run the full workspace.
 Use `./scripts/check --package rocky-sdk` to select a package explicitly, or
-add `--unit` for just its unit tier. These commands keep the workspace build and
+add `--unit` for just its unit tier. `./scripts/check --all` also runs e2e. These commands keep the workspace build and
 filter test execution to avoid additional dependency variants. Cranelift's
 separate build is opt-in with `ROCKY_CRANELIFT=1`.
 

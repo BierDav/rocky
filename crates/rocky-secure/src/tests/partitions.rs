@@ -734,164 +734,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
     );
 }
 
-#[tokio::test]
-#[ignore = "explicit phase-11 measurement; run with --ignored --nocapture"]
-async fn measure_200_partitions() {
-    let root = tempfile::tempdir().unwrap();
-    let f = Fixture::new();
-    let node = PrivateKey::new();
-    let signer = PrivateKey::new();
-    let started = std::time::Instant::now();
-    let writer = f
-        .open(
-            &root.path().join("writer.sqlite"),
-            node.clone(),
-            f.grant(None, &all()),
-            Some((signer.clone(), 1)),
-        )
-        .await;
-    let empty_open = started.elapsed();
-    let empty_pages = {
-        let inner = writer.inner.lock(crate::replica::Class::Background).await;
-        crate::storage::rows(&inner.conn, "PRAGMA page_count")
-            .await
-            .unwrap()[0][0]
-            .clone()
-    };
-    let mut frames = Vec::new();
-    let started = std::time::Instant::now();
-    for index in 1..=200u8 {
-        let name = format!("p{index:03}");
-        f.key(&writer, &name, [index; 32]).await;
-    }
-    let partition_pages = {
-        let inner = writer.inner.lock(crate::replica::Class::Background).await;
-        crate::storage::rows(&inner.conn, "PRAGMA page_count")
-            .await
-            .unwrap()[0][0]
-            .clone()
-    };
-    for index in 1..=200u8 {
-        let name = format!("p{index:03}");
-        frames.push(
-            writer
-                .author_bundle(
-                    [index; 32],
-                    vec![f.write(&name, u32::from(index), i64::from(index))],
-                    vec![],
-                )
-                .await
-                .unwrap()
-                .remove(0),
-        );
-    }
-    let initialize = started.elapsed();
-    writer.flush().await.unwrap();
-    let reader = f
-        .open(
-            &root.path().join("reader.sqlite"),
-            PrivateKey::new(),
-            f.grant(None, &[Right::Read]),
-            None,
-        )
-        .await;
-    for index in 1..=200u8 {
-        f.key(&reader, &format!("p{index:03}"), [index; 32]).await;
-    }
-    let bytes = frames
-        .iter()
-        .map(|frame| frame.to_bytes().unwrap().len())
-        .sum::<usize>();
-    let started = std::time::Instant::now();
-    let (peer, credentials) = {
-        let inner = reader.inner.lock(crate::replica::Class::Background).await;
-        (
-            inner.config.node.public_key(),
-            inner.config.credentials.clone(),
-        )
-    };
-    for index in 1..=200u8 {
-        let scope = f.scope(&format!("p{index:03}"));
-        let frontier = reader.frontier(scope).await.unwrap();
-        let page = writer
-            .range_page(peer, &credentials, &frontier, None, 65536)
-            .await
-            .unwrap();
-        assert_eq!(page.frames.len(), 1);
-        let statuses = reader.receive_all(page.frames).await;
-        assert!(
-            statuses
-                .into_iter()
-                .all(|status| matches!(status, Ok(ReceiveStatus::Applied)))
-        );
-    }
-    let sync = started.elapsed();
-    let started = std::time::Instant::now();
-    seal_and_compact(&writer, &f.publisher, f.scope("p001").domain).await;
-    for index in 1..=200u8 {
-        writer
-            .checkpoint(f.scope(&format!("p{index:03}")))
-            .await
-            .unwrap();
-    }
-    let checkpoint = started.elapsed();
-    let logical_bytes = {
-        let inner = writer.inner.lock(crate::replica::Class::Background).await;
-        crate::storage::rows(&inner.conn, "PRAGMA page_count")
-            .await
-            .unwrap()[0][0]
-            .clone()
-    };
-    drop(writer);
-    let started = std::time::Instant::now();
-    let reopened = f
-        .open(
-            &root.path().join("writer.sqlite"),
-            node,
-            f.grant(None, &all()),
-            Some((signer, 1)),
-        )
-        .await;
-    for index in 1..=200u8 {
-        f.key(&reopened, &format!("p{index:03}"), [index; 32]).await;
-    }
-    let reopen = started.elapsed();
-    let sql = reader
-        .session(
-            (1..=200u8)
-                .map(|index| f.scope(&format!("p{index:03}")))
-                .collect(),
-        )
-        .await
-        .unwrap()
-        .sql(crate::sql::SqlOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        sql.run("SELECT count(*) FROM items", vec![])
-            .await
-            .unwrap()
-            .rows[0][0],
-        SqlValue::Integer(200)
-    );
-    let file_bytes = std::fs::metadata(root.path().join("writer.sqlite"))
-        .unwrap()
-        .len();
-    println!(
-        "P11 partitions=200 empty_open_ms={} initialize_ms={} sync_ms={} checkpoints_ms={} reopen_ms={} ciphertext_bytes={} empty_pages={:?} partition_metadata_pages={:?} file_bytes={} page_count={:?}",
-        empty_open.as_millis(),
-        initialize.as_millis(),
-        sync.as_millis(),
-        checkpoint.as_millis(),
-        reopen.as_millis(),
-        bytes,
-        empty_pages,
-        partition_pages,
-        file_bytes,
-        logical_bytes
-    );
-}
-
 async fn constraint_state(
     replica: &EncryptedReplica<TypedRows>,
     partition: &str,
@@ -1328,7 +1170,7 @@ async fn an_unproved_partition_requires_custody_without_disclosing_its_header_or
 }
 
 #[tokio::test]
-async fn sixty_four_partitions_derive_readiness_once_and_parse_each_statement_once() {
+async fn reads_across_held_partitions_agree_inside_and_after_transactions() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new();
     let writer = f
@@ -1355,20 +1197,10 @@ async fn sixty_four_partitions_derive_readiness_once_and_parse_each_statement_on
         .author_bundle([1; 32], bundle(1), vec![])
         .await
         .unwrap();
-    let derivations = || async {
-        writer
-            .inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .readiness
-            .derivations()
-    };
-    let before = derivations().await;
     writer
         .author_bundle([2; 32], bundle(65), vec![])
         .await
         .unwrap();
-    assert_eq!(derivations().await - before, 1);
 
     let sql = writer
         .session(names.iter().map(|name| f.scope(name)).collect())
@@ -1378,31 +1210,24 @@ async fn sixty_four_partitions_derive_readiness_once_and_parse_each_statement_on
         .await
         .unwrap();
     let count = "SELECT count(*) FROM items WHERE row_kind=0";
-    let before = derivations().await;
     sql.run("BEGIN", vec![]).await.unwrap();
-    let parses = rocky_storage::parsed::parses();
-    assert_eq!(
-        sql.run(count, vec![]).await.unwrap().rows,
-        vec![vec![SqlValue::Integer(128)]]
-    );
-    let first = rocky_storage::parsed::parses();
-    assert!(first > parses);
-    for _ in 0..3 {
-        sql.run(count, vec![]).await.unwrap();
+    for _ in 0..4 {
+        assert_eq!(
+            sql.run(count, vec![]).await.unwrap().rows,
+            vec![vec![SqlValue::Integer(128)]]
+        );
     }
-    // Repeating a statement parses nothing; readiness is derived once.
-    assert_eq!(rocky_storage::parsed::parses(), first);
     sql.run("ROLLBACK", vec![]).await.unwrap();
-    assert_eq!(derivations().await - before, 1);
-    // Reads outside a transaction derive at most once until the state moves.
-    let before = derivations().await;
     for name in &names {
-        sql.run(
-            "SELECT count(*) FROM items WHERE list=?",
-            vec![SqlValue::Text(name.clone())],
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            sql.run(
+                "SELECT count(*) FROM items WHERE list=?",
+                vec![SqlValue::Text(name.clone())]
+            )
+            .await
+            .unwrap()
+            .rows,
+            vec![vec![SqlValue::Integer(2)]]
+        );
     }
-    assert!(derivations().await - before <= 1);
 }

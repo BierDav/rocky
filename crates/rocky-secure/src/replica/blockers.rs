@@ -77,8 +77,6 @@ pub(crate) struct Readiness {
 struct ReadinessCache {
     generation: u64,
     domains: BTreeMap<Scope, (u64, u64, Commitment, Arc<DomainReadiness>)>,
-    #[cfg(test)]
-    derivations: u64,
 }
 impl Readiness {
     pub(super) fn new(conn: &ScopedConnection) -> Result<Self, Error> {
@@ -134,10 +132,6 @@ impl Readiness {
         readiness: Arc<DomainReadiness>,
     ) {
         let mut cache = self.cache();
-        #[cfg(test)]
-        {
-            cache.derivations += 1;
-        }
         if cache.generation == generation && self.write_count() == writes {
             cache
                 .domains
@@ -146,10 +140,6 @@ impl Readiness {
     }
     fn mark(&self) -> (u64, u64) {
         (self.cache().generation, self.write_count())
-    }
-    #[cfg(test)]
-    pub(crate) fn derivations(&self) -> u64 {
-        self.cache().derivations
     }
 }
 

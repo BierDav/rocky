@@ -1043,8 +1043,5 @@ impl RaftSnapshotBuilder<Types> for Store {
 }
 
 #[cfg(test)]
-#[path = "raft_store/probe.rs"]
-mod probe;
-#[cfg(test)]
 #[path = "raft_store/tests.rs"]
 mod tests;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for budget confirmation; run by scripts/lint."""
+"""Regression tests for correctness reporting; run by scripts/lint."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -16,42 +16,48 @@ tiers = importlib.util.module_from_spec(spec)
 loader.exec_module(tiers)
 
 
-class BudgetConfirmation(unittest.TestCase):
-    def judge(self, reruns, confirmed=None):
-        config = SimpleNamespace(per_test=lambda tier, key: 0.01)
-        suite = {"binary-id": "unit"}
-        confirmed = {} if confirmed is None else confirmed
-        with patch.object(tiers, "alone", side_effect=reruns) as alone, contextlib.redirect_stdout(io.StringIO()):
-            over = tiers.judge(config, "unit", [(None, suite, "example", 0.5)], 1.0, confirmed)
-        return over, confirmed, alone.call_count
+class CorrectnessReporting(unittest.TestCase):
+    def test_slow_successes_pass_and_failures_still_fail(self):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(tiers.finish_tier(None, "e2e", {"timed": [None], "wall": 10000, "problems": []}))
+            self.assertTrue(tiers.finish_tier(None, "e2e", {"timed": [], "wall": 0, "problems": ["assertion failed"]}))
 
-    def test_large_scheduler_spike_is_confirmed(self):
-        over, confirmed, calls = self.judge([(0.001, 1.0)])
-        self.assertEqual(over, [])
-        self.assertIn("unit example", confirmed)
-        self.assertEqual(calls, 1)
+    def test_abnormal_exit_after_passing_events_still_fails(self):
+        suite = {"binary-id": "unit", "binary-path": "/binary"}
+        with patch.object(tiers, "libtest", return_value=({"case": ("ok", 0.0, "")}, "", 101)):
+            _, failed, _ = tiers.run_unit(None, [(suite, "case")])
+        self.assertEqual(failed, ["unit exited 101"])
 
-    def test_a_spike_during_confirmation_can_recover(self):
-        over, _, calls = self.judge([(0.4, 1.0), (0.001, 1.0)])
-        self.assertEqual(over, [])
-        self.assertEqual(calls, 2)
 
-    def test_a_real_budget_failure_remains_a_failure(self):
-        over, confirmed, calls = self.judge([(0.02, 1.0)] * tiers.RERUNS)
-        self.assertEqual(len(over), 1)
-        self.assertEqual(confirmed, {})
-        self.assertEqual(calls, tiers.RERUNS)
+class BatchedExecution(unittest.TestCase):
+    def test_batches_cover_each_selected_case_once_without_mixing_binaries(self):
+        left = {"binary-id": "left", "binary-path": "/left"}
+        right = {"binary-id": "right", "binary-path": "/right"}
+        tests = [(left, f"case_{i}") for i in range(65)] + [(right, "case_0")]
+        groups = tiers.batches(tests)
+        self.assertEqual([len(names) for _, names in groups], [32, 32, 1, 1])
+        self.assertEqual([(suite, name) for suite, names in groups for name in names], tests)
 
-    def test_a_failed_confirmation_cannot_pass(self):
-        over, confirmed, calls = self.judge([(None, 1.0)])
-        self.assertEqual(len(over), 1)
-        self.assertEqual(confirmed, {})
-        self.assertEqual(calls, 1)
+    def test_batching_preserves_assertion_missing_result_and_exit_failures(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        events = {"ok": ("ok", 0.1, ""), "bad": ("failed", 0.0, "assertion failed")}
+        with patch.object(tiers, "libtest", return_value=(events, "", 101)), contextlib.redirect_stdout(io.StringIO()):
+            timed, failed, _ = tiers.run_batches(None, [(suite, name) for name in ("ok", "bad", "missing")])
+        self.assertEqual([name for _, _, name, _ in timed], ["ok"])
+        self.assertEqual(set(failed), {"binary exited 101", "binary bad: failed", "binary missing: missing"})
 
-    def test_a_recent_confirmation_is_reused(self):
-        over, _, calls = self.judge([], {"unit example": (0.001, 0.5)})
-        self.assertEqual(over, [])
-        self.assertEqual(calls, 0)
+    def test_isolated_cases_are_excluded_from_batches_and_all_results_combine(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        isolated, shared = (suite, "isolated"), (suite, "shared")
+        source = SimpleNamespace(list=lambda expr: [isolated])
+        config = SimpleNamespace(tiers={"integration": {"isolated-filter": "test(=isolated)"}})
+        with patch.object(tiers, "run_nextest", return_value=([isolated], ["isolated failed"], 1.0)), \
+                patch.object(tiers, "run_batches", return_value=([shared], [], 2.0)) as batch:
+            timed, failed, wall = tiers.run_tier(source, config, "integration", "all()", [isolated, shared])
+        batch.assert_called_once_with(source, [shared])
+        self.assertEqual(timed, [isolated, shared])
+        self.assertEqual(failed, ["isolated failed"])
+        self.assertEqual(wall, 3.0)
 
 
 class ArchivedExecutables(unittest.TestCase):
@@ -66,7 +72,7 @@ class ArchivedExecutables(unittest.TestCase):
                         "other": [{"kind": "bin-exe", "name": "other", "path": "debug/other"}]}},
                     "rust-suites": {"public": suite}}
         listing = SimpleNamespace(returncode=0, stdout=json.dumps(metadata))
-        execution = SimpleNamespace(stdout='', stderr='')
+        execution = SimpleNamespace(stdout='', stderr='', returncode=0)
         with patch.object(tiers.subprocess, "run", side_effect=[listing, execution]) as run:
             [(record, name)] = source.list("all()")
             tiers.libtest(record, [name], threads=1)
@@ -75,44 +81,8 @@ class ArchivedExecutables(unittest.TestCase):
         self.assertNotIn("CARGO_BIN_EXE_other", environment)
 
 
-class SuiteExemption(unittest.TestCase):
-    def run_source(self, name, exempt_result):
-        suite = {"binary-id": "rocky-sdk::migrations"}
-        other = {"binary-id": "rocky-sdk::service"}
-        migration = (suite, "a_migration_of_100000_rows_converges_on_every_member")
-        ordinary = (other, "rollback")
-        exemption = "binary_id(=rocky-sdk::migrations) & test(=a_migration_of_100000_rows_converges_on_every_member)"
-        config = SimpleNamespace(tiers={"e2e": {"suite-exempt-filter": exemption}})
-        source = SimpleNamespace(name=name, list=lambda expr, ignored: [migration])
-        good = ([(source, other, "rollback", 12.0)], [], 13.0)
-        with patch.object(tiers, "run_nextest", side_effect=[good, exempt_result]) as run, \
-                contextlib.redirect_stdout(io.StringIO()):
-            result = tiers.run_tier(source, config, "e2e", "all()", [migration, ordinary])
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args_list[0].args[3], [ordinary])
-        self.assertEqual(run.call_args_list[1].args[3], [migration])
-        self.assertIn(f"!({exemption})", run.call_args_list[0].args[2])
-        return result
-
-    def test_each_build_runs_the_full_exempt_test_without_charging_its_wall(self):
-        for build in ("workspace", "sdk-no-default"):
-            with self.subTest(build=build):
-                timing = (None, {"binary-id": "rocky-sdk::migrations"}, "migration", 500.0)
-                timed, failed, wall, exempt = self.run_source(build, ([timing], [], 501.0))
-                self.assertEqual(len(timed), 2)
-                self.assertEqual(failed, [])
-                self.assertEqual((wall, exempt), (13.0, 501.0))
-
-    def test_exempt_assertion_failures_and_timeouts_still_fail(self):
-        for failure in ("migration assertion failed", "migration timed out"):
-            with self.subTest(failure=failure):
-                _, failed, wall, exempt = self.run_source("workspace", ([], [failure], 600.0))
-                self.assertEqual(failed, [failure])
-                self.assertEqual((wall, exempt), (13.0, 600.0))
-
-
 class MultiTier(unittest.TestCase):
-    def test_features_are_grouped_and_budgets_still_combine_both_builds(self):
+    def test_features_are_grouped_and_failures_combine_both_builds(self):
         events = []
         sources = []
         def source(build, cranelift):
@@ -123,7 +93,7 @@ class MultiTier(unittest.TestCase):
             self.assertEqual(expr, f"({tier}) & (package(=app))")
             events.append((source.name, tier))
             suite = {"binary-id": source.name}
-            return [(source, suite, "test", 0.001)], ["regression"] if tier == "unit" else [], 2.0, 0.0
+            return [(source, suite, "test", 0.001)], ["regression"] if tier == "unit" else [], 2.0
         config = SimpleNamespace(filters={"unit": "unit", "integration": "integration"})
         states = {}
         def finish(config, tier, state):
@@ -181,6 +151,22 @@ class Scope(unittest.TestCase):
                       ["sdks/uniffi/src/lib.rs"]):
             with self.subTest(paths=paths):
                 self.assertIsNone(scope.changed_packages(self.packages(), paths, Path("/repo")))
+
+
+ios_loader = importlib.machinery.SourceFileLoader("ios_results", str(Path(__file__).parent / "ci" / "ios-test-results"))
+ios = importlib.util.module_from_spec(importlib.util.spec_from_loader(ios_loader.name, ios_loader))
+ios_loader.exec_module(ios)
+
+
+class IosCorrectness(unittest.TestCase):
+    def test_slow_success_is_accepted(self):
+        self.assertEqual(ios.results("[==========] Running 1 tests\n[       OK ] example (999999 ms)\n[  PASSED  ] 1 tests"), {"example": 999999})
+
+    def test_missing_failed_and_duplicate_results_are_refused(self):
+        for text in ("", "[==========] Running 2 tests\n[  PASSED  ] 1 tests",
+                     "[==========] Running 2 tests\n[       OK ] same (0 ms)\n[       OK ] same (0 ms)\n[  PASSED  ] 2 tests"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                ios.results(text)
 
 
 if __name__ == "__main__":

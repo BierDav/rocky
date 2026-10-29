@@ -609,13 +609,6 @@ impl OracleStats {
             start: std::time::Instant::now(),
         }
     }
-    pub(crate) fn snapshot(&self) -> (u64, u64, u64) {
-        (
-            self.scans.load(Ordering::Relaxed),
-            self.decodes.load(Ordering::Relaxed),
-            self.nanos.load(Ordering::Relaxed),
-        )
-    }
 }
 #[cfg(test)]
 pub(super) struct OracleTimer<'a> {
@@ -628,13 +621,6 @@ impl Drop for OracleTimer<'_> {
         self.stats
             .nanos
             .fetch_add(self.start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-}
-
-#[cfg(test)]
-impl<A> Inner<A> {
-    pub(crate) fn position_oracle_stats(&self) -> (u64, u64, u64) {
-        self.position_oracles.snapshot()
     }
 }
 

@@ -434,17 +434,9 @@ impl Simulation {
             else {
                 continue;
             };
-            for scope in node.scopes() {
-                if let Err(error) = node.replica.audit(scope).await
-                    && !tolerated(&error)
-                {
-                    return Err(format!(
-                        "{} audit of {}: {error}",
-                        member.name,
-                        rocky_core::scope_label(&scope)
-                    ));
-                }
-            }
+            audit_node(&node, true)
+                .await
+                .map_err(|error| format!("{} audit: {error}", member.name))?;
             let blockers = node.blockers().await.map_err(|error| error.to_string())?;
             if self.synced[index]
                 && let Some(blocker) = blockers.iter().find(|blocker| {
@@ -553,15 +545,9 @@ impl Simulation {
             else {
                 continue;
             };
-            for scope in running.scopes() {
-                if let Err(error) = running.replica.audit(scope).await {
-                    return Err(format!(
-                        "{} audit of {} after healing: {error}",
-                        member.name,
-                        rocky_core::scope_label(&scope)
-                    ));
-                }
-            }
+            audit_node(&running, false)
+                .await
+                .map_err(|error| format!("{} audit after healing: {error}", member.name))?;
         }
         Ok(())
     }
@@ -636,6 +622,32 @@ impl Stuck {
         self.count += 1;
         self.classes.insert(class.to_owned());
         let _ = write!(self.described, "{described}; ");
+    }
+}
+
+// All scopes share the global checks. A blocked scope must not hide an
+// invalid sibling, so retain individual checks when the batch is blocked.
+async fn audit_node(
+    node: &crate::node::Node,
+    allow_blocked: bool,
+) -> Result<(), rocky_secure::Error> {
+    let scopes = node.scopes();
+    if scopes.is_empty() {
+        return Ok(());
+    }
+    match node.replica.audit_scopes(&scopes).await {
+        Ok(_) => Ok(()),
+        Err(error) if allow_blocked && tolerated(&error) => {
+            for scope in scopes {
+                if let Err(error) = node.replica.audit(scope).await
+                    && !tolerated(&error)
+                {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 

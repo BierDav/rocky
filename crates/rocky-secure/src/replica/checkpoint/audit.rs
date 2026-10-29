@@ -637,8 +637,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
     /// Fixture-only composition of the production checks under one guard.
     /// Keyless/unknown slots retain the single audit's partial report meaning.
-    #[cfg(test)]
-    pub(crate) async fn audit_scopes(
+    #[cfg(any(test, feature = "qualification"))]
+    #[doc(hidden)]
+    pub async fn audit_scopes(
         &self,
         scopes: &[ResourceScope],
     ) -> Result<Vec<(ResourceScope, AuditReport)>, Error> {

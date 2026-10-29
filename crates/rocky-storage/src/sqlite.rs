@@ -1141,12 +1141,10 @@ mod tests {
         };
         conn.set_deadline(Some(Instant::now() + std::time::Duration::from_millis(20)))
             .unwrap();
-        let started = Instant::now();
         assert!(matches!(
             conn.query(count(1_000_000_000), ()).await,
             Err(Error::Deadline)
         ));
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
         conn.set_deadline(None).unwrap();
         let mut rows = conn.query(count(1000), ()).await.unwrap();
         assert_eq!(

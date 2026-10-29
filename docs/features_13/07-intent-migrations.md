@@ -97,7 +97,7 @@ remaining work stays bounded and resumable.
 - Issuer fill ≤ 70 s on the reference host, paired. Member apply ≤ 110%
   of paired member pull. Issuer file ≤ 300 MB, member file ≤ 80 MB. WAL
   never exceeds 64 MiB. `pagerStress` no longer leads the fill profile.
-- Crash, release and authority tests pass within their tier budgets.
+- Crash, release and authority tests enforce their correctness invariants.
 - `./scripts/check` passes.
 
 ## Not in scope

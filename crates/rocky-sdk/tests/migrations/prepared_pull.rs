@@ -70,7 +70,7 @@ async fn retain(fixture: MemberFixture, destination: &Path) -> Result<(), Failur
 fn restore(source: &Path) -> Result<MemberFixture, Failure> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(source.join("fixture.json"))?)?;
     if manifest.version != 1
-        || ![8, LARGE].contains(&manifest.rows)
+        || manifest.rows != 8
         || manifest.schema != FILLED.replace("100000", &manifest.rows.to_string())
     {
         return Err("unsupported prepared member-pull fixture".into());
@@ -97,31 +97,11 @@ fn restore(source: &Path) -> Result<MemberFixture, Failure> {
     })
 }
 
-#[cfg(feature = "qualification")]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "explicit benchmark preparation; use scripts/measure-prepared-pull"]
-async fn prepare() -> Result<(), Failure> {
-    let destination = std::env::var_os("ROCKY_PULL_FIXTURE").ok_or("missing ROCKY_PULL_FIXTURE")?;
-    retain(
-        prepare_member_fixture(LARGE, 0, true).await?,
-        Path::new(&destination),
-    )
-    .await
-}
-
-#[cfg(feature = "qualification")]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "explicit benchmark trial; use scripts/measure-prepared-pull"]
-async fn replay() -> Result<(), Failure> {
-    let source = std::env::var_os("ROCKY_PULL_FIXTURE").ok_or("missing ROCKY_PULL_FIXTURE")?;
-    pull_member_fixture(restore(Path::new(&source))?).await
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn relocated_fixture_can_be_pulled_twice() -> Result<(), Failure> {
     let cache = common::identity::small_directory()?;
     let fixture = cache.path().join("prepared");
-    retain(prepare_member_fixture(8, 0, false).await?, &fixture).await?;
+    retain(prepare_member_fixture(8, 0).await?, &fixture).await?;
     // Retain dropped the original directories; both trials must work independently.
     for _ in 0..2 {
         pull_member_fixture(restore(&fixture)?).await?;

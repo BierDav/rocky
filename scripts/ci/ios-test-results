@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Validate simulator test completion and assertion results."""
+from pathlib import Path
+import re
+import sys
+
+def results(text):
+    expected = re.search(r"\[==========\] Running (\d+) tests", text)
+    passed = re.search(r"\[  PASSED  \] (\d+) tests", text)
+    measured = re.findall(r"\[       OK \] (.+) \((\d+) ms\)", text)
+    if not expected or not passed or int(expected[1]) == 0 or int(expected[1]) != int(passed[1]) or len(measured) != int(expected[1]):
+        raise ValueError("iOS tests did not all pass")
+    if len({name for name, _ in measured}) != int(expected[1]) or re.search(r"\[\s+FAILED\s+\]", text):
+        raise ValueError("iOS tests contain duplicate or failed results")
+    return {name: int(ms) for name, ms in measured}
+
+
+def check(log):
+    measured = results(log.read_text())
+    print(f"iOS: {len(measured)} tests passed")
+
+
+if __name__ == "__main__":
+    check(Path(sys.argv[1]))

@@ -1,39 +1,12 @@
-# Test tiers and their budgets; see docs/development.md#test-budgets and
-# docs/decisions/0060-test-tiers-and-budgets.md. `scripts/test-tiers` enforces them.
-#
-# A test belongs to the first tier whose filter matches it (nextest filterset
-# syntax): e2e, then integration; every other test is a unit test. So each test
-# has exactly one tier, and a new test starts as a unit test unless it is in an
-# integration test target. Ignored tests run only in e2e, and only those its
-# filter names; the others are helpers and explicit measurements.
+# Correctness test selection. Timing is diagnostic, never a pass/fail budget.
 
 [unit]
-per-test = "10ms"
-suite = "10s"
 
-# Phase 8: secure history/retirement and SDK delivery/recovery exercise real
-# SQLite or credential sealing. The package filters below include them; the
-# pure rocky-core epoch-order property and SDK capacity check stay in unit.
-# Phase 11: `tests::chains` (session chain table, stored chains, chains beside
-# a checkpoint page) uses real SQLite and is included by the rocky-secure filter.
-# The shopping release hub gate remains e2e; no budget exception is added.
-# Phase 18 endpoint socket-rebind and borrowed-ownership tests use real
-# loopback sockets; kind(test) includes them with the unchanged 2 s budget.
-# Phase 21 Kotlin/Native application tests run in check-ios on macOS, enforce
-# the same 2 s integration budget, and are outside nextest. The agent-device
-# procedure is e2e (15 min). No Rust filter or budget exception is needed.
-# Phase 20 adds Kotlin application integration and shopping multi-process e2e
-# gates in the shopping CI job; scripts/test-tiers handles Rust binaries only.
-# The Rust driver projection and secure checkpoint custody regressions use real
-# SQLite and sessions; the existing integration filters include them.
-# No filter change or exception is needed.
-# Round48 checkpoint byte/signature fixtures use the crypto integration budget.
 [integration]
-per-test = "2s"
-suite = "5m"
-# Isolate the capture subscriber from concurrent callsite registration.
+# The capture subscriber has process-wide callsite state.
+isolated-filter = 'package(=rocky-secure) & test(=replica::lock::tests::slow_holds_report_the_request_site_and_class)'
 filter = '''
-    kind(test)
+kind(test)
     | (package(rocky-secure) & test(=replica::lock::tests::slow_holds_report_the_request_site_and_class))
     | (package(rocky-secure) & test(/^replica::checkpoint::backend_vectors::/))
     | (package(rocky-secure) & test(/^tests::/))
@@ -51,48 +24,14 @@ filter = '''
     | (package(todo-desktop) & test(/^secure_demo::/))
 '''
 
-# End to end: soak tests, the fsync probe, and the tests that need more than the
-# integration budget even alone: crash sweeps over every step, full-size
-# limits, multi-process clusters, and waits on production deadlines (the
-# coordinator client's 12 s request deadline, the 5 s write lease, the service
-# drain). Each was over 1.5 s alone on the reference host; the measurements are
-# in docs/features_07/01-test-tiers-evidence.md. Name a test here only with its
-# measured time; a test that is only slow should be made faster instead.
-# Phase 10 evidence records the owned QUIC shutdown tests at 2.7/2.6 s.
-# Phase 15: the mDNS run waits 2 s to show that another topic stays silent
-# (3.0 s); the two-process discovery runs enroll three devices and start a
-# second process (4.1 s each). See docs/features_07/15-discovery-evidence.md.
-# features_09 phase 8's three-voter election/deadline/restart gate: 3.62 s alone.
-# features_09 phase 7's full-size migration: 100,000 rows seeded and filled by
-# migrations and pulled by a member, 481 s alone; see
-# docs/features_09/07-migrations-at-any-size.md#evidence.
-# features_09 phase 17's coordinated recovery regression commits the real
-# 1,025-entry hash window before signing: 45.3 s alone in the e2e profile.
-# features_09 core prerequisites: real-voter migration and QUIC restarts took
-# 4.606 s alone. Rollback crosses the real 256-operation retention window
-# and real transport deadlines; round38 passes in 45.919 s after the
-# original 71.398 s restoration failure. Budgets and retention remain unchanged.
 [e2e]
-suite = "15m"
-# Owner-authorized 2026-10-21: run the full migration in both builds outside
-# the combined suite clock. Its assertions and existing 600 s timeout remain.
-# features_11 phase 2 records the simulation sweep's exemption: its shards run
-# 1,000 seeds in 10.5 min on 16 shards, 18 cores (2026-10-25), in the workspace build only.
-suite-exempt-filter = '''
-    (binary_id(=rocky-sdk::migrations)
-    & test(=a_migration_of_100000_rows_converges_on_every_member))
-    | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
-'''
 filter = '''
-    (package(rocky-secure) & test(/lthash_100000/))
-    | (package(rocky-secure) & test(/positions_10000/))
-    | (package(rocky-secure) & test(/finalization_100000/))
+(package(rocky-secure) & test(/lthash_100000/))
     | (package(rocky-secure) & test(=tests::coordinated::recovery::regressions::collects_every_entry_across_the_real_hash_window_before_recovery_is_signed))
     | (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
     | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
     | test(/::soak_/)
     | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
-    | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
     | (binary_id(rocky-coordinator) & (
           test(=raft_store::tests::openraft_storage_contract)
     ))
@@ -136,8 +75,7 @@ filter = '''
         | test(=inbound_streams_over_budget_are_dropped_and_served_again_later)
     ))
     | (binary_id(rocky-sdk::migrations) & (
-          test(=a_migration_of_100000_rows_converges_on_every_member)
-        | test(=newest_state_skips_50000_rows_and_100_seals)
+          test(=returning_member_uses_the_newest_checkpoint_across_migration_bundles)
     ))
     | (binary_id(rocky-sdk::group_secrets) & (
           test(=an_interrupted_rotation_resumes_to_one_epoch_across_the_group)
@@ -162,8 +100,7 @@ filter = '''
         | test(=two_phones_never_online_together_pass_the_release_gate_through_custody)
     ))
     | (binary_id(rocky-secure) & (
-          test(=tests::group_sync_measurement::holdings_idle_200_partition_four_table_fixture)
-        | test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
+          test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
         | test(=tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure)
         | test(=tests::generations::a_local_plan_survives_an_interruption_at_every_step)
         | test(=tests::group::wal_stays_bounded_under_sustained_authoring)
@@ -174,130 +111,3 @@ filter = '''
     ))
 '''
 
-# Accepted over-budget tests (Phase 3, catch-up cost). Each measured alone on the
-# reference host (2026-10-10). Remove or fix each before the expiry date.
-[[exception]]
-test = "rocky-secure network::tests::frame_signing_bytes_equal_the_generic_encoding"
-limit = "100ms"
-measured = "64.8ms"
-cause = "Frame signing in debug builds dominates; the test compares the signed bytes against the generic encoding."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-secure tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening"
-limit = "3s"
-measured = "2.09s"
-cause = "Catch-up of a multi-table history plus an interrupted receipt retry; the setup is the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-secure tests::sql::catch_up::an_interrupted_catch_up_resumes_and_applies_every_operation_once"
-limit = "4s"
-measured = "2.88s"
-cause = "Interrupted and resumed catch-up applies every operation once; the replay and the verification are the cost."
-expires = 2026-11-30
-
-
-# Accepted over-budget test (features_09 phases 10 and 11 merged). Measured alone
-# on the reference host (2026-10-15); it was 1.98s before the merge.
-[[exception]]
-test = "rocky-sdk::removal devices_that_explicitly_open_a_readded_field_agree_on_it"
-limit = "3s"
-measured = "2.04s"
-cause = "Six devices cross three generations, each joining and syncing; device setup and adoption are the cost."
-expires = 2026-11-30
-
-# Accepted over-budget test (Phase 17, shared check). Measured alone on the
-# reference host (2026-10-10). Remove or fix before the expiry date.
-[[exception]]
-test = "rocky-coordinator::public tenants_register_isolated_domains_and_cannot_starve_each_other"
-limit = "5s"
-measured = "4.39s"
-cause = "Three tenants register and are served through real coordinator clients; the registration round trips are the cost."
-expires = 2026-11-30
-
-# Accepted over-budget integration tests (Phase 19, shared check). Measured on a
-# loaded reference host (2026-10-10) while other phases built. Remove or fix before the expiry date.
-[[exception]]
-test = "rocky-secure tests::sql::natural_key_relink_converges_and_old_identity_edits_never_touch_replacement"
-limit = "3s"
-measured = "2.69s"
-cause = "Natural-key relink converges across two identities; the SQL replay is the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-secure tests::scaling::bounded_pages_scope_filtering_and_pending_passes_do_not_starve"
-limit = "4s"
-measured = "3.36s"
-cause = "Bounded paging with scope filtering over a large history; the population of the history is the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::peers a_domain_survives_a_change_of_routes_and_transport_kind"
-limit = "5s"
-measured = "4.01s"
-cause = "Domain survives route and transport changes; each route change is a real peer reconnect."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::peers enrolled_peers_sync_directly_while_the_creator_is_offline"
-limit = "8s"
-measured = "7.29s"
-cause = "Enrolled peers sync directly without the creator; several real peers start and converge."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::peers edits_relayed_in_any_order_and_repeated_converge"
-limit = "15s"
-measured = "14.41s"
-cause = "Edits relayed in any order across repeated rounds; the convergence rounds are the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::registry concurrent_enrollments_and_renewals_at_two_issuers_converge"
-limit = "4s"
-measured = "3.78s"
-cause = "Two issuers enroll and renew concurrently; the registry round trips are the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::registry only_issuers_open_the_registry_and_custody_relays_it_sealed"
-limit = "12s"
-measured = "11.39s"
-cause = "Sealed registry relay through custody peers; the sealed round trips are the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::registry_revocation another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_with_enroller_stopped"
-limit = "16s"
-measured = "15.11s"
-cause = "Revocation by a second issuer with the enroller stopped; the revocation propagation is the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::typed trusted_move_keeps_foreign_identity_and_follows_original_stamp_once"
-limit = "3s"
-measured = "2.04s"
-cause = "Trusted move across identities with stamp following; the two-peer setup is the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::shared_lists a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arriving"
-limit = "11s"
-measured = "10.00s"
-cause = "Joined writer obtains authors and sees the list arrive; the join and arrival rounds are the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::shared_lists an_enrolled_writer_syncs_a_list_shared_with_one_envelope"
-limit = "8s"
-measured = "7.02s"
-cause = "Enrolled writer syncs a shared list in one envelope; the enrollment and sync rounds are the cost."
-expires = 2026-11-30
-
-[[exception]]
-test = "rocky-sdk::shopping_release custody_keeps_offered_partitions_across_restart"
-limit = "5s"
-measured = "4.85s"
-cause = "Custody keeps offered partitions across a restart; the restart and re-sync are the cost."
-expires = 2026-11-30

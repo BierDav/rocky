@@ -2,6 +2,7 @@
 # Workspace and scoped validation.
 #
 #   scripts/check                   formatting, clippy, the unit and integration tiers
+#   scripts/check --all             formatting, clippy, and every test tier
 #   scripts/check --unit            the unit tier of the workspace build: the edit loop,
 #                                   on LLVM; ROCKY_CRANELIFT=1 opts into its separate build
 #   scripts/check --package NAME    package and transitive workspace consumers
@@ -16,7 +17,7 @@
 #                                   ran clippy but its archives are gone
 #
 # Tiers combine, as in `--unit --integration`. scripts/test-tiers enforces each
-# tier's budgets. CI builds once with --build and runs the tiers --from its archives.
+# tier's correctness checks. CI builds once with --build and runs the tiers --from its archives.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,10 +30,12 @@ build=
 archives=
 clippy=true
 doc=false
+all=false
 packages=
 changed=
 while [ $# -gt 0 ]; do
     case "$1" in
+    --all) all=true; tiers=" unit integration e2e" ;;
     --unit | --integration | --e2e) tiers="$tiers ${1#--}" ;;
     --package | -p) [ -n "${2:-}" ] || usage; packages="$packages $2"; shift ;;
     --changed) changed=--changed ;;
@@ -47,6 +50,10 @@ done
 [ -z "$build" ] || [ -n "$archives" ] || usage
 # Archives always contain the complete validation matrix.
 [ -z "$archives" ] || { [ -z "$packages" ] && [ -z "$changed" ]; } || usage
+# Reject formatting before metadata, nextest discovery or compilation.
+if { [ -z "$tiers" ] || $all; } && [ -z "$build" ]; then
+    cargo fmt --all -- --check
+fi
 selection='all()'
 if [ -n "$packages$changed" ]; then
     # shellcheck disable=SC2086 # workspace package names are separate arguments
@@ -111,9 +118,8 @@ if [ "$tiers" = " unit" ] && [ -z "$archives" ] && ! $doc; then
     fi
     exec scripts/test-tiers unit --filter "$selection" "--build=--workspace --lib --bins"
 fi
-if [ -z "$tiers" ]; then
-    tiers="unit integration"
-    cargo fmt --all -- --check
+if [ -z "$tiers" ] || $all; then
+    [ -n "$tiers" ] || tiers="unit integration"
     if [ -z "$archives" ] && $clippy; then
         cargo clippy --workspace --all-targets --locked -- -D warnings
     fi

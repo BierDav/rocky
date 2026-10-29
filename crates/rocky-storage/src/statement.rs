@@ -48,7 +48,7 @@ impl From<Rejection> for crate::sqlite::Error {
 /// Table-valued functions a statement may read from.
 const TABLE_FUNCTIONS: &[&str] = &["json_each", "json_tree"];
 /// Functions that reach the file, the engine or its extensions.
-const DENIED_FUNCTIONS: &[&str] = &[
+pub(crate) const DENIED_FUNCTIONS: &[&str] = &[
     "load_extension",
     "readfile",
     "writefile",
@@ -74,7 +74,7 @@ fn forbidden(sql: &str) -> bool {
                 .any(|keyword| word.eq_ignore_ascii_case(keyword))
         })
 }
-fn reserved(name: &str) -> bool {
+pub(crate) fn reserved(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     RESERVED.iter().any(|prefix| name.starts_with(prefix))
 }

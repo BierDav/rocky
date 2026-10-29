@@ -1,4 +1,9 @@
 //! Completeness proofs for each resolved SQL table reference.
+mod intent;
+pub use intent::{
+    DETERMINISTIC_FUNCTIONS, IntentRefusal, MAX_INTENT_PARTITIONS, PartitionStatement, SplitError,
+    check_replayed_table, split_intent,
+};
 use rocky_core::{KeyColumn, PartitionValue, SqlValue};
 use sqlparser::ast::*;
 use std::{
@@ -82,25 +87,27 @@ pub struct Checked {
     pub sql: String,
     pub params: Vec<SqlValue>,
 }
+/// A table named plainly or in `main`, lowercase.
+fn table_name(name: &ObjectName) -> Option<String> {
+    match name.0.as_slice() {
+        [ObjectNamePart::Identifier(name)] => Some(name.value.to_ascii_lowercase()),
+        [
+            ObjectNamePart::Identifier(database),
+            ObjectNamePart::Identifier(name),
+        ] if database.value.eq_ignore_ascii_case("main") => Some(name.value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
 fn table(factor: &TableFactor) -> Option<(String, String)> {
     let TableFactor::Table { name, alias, .. } = factor else {
         return None;
     };
-    let name = match name.0.as_slice() {
-        [ObjectNamePart::Identifier(name)] => name,
-        [
-            ObjectNamePart::Identifier(database),
-            ObjectNamePart::Identifier(name),
-        ] if database.value.eq_ignore_ascii_case("main") => name,
-        _ => return None,
-    };
-    Some((
-        name.value.to_ascii_lowercase(),
-        alias.as_ref().map_or_else(
-            || name.value.to_ascii_lowercase(),
-            |alias| alias.name.value.to_ascii_lowercase(),
-        ),
-    ))
+    let name = table_name(name)?;
+    let alias = alias.as_ref().map_or_else(
+        || name.clone(),
+        |alias| alias.name.value.to_ascii_lowercase(),
+    );
+    Some((name, alias))
 }
 fn unnest(expr: &Expr) -> &Expr {
     if let Expr::Nested(expr) = expr {

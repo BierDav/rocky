@@ -1,6 +1,8 @@
 //! Tip-authenticated schema definitions and the records supplied by a language adapter.
+use super::headers::HeaderSource;
 use super::*;
 use rocky_core::{ApplicationManifest, Scope};
+use rocky_credentials::TipGraph;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tip_schemas(manifest BLOB PRIMARY KEY,definition BLOB NOT NULL,record BLOB NOT NULL) WITHOUT ROWID",
@@ -379,16 +381,14 @@ impl<A: RowApplication> Inner<A> {
             .insert(key, fields.clone());
         Ok(fields)
     }
-    pub(super) async fn schema_requirements(
-        &self,
-        historical: bool,
-    ) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
+    /// The followed path's requirement state, before any header is seen.
+    fn requirement_start(&self) -> Result<Option<Requirements>, Error> {
         let Some((scope, name)) = &self.workspace.followed else {
-            return Ok(BTreeSet::new());
+            return Ok(None);
         };
         let graph = self.graph_for(*scope)?;
         let Some(target) = graph.bookmark(name).map_err(credential)? else {
-            return Ok(BTreeSet::new());
+            return Ok(None);
         };
         let mut path = vec![target];
         let mut cursor = target;
@@ -400,22 +400,56 @@ impl<A: RowApplication> Inner<A> {
             path.push(parent);
             cursor = parent;
         }
-        let mut retained = BTreeSet::new();
-        for row in rows(
-            &self.conn,
-            "SELECT header FROM secure_operations UNION ALL SELECT header FROM secure_voids",
-        )
-        .await?
-        {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                return Err(Error::Corrupt("retained schema reference".into()));
-            };
-            let header: p2panda_core::Header<Extensions> = decode(bytes)?;
-            if header.extensions.scope.domain == *scope && path.contains(&header.extensions.tip) {
-                retained.insert(header.extensions.tip);
+        Ok(Some(Requirements {
+            domain: *scope,
+            graph: graph.clone(),
+            path,
+            retained: BTreeSet::new(),
+            required: BTreeSet::new(),
+        }))
+    }
+    /// The schemas the followed path, kept seals and, when `historical`,
+    /// held frames need. One unpaged scan, for transitions that act on it
+    /// in the same transaction; `EncryptedReplica::schema_requirements`
+    /// pages it.
+    pub(super) async fn schema_requirements(
+        &self,
+        historical: bool,
+    ) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
+        let Some(mut requirements) = self.requirement_start()? else {
+            return Ok(BTreeSet::new());
+        };
+        let domain = requirements.domain;
+        requirements.visit(HeaderSource::Retained, self.domain_headers(domain).await?)?;
+        if historical {
+            let mut frames = Vec::new();
+            for row in rows(&self.conn, "SELECT frame FROM secure_held_frames").await? {
+                let [SqlValue::Blob(bytes)] = row.as_slice() else {
+                    return Err(Error::Corrupt("held schema reference".into()));
+                };
+                let frame: EncryptedFrame = decode(bytes)?;
+                let header = &frame.operation_ref()?.header.extensions;
+                if header.scope.domain == domain {
+                    frames.push(header.clone());
+                }
             }
+            requirements.visit(HeaderSource::HeldFrame, frames)?;
         }
-        let scopes = self.domain_scopes(*scope).await?;
+        self.finish_requirements(requirements, historical).await
+    }
+    async fn finish_requirements(
+        &self,
+        requirements: Requirements,
+        historical: bool,
+    ) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
+        let Requirements {
+            domain,
+            graph,
+            path,
+            mut retained,
+            mut required,
+        } = requirements;
+        let scopes = self.domain_scopes(domain).await?;
         // Stored scopes hold the workspace tip's state until a switch filters it.
         if !scopes.is_empty() && path.contains(&self.workspace.tip) {
             retained.insert(self.workspace.tip);
@@ -437,7 +471,6 @@ impl<A: RowApplication> Inner<A> {
         if genesis_base {
             retained.insert(graph.genesis());
         }
-        let mut required = BTreeSet::new();
         for (seal, _) in self.kept_marks().await? {
             if let Ok(seal) = graph.seal_by_id(seal) {
                 retained.insert(seal.statement.tip);
@@ -456,34 +489,91 @@ impl<A: RowApplication> Inner<A> {
         for tip in path.into_iter().take(oldest + 1) {
             required.insert((tip, graph.schema_any(tip).map_err(credential)?));
         }
-        for row in if historical {
-            rows(&self.conn, "SELECT frame FROM secure_held_frames").await?
-        } else {
-            Vec::new()
-        } {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                return Err(Error::Corrupt("held schema reference".into()));
-            };
-            let frame: EncryptedFrame = decode(bytes)?;
-            let operation = frame.operation_ref()?;
-            if operation.header.extensions.scope.domain == *scope {
-                let tip = operation.header.extensions.tip;
-                required.insert((tip, graph.schema_any(tip).map_err(credential)?));
-            }
-        }
         Ok(required)
     }
     pub(super) async fn required_schemas(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
         self.schema_requirements(true).await
     }
     pub(super) async fn missing_live_schemas(&self) -> Result<BTreeSet<Commitment>, Error> {
-        Ok(self
-            .schema_requirements(false)
-            .await?
+        Ok(self.missing_of(self.schema_requirements(false).await?))
+    }
+    fn missing_of(&self, required: BTreeSet<(TipId, Commitment)>) -> BTreeSet<Commitment> {
+        required
             .into_iter()
             .map(|(_, manifest)| manifest)
             .filter(|manifest| !self.catalog.contains_key(manifest))
-            .collect())
+            .collect()
+    }
+}
+
+/// Requirement state accumulated over a domain's headers.
+struct Requirements {
+    domain: rocky_core::Scope,
+    graph: TipGraph,
+    path: Vec<TipId>,
+    retained: BTreeSet<TipId>,
+    required: BTreeSet<(TipId, Commitment)>,
+}
+impl Requirements {
+    fn visit(&mut self, source: HeaderSource, headers: Vec<Extensions>) -> Result<(), Error> {
+        for header in headers {
+            match source {
+                HeaderSource::Retained if self.path.contains(&header.tip) => {
+                    self.retained.insert(header.tip);
+                }
+                HeaderSource::Retained => {}
+                HeaderSource::HeldFrame => {
+                    let schema = self.graph.schema_any(header.tip).map_err(credential)?;
+                    self.required.insert((header.tip, schema));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// `Inner::schema_requirements` read in validated pages; `act` runs
+    /// on the result in the acquisition that validated it.
+    pub(super) async fn schema_requirements<T>(
+        &self,
+        historical: bool,
+        act: impl AsyncFnOnce(&mut Inner<A>, BTreeSet<(TipId, Commitment)>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let domain = {
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            inner.workspace.followed.as_ref().map(|(scope, _)| *scope)
+        };
+        let Some(domain) = domain else {
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+            if inner.workspace.followed.is_some() {
+                return Err(Error::RetryExhausted);
+            }
+            return act(&mut inner, BTreeSet::new()).await;
+        };
+        self.fold_scan(
+            domain,
+            historical,
+            |inner| match inner.requirement_start()? {
+                Some(requirements) if requirements.domain == domain => Ok(Some(requirements)),
+                Some(_) => Err(Error::RetryExhausted),
+                None => Ok(None),
+            },
+            async |_, requirements, source, headers| match requirements {
+                Some(requirements) => requirements.visit(source, headers),
+                None => Ok(()),
+            },
+            async |inner, requirements| {
+                let required = match requirements {
+                    Some(requirements) => {
+                        inner.finish_requirements(requirements, historical).await?
+                    }
+                    None => BTreeSet::new(),
+                };
+                act(inner, required).await
+            },
+        )
+        .await
     }
 }
 
@@ -498,19 +588,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Only schemas needed by the followed path, kept seals or held changes.
     pub async fn required_schemas(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .required_schemas()
+        self.schema_requirements(true, async |_, required| Ok(required))
             .await
     }
     /// Missing definitions needed by the live switch, excluding independent views.
     pub async fn missing_live_schemas(&self) -> Result<BTreeSet<Commitment>, Error> {
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .missing_live_schemas()
-            .await
+        self.schema_requirements(
+            false,
+            async |inner, required| Ok(inner.missing_of(required)),
+        )
+        .await
     }
     /// The adapter has authenticated `record` by deriving `definition` from it.
     /// The replica independently checks its commitment against the required tip.
@@ -520,19 +607,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         definition: ApplicationManifest,
         record: Vec<u8>,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        if !inner
-            .required_schemas()
-            .await?
-            .contains(&(tip, definition.hash()))
-        {
-            return Err(denied("tip schema is not required"));
-        }
-        transaction!(inner, |inner| inner
-            .store_schema(&definition, &record)
-            .await)?;
-        inner.load_schemas().await?;
-        drop(inner);
+        self.schema_requirements(true, async |inner, required| {
+            if !required.contains(&(tip, definition.hash())) {
+                return Err(denied("tip schema is not required"));
+            }
+            transaction!(inner, |inner| inner
+                .store_schema(&definition, &record)
+                .await)?;
+            inner.load_schemas().await
+        })
+        .await?;
         // Frames that waited for this schema apply now.
         self.settle().await
     }
@@ -1257,13 +1341,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Drops catalog entries no local reader, retained publication or workspace needs.
     pub async fn drop_unrequired_schemas(&self) -> Result<Vec<Commitment>, Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let mut kept: BTreeSet<_> = inner
-            .required_schemas()
-            .await?
-            .into_iter()
-            .map(|(_, manifest)| manifest)
-            .collect();
+        self.schema_requirements(true, async |inner, required| {
+            inner.drop_unrequired_schemas(required).await
+        })
+        .await
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    async fn drop_unrequired_schemas(
+        &mut self,
+        required: BTreeSet<(TipId, Commitment)>,
+    ) -> Result<Vec<Commitment>, Error> {
+        let inner = self;
+        let mut kept: BTreeSet<_> = required.into_iter().map(|(_, manifest)| manifest).collect();
         kept.insert(inner.manifest);
         kept.insert(
             inner

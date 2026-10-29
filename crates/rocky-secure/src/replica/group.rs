@@ -139,14 +139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         #[cfg(not(feature = "qualification"))]
         let receive_limit = RECEIVE_REQUESTS;
-        let class = if work
-            .iter()
-            .any(|(work, _)| matches!(work, Work::Author { .. } | Work::Bundle { .. }))
-        {
-            Class::Interactive
-        } else {
-            Class::Background
-        };
+        let class = class_of(work.iter().map(|(work, _)| work));
         let mut pending = Vec::with_capacity(work.len());
         {
             let mut queue = self.queue();
@@ -244,7 +237,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     settle_failure.get_or_insert(error);
                 }
                 // Yield outside the guard even when no mutex waiter has registered.
+                // A drained local write keeps the leader interactive.
                 tokio::task::yield_now().await;
+                let class = class.min(class_of(cohort.iter().map(|request| &request.work)));
                 inner = self.inner.lock(class).await;
             }
             let mut last_commit = inner.commit;
@@ -313,6 +308,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         group
+    }
+}
+
+/// Local writes acquire as interactive; everything else is background.
+fn class_of<'a>(mut work: impl Iterator<Item = &'a Work>) -> Class {
+    if work.any(|work| matches!(work, Work::Author { .. } | Work::Bundle { .. })) {
+        Class::Interactive
+    } else {
+        Class::Background
     }
 }
 

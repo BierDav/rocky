@@ -1492,6 +1492,9 @@ impl Node {
             let mut transport = self
                 .current()
                 .and_then(|service| service.transport.connectivity());
+            // Read before the status and anchored to that instant: an expiry
+            // while the status is computed must still wake this wait.
+            let (time, read) = (self.status_time()?, tokio::time::Instant::now());
             let status = self.readiness().await?;
             if status["token"] != after {
                 return Ok(status);
@@ -1517,12 +1520,11 @@ impl Node {
                     changed.map_err(|_| ServiceError::Closed("database"))?
                 }
                 _ = async {
-                    let time = self.status_time()?;
                     let settings = self.settings.lock().await;
                     let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).filter(|expires| *expires > time).min();
                     drop(settings);
                     if let Some(expires) = expires {
-                        tokio::time::sleep(Duration::from_secs(expires - time)).await;
+                        tokio::time::sleep_until(read + Duration::from_secs(expires - time)).await;
                     } else {
                         std::future::pending().await
                     }

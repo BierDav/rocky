@@ -141,6 +141,18 @@ impl Simulation {
                 self.scope_local += usize::from(elsewhere);
                 Ok("written".into())
             }
+            Action::Probe(node) => {
+                let member = self.running(*node)?;
+                let key = format!("w{index}");
+                let (synced, written) = tokio::join!(
+                    member.call(json!({"type": "sync"})),
+                    member.write(&key, index as u64)
+                );
+                self.synced[*node] = true;
+                written?;
+                synced?;
+                Ok("probed".into())
+            }
             Action::Sync(node) => self.sync(*node).await,
             Action::SyncPair(node, peer) => {
                 self.running(*node)?;

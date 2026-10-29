@@ -52,7 +52,7 @@ pub enum EarlierEpochWrites {
 impl<A: RowApplication> Inner<A> {
     /// Every locally held operation and void header of the domain. A scan
     /// of headers, never of rows; explicit developer calls only.
-    async fn domain_headers(&self, scope: Scope) -> Result<Vec<Extensions>, Error> {
+    pub(super) async fn domain_headers(&self, scope: Scope) -> Result<Vec<Extensions>, Error> {
         let mut headers = Vec::new();
         for row in rows(
             &self.conn,
@@ -80,18 +80,25 @@ impl<A: RowApplication> Inner<A> {
             self.workspace.tip,
         )
     }
-    pub(super) async fn seal_frontier(
+    /// The seal frontier from one unpaged header scan, for the transitions
+    /// that act on it in the same acquisition: partition creation and tip
+    /// statement admission.
+    pub(crate) async fn seal_frontier(
         &self,
         scope: Scope,
         close: bool,
     ) -> Result<Vec<AuthorMark>, Error> {
+        if close {
+            self.refuse_pruned_close(scope).await?;
+        }
         let graph = self.scope_graph(scope)?;
-        let pruned = if close {
-            rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await?
-        } else {
-            Vec::new()
-        };
-        for record in pruned {
+        let mut marks = self.inherited_marks(&graph)?;
+        self.fold_marks(&graph, &mut marks, self.domain_headers(scope).await?)?;
+        Ok(into_marks(marks))
+    }
+    /// A close seal needs retained history: pruned logs have no author frontier.
+    async fn refuse_pruned_close(&self, scope: Scope) -> Result<(), Error> {
+        for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
             let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope".into()));
             };
@@ -112,21 +119,41 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
         }
-        let mut marks = BTreeMap::<u32, u64>::new();
-        if let Some((_, inherited)) = Self::tip_parent(&graph, self.workspace.tip)? {
-            marks.extend(inherited.iter().map(|mark| (mark.author, mark.sequence)));
-        }
-        for header in self.domain_headers(scope).await? {
-            if self.visible_header(&graph, &header)? {
+        Ok(())
+    }
+    fn inherited_marks(&self, graph: &TipGraph) -> Result<BTreeMap<u32, u64>, Error> {
+        Ok(Self::tip_parent(graph, self.workspace.tip)?
+            .map(|(_, inherited)| {
+                inherited
+                    .iter()
+                    .map(|mark| (mark.author, mark.sequence))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+    fn fold_marks(
+        &self,
+        graph: &TipGraph,
+        marks: &mut BTreeMap<u32, u64>,
+        headers: Vec<Extensions>,
+    ) -> Result<(), Error> {
+        for header in headers {
+            if self.visible_header(graph, &header)? {
                 let author = header.author.ok_or_else(|| denied("node author missing"))?;
                 let mark = marks.entry(author).or_default();
                 *mark = (*mark).max(header.author_sequence);
             }
         }
-        Ok(marks
-            .into_iter()
-            .map(|(author, sequence)| AuthorMark { author, sequence })
-            .collect())
+        Ok(())
+    }
+    /// The frontier a seal of the followed tip names now.
+    fn sealed_baseline(&self, graph: &TipGraph) -> Result<Vec<AuthorMark>, Error> {
+        Ok(match graph.seal(self.workspace.tip).map_err(credential)? {
+            Some(seal) => seal.statement.frontier.clone(),
+            None => Self::tip_parent(graph, self.workspace.tip)?
+                .map(|(_, frontier)| frontier)
+                .unwrap_or_default(),
+        })
     }
     async fn observed_devices(&self, scope: Scope) -> Result<Vec<TipDevice>, Error> {
         let mut peers = BTreeMap::<PeerId, BTreeMap<ResourceScope, Vec<FrontierLog>>>::new();
@@ -186,6 +213,18 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+fn into_marks(marks: BTreeMap<u32, u64>) -> Vec<AuthorMark> {
+    marks
+        .into_iter()
+        .map(|(author, sequence)| AuthorMark { author, sequence })
+        .collect()
+}
+fn covers(frontier: &[AuthorMark], header: &Extensions, author: u32) -> bool {
+    frontier
+        .iter()
+        .any(|mark| mark.author == author && header.author_sequence <= mark.sequence)
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The global author marks of every locally held write visible in the
     /// followed tip, at least its parent seal's. Pruned writes have no
@@ -193,11 +232,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// they walk a `continue` seal as late frames. A `close` would hold
     /// them where others applied them, so it refuses pruned history.
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .seal_frontier(scope, close)
-            .await
+        self.fold_headers(
+            scope,
+            |inner| {
+                let graph = inner.scope_graph(scope)?;
+                Ok((inner.inherited_marks(&graph)?, graph))
+            },
+            async |inner, (marks, graph), headers| inner.fold_marks(graph, marks, headers),
+            async |inner, (marks, _)| {
+                if close {
+                    inner.refuse_pruned_close(scope).await?;
+                }
+                Ok(into_marks(marks))
+            },
+        )
+        .await
     }
     /// Where writes visible in the followed tip, under an earlier key epoch
     /// than their scope's current one, stand: members given only the
@@ -205,15 +254,37 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// by opening the frame. Scans only after such a frame applied or the
     /// followed tip moved, and again until they are covered.
     pub async fn earlier_epoch_writes(&self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        if !inner.earlier_epoch_due() {
+        if !self.earlier_epoch_due().await {
             return Ok(EarlierEpochWrites::Covered);
         }
-        let found = inner.scan_earlier_epochs(scope).await?;
-        inner
-            .earlier_epoch
-            .store(found != EarlierEpochWrites::Covered, Ordering::Relaxed);
-        inner.epochs_scanned = Some(inner.workspace.tip);
+        let found = self
+            .fold_headers(
+                scope,
+                |inner| {
+                    let graph = inner.scope_graph(scope)?;
+                    let sealed = inner.sealed_baseline(&graph)?;
+                    Ok(EpochScan {
+                        graph,
+                        sealed,
+                        bases: BTreeMap::new(),
+                        found: EarlierEpochWrites::Covered,
+                    })
+                },
+                async |inner, scan, headers| {
+                    if scan.found != EarlierEpochWrites::Unsealed {
+                        inner.scan_earlier_epochs(scan, headers).await?;
+                    }
+                    Ok(())
+                },
+                async |inner, scan| {
+                    inner
+                        .earlier_epoch
+                        .store(scan.found != EarlierEpochWrites::Covered, Ordering::Relaxed);
+                    inner.epochs_scanned = Some(inner.workspace.tip);
+                    Ok(scan.found)
+                },
+            )
+            .await?;
         Ok(found)
     }
     /// Whether `unsealed_earlier_epochs` would scan.
@@ -232,24 +303,21 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+struct EpochScan {
+    graph: TipGraph,
+    sealed: Vec<AuthorMark>,
+    /// The frontier of the seal each served base sits at.
+    bases: BTreeMap<ResourceScope, Option<Vec<AuthorMark>>>,
+    found: EarlierEpochWrites,
+}
+
 impl<A: RowApplication> Inner<A> {
-    async fn scan_earlier_epochs(&mut self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
-        let graph = self.scope_graph(scope)?;
-        let sealed = match graph.seal(self.workspace.tip).map_err(credential)? {
-            Some(seal) => seal.statement.frontier.clone(),
-            None => Inner::<A>::tip_parent(&graph, self.workspace.tip)?
-                .map(|(_, frontier)| frontier)
-                .unwrap_or_default(),
-        };
-        let covers = |frontier: &[AuthorMark], header: &Extensions, author: u32| {
-            frontier
-                .iter()
-                .any(|mark| mark.author == author && header.author_sequence <= mark.sequence)
-        };
-        // The frontier of the seal each served base sits at.
-        let mut bases = BTreeMap::new();
-        let mut found = EarlierEpochWrites::Covered;
-        for header in self.domain_headers(scope).await? {
+    async fn scan_earlier_epochs(
+        &mut self,
+        scan: &mut EpochScan,
+        headers: Vec<Extensions>,
+    ) -> Result<(), Error> {
+        for header in headers {
             let Some(author) = header.author else {
                 continue;
             };
@@ -260,18 +328,19 @@ impl<A: RowApplication> Inner<A> {
                 .find(|key| key.scope == header.scope)
                 .map(|key| key.generation);
             if current.is_none_or(|current| header.generation >= current)
-                || !self.visible_header(&graph, &header)?
+                || !self.visible_header(&scan.graph, &header)?
             {
                 continue;
             }
-            if !covers(&sealed, &header, author) {
-                return Ok(EarlierEpochWrites::Unsealed);
+            if !covers(&scan.sealed, &header, author) {
+                scan.found = EarlierEpochWrites::Unsealed;
+                return Ok(());
             }
-            if let std::collections::btree_map::Entry::Vacant(entry) = bases.entry(header.scope) {
+            if !scan.bases.contains_key(&header.scope) {
                 let frontier = match self.served_checkpoint(header.scope).await? {
                     Some((_, signed)) => match signed.statement.seal {
                         Some(seal) => Some(
-                            graph
+                            scan.graph
                                 .seal_by_id(seal)
                                 .map_err(credential)?
                                 .statement
@@ -282,84 +351,93 @@ impl<A: RowApplication> Inner<A> {
                     },
                     None => None,
                 };
-                entry.insert(frontier);
+                scan.bases.insert(header.scope, frontier);
             }
-            if let Some(Some(base)) = bases.get(&header.scope)
+            if let Some(Some(base)) = scan.bases.get(&header.scope)
                 && !covers(base, &header, author)
             {
-                found = EarlierEpochWrites::Unbased;
+                scan.found = EarlierEpochWrites::Unbased;
             }
         }
-        Ok(found)
+        Ok(())
     }
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn tip_observation(&self, scope: Scope) -> Result<TipObservation, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let graph = inner.scope_graph(scope)?;
-        let baseline = match graph.seal(inner.workspace.tip).map_err(credential)? {
-            Some(seal) => seal.statement.frontier.clone(),
-            None => Inner::<A>::tip_parent(&graph, inner.workspace.tip)?
-                .map(|(_, frontier)| frontier)
-                .unwrap_or_default(),
-        };
-        let mut operations_since_seal = 0;
-        for header in inner.domain_headers(scope).await? {
-            let author = header.author.ok_or_else(|| denied("node author missing"))?;
-            let sealed = baseline
-                .iter()
-                .any(|mark| mark.author == author && header.author_sequence <= mark.sequence);
-            if !sealed && inner.visible_header(&graph, &header)? {
-                operations_since_seal += 1;
-            }
-        }
-        Ok(TipObservation {
-            bookmark: inner
-                .workspace
-                .followed
-                .as_ref()
-                .filter(|(domain, _)| *domain == scope)
-                .map(|(_, name)| name.clone()),
-            tip: inner.workspace.tip,
-            operations_since_seal,
-            devices: inner.observed_devices(scope).await?,
-        })
+        self.fold_headers(
+            scope,
+            |inner| {
+                let graph = inner.scope_graph(scope)?;
+                Ok((inner.sealed_baseline(&graph)?, graph, 0))
+            },
+            async |inner, (baseline, graph, operations), headers| {
+                for header in headers {
+                    let author = header.author.ok_or_else(|| denied("node author missing"))?;
+                    if !covers(baseline, &header, author) && inner.visible_header(graph, &header)? {
+                        *operations += 1;
+                    }
+                }
+                Ok(())
+            },
+            async |inner, (_, _, operations_since_seal)| {
+                Ok(TipObservation {
+                    bookmark: inner
+                        .workspace
+                        .followed
+                        .as_ref()
+                        .filter(|(domain, _)| *domain == scope)
+                        .map(|(_, name)| name.clone()),
+                    tip: inner.workspace.tip,
+                    operations_since_seal,
+                    devices: inner.observed_devices(scope).await?,
+                })
+            },
+        )
+        .await
     }
     /// This node's holdings, with the seals it keeps, and the tips peers'
     /// open links claim; peers report no holdings.
     pub async fn tip_nodes(&self, scope: Scope) -> Result<Vec<TipNodeObservation>, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner.scope_graph(scope)?;
-        let local = PeerId::of(inner.config.node.public_key());
-        let mut tips = BTreeSet::from([inner.workspace.tip]);
-        for header in inner.domain_headers(scope).await? {
-            tips.insert(header.tip);
-        }
-        let mut nodes = vec![TipNodeObservation {
-            node: local,
-            followed_tip: Some(inner.workspace.tip),
-            kept_tips: Some(tips.into_iter().collect()),
-            kept_seals: Some(
-                inner
-                    .kept_marks()
-                    .await?
-                    .into_iter()
-                    .map(|(seal, _)| seal)
-                    .collect(),
-            ),
-        }];
-        for device in inner.observed_devices(scope).await? {
-            if device.node != local {
-                nodes.push(TipNodeObservation {
-                    node: device.node,
-                    followed_tip: device.tip,
-                    kept_tips: None,
-                    kept_seals: None,
-                });
-            }
-        }
-        Ok(nodes)
+        self.fold_headers(
+            scope,
+            |inner| {
+                inner.scope_graph(scope)?;
+                Ok(BTreeSet::from([inner.workspace.tip]))
+            },
+            async |_, tips, headers| {
+                tips.extend(headers.into_iter().map(|header| header.tip));
+                Ok(())
+            },
+            async |inner, tips| {
+                let local = PeerId::of(inner.config.node.public_key());
+                let mut nodes = vec![TipNodeObservation {
+                    node: local,
+                    followed_tip: Some(inner.workspace.tip),
+                    kept_tips: Some(tips.into_iter().collect()),
+                    kept_seals: Some(
+                        inner
+                            .kept_marks()
+                            .await?
+                            .into_iter()
+                            .map(|(seal, _)| seal)
+                            .collect(),
+                    ),
+                }];
+                for device in inner.observed_devices(scope).await? {
+                    if device.node != local {
+                        nodes.push(TipNodeObservation {
+                            node: device.node,
+                            followed_tip: device.tip,
+                            kept_tips: None,
+                            kept_seals: None,
+                        });
+                    }
+                }
+                Ok(nodes)
+            },
+        )
+        .await
     }
     /// Whether the followed bookmark's line lacks a registered node, so
     /// writes wait for `register_line_node`.

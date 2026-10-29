@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
+use tokio::sync::{Mutex, MutexGuard, Notify, OwnedMutexGuard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Class {
@@ -12,12 +12,92 @@ pub(crate) enum Class {
     Background,
 }
 
+/// Interactive acquisitions a background acquisition defers to before it
+/// queues anyway, so background work still advances under continuous writes.
+pub(crate) const STARVATION_YIELDS: u64 = 8;
+
 /// The raw mutex stays private so every acquisition has a class and a caller.
+///
+/// Interactive acquisitions register before they wait. A background
+/// acquisition starts only when none is registered, and rechecks after it
+/// obtains the mutex, so an interactive one waits for at most the one
+/// background step already running. Transitions and other oversized steps
+/// acquire as background and therefore start only when the gate is quiet.
 pub(crate) struct ReplicaLock<T> {
     mutex: Arc<Mutex<T>>,
+    gate: Arc<Gate>,
     #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
 }
+
+#[derive(Default)]
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    changed: Notify,
+}
+#[derive(Default, Clone, Copy)]
+struct GateState {
+    /// Registered interactive waiters.
+    waiting: u64,
+    /// Interactive acquisitions so far; counts the starvation guard's yields.
+    acquired: u64,
+    /// Background grants so far and whether one holds, for the step counter.
+    #[cfg(any(test, feature = "qualification"))]
+    background_grants: u64,
+    #[cfg(any(test, feature = "qualification"))]
+    background_holding: bool,
+}
+impl Gate {
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn update<R>(&self, change: impl FnOnce(&mut GateState) -> R) -> R {
+        let result = change(&mut self.state());
+        self.changed.notify_waiters();
+        result
+    }
+}
+
+/// An interactive waiter's registration; dropping it unacquired cancels it.
+struct Registration {
+    gate: Arc<Gate>,
+    #[cfg(any(test, feature = "qualification"))]
+    start: GateState,
+}
+impl Registration {
+    fn new(gate: &Arc<Gate>) -> Self {
+        let mut state = gate.state();
+        state.waiting += 1;
+        #[cfg(any(test, feature = "qualification"))]
+        let start = *state;
+        drop(state);
+        Self {
+            gate: gate.clone(),
+            #[cfg(any(test, feature = "qualification"))]
+            start,
+        }
+    }
+    /// Background steps this waiter waited for: the one running when it
+    /// registered plus any granted afterwards.
+    fn acquired(self) -> u64 {
+        self.gate.update(|state| {
+            state.acquired += 1;
+            #[cfg(any(test, feature = "qualification"))]
+            return state.background_grants - self.start.background_grants
+                + u64::from(self.start.background_holding);
+            #[cfg(not(any(test, feature = "qualification")))]
+            0
+        })
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.gate.update(|state| state.waiting -= 1);
+    }
+}
+
 impl<T> ReplicaLock<T> {
     pub(crate) fn new(
         value: T,
@@ -25,6 +105,7 @@ impl<T> ReplicaLock<T> {
     ) -> Self {
         Self {
             mutex: Arc::new(Mutex::new(value)),
+            gate: Arc::default(),
             #[cfg(any(test, feature = "qualification"))]
             measurements,
         }
@@ -32,7 +113,7 @@ impl<T> ReplicaLock<T> {
 
     #[track_caller]
     pub(crate) fn lock(&self, class: Class) -> impl Future<Output = Guard<MutexGuard<'_, T>>> {
-        self.acquire(class, self.mutex.lock())
+        self.acquire(class, || self.mutex.lock())
     }
 
     #[track_caller]
@@ -40,25 +121,43 @@ impl<T> ReplicaLock<T> {
         &self,
         class: Class,
     ) -> impl Future<Output = Guard<OwnedMutexGuard<T>>> + use<T> {
-        self.acquire(class, self.mutex.clone().lock_owned())
+        let mutex = self.mutex.clone();
+        self.acquire(class, move || mutex.clone().lock_owned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn interactive_waiting(&self) -> bool {
+        self.gate.state().waiting > 0
     }
 
     #[track_caller]
-    fn acquire<G, F: Future<Output = G>>(
+    fn acquire<G, F: Future<Output = G>, L: Fn() -> F>(
         &self,
         class: Class,
-        future: F,
-    ) -> impl Future<Output = Guard<G>> + use<T, G, F> {
+        lock: L,
+    ) -> impl Future<Output = Guard<G>> + use<T, G, F, L> {
         let site = Location::caller();
         // With no sink only acquisition and release need clock reads.
         let timing = cfg!(feature = "qualification")
             || tracing::enabled!(target: "replica", tracing::Level::DEBUG);
         let requested = timing.then(Instant::now);
+        let gate = self.gate.clone();
         #[cfg(any(test, feature = "qualification"))]
         let measurements = self.measurements.clone();
         async move {
-            let guard = future.await;
+            let (guard, _steps) = match class {
+                Class::Interactive => {
+                    let registration = Registration::new(&gate);
+                    let guard = lock().await;
+                    (guard, registration.acquired())
+                }
+                Class::Background => (background(&gate, lock).await, 0),
+            };
             let acquired = Instant::now();
+            #[cfg(any(test, feature = "qualification"))]
+            if class == Class::Interactive {
+                measurements.interactive_steps(_steps);
+            }
             #[cfg(any(test, feature = "qualification"))]
             let work_start = measurements.work_snapshot();
             Guard {
@@ -70,6 +169,8 @@ impl<T> ReplicaLock<T> {
                     class,
                     acquired,
                     wait: requested.map_or(Duration::ZERO, |start| acquired.duration_since(start)),
+                    #[cfg(any(test, feature = "qualification"))]
+                    gate: (class == Class::Background).then_some(gate),
                     #[cfg(any(test, feature = "qualification"))]
                     measurements,
                     #[cfg(any(test, feature = "qualification"))]
@@ -91,18 +192,55 @@ impl<T> ReplicaLock<T> {
     }
 }
 
+/// Waits until no interactive waiter is registered, unless this acquisition
+/// has deferred to `STARVATION_YIELDS` interactive acquisitions already.
+async fn background<G, F: Future<Output = G>>(gate: &Gate, lock: impl Fn() -> F) -> G {
+    let mut first_deferral = None;
+    loop {
+        let starved = loop {
+            let changed = gate.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let state = *gate.state();
+            if state.waiting == 0 {
+                break false;
+            }
+            let first = *first_deferral.get_or_insert(state.acquired);
+            if state.acquired - first >= STARVATION_YIELDS {
+                break true;
+            }
+            changed.await;
+        };
+        let guard = lock().await;
+        // A waiter that registered while this one queued goes first.
+        let state = *gate.state();
+        let first = *first_deferral.get_or_insert(state.acquired);
+        if starved || state.waiting == 0 || state.acquired - first >= STARVATION_YIELDS {
+            #[cfg(any(test, feature = "qualification"))]
+            gate.update(|state| {
+                state.background_grants += 1;
+                state.background_holding = true;
+            });
+            return guard;
+        }
+        drop(guard);
+    }
+}
+
 pub(crate) struct Guard<G> {
     // Field order releases the mutex before recording its completed hold.
     guard: G,
     _timing: Hold,
     #[cfg(any(test, feature = "qualification"))]
-    work_start: [u64; 16],
+    work_start: [u64; 18],
 }
 struct Hold {
     site: &'static Location<'static>,
     class: Class,
     acquired: Instant,
     wait: Duration,
+    #[cfg(any(test, feature = "qualification"))]
+    gate: Option<Arc<Gate>>,
     #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
     #[cfg(any(test, feature = "qualification"))]
@@ -150,6 +288,8 @@ impl<G> Drop for Guard<G> {
             "migration_storage_record",
             "prune_candidate",
             "reclaimed_page",
+            "domain_header",
+            "scan_fallback",
         ]
         .into_iter()
         .enumerate()
@@ -174,6 +314,10 @@ impl<G: DerefMut> DerefMut for Guard<G> {
 }
 impl Drop for Hold {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "qualification"))]
+        if let Some(gate) = &self.gate {
+            gate.update(|state| state.background_holding = false);
+        }
         let hold = self.acquired.elapsed();
         if hold > Duration::from_millis(1) {
             tracing::debug!(target: "replica", site = %self.site, class = ?self.class,
@@ -212,7 +356,7 @@ mod qualification {
     #[derive(Default)]
     struct Recording {
         data: std::sync::Mutex<Option<Measurements>>,
-        work: [std::sync::atomic::AtomicU64; 16],
+        work: [std::sync::atomic::AtomicU64; 18],
     }
     pub(crate) enum WorkUnit {
         #[cfg(feature = "qualification")]
@@ -233,12 +377,16 @@ mod qualification {
         MigrationStorageRecord = 13,
         PruneCandidate = 14,
         ReclaimedPage = 15,
+        DomainHeader = 16,
+        ScanFallback = 17,
     }
 
     #[derive(Default, Debug)]
     pub struct Measurements {
         pub holders: BTreeMap<(String, String), HolderMeasurements>,
         pub flush_us: Vec<u64>,
+        /// Background steps each interactive acquisition waited for.
+        pub interactive_steps: Vec<u64>,
         pub connections: BTreeMap<u64, ConnectionMeasurements>,
         pub checkpoints: BTreeMap<String, Vec<(u64, u64)>>,
     }
@@ -264,7 +412,18 @@ mod qualification {
         pub(crate) fn work(&self, unit: WorkUnit, count: u64) {
             self.0.work[unit as usize].fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         }
-        pub(super) fn work_snapshot(&self) -> [u64; 16] {
+        pub(super) fn interactive_steps(&self, steps: u64) {
+            if let Some(measurements) = self
+                .0
+                .data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                measurements.interactive_steps.push(steps);
+            }
+        }
+        pub(crate) fn work_snapshot(&self) -> [u64; 18] {
             std::array::from_fn(|index| {
                 self.0.work[index].load(std::sync::atomic::Ordering::Relaxed)
             })
@@ -507,5 +666,121 @@ mod tests {
         assert_eq!(holder.hold_us.len(), 1);
         assert_eq!(holder.oversized_request_us.len(), 1);
         assert!(holder.dependent_fanout_us.is_empty());
+    }
+
+    fn order() -> (
+        Arc<StdMutex<Vec<&'static str>>>,
+        ReplicaLock<()>,
+        LockMeasurements,
+    ) {
+        let measurements = LockMeasurements::default();
+        measurements.start();
+        (
+            Arc::default(),
+            ReplicaLock::new((), measurements.clone()),
+            measurements,
+        )
+    }
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn background_queued_first_acquires_after_interactive() {
+        let (order, lock, measurements) = order();
+        let lock = Arc::new(lock);
+        let holder = lock.lock(Class::Background).await;
+        let spawn = |class, name| {
+            let (lock, order) = (lock.clone(), order.clone());
+            tokio::spawn(async move {
+                let _guard = lock.lock(class).await;
+                order.lock().unwrap().push(name);
+            })
+        };
+        let background = spawn(Class::Background, "background");
+        settle().await;
+        let interactive = spawn(Class::Interactive, "interactive");
+        settle().await;
+        assert!(lock.interactive_waiting());
+        drop(holder);
+        background.await.unwrap();
+        interactive.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), ["interactive", "background"]);
+        assert!(!lock.interactive_waiting());
+        assert_eq!(measurements.stop().interactive_steps, [1]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_interactive_waiter_unregisters() {
+        let (_, lock, _) = order();
+        let holder = lock.lock(Class::Background).await;
+        {
+            let waiter = lock.lock(Class::Interactive);
+            tokio::pin!(waiter);
+            std::future::poll_fn(|context| {
+                assert!(waiter.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(lock.interactive_waiting());
+        }
+        assert!(!lock.interactive_waiting());
+        drop(holder);
+        // A background acquisition is not deferred by the cancelled waiter.
+        drop(lock.lock(Class::Background).await);
+    }
+
+    #[tokio::test]
+    async fn interactive_acquisitions_stay_fifo() {
+        let (order, lock, _) = order();
+        let lock = Arc::new(lock);
+        let holder = lock.lock(Class::Interactive).await;
+        let mut tasks = Vec::new();
+        for name in ["first", "second", "third"] {
+            let (lock, order) = (lock.clone(), order.clone());
+            tasks.push(tokio::spawn(async move {
+                let _guard = lock.lock(Class::Interactive).await;
+                order.lock().unwrap().push(name);
+            }));
+            settle().await;
+        }
+        drop(holder);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), ["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn starvation_guard_lets_background_advance() {
+        let (order, lock, _) = order();
+        let lock = Arc::new(lock);
+        let mut holder = Some(lock.lock_owned(Class::Interactive).await);
+        let background = {
+            let (lock, order) = (lock.clone(), order.clone());
+            tokio::spawn(async move {
+                let _guard = lock.lock(Class::Background).await;
+                order.lock().unwrap().push("background");
+            })
+        };
+        // Overlapping interactive writes keep a waiter registered throughout.
+        for _ in 0..2 * STARVATION_YIELDS {
+            let (lock, order) = (lock.clone(), order.clone());
+            let next = tokio::spawn(async move {
+                let guard = lock.lock_owned(Class::Interactive).await;
+                order.lock().unwrap().push("interactive");
+                guard
+            });
+            settle().await;
+            drop(holder.take());
+            holder = Some(next.await.unwrap());
+        }
+        drop(holder);
+        background.await.unwrap();
+        let order = order.lock().unwrap();
+        let position = order.iter().position(|name| *name == "background").unwrap();
+        assert_eq!(position as u64, STARVATION_YIELDS);
     }
 }

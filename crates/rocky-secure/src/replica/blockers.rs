@@ -104,6 +104,10 @@ impl Readiness {
         cache.generation = cache.generation.wrapping_add(1);
         cache.domains.clear();
     }
+    /// State-table writes so far.
+    pub(super) fn writes(&self) -> u64 {
+        self.write_count()
+    }
     fn write_count(&self) -> u64 {
         self.writes.selected_count(
             self.tables
@@ -347,19 +351,33 @@ impl<A: RowApplication> Inner<A> {
             Vec::new()
         })
     }
-    /// Pending frames by scope and the reason their log heads wait; a
-    /// quarantined head names its failure instead.
-    async fn pending_blockers(&self) -> Result<Vec<Blocker>, Error> {
-        let mut counts: BTreeMap<(String, WaitReason), u64> = BTreeMap::new();
-        let mut quarantined: BTreeMap<(String, String), u64> = BTreeMap::new();
-        for record in rows(
-            &self.conn,
-            "SELECT o.scope,o.hash,h.n,q.reason FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence LEFT JOIN secure_quarantine q ON q.hash=o.hash WHERE o.status='pending'",
+    /// Pending log heads after `after`, at most `limit` of them, folded into
+    /// `pending`; the last head read, or `None` once every head is read.
+    async fn pending_heads(
+        &self,
+        pending: &mut PendingCounts,
+        after: (Vec<u8>, Vec<u8>),
+        limit: usize,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
+        let records = collect_rows(
+            self.conn
+                .query(
+                    "SELECT h.scope,h.author,o.hash,h.n,q.reason FROM (SELECT scope,author,min(sequence) AS sequence,count(*) AS n FROM secure_operations WHERE status='pending' AND (scope,author)>(?,?) GROUP BY scope,author ORDER BY scope,author LIMIT ?) h JOIN secure_operations o ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence LEFT JOIN secure_quarantine q ON q.hash=o.hash ORDER BY h.scope,h.author",
+                    bindings(vec![
+                        SqlValue::Blob(after.0),
+                        SqlValue::Blob(after.1),
+                        SqlValue::Integer(limit as i64),
+                    ]),
+                )
+                .await?,
         )
-        .await?
-        {
+        .await?;
+        let mut last = None;
+        let full = records.len() == limit;
+        for record in records {
             let [
                 SqlValue::Blob(scope),
+                SqlValue::Blob(author),
                 SqlValue::Blob(hash),
                 SqlValue::Integer(count),
                 failure,
@@ -367,14 +385,15 @@ impl<A: RowApplication> Inner<A> {
             else {
                 return Err(Error::Corrupt("pending operation".into()));
             };
+            last = Some((scope.clone(), author.clone()));
+            let scope: ResourceScope = decode(scope)?;
             if let SqlValue::Text(reason) = failure {
-                let scope: ResourceScope = decode(scope)?;
-                *quarantined
+                *pending
+                    .quarantined
                     .entry((scope_label(&scope), reason.clone()))
                     .or_default() += *count as u64;
                 continue;
             }
-            let scope: ResourceScope = decode(scope)?;
             let hash = Hash::from_bytes(
                 hash.as_slice()
                     .try_into()
@@ -385,29 +404,12 @@ impl<A: RowApplication> Inner<A> {
                 .get(&hash)
                 .copied()
                 .unwrap_or(WaitReason::Unexamined);
-            *counts.entry((scope_label(&scope), reason)).or_default() += *count as u64;
+            *pending
+                .counts
+                .entry((scope_label(&scope), reason))
+                .or_default() += *count as u64;
         }
-        let undecryptable = |reason: &str| reason == super::quarantine::UNDECRYPTABLE;
-        Ok(counts
-            .into_iter()
-            .map(|((scope, reason), count)| {
-                blocker(
-                    scope,
-                    BlockerKind::PendingFrames { reason, count },
-                    reason.clears_by(),
-                )
-            })
-            .chain(quarantined.into_iter().map(|((scope, reason), count)| {
-                // Another copy of the key or the frame comes from a peer; any
-                // other failure is retried here as what it depends on changes.
-                let clears_by = if undecryptable(&reason) {
-                    ClearsBy::AnyPeer
-                } else {
-                    ClearsBy::LocalWork
-                };
-                blocker(scope, BlockerKind::Quarantined { reason, count }, clears_by)
-            }))
-            .collect())
+        Ok(last.filter(|_| full))
     }
     /// Imports in progress and eviction guards, scope by scope.
     async fn scope_state_blockers(&self) -> Result<Vec<Blocker>, Error> {
@@ -479,37 +481,192 @@ impl<A: RowApplication> Inner<A> {
             )
         }))
     }
-    pub(super) async fn blockers(&self) -> Result<Vec<Blocker>, Error> {
-        let mut domains: BTreeSet<Scope> = self.graphs.keys().copied().collect();
-        if let Some(typed) = &self.workspace.typed {
-            domains.insert(typed.domain);
+}
+
+#[derive(Default)]
+struct PendingCounts {
+    counts: BTreeMap<(String, WaitReason), u64>,
+    quarantined: BTreeMap<(String, String), u64>,
+}
+impl PendingCounts {
+    fn blockers(self) -> Vec<Blocker> {
+        let undecryptable = |reason: &str| reason == super::quarantine::UNDECRYPTABLE;
+        self.counts
+            .into_iter()
+            .map(|((scope, reason), count)| {
+                blocker(
+                    scope,
+                    BlockerKind::PendingFrames { reason, count },
+                    reason.clears_by(),
+                )
+            })
+            .chain(
+                self.quarantined
+                    .into_iter()
+                    .map(|((scope, reason), count)| {
+                        // Another copy of the key or the frame comes from a peer; any
+                        // other failure is retried here as what it depends on changes.
+                        let clears_by = if undecryptable(&reason) {
+                            ClearsBy::AnyPeer
+                        } else {
+                            ClearsBy::LocalWork
+                        };
+                        blocker(scope, BlockerKind::Quarantined { reason, count }, clears_by)
+                    }),
+            )
+            .collect()
+    }
+}
+
+/// Pending log heads per acquisition of the stepped blocker listing.
+const PENDING_HEADS: usize = if cfg!(test) { 1 } else { 64 };
+/// Passes a listing restarts after a blocker source changed under it.
+const BLOCKER_PASSES: usize = 4;
+/// Tables a blocker listing's steps read besides pending frames. A change
+/// between steps restarts the listing; pending counts may move between
+/// pages, as they do between listings.
+const LISTING_TABLES: &[&str] = &[
+    "secure_dropped_tip_frames",
+    "secure_quarantine",
+    "secure_scope_state",
+    "secure_position_ranges",
+    "secure_logs",
+];
+
+struct BlockerSource {
+    writes: Arc<crate::sqlite::Writes>,
+    tables: Vec<String>,
+    count: u64,
+    authority: u64,
+    tip: TipId,
+}
+impl BlockerSource {
+    fn start<A: RowApplication>(inner: &Inner<A>) -> Result<Self, Error> {
+        let names = inner.conn.names();
+        let tables: Vec<String> = STATE_TABLES
+            .iter()
+            .chain(LISTING_TABLES)
+            .map(|table| names.physical(table).unwrap_or(table).to_owned())
+            .collect();
+        let writes = inner
+            .conn
+            .connection()
+            .watch_writes(tables.iter().map(|table| (table.clone(), true)))?;
+        Ok(Self {
+            count: writes.selected_count(tables.iter().map(|table| (table.as_str(), true))),
+            writes,
+            tables,
+            authority: inner.authority,
+            tip: inner.workspace.tip,
+        })
+    }
+    fn check<A: RowApplication>(&self, inner: &Inner<A>) -> Result<(), Error> {
+        let count = self
+            .writes
+            .selected_count(self.tables.iter().map(|table| (table.as_str(), true)));
+        if count != self.count
+            || self.authority != inner.authority
+            || self.tip != inner.workspace.tip
+        {
+            return Err(Error::RetryExhausted);
         }
-        let mut blockers = Vec::new();
-        for domain in domains {
-            blockers.extend(self.workspace_blockers(domain).await?);
-            if self.graphs.contains_key(&domain) {
-                blockers.extend(self.finalization_blocker(domain).await?);
-            }
-        }
-        blockers.extend(self.dropped_tip_blockers().await?);
-        blockers.extend(self.line_node_blockers()?);
-        blockers.extend(self.scope_state_blockers().await?);
-        blockers.extend(self.pending_blockers().await?);
-        blockers.sort();
-        blockers.dedup();
-        Ok(blockers)
+        Ok(())
     }
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Every reason a scope or domain of this replica waits now, derived
     /// from stored state. The gates that refuse reads, writes and imports
-    /// answer from the same predicates.
+    /// answer from the same predicates. Lists one domain, one component or
+    /// one page of pending log heads per acquisition, and restarts when
+    /// what it read changed meanwhile.
     pub async fn blockers(&self) -> Result<Vec<Blocker>, Error> {
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .blockers()
-            .await
+        for _ in 0..BLOCKER_PASSES {
+            match self.blocker_pass().await {
+                Err(Error::RetryExhausted) => continue,
+                result => return result,
+            }
+        }
+        // Under steady writes the listing runs once in one acquisition,
+        // which starts only when no interactive write waits.
+        let inner = self.inner.lock(Class::Background).await;
+        #[cfg(any(test, feature = "qualification"))]
+        inner
+            .flusher
+            .measurements
+            .work(super::lock::WorkUnit::ScanFallback, 1);
+        let mut blockers = Vec::new();
+        for domain in blocker_domains(&inner) {
+            blockers.extend(inner.domain_listing(domain).await?);
+        }
+        blockers.extend(inner.state_listing().await?);
+        let mut pending = PendingCounts::default();
+        let mut after = (Vec::new(), Vec::new());
+        while let Some(last) = inner
+            .pending_heads(&mut pending, after, usize::MAX >> 1)
+            .await?
+        {
+            after = last;
+        }
+        Ok(listed(blockers, pending))
+    }
+    async fn blocker_pass(&self) -> Result<Vec<Blocker>, Error> {
+        let (source, domains) = {
+            let inner = self.inner.lock(Class::Background).await;
+            (BlockerSource::start(&inner)?, blocker_domains(&inner))
+        };
+        let step = async || {
+            tokio::task::yield_now().await;
+            let inner = self.inner.lock(Class::Background).await;
+            source.check(&inner)?;
+            Ok::<_, Error>(inner)
+        };
+        let mut blockers = Vec::new();
+        for domain in domains {
+            blockers.extend(step().await?.domain_listing(domain).await?);
+        }
+        blockers.extend(step().await?.state_listing().await?);
+        let mut pending = PendingCounts::default();
+        let mut after = (Vec::new(), Vec::new());
+        loop {
+            let inner = step().await?;
+            match inner
+                .pending_heads(&mut pending, after, PENDING_HEADS)
+                .await?
+            {
+                Some(last) => after = last,
+                // This step checked the source; nothing it covers moved since.
+                None => return Ok(listed(blockers, pending)),
+            }
+        }
+    }
+}
+
+fn blocker_domains<A: RowApplication>(inner: &Inner<A>) -> BTreeSet<Scope> {
+    let mut domains: BTreeSet<Scope> = inner.graphs.keys().copied().collect();
+    if let Some(typed) = &inner.workspace.typed {
+        domains.insert(typed.domain);
+    }
+    domains
+}
+fn listed(mut blockers: Vec<Blocker>, pending: PendingCounts) -> Vec<Blocker> {
+    blockers.extend(pending.blockers());
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+impl<A: RowApplication> Inner<A> {
+    async fn domain_listing(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
+        let mut blockers = self.workspace_blockers(domain).await?;
+        if self.graphs.contains_key(&domain) {
+            blockers.extend(self.finalization_blocker(domain).await?);
+        }
+        Ok(blockers)
+    }
+    async fn state_listing(&self) -> Result<Vec<Blocker>, Error> {
+        let mut blockers = self.dropped_tip_blockers().await?;
+        blockers.extend(self.line_node_blockers()?);
+        blockers.extend(self.scope_state_blockers().await?);
+        Ok(blockers)
     }
 }

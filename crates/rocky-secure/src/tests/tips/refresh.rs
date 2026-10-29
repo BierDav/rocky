@@ -856,4 +856,32 @@ async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
         assert_eq!(a.held_changes().await.unwrap(), expected);
     }
     assert_eq!(a.snapshot(f.public).await.unwrap().rows, projection);
+
+    // An interactive waiter registered between steps acquires before the next one.
+    let (reached, waiting) = tokio::sync::oneshot::channel();
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    a.pause_held_listing_for_test(reached, paused).await;
+    let listing = a.held_changes();
+    let interleave = async {
+        waiting.await.unwrap();
+        let unit = crate::replica::lock::WorkUnit::HeldListingRow as usize;
+        let at_pause = measurements.work_snapshot()[unit];
+        let holder = a.inner.lock(crate::replica::Class::Background).await;
+        resume.send(()).unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let interactive = async {
+            let _guard = a.inner.lock(crate::replica::Class::Interactive).await;
+            measurements.work_snapshot()[unit]
+        };
+        let release = async {
+            tokio::task::yield_now().await;
+            drop(holder);
+        };
+        let (seen, ()) = tokio::join!(interactive, release);
+        assert_eq!(seen, at_pause);
+    };
+    let (result, ()) = tokio::join!(listing, interleave);
+    assert_eq!(result.unwrap(), expected);
 }

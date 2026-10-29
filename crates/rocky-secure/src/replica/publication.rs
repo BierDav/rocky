@@ -339,57 +339,87 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 
     /// Every staged publication this replica committed, with how many of
-    /// its leading bundles a peer reported holding.
+    /// its leading bundles a peer reported holding. Reads one publication,
+    /// or checks one bundle, per acquisition, and records a publication's
+    /// progress in one transaction once its checks end. The count only
+    /// grows, so a check made against older state never lowers it.
     pub async fn publications(&self) -> Result<Vec<Publication>, Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut publications = Vec::new();
-        for record in rows(
-            &inner.conn,
-            "SELECT publication,bundles,published FROM secure_publications ORDER BY publication",
-        )
-        .await?
-        {
-            let [
-                SqlValue::Blob(id),
-                SqlValue::Integer(bundles),
-                SqlValue::Integer(published),
-            ] = record.as_slice()
-            else {
-                return Err(Error::Corrupt("publication record".into()));
-            };
-            let id: Commitment = id
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Corrupt("publication record".into()))?;
-            let (bundles, mut published) = (*bundles as u64, *published as u64);
-            // A publication on a tip that lost its race stays retained on
-            // its branch; it is not this workspace's to publish.
-            if let Some(Some(frame)) = inner
-                .bundle_frames(&bundle_handle(&id, 0))
-                .await?
-                .into_iter()
-                .next()
-                && matches!(
-                    inner.frame_reach(&frame)?,
-                    super::tips::FrameReach::Held | super::tips::FrameReach::Unfollowed
-                )
-            {
-                continue;
+        let mut after = Vec::new();
+        // The publication being checked, with the count stored for it.
+        let mut current: Option<(Publication, u64)> = None;
+        let mut first = true;
+        loop {
+            if !std::mem::take(&mut first) {
+                tokio::task::yield_now().await;
             }
-            let reached = published;
-            while published < bundles
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+            let Some((publication, stored)) = current.as_mut() else {
+                let records = collect_rows(
+                    inner
+                        .conn
+                        .query(
+                            "SELECT publication,bundles,published FROM secure_publications WHERE publication>? ORDER BY publication LIMIT 1",
+                            [after.clone()],
+                        )
+                        .await?,
+                )
+                .await?;
+                let Some(record) = records.first() else {
+                    return Ok(publications);
+                };
+                let [
+                    SqlValue::Blob(id),
+                    SqlValue::Integer(bundles),
+                    SqlValue::Integer(published),
+                ] = record.as_slice()
+                else {
+                    return Err(Error::Corrupt("publication record".into()));
+                };
+                after.clone_from(id);
+                let id: Commitment = id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("publication record".into()))?;
+                // A publication on a tip that lost its race stays retained on
+                // its branch; it is not this workspace's to publish.
+                if let Some(Some(frame)) = inner
+                    .bundle_frames(&bundle_handle(&id, 0))
+                    .await?
+                    .into_iter()
+                    .next()
+                    && matches!(
+                        inner.frame_reach(&frame)?,
+                        super::tips::FrameReach::Held | super::tips::FrameReach::Unfollowed
+                    )
+                {
+                    continue;
+                }
+                current = Some((
+                    Publication {
+                        id,
+                        bundles: *bundles as u64,
+                        published: *published as u64,
+                    },
+                    *published as u64,
+                ));
+                continue;
+            };
+            if publication.published < publication.bundles
                 && inner
-                    .bundle_published(&bundle_handle(&id, published))
+                    .bundle_published(&bundle_handle(&publication.id, publication.published))
                     .await?
             {
-                published += 1;
+                publication.published += 1;
+                continue;
             }
-            if published != reached {
+            if publication.published != *stored {
+                let (id, published) = (publication.id, publication.published);
                 transaction!(&mut inner, |inner| {
                     inner
                         .conn
                         .execute(
-                            "UPDATE secure_publications SET published=? WHERE publication=?",
+                            "UPDATE secure_publications SET published=max(published,?) WHERE publication=?",
                             bindings(vec![
                                 SqlValue::Integer(published as i64),
                                 SqlValue::Blob(id.to_vec()),
@@ -399,13 +429,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     Ok(())
                 })?;
             }
-            publications.push(Publication {
-                id,
-                bundles,
-                published,
-            });
+            publications.extend(current.take().map(|(publication, _)| publication));
         }
-        Ok(publications)
     }
 }
 

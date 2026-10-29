@@ -1,5 +1,5 @@
 mod admission;
-mod lock;
+pub(crate) mod lock;
 mod maintenance;
 mod wal;
 pub(crate) use lock::{Class, Guard, ReplicaLock};
@@ -38,6 +38,7 @@ pub use schemas::{
     last_in_place_switch_changes,
 };
 pub(super) mod group;
+pub(crate) mod headers;
 mod held;
 mod history;
 pub use history::{HeldSeal, KeptSeals, SealViews};
@@ -460,6 +461,11 @@ pub(super) struct Inner<A> {
     )>,
     #[cfg(test)]
     migration_storage_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
+    header_scan_pause: Option<(
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
@@ -1068,6 +1074,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             checkpoint_export_pause: None,
             #[cfg(test)]
             checkpoint_store_pause: None,
+            #[cfg(test)]
+            header_scan_pause: None,
             #[cfg(test)]
             held_listing_pause: None,
             #[cfg(test)]

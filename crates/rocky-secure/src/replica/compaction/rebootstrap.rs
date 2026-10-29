@@ -102,70 +102,100 @@ impl<A: RowApplication> Inner<A> {
         &self,
         domain: Scope,
     ) -> Result<Vec<SealRebootstrap>, Error> {
-        let Some(graph) = self.graphs.get(&domain) else {
+        let Some(plan) = self.rebootstrap_plan(domain).await? else {
             return Ok(Vec::new());
         };
+        let mut needs = Vec::new();
+        for (scope, id) in &plan.scopes {
+            needs.extend(self.seal_rebootstrap_of(&plan, *scope, *id).await?);
+        }
+        Ok(needs)
+    }
+    /// What every scope's rebootstrap check of `domain` shares.
+    pub(in crate::replica) async fn rebootstrap_plan(
+        &self,
+        domain: Scope,
+    ) -> Result<Option<RebootstrapPlan>, Error> {
+        if !self.graphs.contains_key(&domain) {
+            return Ok(None);
+        }
         let path = self
             .path_seals(domain)?
             .iter()
             .map(|seal| seal.id().map_err(credential))
             .collect::<Result<Vec<_>, _>>()?;
-        let unverified = self.unverified_scopes(domain).await?;
-        let mut needs = Vec::new();
-        for (scope, id) in self.readiness_scopes(domain).await? {
-            let unknown = unverified.iter().any(|(candidate, _)| *candidate == scope);
-            let pruned = self.has_pruned_prefix(scope).await?;
-            let base = match id {
-                Some(id) => self.base_seal(id).await?,
-                None => None,
-            };
-            let anchored = match id {
-                Some(id) => self.has_seal_anchor(id).await?,
-                None => false,
-            };
-            let missing = if unknown || anchored {
-                match (id, self.path_seals(domain)?.last()) {
-                    (Some(id), Some(seal)) => self.replay_has_gaps(scope, id, seal).await?,
-                    (None, Some(seal)) => self
-                        .seal_coverage_waits(domain, seal, None, &[(scope, id)])
-                        .await?
-                        .is_some(),
-                    (_, None) => false,
-                }
-            } else {
-                false
-            };
-            let needed = unknown
-                || (anchored && missing)
-                || match base {
-                    Some(seal) => !path.contains(&seal),
-                    None => pruned,
-                };
-            if !needed {
-                continue;
+        let unverified = self
+            .unverified_scopes(domain)
+            .await?
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect();
+        Ok(Some(RebootstrapPlan {
+            domain,
+            path,
+            unverified,
+            scopes: self.readiness_scopes(domain).await?,
+        }))
+    }
+    /// Whether `scope`'s replay base must move to a seal of the followed path.
+    pub(in crate::replica) async fn seal_rebootstrap_of(
+        &self,
+        plan: &RebootstrapPlan,
+        scope: ResourceScope,
+        id: Option<i64>,
+    ) -> Result<Option<SealRebootstrap>, Error> {
+        let (domain, path) = (plan.domain, &plan.path);
+        let graph = self.graph_for(domain)?;
+        let unknown = plan.unverified.contains(&scope);
+        let pruned = self.has_pruned_prefix(scope).await?;
+        let base = match id {
+            Some(id) => self.base_seal(id).await?,
+            None => None,
+        };
+        let anchored = match id {
+            Some(id) => self.has_seal_anchor(id).await?,
+            None => false,
+        };
+        let missing = if unknown || anchored {
+            match (id, self.path_seals(domain)?.last()) {
+                (Some(id), Some(seal)) => self.replay_has_gaps(scope, id, seal).await?,
+                (None, Some(seal)) => self
+                    .seal_coverage_waits(domain, seal, None, &[(scope, id)])
+                    .await?
+                    .is_some(),
+                (_, None) => false,
             }
-            let listed = self.listed_at(graph, scope, path.iter().rev())?;
-            let logged = self.existence_table(scope);
-            let released = self
-                .existence_released(scope, &path.iter().copied().collect())
-                .await?;
-            if unknown && !missing && !pruned && base.is_none_or(|seal| path.contains(&seal)) {
-                continue;
-            }
-
-            let replay = match (released, pruned || missing) {
-                (true, _) => FrameReplay::Unavailable,
-                (false, false) => FrameReplay::Local,
-                (false, true) => FrameReplay::Peers,
+        } else {
+            false
+        };
+        let needed = unknown
+            || (anchored && missing)
+            || match base {
+                Some(seal) => !path.contains(&seal),
+                None => pruned,
             };
-            needs.push(SealRebootstrap {
-                scope,
-                listed,
-                replay,
-                logged,
-            });
+        if !needed {
+            return Ok(None);
         }
-        Ok(needs)
+        let listed = self.listed_at(graph, scope, path.iter().rev())?;
+        let logged = self.existence_table(scope);
+        let released = self
+            .existence_released(scope, &path.iter().copied().collect())
+            .await?;
+        if unknown && !missing && !pruned && base.is_none_or(|seal| path.contains(&seal)) {
+            return Ok(None);
+        }
+        let replay = match (released, pruned || missing) {
+            (true, _) => FrameReplay::Unavailable,
+            (false, false) => FrameReplay::Local,
+            (false, true) => FrameReplay::Peers,
+        };
+        Ok(Some(SealRebootstrap {
+            scope,
+            listed,
+            replay,
+            logged,
+        }))
     }
     /// Whether `scope`'s existence records were folded at a seal outside
     /// `path`: only a checkpoint with a signed existence base replaces them.
@@ -311,12 +341,55 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+/// What each scope's rebootstrap check of one domain shares.
+pub(in crate::replica) struct RebootstrapPlan {
+    domain: Scope,
+    path: Vec<Commitment>,
+    unverified: BTreeSet<ResourceScope>,
+    scopes: Vec<(ResourceScope, Option<i64>)>,
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// What a stepped rebootstrap listing must not see move: the state
+    /// tables readiness watches, the authority, the tip and the context.
+    fn rebootstrap_context(&self) -> (u64, u64, TipId, u64) {
+        (
+            self.readiness.writes(),
+            self.authority,
+            self.workspace.tip,
+            self.context_epoch.load(Ordering::Relaxed),
+        )
+    }
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The held scopes of `domain` whose replay base must move to a seal of
     /// the followed path, with the checkpoints the graph lists for them.
+    ///
+    /// Plans in one acquisition, then checks one scope per acquisition while
+    /// the plan's context holds; a moved context restarts the listing.
     pub async fn seal_rebootstraps(&self, domain: Scope) -> Result<Vec<SealRebootstrap>, Error> {
+        'pass: for _ in 0..super::super::headers::SCAN_PASSES {
+            let (plan, context) = {
+                let inner = self.inner.lock(crate::replica::Class::Background).await;
+                inner.graph_for(domain)?;
+                let Some(plan) = inner.rebootstrap_plan(domain).await? else {
+                    return Ok(Vec::new());
+                };
+                (plan, inner.rebootstrap_context())
+            };
+            let mut needs = Vec::new();
+            for (scope, id) in &plan.scopes {
+                tokio::task::yield_now().await;
+                let inner = self.inner.lock(crate::replica::Class::Background).await;
+                if inner.rebootstrap_context() != context {
+                    continue 'pass;
+                }
+                needs.extend(inner.seal_rebootstrap_of(&plan, *scope, *id).await?);
+            }
+            return Ok(needs);
+        }
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner.graph_for(domain)?;
         inner.seal_rebootstraps(domain).await
     }
     /// Rebuilds a scope that needs a seal rebootstrap from frames instead of
@@ -325,12 +398,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// seal off the path.
     pub async fn replay_at_seals(&self, scope: ResourceScope, reset: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let need = inner
-            .seal_rebootstraps(scope.domain)
-            .await?
-            .into_iter()
-            .find(|need| need.scope == scope)
-            .ok_or_else(|| denied("the scope's base sits at a seal of the followed path"))?;
+        // Only this scope is checked, not every scope of its domain.
+        let mut need = None;
+        if let Some(plan) = inner.rebootstrap_plan(scope.domain).await?
+            && let Some((_, id)) = plan.scopes.iter().find(|(held, _)| *held == scope)
+        {
+            need = inner.seal_rebootstrap_of(&plan, scope, *id).await?;
+        }
+        let need =
+            need.ok_or_else(|| denied("the scope's base sits at a seal of the followed path"))?;
         match (need.replay, reset) {
             (FrameReplay::Unavailable, _) => {
                 return Err(denied(

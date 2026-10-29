@@ -427,6 +427,10 @@ pub(super) struct FollowPass {
     pub(super) epoch: u64,
     after: Option<(Vec<u8>, Vec<u8>)>,
     row: Option<FollowRow>,
+    /// Writes to moved rows since the pass started; one may lie behind
+    /// the cursor, so the pass then runs once more from the start.
+    moved: Option<(Arc<crate::sqlite::Writes>, String, u64)>,
+    rescan: bool,
 }
 struct FollowRow {
     key: (Vec<u8>, Vec<u8>),
@@ -1211,8 +1215,34 @@ impl<A: RowApplication> Inner<A> {
                 self.follow_pass = pass;
                 return Ok(true);
             }
+            // The current row restarts at its own key; unrelated commits
+            // keep the cursor so the pass still completes under writes.
             pass.row = None;
-            pass.after = None;
+            if pass.epoch != epoch {
+                pass.after = None;
+                pass.moved = None;
+            }
+        }
+        if pass.moved.is_none() {
+            let table = self
+                .conn
+                .names()
+                .physical("secure_move_rows")
+                .unwrap_or("secure_move_rows")
+                .to_owned();
+            let writes = self
+                .conn
+                .connection()
+                .watch_writes([(table.clone(), true)])?;
+            let count = writes.table_count(&table);
+            pass.moved = Some((writes, table, count));
+        }
+        if let Some((writes, table, count)) = &mut pass.moved {
+            let now = writes.table_count(table);
+            if now != *count {
+                *count = now;
+                pass.rescan |= pass.after.is_some();
+            }
         }
         let result = self.follow_move_step(&mut pass, time).await;
         pass.commit = if result.is_ok() {
@@ -1238,7 +1268,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let Some(record) = records.into_iter().next() else {
                 pass.after = None;
-                return Ok(false);
+                return Ok(std::mem::take(&mut pass.rescan));
             };
             let [
                 SqlValue::Blob(scope),

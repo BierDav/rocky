@@ -412,22 +412,27 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn migration_tip_required(&self, tip: TipId) -> Result<bool, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        Ok(inner
+        Ok(self
             .required_schemas()
             .await?
             .iter()
             .any(|(required, _)| *required == tip))
     }
     pub(crate) async fn missing_migration_publications(&self) -> Result<Vec<TipId>, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        self.schema_requirements(true, async |inner, required| {
+            inner.missing_migration_publications(required).await
+        })
+        .await
+    }
+}
+impl<A: RowApplication> Inner<A> {
+    async fn missing_migration_publications(
+        &self,
+        required: BTreeSet<(TipId, Commitment)>,
+    ) -> Result<Vec<TipId>, Error> {
+        let inner = self;
         let mut missing = Vec::new();
-        let required: BTreeSet<_> = inner
-            .required_schemas()
-            .await?
-            .into_iter()
-            .map(|(tip, _)| tip)
-            .collect();
+        let required: BTreeSet<_> = required.into_iter().map(|(tip, _)| tip).collect();
         for tip in required {
             let scope = inner
                 .workspace

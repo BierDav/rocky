@@ -230,3 +230,47 @@ async fn maintenance_finalizes_one_seal_per_step() {
         assert_eq!(status.uncompacted.len(), finalized, "{status:?}");
     }
 }
+
+/// Pending log heads list one per acquisition in tests; counts of
+/// different authors' logs still add up across pages.
+#[tokio::test]
+async fn paged_pending_blockers_add_up_across_authors() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let target = open(&f, &dir.path().join("target.db"), &PrivateKey::new(), &[]).await;
+    let mut frames = Vec::new();
+    for (index, rows) in [(0, [1, 2].as_slice()), (1, [3].as_slice())] {
+        let source = open(
+            &f,
+            &dir.path().join(format!("source-{index}.db")),
+            &PrivateKey::new(),
+            &[f.private],
+        )
+        .await;
+        for row in rows {
+            frames.push(write(&f, &source, f.private, *row).await);
+        }
+    }
+    for frame in frames {
+        assert_eq!(
+            target.receive(frame).await.unwrap(),
+            ReceiveStatus::MissingKey
+        );
+    }
+    let label = rocky_core::scope_label(&f.private);
+    let counts: Vec<u64> = target
+        .blockers()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|blocker| blocker.scope == label)
+        .filter_map(|blocker| match blocker.kind {
+            BlockerKind::PendingFrames {
+                reason: WaitReason::OpeningKey,
+                count,
+            } => Some(count),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(counts, [3]);
+}

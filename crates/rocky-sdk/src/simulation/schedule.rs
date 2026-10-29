@@ -17,6 +17,8 @@ pub(super) struct Scenario {
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Write(usize),
+    /// A write racing the node's own sync pass: the interactive probe.
+    Probe(usize),
     /// A sync pass with every peer the node can reach.
     Sync(usize),
     /// A sync pass of the first node while only the second is reachable.
@@ -53,6 +55,7 @@ impl fmt::Display for Action {
         let name = |node: &usize| node_name(*node);
         match self {
             Self::Write(node) => write!(f, "write {}", name(node)),
+            Self::Probe(node) => write!(f, "probe {}", name(node)),
             Self::Sync(node) => write!(f, "sync {}", name(node)),
             Self::SyncPair(node, peer) => write!(f, "sync {} with {}", name(node), name(peer)),
             Self::Faults(a, b, faults) => write!(f, "faults {}-{} {faults:?}", name(a), name(b)),
@@ -80,8 +83,9 @@ pub(super) fn node_name(node: usize) -> String {
 
 /// Weights of the draw; the device testing's paths are favored by the
 /// follow-ups in `plan`.
-const WEIGHTS: [(Kind, u64); 19] = [
+const WEIGHTS: [(Kind, u64); 20] = [
     (Kind::Write, 20),
+    (Kind::Probe, 6),
     (Kind::Sync, 14),
     (Kind::SyncPair, 8),
     (Kind::Faults, 5),
@@ -104,6 +108,7 @@ const WEIGHTS: [(Kind, u64); 19] = [
 #[derive(Clone, Copy)]
 enum Kind {
     Write,
+    Probe,
     Sync,
     SyncPair,
     Faults,
@@ -168,6 +173,7 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
             .map_or(Kind::Write, |(kind, _)| *kind);
         let action = match kind {
             Kind::Write => Action::Write(node(&mut draws)),
+            Kind::Probe => Action::Probe(node(&mut draws)),
             Kind::Sync => Action::Sync(node(&mut draws)),
             Kind::SyncPair => {
                 let (a, b) = pair(&mut draws);

@@ -43,11 +43,25 @@ pub enum PlacementPage {
     CustodyRequired,
 }
 
+struct PlacementPlan {
+    authority: u64,
+    tip: TipId,
+    scopes: Vec<(ResourceScope, Option<i64>)>,
+    held: BTreeMap<u32, super::positions::Runs>,
+    last: BTreeMap<(ResourceScope, u32), u64>,
+    checks: Vec<(
+        rocky_credentials::SignedSeal,
+        Option<rocky_credentials::SignedSeal>,
+    )>,
+    unverified: BTreeSet<ResourceScope>,
+}
+
 impl<A: RowApplication> Inner<A> {
     /// What this replica asks peers to place: the gaps that keep a seal of
     /// the followed path from being finalized, and those of the seal the
-    /// followed line inherits.
-    async fn wanted_placements(&self, domain: Scope) -> Result<Vec<PlacementRequest>, Error> {
+    /// followed line inherits. Planned in one acquisition; each (seal,
+    /// scope) check then runs in its own.
+    async fn placement_plan(&self, domain: Scope) -> Result<PlacementPlan, Error> {
         let path = self.path_seals(domain)?;
         let scopes = self.readiness_scopes(domain).await?;
         let held_scopes = self.custody_scopes(now()?)?;
@@ -60,68 +74,38 @@ impl<A: RowApplication> Inner<A> {
             if self.finalized_depth(domain, id).await?.is_some() {
                 continue;
             }
-            checks.push((seal, index.checked_sub(1).map(|previous| &path[previous])));
+            checks.push((
+                seal.clone(),
+                index.checked_sub(1).map(|previous| path[previous].clone()),
+            ));
         }
-        if !self.unverified_scopes(domain).await?.is_empty()
+        let unverified: BTreeSet<_> = self
+            .unverified_scopes(domain)
+            .await?
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect();
+        if !unverified.is_empty()
             && let Some(seal) = path.last()
         {
-            checks.push((seal, None));
+            checks.push((seal.clone(), None));
         }
         // A line's first coordinated slot checks its parent seal from the start.
         let graph = self.graph_for(domain)?;
         if let Some((parent, _)) = Self::tip_parent(graph, self.workspace.tip)?
             && let Some(seal) = path.iter().find(|seal| seal.statement.tip == parent)
         {
-            checks.push((seal, None));
+            checks.push((seal.clone(), None));
         }
-        let mut requests: Vec<PlacementRequest> = Vec::new();
-        for (seal, previous) in checks {
-            let id = seal.id().map_err(credential)?;
-            let mut gaps = BTreeSet::new();
-            let unverified = self.unverified_scopes(domain).await?;
-            for (scope, scope_id) in &scopes {
-                let previous = if unverified.iter().any(|(unknown, _)| unknown == scope) {
-                    None
-                } else {
-                    previous
-                };
-                let starts = self.seal_starts(*scope_id, previous).await?;
-                gaps.extend(compaction::blocking_gaps(
-                    seal,
-                    &starts,
-                    &[(*scope, *scope_id)],
-                    &held,
-                    &last,
-                    MAX_REQUESTS * MAX_PLACEMENTS,
-                ));
-            }
-            for (author, position) in gaps {
-                if requests.iter().any(|request| {
-                    request.author == author && (request.from..=request.to).contains(&position)
-                }) {
-                    continue;
-                }
-                if let Some(request) = requests.last_mut()
-                    && request.seal == id
-                    && request.author == author
-                    && request.to + 1 == position
-                    && position - request.from < MAX_PLACEMENTS as u64
-                {
-                    request.to = position;
-                    continue;
-                }
-                if requests.len() == MAX_REQUESTS {
-                    return Ok(requests);
-                }
-                requests.push(PlacementRequest {
-                    seal: id,
-                    author,
-                    from: position,
-                    to: position,
-                });
-            }
-        }
-        Ok(requests)
+        Ok(PlacementPlan {
+            authority: self.authority,
+            tip: self.workspace.tip,
+            scopes,
+            held,
+            last,
+            checks,
+            unverified,
+        })
     }
     /// Answers `request` from the frames and voids this replica holds:
     /// released positions through the seal's frontier, without bodies.
@@ -599,13 +583,69 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The placement requests this replica wants answered.
+    /// The placement requests this replica wants answered. A receiver
+    /// revalidates every request; a moved authority or tip ends the listing
+    /// early with what it found, and the next pass asks again.
     pub async fn wanted_placements(&self) -> Result<Vec<PlacementRequest>, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let Some((domain, _)) = inner.workspace.followed.clone() else {
-            return Ok(Vec::new());
+        let plan = {
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            let Some((domain, _)) = inner.workspace.followed.clone() else {
+                return Ok(Vec::new());
+            };
+            inner.placement_plan(domain).await?
         };
-        inner.wanted_placements(domain).await
+        let mut requests: Vec<PlacementRequest> = Vec::new();
+        for (seal, previous) in &plan.checks {
+            let id = seal.id().map_err(credential)?;
+            let mut gaps = BTreeSet::new();
+            for (scope, scope_id) in &plan.scopes {
+                tokio::task::yield_now().await;
+                let inner = self.inner.lock(crate::replica::Class::Background).await;
+                // A plan from another authority or tip only asks for placements the
+                // peer refuses or this replica no longer needs.
+                if (inner.authority, inner.workspace.tip) != (plan.authority, plan.tip) {
+                    return Ok(requests);
+                }
+                let previous = previous
+                    .as_ref()
+                    .filter(|_| !plan.unverified.contains(scope));
+                let starts = inner.seal_starts(*scope_id, previous).await?;
+                gaps.extend(compaction::blocking_gaps(
+                    seal,
+                    &starts,
+                    &[(*scope, *scope_id)],
+                    &plan.held,
+                    &plan.last,
+                    MAX_REQUESTS * MAX_PLACEMENTS,
+                ));
+            }
+            for (author, position) in gaps {
+                if requests.iter().any(|request| {
+                    request.author == author && (request.from..=request.to).contains(&position)
+                }) {
+                    continue;
+                }
+                if let Some(request) = requests.last_mut()
+                    && request.seal == id
+                    && request.author == author
+                    && request.to + 1 == position
+                    && position - request.from < MAX_PLACEMENTS as u64
+                {
+                    request.to = position;
+                    continue;
+                }
+                if requests.len() == MAX_REQUESTS {
+                    return Ok(requests);
+                }
+                requests.push(PlacementRequest {
+                    seal: id,
+                    author,
+                    from: position,
+                    to: position,
+                });
+            }
+        }
+        Ok(requests)
     }
     /// Answers a peer's placement request.
     pub async fn placement_page(

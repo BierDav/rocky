@@ -1,9 +1,13 @@
 # 2. Interactive first
 
-Status: blocked (2026-10-29): the bounded-holds prerequisite still has
-unbounded steady-state metadata scans. See the
-[prerequisite audit](02-interactive-first-evidence.md). Implementation has
-not started. Owner: `rocky-secure` (the replica lock wrapper from
+Status: implemented (2026-10-29); the latency gate is unmet. The gate,
+yields, starvation guard, quiet-gate starts and the simulation probe are
+in, and the bounded-holds prerequisite is finished. No interactive write
+waited for more than one background step. Desktop L1–L4 write p95 stays
+at 38–188 ms, against 16 ms. The writes queue on the SDK reactor thread
+before reaching the replica lock, which is outside this brief. See the
+[evidence](02-interactive-first-evidence.md).
+Owner: `rocky-secure` (the replica lock wrapper from
 features_12 phase 1 and the step loops from features_12 phase 2).
 Depends on features_12 phase 2 (see the [audit](02-interactive-first-evidence.md)
 for its preserved brief and remaining work).

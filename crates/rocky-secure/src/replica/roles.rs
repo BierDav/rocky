@@ -1119,24 +1119,29 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Role, holding, retained window, custody coverage and peer lag of
     /// every known scope.
+    /// Reads one scope per acquisition; each entry is consistent in itself.
     pub async fn replica_status(&self) -> Result<ReplicaStatus, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let role = inner.role().await?;
-        let mut scopes = BTreeSet::new();
-        for sql in [
-            "SELECT scope FROM secure_scope_state",
-            "SELECT scope FROM secure_subscriptions",
-        ] {
-            for record in rows(&inner.conn, sql).await? {
-                let [SqlValue::Blob(scope)] = record.as_slice() else {
-                    return Err(Error::Corrupt("scope".into()));
-                };
-                scopes.insert(decode::<ResourceScope>(scope)?);
+        let (role, scopes) = {
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            let mut scopes = BTreeSet::new();
+            for sql in [
+                "SELECT scope FROM secure_scope_state",
+                "SELECT scope FROM secure_subscriptions",
+            ] {
+                for record in rows(&inner.conn, sql).await? {
+                    let [SqlValue::Blob(scope)] = record.as_slice() else {
+                        return Err(Error::Corrupt("scope".into()));
+                    };
+                    scopes.insert(decode::<ResourceScope>(scope)?);
+                }
             }
-        }
-        let me = inner.config.node.public_key();
+            (inner.role().await?, scopes)
+        };
         let mut status = Vec::new();
         for scope in scopes {
+            tokio::task::yield_now().await;
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            let me = inner.config.node.public_key();
             let holding = match inner.holding(scope).await? {
                 Some(holding) => holding,
                 None if role.role == ReplicaRole::Full => Holding::Held,

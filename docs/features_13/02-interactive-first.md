@@ -1,8 +1,12 @@
 # 2. Interactive first
 
-Status: planned. Owner: `rocky-secure` (the replica lock wrapper from
+Status: blocked (2026-10-29): the bounded-holds prerequisite still has
+unbounded steady-state metadata scans. See the
+[prerequisite audit](02-interactive-first-evidence.md). Implementation has
+not started. Owner: `rocky-secure` (the replica lock wrapper from
 features_12 phase 1 and the step loops from features_12 phase 2).
-Depends on [features_12 phase 2](../features_12/02-bounded-holds.md).
+Depends on features_12 phase 2 (see the [audit](02-interactive-first-evidence.md)
+for its preserved brief and remaining work).
 Effort: one week. Carried over from features_12 phase 3. Follow the
 [execution contract](README.md#agent-execution-contract).
 

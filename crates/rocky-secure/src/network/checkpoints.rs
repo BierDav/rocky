@@ -88,16 +88,20 @@ impl NativeSession {
             .into_iter()
             .filter(|scope| selected.is_empty() || selected.contains(scope))
             .collect();
-        let shared = replica
-            .peer_holds(self.peer, &self.credentials, &scopes)
-            .await?;
         let mut missing = false;
         for scope in scopes {
-            if !shared.contains(&scope) {
-                missing = true;
-                continue;
+            match replica
+                .authorize_held_reader(self.peer, &self.credentials, scope)
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Rejected(_)) => {
+                    missing = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
-            if !self.try_scoped_holding(replica, &[scope], false).await? {
+            if !self.try_scoped_holding(replica, &[scope], true).await? {
                 missing = true;
                 continue;
             }

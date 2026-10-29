@@ -847,6 +847,11 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
         b.compact(lineage.domain, 0).await.unwrap().compacted,
         Some(second)
     );
+    assert_eq!(
+        b.seal_frontier(lineage.domain, true).await.unwrap(),
+        b.seal_frontier(lineage.domain, false).await.unwrap(),
+        "pruned history covered by an inherited seal still permits closing"
+    );
     assert_eq!(a.kept_seals().await.unwrap(), vec![first, second]);
     assert_eq!(
         scalar(&a, "SELECT count(*) FROM secure_checkpoints").await,
@@ -854,6 +859,36 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
     );
     assert_eq!(b.held_seal(lineage.domain, first).await.unwrap(), None);
 
+    // The provider already follows another branch while serving the retained seal.
+    let opening = SignedTipOpening::sign(
+        TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            schema: lineage.definition(3).hash(),
+            scope: lineage.domain,
+            seal: first,
+            minimum_in_sync: 1,
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    let bookmark = SignedBookmarkMove::sign(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "dev".into(),
+            from: None,
+            to: Some(opening.tip().unwrap()),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    a.publish_tip_statements(&[
+        TipStatement::Opening(opening),
+        TipStatement::Bookmark(bookmark),
+    ])
+    .await
+    .unwrap();
+    a.follow_bookmark(lineage.domain, "dev").await.unwrap();
     b.want_seal(lineage.domain, first).await.unwrap();
     assert_eq!(b.wanted_seals(lineage.domain).await.unwrap(), vec![first]);
     let (near, far) = crate::network::link::testing::tcp().await;

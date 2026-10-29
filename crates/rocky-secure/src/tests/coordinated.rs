@@ -430,6 +430,7 @@ impl Fixture {
                 Err(
                     CoordinatedError::Conflict
                     | CoordinatedError::Aborted
+                    | CoordinatedError::Behind
                     | CoordinatedError::Undecided,
                 ) => tokio::time::sleep(std::time::Duration::from_millis(2)).await,
                 Err(error) => panic!("{error:?}"),
@@ -1270,4 +1271,27 @@ async fn a_trusted_node_that_cannot_hold_an_entrys_scope_stores_and_acknowledges
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn waiting_for_another_writers_stored_proposal_is_safe_to_retry() {
+    let fixture = Fixture::new(2).await;
+    let alice = &fixture.alice;
+    let bob = &fixture.bob;
+    let slot = fixture.slot(alice).await.unwrap();
+    fixture.stage(alice, slot, "alice").await.unwrap();
+    fixture.mesh.set(&bob.0, true, false);
+    let mut stored = bob.1.observe_entries();
+    tokio::select! {
+        result = fixture.propose(alice) => panic!("proposal ended before the storage check: {result:?}"),
+        () = async {
+            loop {
+                if bob.1.coordinated_status(tip_log(&fixture.lineage)).await.unwrap().undecided > 0 {
+                    break;
+                }
+                stored.changed().await.unwrap();
+            }
+            assert!(matches!(fixture.slot(bob).await, Err(CoordinatedError::Behind)));
+        } => {}
+    }
 }

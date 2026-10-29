@@ -1,8 +1,8 @@
 # 3. Intent shapes
 
-Status: measurements and validation finished (2026-10-29); completion gate
-blocked by timing-budget and shopping qualification failures.
-See [evidence](03-intent-shapes-evidence.md).
+Status: measurements finished (2026-10-29). The reported migration and shopping
+validation failures are repaired; the captured corpus remains from the original
+measurement run. See [evidence](03-intent-shapes-evidence.md#shared-validation-repair-2026-10-29).
 Owner: test support in `rocky-secure` and `rocky-sdk`,
 plus the example applications. Depends on nothing; touches no engine
 code. Effort: three to five days. Follow the

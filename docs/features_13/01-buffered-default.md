@@ -1,6 +1,7 @@
 # 1. Buffered default
 
-Status: planned. Owner: `rocky-sdk` (`Database::transaction`). Depends
+Status: implemented; qualification blocked (loaded-host write p95 and validation).
+See [evidence](01-buffered-default-evidence.md). Owner: `rocky-sdk` (`Database::transaction`). Depends
 on nothing. Effort: one to two days. Carried over from features_12
 phase 4, slice 1. Follow the
 [execution contract](README.md#agent-execution-contract).

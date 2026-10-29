@@ -396,15 +396,19 @@ struct MemberFixture {
 }
 
 async fn converges_on_every_member(large: usize, history: usize) -> Result<(), Failure> {
-    pull_member_fixture(prepare_member_fixture(large, history).await?).await
+    pull_member_fixture(prepare_member_fixture(large, history, true).await?).await
 }
 
-async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFixture, Failure> {
+async fn prepare_member_fixture(
+    large: usize,
+    history: usize,
+    measure_additive: bool,
+) -> Result<MemberFixture, Failure> {
     let root = common::identity::small_directory()?;
     // The history gate needs one 50k-row state; the other gates exercise
     // the additive switch and second migration as well.
     let multi_step = history == 0;
-    let small = if multi_step {
+    let small = if multi_step && measure_additive {
         let changes = additive_switch_changes(root.path(), 8).await?;
         assert!(changes >= 0, "the additive switch was not in place");
         Some(changes)

@@ -87,16 +87,26 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<AuthorMark>, Error> {
         let graph = self.scope_graph(scope)?;
         let pruned = if close {
-            rows(&self.conn, "SELECT scope FROM secure_scope_state").await?
+            rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await?
         } else {
             Vec::new()
         };
         for record in pruned {
-            let [SqlValue::Blob(bytes)] = record.as_slice() else {
+            let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope".into()));
             };
             let resource: ResourceScope = decode(bytes)?;
             if resource.domain == scope && self.has_pruned_prefix(resource).await? {
+                // A base on the inherited path is already bounded by its seal's
+                // author frontier. Only uncovered pruning prevents a close.
+                if let Some(base) = self.base_seal(*id).await?
+                    && self
+                        .path_seals(scope)?
+                        .iter()
+                        .any(|seal| seal.id().ok() == Some(base))
+                {
+                    continue;
+                }
                 return Err(denied(
                     "a close seal needs retained history; pruned logs have no author frontier",
                 ));

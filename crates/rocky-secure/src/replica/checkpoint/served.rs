@@ -37,7 +37,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Option<SignedCheckpoint>, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
-        inner.authorize_peer(peer, credentials, scope)?;
+        inner.authorize_seal_peer(peer, credentials, scope)?;
         // A no-frames base needs no key: its original statement is served.
         if !inner.importing.contains(&scope)
             && !inner.importing(scope).await?

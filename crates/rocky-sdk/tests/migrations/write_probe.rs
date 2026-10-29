@@ -518,7 +518,7 @@ async fn probe(
     measurements: Option<&LockMeasurements>,
     reactor: Option<&ReactorMeasurements>,
     events: &TableEvents,
-    buffered: Option<&Connection>,
+    flushed: Option<&Connection>,
 ) -> Result<(Measurements, ReactorSnapshot), Failure> {
     let mut write = Vec::with_capacity(count);
     let mut observed = Vec::with_capacity(count);
@@ -543,7 +543,7 @@ async fn probe(
         ticks.tick().await;
         let start = Instant::now();
         let connection_id;
-        if let Some(conn) = buffered {
+        if let Some(conn) = flushed {
             connection_id = conn.measurement_id();
             execute(conn, "BEGIN").await?;
             execute(conn, UPDATE).await?;
@@ -642,7 +642,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
             .database
             .observe_tables(Some(vec!["write_probe".into()]))
             .await?;
-        let buffered = if durability == Durability::Buffered {
+        let flushed = if durability == Durability::Flushed {
             Some(connection(&fixture.node.database, durability).await?)
         } else {
             None
@@ -664,7 +664,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
             None,
             None,
             &events,
-            buffered.as_ref(),
+            flushed.as_ref(),
         )
         .await?;
         measurements.start();
@@ -687,7 +687,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
                 Some(&measurements),
                 Some(&reactor),
                 &events,
-                buffered.as_ref(),
+                flushed.as_ref(),
             )
             .await;
             let _ = stop.send(true);
@@ -712,7 +712,7 @@ async fn scenario(kind: Load) -> Result<(), Failure> {
         }
         holders(&result);
         unit_costs(&result);
-        if let Some(conn) = buffered {
+        if let Some(conn) = flushed {
             conn.close().await;
         }
         fixture.node.close().await;

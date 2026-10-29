@@ -722,7 +722,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let status = self.resolve(log, coordinator, peers).await?;
         if status.undecided > 0 {
-            return Err(CoordinatedError::Undecided);
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            // Stored proposals belong to another writer. No local transaction
+            // was authored, so waiting for its decision is safe to retry.
+            return Err(
+                if inner
+                    .entries(log, &["staged", "assigned", "carried"])
+                    .await?
+                    .is_empty()
+                {
+                    CoordinatedError::Behind
+                } else {
+                    CoordinatedError::Undecided
+                },
+            );
         }
         let mut head = coordinator.log_head(log).await.map_err(coordination)?;
         if head.terminal.is_some() {

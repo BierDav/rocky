@@ -409,11 +409,37 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
     ) -> Result<(), Error> {
         self.same_tip_peer(peer)?;
+        self.authorize_seal_peer(peer, credentials, scope)
+    }
+    /// Sealed state is readable across branches under the same scope grants.
+    pub(crate) fn authorize_seal_peer(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
         if !crate::replica::roles::holds_whole(&grants, scope) {
             return Err(denied("ciphertext custody denied"));
         }
         Ok(())
+    }
+    async fn authorize_checkpoint_peer(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scope: ResourceScope,
+        checkpoint: Commitment,
+    ) -> Result<(), Error> {
+        if self
+            .served_seal_checkpoint(scope, checkpoint)
+            .await?
+            .is_some()
+        {
+            self.authorize_seal_peer(peer, credentials, scope)
+        } else {
+            self.authorize_peer(peer, credentials, scope)
+        }
     }
     /// As `authorize_peer` for a coordinated log's entries: a peer also
     /// takes those of a sealed tip its followed tip descends from, the
@@ -1247,7 +1273,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         });
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flush_guard(inner, &self.inner).await?;
-        inner.authorize_peer(peer, credentials, scope)?;
+        inner
+            .authorize_checkpoint_peer(peer, credentials, scope, checkpoint)
+            .await?;
         if !(4096..=MAX_SECURE_FRAME).contains(&byte_quota) {
             return Err(denied("sync quota"));
         }
@@ -1578,7 +1606,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.units("served_checkpoint_page", 1);
         inner = flush_guard(inner, &self.inner).await?;
         inner.check_export_source(&source)?;
-        inner.authorize_peer(peer, credentials, scope)?;
+        inner
+            .authorize_checkpoint_peer(peer, credentials, scope, checkpoint)
+            .await?;
         drop(inner);
         Ok(page)
     }

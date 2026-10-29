@@ -185,6 +185,13 @@ impl Node {
         let scope = self.domain().scope;
         let graph = self.replica.tip_graph(scope).await?;
         let followed = self.replica.followed_tip().await;
+        // A losing publication must first adopt the bookmark's winner.
+        // Sealing its old workspace would prevent the sync that fetches it.
+        if let Some((_, name)) = self.replica.followed_bookmark().await
+            && graph.bookmark(&name)? != Some(followed)
+        {
+            return Ok(());
+        }
         let mut pending = false;
         let mut needs_seal = false;
         for publication in publications {
@@ -198,6 +205,11 @@ impl Node {
             let Some(migration) = self.replica.migration_publication(publication.id).await? else {
                 continue;
             };
+            if migration.statement.tip != followed
+                && !graph.succeeds(migration.statement.tip, followed)?
+            {
+                continue;
+            }
             pending = true;
             let mut covered = false;
             for seal in &graph.seals {

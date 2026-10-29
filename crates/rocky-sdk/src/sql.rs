@@ -247,7 +247,7 @@ impl Drop for Rows<'_> {
 fn options(read_only: bool) -> ConnectionOptions {
     ConnectionOptions {
         read_only,
-        durability: crate::Durability::Flushed,
+        durability: crate::Durability::Buffered,
         profile: None,
         transaction_timeout: None,
         binding: None,
@@ -260,6 +260,10 @@ impl Database {
         Ok(Rows::new(Source::Owned(connection), sql, params).await?)
     }
     /// Starts an atomic write. Call `commit` explicitly; dropping rolls it back.
+    /// On commit return, the write is visible to readers and observers and survives
+    /// an application crash (WAL with `synchronous=NORMAL`), but not power loss.
+    /// The background `settle_commits` flush makes it durable and publishable.
+    /// For a flushed commit, use `Database::connect` with `Durability::Flushed`.
     /// Application callbacks are never automatically retried.
     pub async fn transaction(&self) -> Result<Transaction, Failure> {
         let connection = self.connect(options(false)).await?;

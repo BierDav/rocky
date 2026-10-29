@@ -250,12 +250,16 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
                 }.toString(),
             )
         }
+        val protocolKeys = mutableListOf<String>()
         val findings = member.directory.walkTopDown().filter { it.isFile }.flatMap { file ->
             val bytes = file.readBytes()
             val keys = foreign.filter { key ->
                 key.length == 64 && (bytes.containsBytes(key.encodeToByteArray()) || bytes.containsBytes(key.chunked(2).map { it.toInt(16).toByte() }.toByteArray()))
             }.map { key -> "${file.relativeTo(member.directory)}: foreign node $key" }
-            keys + names.filter { bytes.containsBytes(it.encodeToByteArray()) }.map { "${file.relativeTo(member.directory)}: foreign label $it" }
+            // Signed operations and credentials retain public signer keys. They are
+            // protocol evidence, not the application's trusted device directory.
+            protocolKeys += keys
+            names.filter { bytes.containsBytes(it.encodeToByteArray()) }.map { "${file.relativeTo(member.directory)}: foreign label $it" }
         }.toList() +
             member.call("lists").jsonArray.flatMap { entry ->
                 // Envelopes this member sent; it shared nothing, so it addresses no other device.
@@ -268,7 +272,8 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
             issuer.directory.walkTopDown().filter { it.isFile }.any { it.readBytes().containsBytes(name.encodeToByteArray()) }
         }.map { "control: trusted device holds no $it" }
         File(root, "member-privacy.json").writeText(JsonArray((findings + control).map(::JsonPrimitive)).toString())
-        notes += "member-directory audit (${names.size / 2} foreign labels, ${foreign.size} foreign keys, sent envelopes): ${findings.size} matches"
+        File(root, "member-protocol-keys.json").writeText(JsonArray(protocolKeys.map(::JsonPrimitive)).toString())
+        notes += "member-directory audit (${names.size / 2} foreign labels, sent envelopes): ${findings.size} matches; ${protocolKeys.size} files retain public protocol keys"
         return findings + control
     }
 

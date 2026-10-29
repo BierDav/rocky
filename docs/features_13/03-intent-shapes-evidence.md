@@ -112,9 +112,10 @@ can occur independently of capture and remain outside this measurement phase.
   and `-m androidApp`. **Both pass.** Android shared/test compilation passes;
   no physical-device or emulator qualification is claimed.
 
-Full validation is finished. Remaining completion-gate blockers are the unchanged
-migration-fixture timing budget and the shopping coordinated-decision failure;
-the three qualification failures also limit the measured shopping corpus.
+At this measurement run, the migration-fixture budget, shopping coordinated
+write and three qualification scenarios still failed. The subsequent
+[shared validation repair](#shared-validation-repair-2026-10-29) clears these
+failures; the measured corpus below remains from the original run.
 
 ## Sources
 
@@ -175,3 +176,43 @@ statements. The 300-statement transaction is a bulk insert in
 - **Seal cadence:** the busiest shopping process committed 13 transactions
   in 60 s. That is automated qualification, faster than human editing,
   and far below 1,024. `ROUTINE_SEAL_TRANSACTIONS` stays at 1,024.
+
+
+## Shared validation repair (2026-10-29)
+
+The earlier failure reports above describe the original measurement run.
+The repair keeps its captured corpus unchanged.
+
+- Fixture relocation skips the separate additive-switch measurement, which
+  remains in the migration qualification gates. Both independent pulls remain.
+- Slot acquisition reports another writer's stored proposal as `Behind`, so
+  retrying clients wait safely. Own unresolved proposals remain `Undecided`.
+- Retained-seal offers, holding proofs and checkpoint pages authorize scope
+  access across branches, including the authorization repeated after export.
+  Live replication still requires the same tip.
+- A losing migration adopts the winning bookmark before closing publications;
+  publications outside its new path cannot seal that path repeatedly.
+- Closing after compaction accepts pruning covered by a base on the inherited
+  seal path; pruning without that coverage remains refused.
+- The privacy audit gates foreign labels, absent roster tables and outgoing
+  envelopes. Public signer keys in signed protocol evidence are reported in
+  `member-protocol-keys.json`, rather than treated as leaked roster rows.
+
+`./scripts/lint` passes. The isolated shopping approvals test passes. The full
+shopping qualification run passes all eight scenarios, including `gate`,
+`branch` and `race-rollback`; the latter converges all four devices and holds
+back the member's write past the rollback seal. The Rust regressions for
+other-writer slot acquisition and cross-branch seal pulling pass; the latter
+also checks closing after compaction.
+
+`NEXTEST_TEST_THREADS=8 ./scripts/check` passes: 212 unit executions and
+1,467 integration executions (1,143 workspace and 324 SDK without defaults).
+Integration wall time is 243.18 s against the 300 s budget. The relocation
+fixture budget is accepted using the runner's isolated confirmation of
+629.4 ms after load adjustment (factor 3.4), against its unchanged 2.00 s limit.
+Host load exceeded 400 on 18 CPUs during validation; these are not idle-host
+measurements. Commit lint also passes.
+
+Evidence is retained under `local/phase02-03-repair/`, including
+`check-final.log` and `qualification-final/evidence.json`. These fixes do not
+resolve phase 2's separate bounded-holds prerequisite audit.

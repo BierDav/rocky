@@ -5,6 +5,9 @@
 #   scripts/tools [TOOL...]   install the named tools (default: all) when missing
 #                             or outdated, then print local/bin
 #   scripts/tools --path      print local/bin only
+#
+# A runtime, such as the JRE ktlint runs on, installs as a directory in
+# local/<tool>, linked from local/bin/<tool>.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -52,18 +55,28 @@ for tool in $tools; do
     if [ -n "$member" ]; then
         mkdir "$work/$tool"
         case "$url" in
-        *.tar.gz | *.tgz) tar -xzf "$file" -C "$work/$tool" "$member" ;;
-        *.tar.xz) tar -xJf "$file" -C "$work/$tool" "$member" ;;
+        *.tar.gz | *.tgz) tar -xzf "$file" -C "$work/$tool" "${member%/}" ;;
+        *.tar.xz) tar -xJf "$file" -C "$work/$tool" "${member%/}" ;;
         *.zip) unzip -q "$file" "$member" -d "$work/$tool" ;;
         *)
             echo "tools: $url is not a supported archive" >&2
             exit 1
             ;;
         esac
-        file="$work/$tool/$member"
+        file="$work/$tool/${member%/}"
     fi
-    chmod +x "$file"
-    mv "$file" "$bin/$tool"
+    case "$member" in
+    */)
+        # A runtime directory: its bin/<tool> is the executable.
+        rm -rf "${bin:?}/$tool" "$repo_root/local/$tool"
+        mv "$file" "$repo_root/local/$tool"
+        ln -s "../$tool/bin/$tool" "$bin/$tool"
+        ;;
+    *)
+        chmod +x "$file"
+        mv "$file" "$bin/$tool"
+        ;;
+    esac
     echo "$version $expected" >"$stamp"
     echo "installed $tool $version" >&2
 done

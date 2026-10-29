@@ -76,10 +76,6 @@ jobs:
           key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
           lookup-only: true
 
-      # ktlint runs on the JVM.
-      - uses: ./source/.github/actions/setup-java
-        if: steps.passed.outputs.cache-hit != 'true'
-
       - name: Bootstrap Rustup and register its tool paths
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source

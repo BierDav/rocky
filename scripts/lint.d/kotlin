@@ -1,6 +1,7 @@
 # shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
 # Kotlin formatting and lint rules from .editorconfig.
-tools=ktlint
+# ktlint runs on the pinned JRE that scripts/tools installs.
+tools='java ktlint'
 # Build output is generated code.
 patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts sdks/uniffi/qualification/discovery/**/*.kt sdks/uniffi/qualification/discovery/**/*.kts !**/build/** !**/target/** !local/**'
 
@@ -11,5 +12,5 @@ check() { (set -f && ktlint --relative $patterns); }
 fix() { (set -f && ktlint --relative --format $patterns); }
 
 # shellcheck disable=SC2016 # jj expands $root and $path
-jj_fix_command='["$root/local/bin/ktlint", "--stdin", "--stdin-path=$root/$path", "--format", "--log-level=none"]'
+jj_fix_command='["$root/local/bin/java", "-jar", "$root/local/bin/ktlint", "--stdin", "--stdin-path=$root/$path", "--format", "--log-level=none"]'
 jj_fix_patterns="[\"glob:'examples/**/*.{kt,kts}' | glob:'sdks/kotlin/**/*.{kt,kts}'\"]"

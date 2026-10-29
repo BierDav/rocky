@@ -4,9 +4,14 @@
 #   tool version platform sha256 url [member]
 #
 # `member` is the executable's path inside a .tar.gz/.tar.xz/.zip archive;
-# without it the download is the executable. Shellcheck publishes no checksums;
-# its hashes are of the release archives, taken when pinning.
+# without it the download is the executable. A member ending in `/` is a
+# runtime directory whose bin/<tool> is the executable. Shellcheck publishes
+# no checksums; its hashes are of the release archives, taken when pinning.
 
+# Temurin JRE for ktlint, so lint needs no host Java.
+java 21.0.13+9 Darwin-arm64 225bab0a09491ef06835488cd942f5d2befa9a0410a2484f0c8bbcf7506ec09a https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.13_9.tar.gz jdk-21.0.13+9-jre/Contents/Home/
+java 21.0.13+9 Linux-aarch64 b1734db7ade49c3f6acc6ae06233b8c2dd90e3e2f00f67000ae1c972aaa64d8c https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_aarch64_linux_hotspot_21.0.13_9.tar.gz jdk-21.0.13+9-jre/
+java 21.0.13+9 Linux-x86_64 a535a1df9c6284d9618872984e026ae0352d1f7e9e0605425c0e6114f47351dd https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_x64_linux_hotspot_21.0.13_9.tar.gz jdk-21.0.13+9-jre/
 ktlint 1.8.0 any a3fd620207d5c40da6ca789b95e7f823c54e854b7fade7f613e91096a3706d75 https://github.com/ktlint/ktlint/releases/download/1.8.0/ktlint
 
 shellcheck 0.11.0 Darwin-arm64 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79 https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.xz shellcheck-v0.11.0/shellcheck

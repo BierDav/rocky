@@ -264,6 +264,7 @@ mod tests {
             sql_name: name.into(),
             granted_like: None,
             class: TableClass::Mergeable,
+            coordinated: false,
             create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
             auto_generate: false,
             columns,

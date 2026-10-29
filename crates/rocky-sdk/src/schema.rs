@@ -237,6 +237,7 @@ impl Table {
             name: name.into(),
             granted_like: None,
             class: rocky_core::TableClass::Mergeable,
+            coordinated: false,
             columns: Vec::new(),
             primary_key: vec!["id".into()],
             partition_by: Vec::new(),

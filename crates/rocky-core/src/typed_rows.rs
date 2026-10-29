@@ -493,6 +493,7 @@ mod tests {
                 sql_name: "items".into(),
             granted_like: None,
                 class: TableClass::Mergeable,
+                coordinated: false,
                 create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id INTEGER NOT NULL,row_kind INTEGER NOT NULL DEFAULT 0)".into(),
                 auto_generate: false,
                 columns: vec![

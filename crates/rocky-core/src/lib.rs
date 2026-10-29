@@ -24,6 +24,7 @@ mod logical;
 mod migration;
 pub use migration::*;
 pub mod net;
+pub mod replay;
 mod storage;
 mod types;
 mod value;

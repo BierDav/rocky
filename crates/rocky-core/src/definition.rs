@@ -42,6 +42,9 @@ pub struct TableDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_like: Option<String>,
     pub class: TableClass,
+    /// A replayed table whose writes go through the coordinated log.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub coordinated: bool,
     pub columns: Vec<ColumnDefinition>,
     pub primary_key: Vec<String>,
     #[serde(default)]
@@ -403,6 +406,7 @@ impl TableDefinition {
             sql_name: name.clone(),
             granted_like: self.granted_like.clone(),
             class: self.class,
+            coordinated: self.coordinated,
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
             auto_generate: false,
             columns,

@@ -61,6 +61,7 @@ pub(crate) fn schema() -> LogicalSchema {
             sql_name: "notes".into(),
             granted_like: None,
             class: TableClass::Mergeable,
+            coordinated: false,
             create_sql: NOTES.into(),
             auto_generate: false,
             columns: vec![

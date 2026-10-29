@@ -37,11 +37,18 @@ pub enum TableClass {
     Mergeable,
     /// Installed, never written by a replicated operation.
     LocalOnly,
+    /// Replicated as intents: replicas replay each partition's transactions
+    /// in canonical order and drop those that fail.
+    Replayed,
 }
 impl TableClass {
     /// Rows with a key and register fields that replicas agree on.
     pub fn typed(self) -> bool {
         self == Self::Mergeable
+    }
+    /// Rows other replicas hold: registers or replayed intents.
+    pub fn replicated(self) -> bool {
+        matches!(self, Self::Mergeable | Self::Replayed)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +136,9 @@ pub struct LogicalTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_like: Option<String>,
     pub class: TableClass,
+    /// Replayed only: writes go through the coordinated log, in its order.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub coordinated: bool,
     /// The ORM's own statement, naming `sql_name`.
     pub create_sql: String,
     /// The engine or ORM assigns the key.
@@ -181,6 +191,34 @@ pub enum Incompatibility {
     /// A table with an existence log, or one its support rows need, cannot
     /// hold deterministic support rows; names the conflicting key/constraint.
     SupportRow(String),
+    /// Only a replayed table may be coordinated.
+    Coordinated,
+    /// A foreign key between a replayed and a mergeable table, named by its
+    /// first column: the two replicate differently.
+    ClassReference(String),
+    /// A foreign key from a coordinated table to an uncoordinated one, named
+    /// by its first column.
+    CoordinatedReference(String),
+    /// A table class this profile cannot keep convergent yet.
+    Unsupported(TableClass),
+}
+/// Why a foreign key from `table` to `target` mixes replication classes.
+fn class_reference(
+    table: &LogicalTable,
+    target: &LogicalTable,
+    key: &LogicalForeignKey,
+) -> Option<Incompatibility> {
+    let column = || key.columns.first().cloned().unwrap_or_default();
+    let replayed = |table: &LogicalTable| table.class == TableClass::Replayed;
+    if replayed(table) != replayed(target)
+        && (table.class.replicated() || target.class.replicated())
+    {
+        return Some(Incompatibility::ClassReference(column()));
+    }
+    if replayed(table) && table.coordinated && !target.coordinated {
+        return Some(Incompatibility::CoordinatedReference(column()));
+    }
+    None
 }
 /// The storage profile a descriptor is installed on. Their differences are
 /// listed in `docs/runtime/schema-definitions.md`.
@@ -646,7 +684,10 @@ impl LogicalTable {
                 }
             }
         }
-        if self.class != TableClass::Mergeable {
+        if self.coordinated && self.class != TableClass::Replayed {
+            return Err(Incompatibility::Coordinated);
+        }
+        if !self.class.replicated() {
             if !self.foreign_keys.is_empty()
                 || tokenize(&self.create_sql)
                     .unwrap_or_default()
@@ -658,9 +699,15 @@ impl LogicalTable {
             if let Some((index, _)) = self.policy_indexes().next() {
                 return Err(Incompatibility::ConflictPolicy(index.name.clone()));
             }
-            if !self.class.typed() {
-                return Ok(());
+            return Ok(());
+        }
+        if self.class == TableClass::Replayed {
+            // SQLite enforces a replayed table's constraints during replay;
+            // references are checked across tables by the schema.
+            if let Some((index, _)) = self.policy_indexes().next() {
+                return Err(Incompatibility::ConflictPolicy(index.name.clone()));
             }
+            return Ok(());
         }
         let statement = tokenize(&self.create_sql).unwrap_or_default();
         let has = |keyword: &str| {
@@ -1050,6 +1097,18 @@ impl LogicalSchema {
             })
         };
         for table in &self.tables {
+            // A reference across replication classes is refused first: no
+            // spelling of it can converge.
+            for key in &table.foreign_keys {
+                if let Some(target) = self
+                    .tables
+                    .iter()
+                    .find(|target| target.sql_name.eq_ignore_ascii_case(&key.table))
+                    && let Some(reason) = class_reference(table, target, key)
+                {
+                    return incompatible(&table.sql_name, reason);
+                }
+            }
             if let Err(reason) = table.installable() {
                 return incompatible(&table.sql_name, reason);
             }
@@ -1091,29 +1150,33 @@ impl LogicalSchema {
                     }
                 }
                 // Only the parent's identity names one incarnation.
-                if !target.is_some_and(|target| {
-                    mergeable
-                        && (target.partition_by.is_empty()
-                            && (table.partition_by.is_empty() || target.existence_log)
-                            || !table.partition_by.is_empty()
-                                && table.partition_group.is_some()
-                                && table.partition_group == target.partition_group
-                                && target.partition_by.iter().zip(&table.partition_by).all(
-                                    |(parent, child)| {
-                                        key.references.iter().zip(&key.columns).any(|(r, c)| {
-                                            r.eq_ignore_ascii_case(parent)
-                                                && c.eq_ignore_ascii_case(child)
-                                        })
-                                    },
-                                ))
-                        && target
-                            .identity_columns()
-                            .iter()
-                            .map(String::as_str)
-                            .zip(&key.references)
-                            .all(|(identity, reference)| identity.eq_ignore_ascii_case(reference))
-                        && target.identity_columns().len() == key.references.len()
-                }) {
+                if table.class == TableClass::Mergeable
+                    && !target.is_some_and(|target| {
+                        mergeable
+                            && (target.partition_by.is_empty()
+                                && (table.partition_by.is_empty() || target.existence_log)
+                                || !table.partition_by.is_empty()
+                                    && table.partition_group.is_some()
+                                    && table.partition_group == target.partition_group
+                                    && target.partition_by.iter().zip(&table.partition_by).all(
+                                        |(parent, child)| {
+                                            key.references.iter().zip(&key.columns).any(|(r, c)| {
+                                                r.eq_ignore_ascii_case(parent)
+                                                    && c.eq_ignore_ascii_case(child)
+                                            })
+                                        },
+                                    ))
+                            && target
+                                .identity_columns()
+                                .iter()
+                                .map(String::as_str)
+                                .zip(&key.references)
+                                .all(|(identity, reference)| {
+                                    identity.eq_ignore_ascii_case(reference)
+                                })
+                            && target.identity_columns().len() == key.references.len()
+                    })
+                {
                     return incompatible(
                         &table.sql_name,
                         Incompatibility::Reference(
@@ -1148,6 +1211,20 @@ impl LogicalSchema {
     pub fn diagnose(&self, profile: Profile) -> Vec<SchemaError> {
         if let Err(error) = self.installable() {
             return vec![error];
+        }
+        // Neither profile replays intents yet; features_13 phase 4 adds it
+        // to the secure profile.
+        let replayed: Vec<_> = self
+            .tables
+            .iter()
+            .filter(|table| table.class == TableClass::Replayed)
+            .map(|table| SchemaError::Incompatible {
+                table: table.sql_name.clone(),
+                reason: Incompatibility::Unsupported(TableClass::Replayed),
+            })
+            .collect();
+        if !replayed.is_empty() {
+            return replayed;
         }
         let mut found = Vec::new();
         let mut refuse = |table: &LogicalTable, reason| {
@@ -1391,6 +1468,7 @@ mod tests {
                 sql_name: "items".into(),
             granted_like: None,
                 class: TableClass::Mergeable,
+                coordinated: false,
                 create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`key`))".into(),
                 auto_generate: false,
                 columns: vec![column("key", Affinity::Text), column("title", Affinity::Text), column("id", Affinity::Integer), column("row_kind", Affinity::Integer)],
@@ -1546,6 +1624,64 @@ mod tests {
         assert_ne!(
             schema.table_id(&schema.tables[0]),
             published.table_id(&published.tables[0])
+        );
+    }
+    #[test]
+    fn replayed_tables_refuse_mixed_and_coordinated_references() {
+        // `items` references `parents` by its identity.
+        let reason = |child: TableClass, parent: TableClass, coordinated: [bool; 2]| {
+            let mut schema = schema();
+            let mut parents = schema.tables[0].clone();
+            parents.sql_name = "parents".into();
+            parents.create_sql = parents.create_sql.replace("`items`", "`parents`");
+            for index in &mut parents.indexes {
+                index.name = index.name.replace("items", "parents");
+            }
+            parents.class = parent;
+            parents.coordinated = coordinated[1];
+            let items = &mut schema.tables[0];
+            items.class = child;
+            items.coordinated = coordinated[0];
+            items.foreign_keys.push(LogicalForeignKey {
+                table: "parents".into(),
+                columns: vec!["id".into()],
+                references: vec!["id".into()],
+                on_delete: "NO ACTION".into(),
+                on_update: "NO ACTION".into(),
+            });
+            schema.tables.push(parents);
+            schema.tables.sort_by(|a, b| a.sql_name.cmp(&b.sql_name));
+            match schema.installable() {
+                Err(SchemaError::Incompatible { reason, .. }) => Some(reason),
+                Ok(()) => None,
+                Err(error) => panic!("{error}"),
+            }
+        };
+        use TableClass::{Mergeable, Replayed};
+        let mixed = Some(Incompatibility::ClassReference("id".into()));
+        assert_eq!(reason(Replayed, Mergeable, [false; 2]), mixed);
+        assert_eq!(reason(Mergeable, Replayed, [false; 2]), mixed);
+        assert_eq!(reason(Replayed, Replayed, [false; 2]), None);
+        assert_eq!(reason(Replayed, Replayed, [false, true]), None);
+        assert_eq!(reason(Replayed, Replayed, [true; 2]), None);
+        assert_eq!(
+            reason(Replayed, Replayed, [true, false]),
+            Some(Incompatibility::CoordinatedReference("id".into()))
+        );
+        assert_eq!(
+            reason(Mergeable, Mergeable, [true, false]),
+            Some(Incompatibility::Coordinated)
+        );
+        // Until the replay engine lands, no profile installs one.
+        let mut schema = schema();
+        schema.tables[0].class = Replayed;
+        assert_eq!(schema.installable(), Ok(()));
+        assert_eq!(
+            schema.supported_on(Profile::Secure),
+            Err(SchemaError::Incompatible {
+                table: "items".into(),
+                reason: Incompatibility::Unsupported(Replayed),
+            })
         );
     }
     #[test]

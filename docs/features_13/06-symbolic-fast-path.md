@@ -1,7 +1,8 @@
 # 6. Symbolic fast path
 
-Status: planned. Owner: new crate `crates/rocky-symbolic`; its caller in
-`rocky-secure` replay. Depends on [phase 3](03-intent-shapes.md) and
+Status: complete, not merged: the merge rule's paired advantage failed, so the
+crate was deleted; see the [evidence](06-symbolic-fast-path-evidence.md). Owner:
+new crate `crates/rocky-symbolic`; its caller in `rocky-secure` replay. Depends on [phase 3](03-intent-shapes.md) and
 [phase 5](05-replayed-constraints.md). Effort: two weeks. Follow the
 [execution contract](README.md#agent-execution-contract).
 

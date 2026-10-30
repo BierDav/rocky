@@ -68,7 +68,7 @@ features_11's results.
 | Observer notification after `commit()` returns (p95) | features_12 phase 1 | ≤ 5 ms | 1, 4 |
 | Single-row intent receive, in order, SQL statements | 83 (register path) | ≤ 45 | 4 |
 | Single-row intent author, SQL statements | 87 (features_12 phase 1) | ≤ 43 | 4 |
-| Late commuting transaction (fast path) | not available | no rewind; statements ≤ in-order receive + 5 | 6 |
+| Late commuting transaction (fast path) | not available | no rewind; statements ≤ in-order receive + 5 ([met, but the crate was not merged](06-symbolic-fast-path-evidence.md)) | 6 |
 | Induced typed-row work per acquisition in replayed tables | unbounded (constraint fan-out) | none; the fan-out exception and its counter are deleted | 5, 8 |
 | Issuer 100k migration fill | 239.6 s (paired, loaded host) | ≤ 70 s | 7 |
 | Member apply of the 100k migration | 15.2 s member pull (paired) | ≤ 110% of paired pull | 7 |
@@ -286,7 +286,7 @@ bump in its evidence.
 | 3 | [Intent shapes](03-intent-shapes.md) (measured; validation gate blocked) | none | 3–5 d | Measured transaction shapes; fast-path set and seal cadence chosen |
 | 4 | [Intent replay](04-intent-replay.md) | 2, 3 | 3–4 w | `Replayed` tables: intents, split, replay, drops, outcomes; [slices 1–9 implemented; L0 gate unmet (baseline too), L2 regression open](04-intent-replay-evidence.md) |
 | 5 | [Replayed constraints](05-replayed-constraints.md) | 4 | 2–3 w | Unique, FK, complex `CHECK` and assertions in replay; no field stamps or induced fan-out |
-| 6 | [Symbolic fast path](06-symbolic-fast-path.md) | 3, 5 | 2 w | `rocky-symbolic`, merged only if proven and faster |
+| 6 | [Symbolic fast path](06-symbolic-fast-path.md) | 3, 5 | 2 w | `rocky-symbolic`, merged only if proven and faster; [proven equal, not faster in the mix: not merged](06-symbolic-fast-path-evidence.md) |
 | 7 | [Intent migrations](07-intent-migrations.md) | 4 | 2 w | Migrations publish as intents; bounded, resumable |
 | 8 | [Intent only](08-intent-only.md) | 5, 6, 7 | 2 w | `Mergeable`, registers and resolver deleted |
 | 9 | [Qualification](09-qualification.md) | 1, 2, 8 | 1 w | Devices, convergence fuzz, sync non-regression |

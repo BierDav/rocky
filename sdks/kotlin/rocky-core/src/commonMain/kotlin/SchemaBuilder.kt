@@ -4,6 +4,12 @@ import kotlinx.serialization.json.*
 
 enum class TableClass(internal val wire: String) {
     Mergeable("mergeable"),
+
+    /**
+     * Replicates each transaction's statements; replicas replay them in canonical order and drop a transaction
+     * whose replay fails. [RockyDatabase.transactionOutcome] reports how a committed transaction stands.
+     */
+    Replayed("replayed"),
     LocalOnly("local_only"),
 }
 enum class UpdatePolicy(internal val wire: String) { Changed("changed"), Assigned("assigned") }

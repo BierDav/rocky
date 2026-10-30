@@ -384,7 +384,8 @@ impl<A: RowApplication> Inner<A> {
                         )
                         .await?;
                     // The author's execution is the transaction's local replay.
-                    self.record_replayed(&frame, recorded, None, &undo).await?;
+                    self.record_replayed(&frame, recorded, None, &undo, None)
+                        .await?;
                     replayed.push(authored.len());
                     authored.push(frame);
                     continue;
@@ -643,6 +644,9 @@ impl<A: RowApplication> Inner<A> {
         }
         // An applied member still retained must be of this same transaction.
         for (index, frame) in &settled {
+            if !self.member_opens(frame)? {
+                return Ok(Outcome::Waiting(WaitReason::OpeningKey));
+            }
             if let Err(error) = self.membership_of(frame, *index, membership) {
                 return self.reject_members(&hashes, &error.to_string()).await;
             }
@@ -722,6 +726,9 @@ impl<A: RowApplication> Inner<A> {
                 match error {
                     Error::Rejected(reason) if reason == identity::LEDGER_WAITS => {
                         Ok(Outcome::Waiting(WaitReason::Ledger))
+                    }
+                    Error::Rejected(reason) if reason == super::replay::KEY_WAITS => {
+                        Ok(Outcome::Waiting(WaitReason::OpeningKey))
                     }
                     error if identity::receipts::semantic_refusal(&error) => {
                         self.reject_members(&hashes, &error.to_string()).await
@@ -912,6 +919,9 @@ impl<A: RowApplication> Inner<A> {
         if !self.frame_schema_ready(frame)? {
             return Ok(Err(WaitReason::Schema));
         }
+        if !self.member_opens(frame)? {
+            return Ok(Err(WaitReason::OpeningKey));
+        }
         let grants = self.verify_frame(frame, time)?;
         let payload = self.membership_of(frame, index, expected)?;
         if !self
@@ -927,6 +937,14 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Err(WaitReason::Dependencies));
         }
         Ok(Ok((frame.clone(), payload, grants)))
+    }
+    /// Whether this replica holds the key that sealed a member; a held
+    /// member waits for it, as a single frame does.
+    fn member_opens(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
+        let extension = &frame.operation_ref()?.header.extensions;
+        Ok(self
+            .opening_key(extension.scope, extension.generation)
+            .is_some())
     }
     /// Decrypts a member and checks it carries `expected` at `index`.
     fn membership_of(

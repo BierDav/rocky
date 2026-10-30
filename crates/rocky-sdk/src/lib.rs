@@ -93,11 +93,12 @@ pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// The client of a coordination service and the bundle that pins it.
 #[cfg(feature = "iroh")]
 pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};
+pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, ConflictPolicy, DeleteAction, ForeignKeyDefinition,
     IndexColumn, IndexDefinition, LogicalView, TableClass, TableDefinition, UpdatePolicy,
 };
-pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue};
+pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
 /// Signed credentials, grant profiles and the key provider contract.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;

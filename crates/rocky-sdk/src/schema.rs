@@ -228,15 +228,23 @@ impl SchemaBuilder {
     }
 }
 
-/// A mergeable table has Rocky-managed `id` and `row_kind` columns.
-/// Use `primary_key` to declare a natural key instead.
+/// A typed table has Rocky-managed `id` and `row_kind` columns. Use
+/// `primary_key` to declare a natural key instead.
 pub struct Table(rocky_core::TableDefinition);
 impl Table {
     pub fn mergeable(name: impl Into<String>) -> Self {
+        Self::of(name, rocky_core::TableClass::Mergeable)
+    }
+    /// Replicates each transaction's statements; replicas replay them in
+    /// canonical order and drop a transaction whose replay fails.
+    pub fn replayed(name: impl Into<String>) -> Self {
+        Self::of(name, rocky_core::TableClass::Replayed)
+    }
+    fn of(name: impl Into<String>, class: rocky_core::TableClass) -> Self {
         Self(rocky_core::TableDefinition {
             name: name.into(),
             granted_like: None,
-            class: rocky_core::TableClass::Mergeable,
+            class,
             coordinated: false,
             columns: Vec::new(),
             primary_key: vec!["id".into()],

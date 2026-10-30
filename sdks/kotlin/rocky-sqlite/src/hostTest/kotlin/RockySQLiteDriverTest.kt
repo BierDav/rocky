@@ -7,6 +7,7 @@ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.sqlite.execSQL
 import kotlinx.coroutines.runBlocking
 import rocky.RockyDatabase
+import rocky.RockyTransactionOutcome
 import rocky.schema
 import kotlin.test.*
 import rocky.testing.TestFile as File
@@ -168,6 +169,40 @@ class RockySQLiteDriverTest {
             assertEquals(23, code(assertFailsWith<SQLiteException>(sql) { writer.execSQL(sql) }), sql)
         }
         writer.close()
+    }
+
+    @Test fun aReplayedCommitReportsItsOutcome() = runBlocking {
+        val counters = schema("counters", version = 1) {
+            table("counters") {
+                tableClass = rocky.TableClass.Replayed
+                text("key")
+                integer("amount")
+                primaryKey("key")
+            }
+        }
+        val directory: File = Files.createTempDirectory("rocky-sqlite").toFile()
+        val database = RockyDatabase.local(directory.path, counters)
+        try {
+            val writer = RockySQLiteDriver(database).open("counters")
+            writer.execSQL("BEGIN IMMEDIATE TRANSACTION")
+            writer.insertFrom("counters", "INSERT INTO counters(key, amount, id) VALUES('c', 1, ?)")
+            writer.execSQL("UPDATE counters SET amount = amount + 1 WHERE key = 'c'")
+            writer.execSQL("END TRANSACTION")
+            val token = assertNotNull(writer.committedTransaction())
+            assertEquals(RockyTransactionOutcome.Applied, database.transactionOutcome(token))
+            assertEquals(
+                2,
+                writer.prepare("SELECT amount FROM counters").use {
+                    it.step()
+                    it.getLong(0)
+                },
+            )
+            assertNull(database.transactionOutcome(ByteArray(32)))
+            writer.close()
+        } finally {
+            database.close()
+            directory.deleteRecursively()
+        }
     }
 
     // The bundled native getters dereference null pointers for NULL/empty text.

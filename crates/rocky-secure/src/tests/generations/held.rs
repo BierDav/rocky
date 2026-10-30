@@ -10,7 +10,7 @@ fn encoded(value: SqlValue) -> Vec<u8> {
 }
 /// Catches `target` up on `scope` from `source` by range pages, voids
 /// first, as a session does.
-async fn sync(
+pub(super) async fn sync(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,
     target_key: &PrivateKey,

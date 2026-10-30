@@ -70,7 +70,7 @@ async fn retain(fixture: MemberFixture, destination: &Path) -> Result<(), Failur
 fn restore(source: &Path) -> Result<MemberFixture, Failure> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(source.join("fixture.json"))?)?;
     if manifest.version != 1
-        || manifest.rows != 8
+        || ![8, PULL_ROWS].contains(&manifest.rows)
         || manifest.schema != FILLED.replace("100000", &manifest.rows.to_string())
     {
         return Err("unsupported prepared member-pull fixture".into());
@@ -95,6 +95,27 @@ fn restore(source: &Path) -> Result<MemberFixture, Failure> {
         hub,
         a,
     })
+}
+
+/// Rows of the features_13 sync non-regression member pull.
+const PULL_ROWS: usize = 100_000;
+
+/// A member pulls the issuer's 100k-row migration, three times from one
+/// prepared fixture. Diagnostic; `cargo test --release -p rocky-sdk --test
+/// migrations prepared_pull::member_pull -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement"]
+async fn member_pull_of_100000_rows() -> Result<(), Failure> {
+    if cfg!(debug_assertions) {
+        return Err("run measurements with --release".into());
+    }
+    let cache = common::identity::small_directory()?;
+    let fixture = cache.path().join("prepared");
+    retain(prepare_member_fixture(PULL_ROWS, 0).await?, &fixture).await?;
+    for _ in 0..3 {
+        pull_member_fixture(restore(&fixture)?).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

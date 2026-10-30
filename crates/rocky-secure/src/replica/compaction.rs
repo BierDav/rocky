@@ -683,6 +683,7 @@ impl<A: RowApplication> Inner<A> {
                 through: bound,
                 excluded: Vec::new(),
                 changed: false,
+                replayed: self.replayed_scope(*scope),
             };
             if indexed {
                 (change.through, change.excluded) =
@@ -726,7 +727,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             change.changed = change.through > bound || !change.excluded.is_empty();
-            if !change.changed {
+            if !change.changed && !change.replayed {
                 change.changed = if indexed {
                     self.has_indexed_seal_drops(*scope, seal.statement.tip, *id)
                         .await?
@@ -760,6 +761,8 @@ struct SealChange {
     /// Positions after `bound` it excludes, in order, with their hashes.
     excluded: Vec<(i64, Vec<u8>)>,
     changed: bool,
+    /// A replayed scope keeps no row records: replay orders its rows.
+    replayed: bool,
 }
 
 /// Where the finalized seals start on the path: only the latest compacted
@@ -924,6 +927,12 @@ impl<A: RowApplication> Inner<A> {
             },
         };
         let changed: Vec<&SealChange> = changes.iter().filter(|change| change.changed).collect();
+        // Rows of replayed scopes follow their replay order, not records.
+        let restored: Vec<&SealChange> = changed
+            .iter()
+            .copied()
+            .filter(|change| !change.replayed)
+            .collect();
         // Application order stays causal: every operation the seal
         // excludes, in order, after every one it includes.
         self.conn
@@ -984,7 +993,7 @@ impl<A: RowApplication> Inner<A> {
         // A scope whose every applied operation the seal includes already
         // holds the seal's state: rebuilding it would rewrite every row.
         let mut whole = BTreeSet::new();
-        for change in &changed {
+        for change in &restored {
             let last = match collect_rows(
                 self.conn
                     .query(
@@ -1007,14 +1016,14 @@ impl<A: RowApplication> Inner<A> {
                 whole.insert(change.id);
             }
         }
-        for change in changed.iter().filter(|change| !whole.contains(&change.id)) {
+        for change in restored.iter().filter(|change| !whole.contains(&change.id)) {
             if incremental {
                 self.restore_seal_rows(change.scope, change.through).await?;
             } else {
                 self.restore_rows(change.scope, change.through).await?;
             }
         }
-        for change in changed.iter().filter(|change| !whole.contains(&change.id)) {
+        for change in restored.iter().filter(|change| !whole.contains(&change.id)) {
             if !incremental {
                 self.reproject(change.scope).await?;
             }
@@ -1023,7 +1032,7 @@ impl<A: RowApplication> Inner<A> {
             Box::pin(self.resolve(None)).await?;
         }
         let mut drops = Vec::new();
-        for change in &changed {
+        for change in &restored {
             let mut rows = Vec::new();
             for (row, record) in self
                 .seal_drops(change.scope, seal.statement.tip, incremental)
@@ -1101,6 +1110,12 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        let cuts: Vec<_> = changes
+            .iter()
+            .filter(|change| change.replayed)
+            .map(|change| (change.id, change.through))
+            .collect();
+        self.order_behind_seal(&cuts, depth, now()?).await?;
         for change in &changes {
             self.conn
                 .execute(
@@ -1127,7 +1142,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // Rebuilt with every operation, applying the seal's diff; a whole
         // scope the seal drops nothing of is that state already.
-        for change in changed
+        for change in restored
             .iter()
             .filter(|change| !unchanged.contains(&change.id))
         {

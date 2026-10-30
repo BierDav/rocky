@@ -447,7 +447,7 @@ async fn a_seal_ends_rewinds_and_makes_drops_final() {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
     // A seal finalizes everything Carol applied so far.
-    carol.seal_replayed_for_test(t.salaries).await;
+    carol.seal_replayed_for_test(t.salaries).await.unwrap();
     assert_eq!(undo_records(&carol).await, 0);
     use rocky_core::replay::{DropReason, TransactionOutcome};
     assert_eq!(
@@ -701,6 +701,108 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
     assert!(replayed.1 <= 45, "{replayed:?} statements");
 }
 
+/// Receiving a transaction that changed 32 rows costs at most 6.5
+/// statements per row (the features_11 result was 6.40625), whether the
+/// author wrote each row in its own statement or all in one.
+#[tokio::test]
+async fn a_thirty_two_row_intent_receives_within_its_statements_per_row() {
+    const ROWS: usize = 32;
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let alice = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    let bob = t
+        .open(
+            &dir.path().join("b.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    let session = sql(&alice, &both).await;
+    session.run("BEGIN", vec![]).await.unwrap();
+    for row in 0..ROWS {
+        insert(
+            &session,
+            "INSERT INTO salaries VALUES(?,0)",
+            vec![text(&format!("k{row:02}"))],
+        )
+        .await
+        .unwrap();
+    }
+    let [created] = session
+        .commit([1; 32])
+        .await
+        .unwrap()
+        .committed
+        .unwrap()
+        .frames
+        .try_into()
+        .unwrap();
+    assert_eq!(bob.receive(created).await.unwrap(), ReceiveStatus::Applied);
+    let commit = |statements: Vec<(String, Vec<SqlValue>)>, handle: u8| {
+        let session = &session;
+        async move {
+            session.run("BEGIN", vec![]).await.unwrap();
+            for (statement, params) in statements {
+                session.run(&statement, params).await.unwrap();
+            }
+            let [frame] = session
+                .commit([handle; 32])
+                .await
+                .unwrap()
+                .committed
+                .unwrap()
+                .frames
+                .try_into()
+                .unwrap();
+            frame
+        }
+    };
+    let each = commit(
+        (0..ROWS)
+            .map(|row| {
+                (
+                    "UPDATE salaries SET amount=amount+1 WHERE key=?".to_owned(),
+                    vec![text(&format!("k{row:02}"))],
+                )
+            })
+            .collect(),
+        2,
+    )
+    .await;
+    let all = commit(
+        vec![("UPDATE salaries SET amount=amount*2".to_owned(), vec![])],
+        3,
+    )
+    .await;
+    let mut per_row = Vec::new();
+    for frame in [each, all] {
+        // The counter sees Rocky's statements; the replayed application
+        // statements run once each beside them.
+        let replayed = opened(&t, &frame).1.unwrap().statements.len() as u64;
+        let before = crate::sqlite::statements();
+        assert_eq!(bob.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+        per_row.push((crate::sqlite::statements() - before + replayed) as f64 / ROWS as f64);
+    }
+    assert_eq!(
+        select(&sql(&bob, &both).await, "SELECT sum(amount) FROM salaries").await,
+        vec![vec![SqlValue::Integer(2 * ROWS as i64)]]
+    );
+    println!(
+        "P4 receive_statements_per_row each={} all={}",
+        per_row[0], per_row[1]
+    );
+    assert!(per_row.iter().all(|count| *count <= 6.5), "{per_row:?}");
+}
+
 #[tokio::test]
 async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
     let t = replayed();
@@ -748,4 +850,108 @@ async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
         carol.unsealed_replayed_transactions().await.unwrap(),
         LATER as u64 + 2
     );
+}
+
+#[tokio::test]
+async fn replayed_inserts_take_their_authors_own_identities() {
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let (a, b) = (PrivateKey::new(), PrivateKey::new());
+    let alice = t.open(&dir.path().join("a.db"), &a, t.full(), &both).await;
+    let bob = t.open(&dir.path().join("b.db"), &b, t.full(), &both).await;
+    // Replayed tables keep no row records; the allocator still advances.
+    let session = sql(&bob, &both).await;
+    let mut frames = Vec::new();
+    for key in ["ann", "ben"] {
+        frames.extend(
+            insert(
+                &session,
+                &format!("INSERT INTO salaries VALUES('{key}',1)"),
+                vec![],
+            )
+            .await
+            .unwrap()
+            .committed
+            .unwrap()
+            .frames,
+        );
+    }
+    for frame in frames {
+        assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    // An id of another author's number is refused at commit, and a
+    // replica drops it when the author skips that check.
+    let alices = rocky_core::RowIdentity::next(crate::tests::node_number(a.public_key()), 100)
+        .unwrap()
+        .integer();
+    let forged = format!("INSERT INTO salaries(key,amount,id) VALUES('cy',1,{alices})");
+    assert!(matches!(
+        session.run(&forged, vec![]).await,
+        Err(Error::Rejected(_))
+    ));
+    bob.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .unchecked_replayed_admission = true;
+    let [frame] = session
+        .run(&forged, vec![])
+        .await
+        .unwrap()
+        .committed
+        .unwrap()
+        .frames
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        alice.receive(frame.clone()).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    use rocky_core::replay::{DropReason, TransactionOutcome};
+    assert_eq!(
+        alice
+            .transaction_outcome(transaction(&t, &frame))
+            .await
+            .unwrap(),
+        Some(TransactionOutcome::Dropped {
+            reason: DropReason::Admission,
+            sealed: false,
+        })
+    );
+    assert_eq!(amounts(&alice, &both).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_update_to_equal_values_needs_no_right() {
+    let t = replayed();
+    let dir = TempDir::new().unwrap();
+    let both = [t.items, t.salaries];
+    let alice = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    let bob = t
+        .open(
+            &dir.path().join("b.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    let created = create(&alice, &both, 10).await;
+    let same = raise(&sql(&alice, &both).await, 0).await;
+    for frame in [created, same.clone()] {
+        assert_eq!(bob.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    assert_eq!(
+        bob.transaction_outcome(transaction(&t, &same))
+            .await
+            .unwrap(),
+        Some(rocky_core::replay::TransactionOutcome::Applied)
+    );
+    assert_eq!(undo_records(&bob).await, 1);
 }

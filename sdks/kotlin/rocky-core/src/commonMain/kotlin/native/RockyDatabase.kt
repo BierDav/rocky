@@ -12,6 +12,7 @@ import rocky.internal.native.NativeException
 import rocky.internal.native.NativeNetwork
 import rocky.internal.native.NativeNetworkService
 import rocky.internal.native.NativeTableEvents
+import rocky.internal.native.NativeTransactionOutcome
 import rocky.internal.native.prepareDevice
 
 /**
@@ -21,6 +22,14 @@ import rocky.internal.native.prepareDevice
 sealed interface RockyBinding {
     data class Seal(val seal: String) : RockyBinding
     data class Bookmark(val name: String) : RockyBinding
+}
+
+/** How a committed transaction with replayed writes stands on this device. */
+sealed interface RockyTransactionOutcome {
+    data object Applied : RockyTransactionOutcome
+
+    /** Its writes are gone: `constraint`, `admission`, `schema` or `engine`; [sealed] makes the drop final. */
+    data class Dropped(val reason: String, val sealed: Boolean) : RockyTransactionOutcome
 }
 
 /** Database ownership is independent of sessions and of an optional network. */
@@ -90,6 +99,18 @@ class RockyDatabase private constructor(
                 is RockyBinding.Bookmark -> NativeBinding.Bookmark(binding.name)
             },
         )
+    }
+
+    /**
+     * How the transaction a driver connection committed under [token] stands: null until one of its replayed
+     * writes replayed. A local commit stays visible until replay drops it.
+     */
+    suspend fun transactionOutcome(token: ByteArray): RockyTransactionOutcome? = nativeCall {
+        when (val outcome = native.transactionOutcome(token)) {
+            null -> null
+            is NativeTransactionOutcome.Applied -> RockyTransactionOutcome.Applied
+            is NativeTransactionOutcome.Dropped -> RockyTransactionOutcome.Dropped(outcome.reason, outcome.sealed)
+        }
     }
 
     /** Committed changes of `tables`, or of every table, for a driver to invalidate what it read. */

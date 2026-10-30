@@ -12,7 +12,22 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     // Members some record names: a seal covers a transaction of several
     // members once each has one.
     "CREATE TABLE IF NOT EXISTS secure_outcome_members(txn BLOB NOT NULL,member INTEGER NOT NULL,PRIMARY KEY(txn,member)) WITHOUT ROWID",
+    // Refused records that disagreed with a stored one, with both engines.
+    "CREATE TABLE IF NOT EXISTS secure_outcome_divergence(txn BLOB NOT NULL,publisher BLOB NOT NULL,stored TEXT NOT NULL,refused TEXT NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID",
 ];
+
+/// Two replicas replayed the same members of a transaction after the same
+/// prefixes and disagree on its outcome. The later record was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeDivergence {
+    pub transaction: Commitment,
+    /// The publisher of the refused record.
+    pub publisher: PublicKey,
+    /// The engine of the record this replica kept.
+    pub stored: String,
+    /// The engine of the refused record.
+    pub refused: String,
+}
 
 /// This build's engine as records name it.
 fn engine() -> String {
@@ -24,18 +39,16 @@ fn engine() -> String {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What the partition applied before `stamp`: the last sequence per
-    /// author.
-    async fn prefix(&self, scope: i64, stamp: &Stamp) -> Result<Vec<BaseMark>, Error> {
+    /// What the partition applied before the recorded member `hash`: the
+    /// last sequence per author.
+    async fn prefix(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
         let rows = collect_rows(
             self.conn
                 .query(
-                    "SELECT author,MAX(sequence) FROM secure_replayed WHERE scope=? AND (clock,author,sequence)<(?,?,?) GROUP BY author ORDER BY author",
+                    "SELECT author,MAX(sequence) FROM secure_replayed WHERE scope=? AND (era,clock,author,sequence)<(SELECT era,clock,author,sequence FROM secure_replayed WHERE hash=?) GROUP BY author ORDER BY author",
                     bindings(vec![
                         SqlValue::Integer(scope),
-                        SqlValue::Integer(stamp.clock as i64),
-                        SqlValue::Integer(i64::from(stamp.author)),
-                        SqlValue::Integer(stamp.sequence as i64),
+                        SqlValue::Blob(hash.as_bytes().to_vec()),
                     ]),
                 )
                 .await?,
@@ -136,7 +149,8 @@ impl<A: RowApplication> Inner<A> {
 
     /// Signs how this replica replayed its held members of a transaction
     /// of several members into each of their logs it may write: after
-    /// replaying them, and as their author at commit.
+    /// replaying them, and as their author at commit; again only when the
+    /// outcome changes.
     pub(in crate::replica) async fn publish_outcome(
         &self,
         transaction: Commitment,
@@ -155,10 +169,10 @@ impl<A: RowApplication> Inner<A> {
         let mut replayed = Vec::with_capacity(held.len());
         let mut logs = Vec::new();
         for (frame, member) in held {
-            let header = &frame.operation_ref()?.header;
-            let scope = header.extensions.scope;
+            let operation = frame.operation_ref()?;
+            let scope = operation.header.extensions.scope;
             let id = self.scope_id(scope).await?;
-            replayed.push((*member, self.prefix(id, &stamp(header)).await?));
+            replayed.push((*member, self.prefix(id, operation.hash).await?));
             let writes = grants.iter().any(|grant| {
                 grant.scope == scope
                     && [Right::Insert, Right::Update, Right::Delete]
@@ -173,24 +187,53 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         replayed.sort_by_key(|(member, _)| *member);
+        // A redo publishes again only when the outcome changed; a moved
+        // prefix alone would make records grow with every rewind.
+        let unchanged =
+            self.outcome_records(transaction)
+                .await?
+                .iter()
+                .any(|(publisher, _, own)| {
+                    publisher.as_slice() == node.as_bytes()
+                        && own.dropped == dropped
+                        && own
+                            .replayed
+                            .iter()
+                            .map(|(member, _)| member)
+                            .eq(replayed.iter().map(|(member, _)| member))
+                });
+        if unchanged {
+            return Ok(());
+        }
         let record = OutcomeRecord {
             transaction,
             replayed,
             dropped,
             engine: engine(),
         };
+        self.sign_outcome(&record, &logs, node, time).await
+    }
+
+    /// Appends `record` to each of `logs` as this node and stores it.
+    async fn sign_outcome(
+        &self,
+        record: &OutcomeRecord,
+        logs: &[(ResourceScope, i64)],
+        node: PublicKey,
+        time: u64,
+    ) -> Result<(), Error> {
         record.check().map_err(denied)?;
         let mut sequence = 0;
         for (scope, id) in logs {
-            let tip = self.author_tip(scope, id, node).await?;
+            let tip = self.author_tip(*scope, *id, node).await?;
             let frame = self
-                .author_log_frame((scope, tip), time, |_, _| {
+                .author_log_frame((*scope, tip), time, |_, _| {
                     RowPayload::outcome_record(record.clone())
                 })
                 .await?;
             sequence = frame.operation_ref()?.header.extensions.author_sequence;
         }
-        self.store_outcome(node.as_bytes(), sequence, &record).await
+        self.store_outcome(node.as_bytes(), sequence, record).await
     }
 
     /// Takes in another replica's record. A record that disagrees with one
@@ -217,6 +260,22 @@ impl<A: RowApplication> Inner<A> {
                 && other.replayed == record.replayed
                 && other.dropped != record.dropped
         }) {
+            tracing::warn!(
+                stored = %other.engine,
+                refused = %record.engine,
+                "divergent outcome records"
+            );
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO secure_outcome_divergence VALUES(?,?,?,?)",
+                    bindings(vec![
+                        SqlValue::Blob(record.transaction.to_vec()),
+                        SqlValue::Blob(publisher.as_bytes().to_vec()),
+                        SqlValue::Text(other.engine.clone()),
+                        SqlValue::Text(record.engine.clone()),
+                    ]),
+                )
+                .await?;
             return Ok(Err(format!(
                 "divergent outcome records for one transaction: {} and {}",
                 other.engine, record.engine
@@ -227,7 +286,7 @@ impl<A: RowApplication> Inner<A> {
         let held = collect_rows(
             self.conn
                 .query(
-                    "SELECT clock,author,sequence,scope,member,dropped FROM secure_replayed WHERE txn=? AND sealed=0",
+                    "SELECT era,clock,author,sequence,scope,member,dropped FROM secure_replayed WHERE txn=? AND sealed=0",
                     [record.transaction.to_vec()],
                 )
                 .await?,
@@ -246,7 +305,7 @@ impl<A: RowApplication> Inner<A> {
             else {
                 return Err(Error::Corrupt("replayed member".into()));
             };
-            starts.push((*scope, stamp_of(row)?));
+            starts.push((*scope, order_of(row)?));
             members.push(*member as u16);
             dropped |= !matches!(outcome, SqlValue::Null);
         }
@@ -265,7 +324,74 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+#[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Signs this replica's stored record of `transaction` again, with its
+    /// outcome and engine replaced, as a divergent replica would.
+    pub(crate) async fn forge_outcome_for_test(
+        &self,
+        transaction: Commitment,
+        dropped: Option<DropReason>,
+        engine: &str,
+        scopes: &[ResourceScope],
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock(Class::Background).await;
+        let time = now()?;
+        let engine = engine.to_owned();
+        let scopes = scopes.to_vec();
+        transaction!(inner, |inner| {
+            let node = inner.config.node.public_key();
+            let (.., mut record) = inner
+                .outcome_records(transaction)
+                .await?
+                .into_iter()
+                .find(|(publisher, ..)| publisher.as_slice() == node.as_bytes())
+                .ok_or(Error::Closed)?;
+            record.dropped = dropped;
+            record.engine = engine.clone();
+            let mut logs = Vec::new();
+            for scope in &scopes {
+                logs.push((*scope, inner.scope_id(*scope).await?));
+            }
+            inner.sign_outcome(&record, &logs, node, time).await
+        })
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Outcome records this replica refused as divergence.
+    pub async fn outcome_divergences(&self) -> Result<Vec<OutcomeDivergence>, Error> {
+        let inner = self.inner.lock(Class::Background).await;
+        let corrupt = || Error::Corrupt("outcome divergence".into());
+        collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT txn,publisher,stored,refused FROM secure_outcome_divergence ORDER BY txn,publisher",
+                    (),
+                )
+                .await?,
+        )
+        .await?
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [
+                SqlValue::Blob(txn),
+                SqlValue::Blob(publisher),
+                SqlValue::Text(stored),
+                SqlValue::Text(refused),
+            ] => Ok(OutcomeDivergence {
+                transaction: txn.as_slice().try_into().map_err(|_| corrupt())?,
+                publisher: PublicKey::from_bytes(publisher.as_slice().try_into().map_err(|_| corrupt())?)
+                    .map_err(|_| corrupt())?,
+                stored: stored.clone(),
+                refused: refused.clone(),
+            }),
+            _ => Err(corrupt()),
+        })
+        .collect()
+    }
+
     /// Publishes this replica's record for every open transaction of
     /// several members it holds whole that some member still lacks one
     /// for, as when its author is gone. The owner runs this before it

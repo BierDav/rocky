@@ -13,6 +13,8 @@ use crate::{
 pub(crate) struct Touched {
     tables: BTreeSet<String>,
     causes: BTreeSet<Cause>,
+    /// Replayed transactions the open write transaction records as dropped.
+    dropped: BTreeSet<Commitment>,
 }
 /// Query state shared by a replica's handles.
 pub(crate) struct Queries {
@@ -220,6 +222,12 @@ impl<A: RowApplication> Inner<A> {
             touched.tables.insert(table.to_ascii_lowercase());
         }
     }
+    /// The open write transaction records `transaction` as dropped.
+    pub(super) fn touch_dropped(&self, transaction: Commitment) {
+        if let Ok(mut touched) = self.workspace.queries.touched.lock() {
+            touched.dropped.insert(transaction);
+        }
+    }
     /// Why the open write transaction changes typed tables.
     pub(crate) fn cause(&self, cause: Cause) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
@@ -244,17 +252,23 @@ impl<A: RowApplication> Inner<A> {
         let Ok(mut touched) = self.workspace.queries.touched.lock() else {
             return;
         };
-        let Touched { tables, mut causes } = std::mem::take(&mut *touched);
+        let Touched {
+            tables,
+            mut causes,
+            dropped,
+        } = std::mem::take(&mut *touched);
+        let Some(events) = &self.workspace.queries.events else {
+            return;
+        };
+        events.publish_drops(self.revision, &dropped);
         if tables.is_empty() {
             return;
         }
         if causes.is_empty() {
             causes.insert(Cause::Rebuild);
         }
-        if let Some(events) = &self.workspace.queries.events {
-            let causes: Vec<_> = causes.into_iter().collect();
-            events.publish(Some(&tables), self.revision, &causes);
-        }
+        let causes: Vec<_> = causes.into_iter().collect();
+        events.publish(Some(&tables), self.revision, &causes);
     }
     /// Refuses a statement that names a typed table whose rows are not
     /// locally available to `status`. A held, complete scope with no

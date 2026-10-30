@@ -120,6 +120,39 @@ impl NativeDatabase {
             connection: Arc::new(connection),
         }))
     }
+    /// How a committed transaction with replayed writes stands here, by
+    /// the token its connection's `committed` returned: `None` until one
+    /// of its writes replayed.
+    pub async fn transaction_outcome(
+        &self,
+        token: Vec<u8>,
+    ) -> Result<Option<NativeTransactionOutcome>, NativeError> {
+        let token = rocky_sdk::TransactionToken(
+            token
+                .try_into()
+                .map_err(|_| failure("a transaction token has 32 bytes".into()))?,
+        );
+        let outcome = self
+            .database()
+            .transaction_outcome(token)
+            .await
+            .map_err(failure)?;
+        Ok(outcome.map(|outcome| match outcome {
+            rocky_sdk::TransactionOutcome::Applied => NativeTransactionOutcome::Applied,
+            rocky_sdk::TransactionOutcome::Dropped { reason, sealed } => {
+                NativeTransactionOutcome::Dropped {
+                    reason: match reason {
+                        rocky_sdk::DropReason::Constraint => "constraint",
+                        rocky_sdk::DropReason::Admission => "admission",
+                        rocky_sdk::DropReason::Schema => "schema",
+                        rocky_sdk::DropReason::Engine => "engine",
+                    }
+                    .into(),
+                    sealed,
+                }
+            }
+        }))
+    }
     /// Committed changes of `tables`, or of every table.
     pub async fn observe_tables(
         &self,
@@ -151,6 +184,12 @@ impl NativeConnection {
     }
     pub async fn in_transaction(&self) -> Result<bool, NativeError> {
         self.connection.in_transaction().await.map_err(sql)
+    }
+    /// The token of the transaction the last `COMMIT` published; `None`
+    /// when it published nothing.
+    pub async fn committed(&self) -> Result<Option<Vec<u8>>, NativeError> {
+        let token = self.connection.committed().await.map_err(sql)?;
+        Ok(token.map(|token| token.0.to_vec()))
     }
     /// An open transaction rolls back; cursors end.
     pub async fn shutdown(&self) {
@@ -192,11 +231,20 @@ impl NativeStatement {
     }
 }
 
-/// Tables whose committed rows may differ, and why.
+/// How a replayed transaction stands: applied, or dropped with
+/// `constraint`, `admission`, `schema` or `engine`; `sealed` makes it final.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum NativeTransactionOutcome {
+    Applied,
+    Dropped { reason: String, sealed: bool },
+}
+/// Tables whose committed rows may differ, and why; `dropped` names the
+/// transactions a replay dropped, by token.
 #[derive(uniffi::Record)]
 pub struct NativeTableChange {
     pub tables: Vec<String>,
     pub causes: Vec<String>,
+    pub dropped: Vec<Vec<u8>>,
 }
 #[derive(uniffi::Object)]
 pub struct NativeTableEvents {
@@ -210,6 +258,11 @@ impl NativeTableEvents {
         Ok(NativeTableChange {
             tables: change.tables,
             causes: change.causes,
+            dropped: change
+                .dropped
+                .into_iter()
+                .map(|token| token.0.to_vec())
+                .collect(),
         })
     }
 }

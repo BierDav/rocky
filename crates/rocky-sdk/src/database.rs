@@ -127,6 +127,10 @@ enum Command {
         Option<Vec<String>>,
         oneshot::Sender<Result<rocky_runtime::TableObserver, Failure>>,
     ),
+    Outcome(
+        rocky_core::TransactionToken,
+        oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
+    ),
 }
 /// The scope and the network service a database opened with.
 type Greeting = Result<(String, Option<u64>), Failure>;
@@ -477,6 +481,18 @@ impl Database {
             })
             .await?
     }
+    /// How a committed transaction with replayed writes stands here:
+    /// `None` until one of its writes replayed. A local commit stays
+    /// visible until replay drops it; a drop is final once a seal covers
+    /// it.
+    pub async fn transaction_outcome(
+        &self,
+        token: rocky_core::TransactionToken,
+    ) -> Result<Option<rocky_core::replay::TransactionOutcome>, Failure> {
+        self.shared
+            .request(|reply| Command::Outcome(token, reply))
+            .await?
+    }
     /// Committed changes of `tables`, or of every table. Register before
     /// reading what the changes invalidate.
     pub async fn observe_tables(
@@ -632,6 +648,15 @@ impl Connection {
         self.call(connection::Call::Finish { statement })
             .await
             .map(drop)
+    }
+    /// The transaction this connection's last `COMMIT` published, as
+    /// `Database::transaction_outcome` and table changes name it; `None`
+    /// when it published nothing.
+    pub async fn committed(&self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
+        match self.call(connection::Call::Committed).await? {
+            connection::Reply::Token(token) => Ok(token),
+            _ => Err(connection::failure(connection::code::MISUSE, "no token")),
+        }
     }
     pub async fn in_transaction(&self) -> Result<bool, SqlFailure> {
         match self.call(connection::Call::InTransaction).await? {
@@ -1685,6 +1710,16 @@ async fn run_inner(
                         .await
                         .map_err(Failure::from);
                     let _ = reply.send(observed);
+                });
+            }
+            Command::Outcome(token, reply) => {
+                crate::reactor::spawn_in(&mut tasks, "outcome", async move {
+                    let outcome = node
+                        .replica
+                        .transaction_outcome(token.0)
+                        .await
+                        .map_err(Failure::from);
+                    let _ = reply.send(outcome);
                 });
             }
         }

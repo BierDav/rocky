@@ -364,6 +364,8 @@ pub(crate) struct State {
     declared: Vec<rocky_core::LogicalTable>,
     /// The kept seal a bound connection reads, resolved once.
     seal: Option<rocky_core::Commitment>,
+    /// The transaction the last `COMMIT` published, as outcomes name it.
+    committed: Option<rocky_core::TransactionToken>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -398,6 +400,7 @@ impl State {
             version,
             declared,
             seal,
+            committed: None,
         };
         state.sql().await?;
         Ok(state)
@@ -479,6 +482,10 @@ impl State {
     }
     pub(crate) fn in_transaction(&self) -> bool {
         self.active()
+    }
+    /// What the last `COMMIT` published; `None` when it published nothing.
+    pub(crate) fn committed(&self) -> Option<rocky_core::TransactionToken> {
+        self.committed
     }
 
     /// `PRAGMA query_only` as SQLite keeps it per connection: a writer
@@ -635,6 +642,18 @@ impl State {
             self.open = true;
         }
         let ran = self.sql().await?.run(sql, params).await;
+        if matches!(control, SqlControl::Commit) {
+            self.committed = None;
+            if let Ok(rows) = &ran
+                && let Some(commit) = rows
+                    .committed
+                    .as_ref()
+                    .filter(|commit| !commit.frames.is_empty())
+            {
+                let transaction = self.node.replica.transaction_of(commit.handle).await;
+                self.committed = Some(rocky_core::TransactionToken(transaction));
+            }
+        }
         if ending || ran.is_err() || matches!(control, SqlControl::Release(_)) {
             // A failed commit, an engine rollback or the release of the
             // outermost savepoint ends the transaction in the session; an
@@ -814,10 +833,12 @@ pub(crate) enum Call {
         statement: u64,
     },
     InTransaction,
+    Committed,
 }
 pub(crate) enum Reply {
     Page(Page),
     Flag(bool),
+    Token(Option<rocky_core::TransactionToken>),
     Done,
 }
 pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply, SqlFailure> {
@@ -837,6 +858,7 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
             Ok(Reply::Done)
         }
         Call::InTransaction => Ok(Reply::Flag(state.in_transaction())),
+        Call::Committed => Ok(Reply::Token(state.committed())),
     };
     reply.map_err(sql_failure)
 }
@@ -853,6 +875,9 @@ pub struct TableChange {
     pub tables: Vec<String>,
     /// `local`, `sync`, `confirmed`, `rebuild` or `authority`.
     pub causes: Vec<String>,
+    /// Committed transactions a replay here dropped since the last change.
+    /// Their writes are gone; `Database::transaction_outcome` says why.
+    pub dropped: Vec<rocky_core::TransactionToken>,
 }
 impl TableEvents {
     pub(crate) fn new(observer: TableObserver) -> Self {
@@ -869,6 +894,11 @@ impl TableEvents {
                 .causes
                 .into_iter()
                 .map(|cause| format!("{cause:?}").to_ascii_lowercase())
+                .collect(),
+            dropped: change
+                .dropped
+                .into_iter()
+                .map(rocky_core::TransactionToken)
                 .collect(),
         })
     }

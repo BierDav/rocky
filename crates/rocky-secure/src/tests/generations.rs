@@ -90,6 +90,8 @@ pub(super) struct Lineage {
     pub(super) domain: Scope,
     /// Every table keeps an existence log.
     pub(super) existence: bool,
+    /// Every table is replayed.
+    pub(super) replayed: bool,
 }
 impl Lineage {
     /// The domain root a replica's tip graph starts from.
@@ -232,6 +234,7 @@ impl Lineage {
             publisher,
             domain,
             existence: false,
+            replayed: false,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -254,6 +257,9 @@ impl Lineage {
                     column("label", Affinity::Text, true),
                 ],
             ));
+        }
+        for table in tables.iter_mut().filter(|_| self.replayed) {
+            table.class = TableClass::Replayed;
         }
         // An existence log names rows by `id`.
         for table in tables.iter_mut().filter(|_| self.existence) {
@@ -299,7 +305,8 @@ impl Lineage {
         let added = items
             .columns
             .iter()
-            .filter(|column| ["note", "rank"].contains(&column.sql_name.as_str()))
+            // A replayed table has no register records to fill.
+            .filter(|column| !self.replayed && ["note", "rank"].contains(&column.sql_name.as_str()))
             .map(|column| schema.field_id(items, column))
             .collect();
         TypedRows::new(schema.clone(), vec![DOMAIN])
@@ -876,5 +883,6 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
 }
 
 mod held;
+mod replayed;
 mod sideways;
 mod switches;

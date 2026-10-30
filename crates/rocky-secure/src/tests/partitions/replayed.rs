@@ -3,6 +3,8 @@
 use super::*;
 use rocky_core::replay::{DropReason, TransactionOutcome};
 
+mod convergence;
+
 async fn sql_on(
     f: &Fixture,
     replica: &EncryptedReplica<TypedRows>,
@@ -270,13 +272,13 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
         ReceiveStatus::Applied
     );
     // Only its own record names member 0: B has none here yet.
-    partial.seal_replayed_for_test(f.scope("A")).await;
+    partial.seal_replayed_for_test(f.scope("A")).await.unwrap();
     assert_eq!(partial.unsealed_replayed_transactions().await.unwrap(), 1);
     assert_eq!(
         partial.receive(record).await.unwrap(),
         ReceiveStatus::Applied
     );
-    partial.seal_replayed_for_test(f.scope("A")).await;
+    partial.seal_replayed_for_test(f.scope("A")).await.unwrap();
     assert_eq!(partial.unsealed_replayed_transactions().await.unwrap(), 0);
 
     // A replica holding the transaction whole fills in a lost record.
@@ -295,4 +297,153 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
     assert_eq!(records(&f, &writer, &w, "B").await.len(), 2);
     writer.publish_missing_outcomes().await.unwrap();
     assert_eq!(records(&f, &writer, &w, "A").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
+    let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let open = |name: &'static str, node: &PrivateKey, number| {
+        let (f, root, node) = (&f, &root, node.clone());
+        async move {
+            f.open(
+                &root.path().join(name),
+                node.clone(),
+                f.grant(None, &all()),
+                Some((node, number)),
+            )
+            .await
+        }
+    };
+    let writer = open("w.sqlite", &w, 1).await;
+    let other = open("x.sqlite", &x, 2).await;
+    let reader = open("r.sqlite", &r, 3).await;
+    for replica in [&writer, &other, &reader] {
+        f.key(replica, "A", [1; 32]).await;
+        f.key(replica, "B", [2; 32]).await;
+    }
+    let [earlier] = insert(&f, &other, &["A", "B"], &[("A", "e", 1)], 1)
+        .await
+        .try_into()
+        .unwrap();
+    let both = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "b", 1)], 2).await;
+    assert_eq!(records(&f, &writer, &w, "A").await.len(), 1);
+    for status in reader.receive_all(both).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::Applied);
+    }
+
+    // Reopened with only A's key, the reader cannot redo the transaction's
+    // member in B: the earlier arrival waits instead of being rejected.
+    drop(reader);
+    let reader = open("r.sqlite", &r, 3).await;
+    f.key(&reader, "A", [1; 32]).await;
+    assert_ne!(
+        reader.receive(earlier.clone()).await.unwrap(),
+        ReceiveStatus::Rejected
+    );
+    assert!(matches!(
+        sql_on(&f, &reader, &["A"])
+            .await
+            .run("SELECT key FROM items WHERE list='A'", vec![])
+            .await,
+        Err(Error::Sql(crate::sql::SqlError::Unavailable {
+            reason: crate::sql::Unavailable::Incomplete,
+            ..
+        }))
+    ));
+    f.key(&reader, "B", [2; 32]).await;
+    assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 3);
+
+    // The writer rewinds too; its transaction redoes with the same outcome,
+    // so it publishes no new record.
+    assert_eq!(
+        writer.receive(earlier).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    assert_eq!(keys(&f, &writer, &["A", "B"]).await.len(), 3);
+    assert_eq!(records(&f, &writer, &w, "A").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engines() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
+    let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let open = |name: &'static str, node: &PrivateKey, number| {
+        let (f, root, node) = (&f, &root, node.clone());
+        async move {
+            let replica = f
+                .open(
+                    &root.path().join(name),
+                    node.clone(),
+                    f.grant(None, &all()),
+                    Some((node, number)),
+                )
+                .await;
+            f.key(&replica, "A", [1; 32]).await;
+            f.key(&replica, "B", [2; 32]).await;
+            replica
+        }
+    };
+    let (writer, forger, reader) = (
+        open("w.sqlite", &w, 1).await,
+        open("x.sqlite", &x, 2).await,
+        open("r.sqlite", &r, 3).await,
+    );
+    let both = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "b", 1)], 1).await;
+    for status in forger.receive_all(both.clone()).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::Applied);
+    }
+    let member = both
+        .iter()
+        .find(|frame| frame.scope().unwrap() == f.scope("A"))
+        .unwrap();
+    let txn = transaction(member, [1; 32], &f);
+    // The forger signs again that the transaction dropped, as another
+    // engine would decide after the same prefixes.
+    forger
+        .forge_outcome_for_test(
+            txn,
+            Some(DropReason::Constraint),
+            "forged engine",
+            &[f.scope("A"), f.scope("B")],
+        )
+        .await
+        .unwrap();
+    let [honest, forged] = records(&f, &forger, &x, "A").await.try_into().unwrap();
+    let [authored] = records(&f, &writer, &w, "A").await.try_into().unwrap();
+
+    for status in reader.receive_all(both).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::Applied);
+    }
+    for record in [authored, honest] {
+        assert_eq!(
+            reader.receive(record).await.unwrap(),
+            ReceiveStatus::Applied
+        );
+    }
+    assert_eq!(
+        reader.receive(forged).await.unwrap(),
+        ReceiveStatus::Rejected
+    );
+    let [divergence] = reader
+        .outcome_divergences()
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(divergence.transaction, txn);
+    assert_eq!(divergence.publisher, x.public_key());
+    assert!(
+        divergence.stored.starts_with("rocky-secure "),
+        "{divergence:?}"
+    );
+    assert_eq!(divergence.refused, "forged engine");
+    // The refused record changes nothing.
+    assert_eq!(
+        reader.transaction_outcome(txn).await.unwrap(),
+        Some(TransactionOutcome::Applied)
+    );
+    assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 2);
 }

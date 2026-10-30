@@ -69,6 +69,7 @@ mod recovery;
 mod removal;
 pub(crate) mod replay;
 pub use removal::local_row_counts;
+pub use replay::outcomes::OutcomeDivergence;
 mod restore;
 pub(super) mod roles;
 mod session;
@@ -483,10 +484,9 @@ pub(super) struct Inner<A> {
     )>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
+    /// The armed crash point and the one that fired.
     #[cfg(any(test, feature = "qualification"))]
-    crash: Option<CrashPoint>,
-    #[cfg(any(test, feature = "qualification"))]
-    crashed: Option<CrashPoint>,
+    crash: std::sync::Mutex<(Option<CrashPoint>, Option<CrashPoint>)>,
     /// Fails publication after this step: 1 journaled, 2 committed at
     /// the coordinator, 3 inside the admission transaction.
     #[cfg(test)]
@@ -1093,9 +1093,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             stage_fault: None,
             #[cfg(any(test, feature = "qualification"))]
-            crash: None,
-            #[cfg(any(test, feature = "qualification"))]
-            crashed: None,
+            crash: Default::default(),
             #[cfg(test)]
             #[cfg(test)]
             publication_fault: None,

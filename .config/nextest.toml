@@ -18,6 +18,13 @@ filter = 'package(rocky-sdk) & test(/^simulation::tests::sweep_/)'
 priority = 89
 slow-timeout = { period = "60s", terminate-after = 20 }
 
+# Replayed convergence: every schedule of five transactions and the seeded
+# sweep open a receiver per schedule.
+[[profile.default.overrides]]
+filter = 'package(rocky-secure) & test(/^tests::partitions::replayed::convergence::(every_schedule_of_five|seeded_schedule_sweep)/)'
+priority = 88
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 # Stop hung tests; elapsed time is otherwise diagnostic only.
 [profile.integration]
 fail-fast = false

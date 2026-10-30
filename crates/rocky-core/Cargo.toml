@@ -14,8 +14,6 @@ workspace = true
 [features]
 # Deterministic simulator fault hooks; never enabled in published artifacts.
 qualification = []
-# Replayed tables on the secure profile before phase 4 completes; tests only.
-intent-replay = []
 
 [dependencies]
 sha2 = "0.10"

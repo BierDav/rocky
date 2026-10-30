@@ -1,7 +1,10 @@
 # 4. Intent replay
 
-Status: planned. Owner: `rocky-core` (intent wire types,
-`TableClass::Replayed`), `rocky-storage` (statement check and partition
+Status: slices 1–9 implemented, including late transactions in a
+successor tip; completion gate open: desktop L0 p95 (≤ 3 ms) is missed
+on this host by the phase-start baseline too, and replayed writes regress
+under L2; see the [evidence](04-intent-replay-evidence.md). Owner:
+`rocky-core` (intent wire types, `TableClass::Replayed`), `rocky-storage` (statement check and partition
 split in `partition_sql.rs`), `rocky-secure` (authoring, receive, replay,
 undo, outcomes), `rocky-sdk` and `sdks/uniffi` (schema declaration and
 outcomes). Depends on [phase 2](02-interactive-first.md) and

@@ -4,7 +4,7 @@
 //! changed tables only, and an observer holds at most one pending change.
 //! See `docs/runtime/queries-and-observation.md`.
 use crate::Error;
-use rocky_core::Scope;
+use rocky_core::{Commitment, Scope};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, Weak},
@@ -33,6 +33,9 @@ pub struct TableChange {
     /// change. A read started after receiving this observes at least it.
     pub revisions: BTreeMap<Scope, u64>,
     pub causes: BTreeSet<Cause>,
+    /// Transactions a committed replay dropped here, by identity; every
+    /// observer receives them, whichever tables it follows.
+    pub dropped: BTreeSet<Commitment>,
 }
 impl TableChange {
     fn merge(
@@ -67,6 +70,14 @@ impl Slot {
                 .change
                 .get_or_insert_with(TableChange::default)
                 .merge(labels.into_iter(), scope, revision, causes);
+        }
+        self.notify.notify_one();
+    }
+    fn offer_drops(&self, scope: Scope, revision: u64, dropped: &BTreeSet<Commitment>) {
+        if let Ok(mut pending) = self.pending.lock() {
+            let change = pending.change.get_or_insert_with(TableChange::default);
+            change.merge(std::iter::empty(), scope, revision, &[Cause::Sync]);
+            change.dropped.extend(dropped);
         }
         self.notify.notify_one();
     }
@@ -226,6 +237,25 @@ impl TableEvents {
     }
 }
 
+impl TableEvents {
+    /// Offers transactions a committed replay dropped to every observer.
+    /// Call only after the commit.
+    pub fn publish_drops(&self, revision: u64, dropped: &BTreeSet<Commitment>) {
+        if dropped.is_empty() {
+            return;
+        }
+        let Ok(registry) = self.registry.lock() else {
+            return;
+        };
+        let mut slots: Vec<_> = registry.slots().collect();
+        slots.sort_by_key(|slot| Arc::as_ptr(slot) as usize);
+        slots.dedup_by_key(|slot| Arc::as_ptr(slot) as usize);
+        for slot in slots {
+            slot.offer_drops(self.scope, revision, dropped);
+        }
+    }
+}
+
 /// Receives committed changes of the tables it registered for. Register
 /// it before taking the initial snapshot: every later commit is reported,
 /// coalesced into at most one pending change.
@@ -288,6 +318,26 @@ mod tests {
             .iter()
             .map(|t| (t.to_string(), t.to_string()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn every_observer_receives_dropped_transactions_once() {
+        let events = TableEvents::new(scope(1), ["items".into(), "tags".into()]);
+        let mut items = TableObserver::new();
+        events
+            .register(&items, Some(&own(&["items", "tags"])))
+            .unwrap();
+        let mut tags = TableObserver::new();
+        events.register(&tags, Some(&own(&["tags"]))).unwrap();
+        events.publish_drops(5, &[[7; 32]].into());
+        events.publish_drops(6, &BTreeSet::new());
+        for observer in [&mut items, &mut tags] {
+            let change = observer.next().await.unwrap();
+            assert_eq!(change.dropped, [[7; 32]].into());
+            assert!(change.tables.is_empty());
+            assert_eq!(change.revisions, [(scope(1), 5)].into());
+            assert_eq!(observer.try_next().unwrap(), None);
+        }
     }
 
     #[tokio::test]

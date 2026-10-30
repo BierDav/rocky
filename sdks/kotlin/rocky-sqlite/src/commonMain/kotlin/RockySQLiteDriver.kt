@@ -74,6 +74,12 @@ internal class RockySQLiteConnection(private val driver: RockySQLiteDriver) : SQ
     }
 }
 
+/**
+ * The token of the transaction this connection's last commit published, for [RockyDatabase.transactionOutcome];
+ * null when it published nothing or the connection is not Rocky's.
+ */
+fun SQLiteConnection.committedTransaction(): ByteArray? = (this as? RockySQLiteConnection)?.let { connection -> native { connection.native().committed() } }
+
 /** Structured metadata preserved alongside SQLite's standard exception type and result code. */
 private class RockyReadRetry : Exception()
 

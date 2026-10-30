@@ -540,7 +540,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let result = match materialized {
             Ok((rows, admission)) => {
-                async {
+                let applied = async {
                     if let Some(record) = payload.as_ref().ok().and_then(RowPayload::outcome)
                         && let Err(divergence) = self.apply_outcome(frame, record, time).await?
                     {
@@ -552,7 +552,16 @@ impl<A: RowApplication> Inner<A> {
                         .await?;
                     Ok(Outcome::Applied)
                 }
-                .await
+                .await;
+                match applied {
+                    // A record's rewind needs a key this replica lacks yet.
+                    Err(Error::Rejected(reason)) if reason == super::replay::KEY_WAITS => {
+                        self.conn.execute("ROLLBACK TO pending", ()).await?;
+                        self.invalidate_context();
+                        Ok(Outcome::Waiting(WaitReason::OpeningKey))
+                    }
+                    applied => applied,
+                }
             }
             Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;

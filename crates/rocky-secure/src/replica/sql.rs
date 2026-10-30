@@ -1225,6 +1225,30 @@ impl<A: RowApplication> SecureSql<A> {
                         "row/field transition denied; the replayed effects are not granted",
                     ));
                 }
+                let author = inner.node_author.as_ref().map(|author| author.number);
+                let birth = match inner.replayed_birth(&change, author) {
+                    Err(_) if unchecked => None,
+                    birth => birth?,
+                };
+                if let Some(identity) = birth {
+                    let signer = inner
+                        .node_author
+                        .as_ref()
+                        .ok_or_else(|| denied("node author credential missing"))?
+                        .key
+                        .public_key();
+                    inner
+                        .put_identity_mark(
+                            change.scope,
+                            &super::checkpoint::IdentityMark {
+                                author: identity.author(),
+                                signer,
+                                sequence: identity.sequence(),
+                            },
+                            super::identity::Raise::Own,
+                        )
+                        .await?;
+                }
                 undo.entry(change.scope)
                     .or_default()
                     .push(super::replay::Undo {

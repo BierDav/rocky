@@ -284,7 +284,7 @@ bump in its evidence.
 | 1 | [Buffered default](01-buffered-default.md) (implemented; qualification blocked) | none | 1–2 d | Rust SDK commits buffered |
 | 2 | [Interactive first](02-interactive-first.md) | features_12 phase 2 | 1 w | Interactive writes wait for at most one bounded step; [implemented, latency gate unmet: reactor queueing](02-interactive-first-evidence.md) |
 | 3 | [Intent shapes](03-intent-shapes.md) (measured; validation gate blocked) | none | 3–5 d | Measured transaction shapes; fast-path set and seal cadence chosen |
-| 4 | [Intent replay](04-intent-replay.md) | 2, 3 | 3–4 w | `Replayed` tables: intents, split, replay, drops, outcomes |
+| 4 | [Intent replay](04-intent-replay.md) | 2, 3 | 3–4 w | `Replayed` tables: intents, split, replay, drops, outcomes; [slices 1–9 implemented; L0 gate unmet (baseline too), L2 regression open](04-intent-replay-evidence.md) |
 | 5 | [Replayed constraints](05-replayed-constraints.md) | 4 | 2–3 w | Unique, FK, complex `CHECK` and assertions in replay; no field stamps or induced fan-out |
 | 6 | [Symbolic fast path](06-symbolic-fast-path.md) | 3, 5 | 2 w | `rocky-symbolic`, merged only if proven and faster |
 | 7 | [Intent migrations](07-intent-migrations.md) | 4 | 2 w | Migrations publish as intents; bounded, resumable |

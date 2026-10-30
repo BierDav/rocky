@@ -22,9 +22,17 @@ pub enum CrashPoint {
     GroupBeforeCommit,
     /// A group commit, after it committed and before anyone hears of it.
     GroupAfterCommit,
+    /// Replaying a received transaction's intents, before its commit.
+    Apply,
+    /// Rewinding applied transactions through their undo records.
+    Rewind,
+    /// Between transactions redone after a rewind.
+    Redo,
+    /// Deleting undo records a seal covers.
+    UndoDeletion,
 }
 impl CrashPoint {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::Import,
         Self::Switch,
         Self::Prune,
@@ -33,7 +41,13 @@ impl CrashPoint {
         Self::Evict,
         Self::GroupBeforeCommit,
         Self::GroupAfterCommit,
+        Self::Apply,
+        Self::Rewind,
+        Self::Redo,
+        Self::UndoDeletion,
     ];
+    /// The points of replayed tables.
+    pub const REPLAY: [Self; 4] = [Self::Apply, Self::Rewind, Self::Redo, Self::UndoDeletion];
     pub(super) fn stage(self) -> Option<checkpoint::Stage> {
         use checkpoint::Stage;
         Some(match self {
@@ -43,7 +57,12 @@ impl CrashPoint {
             Self::Compact => Stage::Compact,
             Self::Settle => Stage::Settle,
             Self::Evict => Stage::Evict,
-            Self::GroupBeforeCommit | Self::GroupAfterCommit => return None,
+            Self::GroupBeforeCommit
+            | Self::GroupAfterCommit
+            | Self::Apply
+            | Self::Rewind
+            | Self::Redo
+            | Self::UndoDeletion => return None,
         })
     }
 }
@@ -51,26 +70,34 @@ impl CrashPoint {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Arms `point` for the next step that reaches it; `None` disarms.
     pub async fn arm_crash(&self, point: Option<CrashPoint>) {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner.crash = point;
-        inner.crashed = None;
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        *inner
+            .crash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (point, None);
     }
     /// The armed point that fired since it was armed.
     pub async fn crashed(&self) -> Option<CrashPoint> {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .crashed
+            .crash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
     }
 }
 
 impl<A: RowApplication> Inner<A> {
     /// Fails once at the armed point.
-    pub(super) fn crash_at(&mut self, point: impl Fn(CrashPoint) -> bool) -> Result<(), Error> {
-        match self.crash {
+    pub(super) fn crash_at(&self, point: impl Fn(CrashPoint) -> bool) -> Result<(), Error> {
+        let mut crash = self
+            .crash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match crash.0 {
             Some(armed) if point(armed) => {
-                self.crash = None;
-                self.crashed = Some(armed);
+                *crash = (None, Some(armed));
                 Err(Error::InjectedFailure)
             }
             _ => Ok(()),

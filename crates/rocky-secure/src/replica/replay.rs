@@ -3,15 +3,17 @@
 //! whose effects its author may not write is dropped with its reason. An
 //! arrival ordered before applied transactions rewinds them through their
 //! undo records, applies, then redoes them. A seal ends rewinds behind it.
+//! Order is `(era, stamp)`: a transaction a finalized seal leaves out
+//! moves to the next era, after every transaction the seal covers.
 use super::*;
 use rocky_core::TableClass;
 use rocky_core::replay::{DropReason, Intent, TransactionOutcome};
 use rocky_storage::partition_sql::{TablePartitions, split_intent};
 
-pub(super) mod outcomes;
+pub(crate) mod outcomes;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,PRIMARY KEY(scope,clock,author,sequence)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
 ];
 
@@ -24,10 +26,22 @@ pub(super) struct Undo {
     pub(super) before: Option<Vec<SqlValue>>,
 }
 
+/// What one member's replay changed: the rows' prior images, and the
+/// identities of the rows it created.
+pub(super) struct Replayed {
+    undo: Vec<Undo>,
+    births: Vec<checkpoint::IdentityMark>,
+}
+
+/// A partition's replay position: the era, then the stamp.
+pub(super) type Order = (i64, Stamp);
+
 /// A rewound transaction's members here, to redo in canonical order.
 struct Redo {
     transaction: Commitment,
     members: Vec<(Hash, u16)>,
+    /// Where its earliest member stood.
+    order: Order,
 }
 
 /// One held intent member of a transaction: its frame, statements, its
@@ -90,21 +104,43 @@ fn undo_of(bytes: &[u8]) -> Result<Vec<Undo>, Error> {
         .collect()
 }
 
-fn stamp_of(row: &[SqlValue]) -> Result<Stamp, Error> {
+/// A row's leading `era,clock,author,sequence`.
+fn order_of(row: &[SqlValue]) -> Result<Order, Error> {
     match row {
         [
+            SqlValue::Integer(era),
             SqlValue::Integer(clock),
             SqlValue::Integer(author),
             SqlValue::Integer(sequence),
             ..,
-        ] => Ok(Stamp {
-            clock: *clock as u64,
-            author: *author as u32,
-            sequence: *sequence as u64,
-        }),
+        ] => Ok((
+            *era,
+            Stamp {
+                clock: *clock as u64,
+                author: *author as u32,
+                sequence: *sequence as u64,
+            },
+        )),
         _ => Err(Error::Corrupt("replayed order".into())),
     }
 }
+
+fn order_bindings(scope: i64, (era, stamp): &Order) -> Vec<SqlValue> {
+    vec![
+        SqlValue::Integer(scope),
+        SqlValue::Integer(*era),
+        SqlValue::Integer(stamp.clock as i64),
+        SqlValue::Integer(i64::from(stamp.author)),
+        SqlValue::Integer(stamp.sequence as i64),
+    ]
+}
+
+/// The era an arrival joins: one past the domain's last finalized seal.
+const OPEN_ERA: &str = "(SELECT COALESCE(MAX(depth),0) FROM secure_finalized WHERE domain=?)";
+
+/// Why an arrival waits: a transaction it rewinds has a member in a
+/// partition whose key this replica does not hold yet.
+pub(super) const KEY_WAITS: &str = "a rewound transaction waits for its partition key";
 
 /// Events one replayed transaction may capture.
 const REPLAY_CAPTURE: (usize, usize) = (MAX_BUNDLE_ROWS, MAX_BUNDLE_BYTES);
@@ -152,6 +188,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
     }
 
+    /// The identity of the transaction this replica committed under
+    /// `handle`, as outcomes and observers name it.
+    pub async fn transaction_of(&self, handle: Commitment) -> Commitment {
+        let inner = self.inner.lock(Class::Interactive).await;
+        super::bundle::transaction_id(inner.config.node.public_key(), &handle)
+    }
+
     /// How a transaction with replayed writes stands here: `None` until a
     /// member of it has replayed. A drop is final once a seal covers it.
     pub async fn transaction_outcome(
@@ -186,11 +229,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Seals everything `scope` applied so far, as a finalized seal would.
-    pub(crate) async fn seal_replayed_for_test(&self, scope: ResourceScope) {
-        let inner = self.inner.lock(Class::Background).await;
-        let id = inner.find_scope_id(scope).await.unwrap().unwrap();
-        inner.seal_replayed(id, i64::MAX).await.unwrap();
+    /// Seals everything `scope` applied so far, as a finalized seal would,
+    /// inside one transaction as seal finalization runs it.
+    pub(crate) async fn seal_replayed_for_test(&self, scope: ResourceScope) -> Result<(), Error> {
+        let mut inner = self.inner.lock(Class::Background).await;
+        let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
+        transaction!(inner, |inner| inner.seal_replayed(id, i64::MAX).await)
     }
 }
 
@@ -208,7 +252,7 @@ impl<A: RowApplication> Inner<A> {
     /// Undoes every unsealed transaction ordered at or after `starts` in
     /// its partition, and every transaction sharing a member with one,
     /// latest first. Returns them for redo in canonical order.
-    async fn rewind(&self, starts: Vec<(i64, Stamp)>) -> Result<Vec<Redo>, Error> {
+    async fn rewind(&self, starts: Vec<(i64, Order)>) -> Result<Vec<Redo>, Error> {
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut work = starts;
         let mut rewound = BTreeMap::new();
@@ -216,19 +260,14 @@ impl<A: RowApplication> Inner<A> {
             let later = collect_rows(
                 self.conn
                     .query(
-                        "SELECT clock,author,sequence,hash,txn,member,undo FROM secure_replayed WHERE scope=? AND sealed=0 AND (clock,author,sequence)>=(?,?,?)",
-                        bindings(vec![
-                            SqlValue::Integer(scope),
-                            SqlValue::Integer(from.clock as i64),
-                            SqlValue::Integer(i64::from(from.author)),
-                            SqlValue::Integer(from.sequence as i64),
-                        ]),
+                        "SELECT era,clock,author,sequence,hash,txn,member,undo FROM secure_replayed WHERE scope=? AND sealed=0 AND (era,clock,author,sequence)>=(?,?,?,?)",
+                        bindings(order_bindings(scope, &from)),
                     )
                     .await?,
             )
             .await?;
             for row in later {
-                let stamp = stamp_of(&row)?;
+                let order = order_of(&row)?;
                 let [
                     ..,
                     SqlValue::Blob(hash),
@@ -247,7 +286,7 @@ impl<A: RowApplication> Inner<A> {
                     _ => return Err(corrupt()),
                 };
                 if rewound
-                    .insert((stamp, scope), (hash, transaction, *member as u16, undo))
+                    .insert((order, scope), (hash, transaction, *member as u16, undo))
                     .is_some()
                 {
                     continue;
@@ -256,7 +295,7 @@ impl<A: RowApplication> Inner<A> {
                 for other in collect_rows(
                     self.conn
                         .query(
-                            "SELECT clock,author,sequence,scope FROM secure_replayed WHERE txn=? AND sealed=0",
+                            "SELECT era,clock,author,sequence,scope FROM secure_replayed WHERE txn=? AND sealed=0",
                             [transaction.to_vec()],
                         )
                         .await?,
@@ -266,9 +305,9 @@ impl<A: RowApplication> Inner<A> {
                     let [.., SqlValue::Integer(other_scope)] = other.as_slice() else {
                         return Err(corrupt());
                     };
-                    let stamp = stamp_of(&other)?;
-                    if !rewound.contains_key(&(stamp.clone(), *other_scope)) {
-                        work.push((*other_scope, stamp));
+                    let order = order_of(&other)?;
+                    if !rewound.contains_key(&(order.clone(), *other_scope)) {
+                        work.push((*other_scope, order));
                     }
                 }
             }
@@ -281,14 +320,17 @@ impl<A: RowApplication> Inner<A> {
                     [hash.as_bytes().to_vec()],
                 )
                 .await?;
+            #[cfg(any(test, feature = "qualification"))]
+            self.crash_at(|point| point == CrashPoint::Rewind)?;
         }
         let mut redo: Vec<Redo> = Vec::new();
-        for (hash, transaction, member, _) in rewound.into_values() {
+        for ((order, _), (hash, transaction, member, _)) in rewound {
             match redo.iter_mut().find(|redo| redo.transaction == transaction) {
                 Some(redo) => redo.members.push((hash, member)),
                 None => redo.push(Redo {
                     transaction,
                     members: vec![(hash, member)],
+                    order,
                 }),
             }
         }
@@ -320,6 +362,7 @@ impl<A: RowApplication> Inner<A> {
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
         for (table, undo) in tables.iter().zip(undo) {
+            self.touch(&table.name);
             self.conn
                 .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                 .await?;
@@ -337,6 +380,221 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
+    /// Rebuilds replayed table `table` of a schema switch from its live
+    /// rows, which are its only copy: columns both schemas name keep their
+    /// values, new ones take their defaults. Inside the switch transaction.
+    pub(super) async fn rebuild_replayed(
+        &self,
+        installed: &rocky_core::LogicalSchema,
+        table: &rocky_core::LogicalTable,
+    ) -> Result<(), Error> {
+        let name = &table.sql_name;
+        self.conn
+            .execute(
+                format!(
+                    "DROP TABLE IF EXISTS {}",
+                    typed::quoted(&typed::physical(name, true))
+                ),
+                (),
+            )
+            .await?;
+        let before = installed.table(name);
+        let kept: Vec<String> = before
+            .iter()
+            .flat_map(|before| &before.columns)
+            .filter(|column| table.column(&column.sql_name).is_some())
+            .map(|column| typed::quoted(&column.sql_name))
+            .collect();
+        let old = format!("secure_rebuild_{name}");
+        if before.is_some() {
+            // References from other tables keep naming the table itself.
+            self.conn
+                .execute("PRAGMA legacy_alter_table=ON", ())
+                .await?;
+            self.conn
+                .execute(
+                    format!(
+                        "ALTER TABLE {} RENAME TO {}",
+                        typed::quoted(name),
+                        typed::quoted(&old)
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        self.conn.execute(table.create_sql.clone(), ()).await?;
+        if before.is_some() {
+            self.conn
+                .execute(
+                    format!(
+                        "INSERT INTO {}({columns}) SELECT {columns} FROM {}",
+                        typed::quoted(name),
+                        typed::quoted(&old),
+                        columns = kept.join(",")
+                    ),
+                    (),
+                )
+                .await?;
+            self.conn
+                .execute(format!("DROP TABLE {}", typed::quoted(&old)), ())
+                .await?;
+            self.conn
+                .execute("PRAGMA legacy_alter_table=OFF", ())
+                .await?;
+        }
+        for index in &table.indexes {
+            self.conn.execute(index.create_sql.clone(), ()).await?;
+        }
+        self.touch(name);
+        Ok(())
+    }
+
+    /// Rewrites the undo images of replayed tables whose columns a schema
+    /// switch changed into the new column order, so that a rewind across
+    /// the switch restores rows the new tables can hold.
+    pub(super) async fn reshape_undo(
+        &self,
+        before: &rocky_core::LogicalSchema,
+        after: &rocky_core::LogicalSchema,
+    ) -> Result<(), Error> {
+        let mut changed = BTreeMap::new();
+        for table in after
+            .tables
+            .iter()
+            .filter(|table| table.class == TableClass::Replayed)
+        {
+            let Some(old) = before.table(&table.sql_name) else {
+                continue;
+            };
+            let names = |table: &rocky_core::LogicalTable| -> Vec<String> {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| column.sql_name.to_ascii_lowercase())
+                    .collect()
+            };
+            if names(old) == names(table) {
+                continue;
+            }
+            let sources: Vec<Result<usize, SqlValue>> = table
+                .columns
+                .iter()
+                .map(|column| {
+                    old.columns
+                        .iter()
+                        .position(|o| o.sql_name.eq_ignore_ascii_case(&column.sql_name))
+                        .ok_or_else(|| rocky_core::default_value(column).unwrap_or(SqlValue::Null))
+                })
+                .collect();
+            changed.insert(table.sql_name.to_ascii_lowercase(), sources);
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let corrupt = || Error::Corrupt("undo record".into());
+        for row in collect_rows(
+            self.conn
+                .query(
+                    "SELECT hash,undo FROM secure_replayed WHERE sealed=0 AND undo IS NOT NULL",
+                    (),
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Blob(hash), SqlValue::Blob(undo)] = row.as_slice() else {
+                return Err(corrupt());
+            };
+            let mut undo = undo_of(undo)?;
+            let mut touched = false;
+            for entry in &mut undo {
+                let Some(sources) = changed.get(&entry.table.to_ascii_lowercase()) else {
+                    continue;
+                };
+                if let Some(before) = &entry.before {
+                    entry.before = Some(
+                        sources
+                            .iter()
+                            .map(|source| match source {
+                                Ok(index) => before.get(*index).cloned().ok_or_else(corrupt),
+                                Err(default) => Ok(default.clone()),
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                    touched = true;
+                }
+            }
+            if touched {
+                self.conn
+                    .execute(
+                        "UPDATE secure_replayed SET undo=? WHERE hash=?",
+                        bindings(vec![undo_blob(&undo)?, SqlValue::Blob(hash.clone())]),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `scope` is a partition of a replayed table.
+    pub(super) fn replayed_scope(&self, scope: ResourceScope) -> bool {
+        self.workspace.typed.as_ref().is_some_and(|typed| {
+            typed.by_scope(scope).is_some_and(|projected| {
+                typed
+                    .rows
+                    .schema()
+                    .table(&projected.table.sql_name)
+                    .is_some_and(|table| table.class == TableClass::Replayed)
+            })
+        })
+    }
+
+    /// A seal finalized at depth `era` leaves out the unsealed transactions
+    /// applied after each `(scope, through)` cut: they rewind, with what
+    /// follows them, and redo in the new era, after every transaction the
+    /// seal covers. Their identity and stamp stay; outcomes may change.
+    pub(super) async fn order_behind_seal(
+        &self,
+        cuts: &[(i64, i64)],
+        era: i64,
+        time: u64,
+    ) -> Result<(), Error> {
+        let corrupt = || Error::Corrupt("replayed member".into());
+        let mut starts = Vec::new();
+        let mut moved = BTreeSet::new();
+        for (scope, through) in cuts {
+            let rows = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT era,clock,author,sequence,hash FROM secure_replayed WHERE scope=? AND sealed=0 AND era<? AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position>?) ORDER BY era,clock,author,sequence",
+                        [*scope, era, *scope, *through],
+                    )
+                    .await?,
+            )
+            .await?;
+            if let Some(first) = rows.first() {
+                starts.push((*scope, order_of(first)?));
+            }
+            for row in rows {
+                let [.., SqlValue::Blob(hash)] = row.as_slice() else {
+                    return Err(corrupt());
+                };
+                moved.insert(Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?);
+            }
+        }
+        if starts.is_empty() {
+            return Ok(());
+        }
+        let mut redo = self.rewind(starts).await?;
+        for redo in &mut redo {
+            if redo.members.iter().any(|(hash, _)| moved.contains(hash)) {
+                redo.order.0 = era;
+            }
+        }
+        redo.sort_by(|a, b| a.order.cmp(&b.order));
+        self.redo(redo, time).await
+    }
+
     /// A seal finalized `scope` through `through`: the transactions it
     /// covers never rewind again, their drops are final and their undo
     /// records go. One of several members stays open until a record names
@@ -348,6 +606,8 @@ impl<A: RowApplication> Inner<A> {
                 [scope, scope, through],
             )
             .await?;
+        #[cfg(any(test, feature = "qualification"))]
+        self.crash_at(|point| point == CrashPoint::UndoDeletion)?;
         Ok(())
     }
 
@@ -360,24 +620,31 @@ impl<A: RowApplication> Inner<A> {
         &self,
         (transaction, members): (Commitment, u16),
         intents: &[Replaying<'_>],
+        era: Option<i64>,
         time: u64,
     ) -> Result<(), Error> {
         if members > 1 {
             let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
             if let Some(reason) = self.remote_drop(transaction, &held).await? {
                 for (frame, .., member) in intents {
-                    self.record_replayed(frame, (transaction, *member, members), Some(reason), &[])
-                        .await?;
+                    self.record_replayed(
+                        frame,
+                        (transaction, *member, members),
+                        Some(reason),
+                        &[],
+                        era,
+                    )
+                    .await?;
                 }
                 return Ok(());
             }
         }
         self.conn.execute("SAVEPOINT intents", ()).await?;
-        let mut undo = Vec::with_capacity(intents.len());
+        let mut replayed = Vec::with_capacity(intents.len());
         let mut dropped = None;
         for (frame, intent, grants, _) in intents {
             match self.replay_intent(frame, intent, grants)? {
-                Ok(changed) => undo.push(changed),
+                Ok(changed) => replayed.push(changed),
                 Err(reason) => {
                     dropped = Some(reason);
                     break;
@@ -386,13 +653,21 @@ impl<A: RowApplication> Inner<A> {
         }
         if dropped.is_some() {
             self.conn.execute("ROLLBACK TO intents", ()).await?;
-            undo.clear();
+            replayed.clear();
         }
         self.conn.execute("RELEASE intents", ()).await?;
         for (index, (frame, _, _, member)) in intents.iter().enumerate() {
-            let undo = undo.get(index).map_or(&[][..], Vec::as_slice);
-            self.record_replayed(frame, (transaction, *member, members), dropped, undo)
+            let (undo, births) = replayed.get(index).map_or((&[][..], &[][..]), |replayed| {
+                (replayed.undo.as_slice(), replayed.births.as_slice())
+            });
+            self.record_replayed(frame, (transaction, *member, members), dropped, undo, era)
                 .await?;
+            // A created identity stays reserved, whatever later rewinds do.
+            let scope = frame.scope()?;
+            for birth in births {
+                self.put_identity_mark(scope, birth, identity::Raise::Own)
+                    .await?;
+            }
             if dropped.is_none()
                 && let Some(table) = self
                     .workspace
@@ -411,6 +686,8 @@ impl<A: RowApplication> Inner<A> {
             self.publish_outcome(transaction, &held, dropped, time)
                 .await?;
         }
+        #[cfg(any(test, feature = "qualification"))]
+        self.crash_at(|point| point == CrashPoint::Apply)?;
         Ok(())
     }
 
@@ -425,24 +702,61 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
     ) -> Result<(), Error> {
         let mut starts = Vec::with_capacity(intents.len());
+        let mut era = None;
         for (frame, ..) in intents {
             let header = &frame.operation_ref()?.header;
-            starts.push((self.scope_id(header.extensions.scope).await?, stamp(header)));
+            let scope = header.extensions.scope;
+            let era = match era {
+                Some(era) => era,
+                None => *era.insert(self.open_era(scope.domain).await?),
+            };
+            starts.push((self.scope_id(scope).await?, (era, stamp(header))));
         }
         let redo = self.rewind(starts).await?;
-        self.replay_transaction(transaction, intents, time).await?;
+        self.replay_transaction(transaction, intents, era, time)
+            .await?;
         self.redo(redo, time).await
+    }
+
+    async fn open_era(&self, domain: rocky_core::Scope) -> Result<i64, Error> {
+        match collect_rows(
+            self.conn
+                .query(format!("SELECT {OPEN_ERA}"), [encode(&domain)?])
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Integer(era)]) => Ok(*era),
+            _ => Err(Error::Corrupt("replay era".into())),
+        }
     }
 
     /// Replays rewound transactions again, in canonical order.
     async fn redo(&self, redo: Vec<Redo>, time: u64) -> Result<(), Error> {
-        for redo in redo {
+        for (index, redo) in redo.into_iter().enumerate() {
+            #[cfg(any(test, feature = "qualification"))]
+            if index > 0 {
+                self.crash_at(|point| point == CrashPoint::Redo)?;
+            }
+            #[cfg(not(any(test, feature = "qualification")))]
+            let _ = index;
             let mut opened = Vec::with_capacity(redo.members.len());
             for (hash, member) in redo.members {
                 let frame = self
                     .frame(hash)
                     .await?
                     .ok_or_else(|| Error::Corrupt("rewound frame is missing".into()))?;
+                // The caller's savepoint undoes the rewind; the arrival retries
+                // once the key is back.
+                let extension = &frame.operation_ref()?.header.extensions;
+                if self
+                    .opening_key(extension.scope, extension.generation)
+                    .is_none()
+                {
+                    return Err(Error::Rejected(KEY_WAITS.into()));
+                }
                 let payload = self.row_payload(&frame)?;
                 // Admission is never carried across a grant change.
                 let grants = self.verify_frame(&frame, time).ok();
@@ -460,6 +774,7 @@ impl<A: RowApplication> Inner<A> {
                 intents.push((frame, intent, grants, *member));
             }
             let transaction = (redo.transaction, members);
+            let era = Some(redo.order.0);
             if intents.iter().any(|(_, _, grants, _)| grants.is_none()) {
                 for (frame, _, _, member) in &intents {
                     self.record_replayed(
@@ -467,6 +782,7 @@ impl<A: RowApplication> Inner<A> {
                         (redo.transaction, *member, members),
                         Some(DropReason::Admission),
                         &[],
+                        era,
                     )
                     .await?;
                 }
@@ -478,29 +794,37 @@ impl<A: RowApplication> Inner<A> {
                     (*frame, *intent, grants.as_deref().unwrap_or(&[]), *member)
                 })
                 .collect();
-            self.replay_transaction(transaction, &intents, time).await?;
+            self.replay_transaction(transaction, &intents, era, time)
+                .await?;
         }
         Ok(())
     }
 
     /// Records where a transaction's member stands in its partition's order
-    /// and how it replayed: `None` with its undo when it applied.
+    /// and how it replayed: `None` with its undo when it applied. Without
+    /// an `era` it joins the open one.
     pub(super) async fn record_replayed(
         &self,
         frame: &EncryptedFrame,
         (transaction, member, members): (Commitment, u16, u16),
         dropped: Option<DropReason>,
         undo: &[Undo],
+        era: Option<i64>,
     ) -> Result<(), Error> {
         let operation = frame.operation_ref()?;
         let header = &operation.header;
         let stamp = stamp(header);
         let id = self.scope_id(header.extensions.scope).await?;
+        if dropped.is_some() {
+            self.touch_dropped(transaction);
+        }
         self.conn
             .execute(
-                "INSERT INTO secure_replayed VALUES(?,?,?,?,?,?,?,?,?,0,?)",
+                format!("INSERT INTO secure_replayed VALUES(?,COALESCE(?,{OPEN_ERA}),?,?,?,?,?,?,?,?,0,?)"),
                 bindings(vec![
                     SqlValue::Integer(id),
+                    era.map_or(SqlValue::Null, SqlValue::Integer),
+                    SqlValue::Blob(encode(&header.extensions.scope.domain)?),
                     SqlValue::Integer(stamp.clock as i64),
                     SqlValue::Integer(i64::from(stamp.author)),
                     SqlValue::Integer(stamp.sequence as i64),
@@ -520,14 +844,14 @@ impl<A: RowApplication> Inner<A> {
 
     /// Runs one member's statements on its partition inside the caller's
     /// savepoint and admits their effects against the author's grants.
-    /// Returns the changed rows' prior images, or why the transaction
-    /// drops; the caller rolls back then.
+    /// Returns what it changed, or why the transaction drops; the caller
+    /// rolls back then.
     fn replay_intent(
         &self,
         frame: &EncryptedFrame,
         intent: &Intent,
         grants: &[rocky_core::ResourceGrant],
-    ) -> Result<Result<Vec<Undo>, DropReason>, Error> {
+    ) -> Result<Result<Replayed, DropReason>, Error> {
         let header = &frame.operation_ref()?.header;
         let scope = header.extensions.scope;
         let typed = self
@@ -617,6 +941,10 @@ impl<A: RowApplication> Inner<A> {
                     Err(sqlite::Error::Denied | sqlite::Error::Unsupported(_)) => {
                         return Ok(Some(DropReason::Schema));
                     }
+                    // A statement that no longer compiles against the schema.
+                    Err(_) if conn.describe(&copy.statement.sql).is_err() => {
+                        return Ok(Some(DropReason::Schema));
+                    }
                     _ => return Ok(Some(DropReason::Engine)),
                 }
             }
@@ -638,6 +966,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // Admission runs on the rows this replay produced.
         let mut undo = Vec::new();
+        let mut births = Vec::new();
         for touched in touched? {
             let captured = &plan.tables[touched.table];
             if !captured.name.eq_ignore_ascii_case(&logical.sql_name) {
@@ -649,18 +978,51 @@ impl<A: RowApplication> Inner<A> {
             if change.scope != scope || !change.permitted_by(grants) {
                 return Ok(Err(DropReason::Admission));
             }
+            match self.replayed_birth(&change, header.extensions.author) {
+                Ok(Some(identity)) => births.push(checkpoint::IdentityMark {
+                    author: identity.author(),
+                    signer: header.public_key,
+                    sequence: identity.sequence(),
+                }),
+                Ok(None) => {}
+                Err(_) => return Ok(Err(DropReason::Admission)),
+            }
             undo.push(Undo {
                 table: captured.name.clone(),
                 key: touched.key,
                 before: touched.before,
             });
         }
-        Ok(Ok(undo))
+        Ok(Ok(Replayed { undo, births }))
+    }
+
+    /// The identity a replayed change creates. Only its author's own
+    /// number may create one, as `next_id` allocates them.
+    pub(super) fn replayed_birth(
+        &self,
+        change: &RowChange,
+        author: Option<u32>,
+    ) -> Result<Option<rocky_core::RowIdentity>, Error> {
+        if change.before.is_some() {
+            return Ok(None);
+        }
+        let Some(identity) = self
+            .app
+            .row_identity(change)
+            .map_err(|error| denied(&error))?
+        else {
+            return Ok(None);
+        };
+        if Some(identity.author()) != author {
+            return Err(denied("a replayed insert names another author's identity"));
+        }
+        Ok(Some(identity))
     }
 }
 
 /// The change a replayed table's captured row went through, as grants see
-/// it; `None` when it changed nothing.
+/// it; `None` when it changed nothing, such as an update to equal values,
+/// which needs no right.
 pub(super) fn replayed_change(
     conn: &sqlite::Connection,
     typed: &typed::Typed,
@@ -696,5 +1058,5 @@ pub(super) fn replayed_change(
         before: touched.before.as_ref().map(fields).transpose()?,
         after: after.as_ref().map(fields).transpose()?,
     };
-    Ok(apply::changes(&change).then_some(change))
+    Ok(change.right().is_some().then_some(change))
 }

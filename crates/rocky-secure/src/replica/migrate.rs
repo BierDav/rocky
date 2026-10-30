@@ -417,7 +417,10 @@ impl<A: RowApplication> Inner<A> {
                 Some(old) => inner.begin_switch_history(old, &projected).await?,
                 None => None,
             };
-            for table in installed.mergeable() {
+            for table in installed
+                .mergeable()
+                .chain(removed_replayed(installed, &record.schema))
+            {
                 inner.touch(&table.sql_name);
                 for name in [
                     table.sql_name.clone(),
@@ -435,15 +438,18 @@ impl<A: RowApplication> Inner<A> {
                 table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
             }) {
                 inner.touch(&table.sql_name);
-                if table.class == TableClass::Mergeable {
-                    inner.conn.execute(table.create_sql.clone(), ()).await?;
-                    for index in &table.indexes {
-                        inner.conn.execute(index.create_sql.clone(), ()).await?;
+                match table.class {
+                    TableClass::Mergeable => {
+                        inner.conn.execute(table.create_sql.clone(), ()).await?;
+                        for index in &table.indexes {
+                            inner.conn.execute(index.create_sql.clone(), ()).await?;
+                        }
                     }
-                } else {
-                    inner.replace_indexes(installed, table).await?;
+                    TableClass::Replayed => inner.rebuild_replayed(installed, table).await?,
+                    _ => inner.replace_indexes(installed, table).await?,
                 }
             }
+            inner.reshape_undo(installed, &record.schema).await?;
             for sql in projected
                 .constraints
                 .iter()
@@ -457,6 +463,7 @@ impl<A: RowApplication> Inner<A> {
                     .as_ref()
                     .and_then(|constraints| constraints.node(table.scope))
                     .is_none()
+                    && !inner.replayed_scope(table.scope)
                 {
                     typed::reproject(inner, &projected, table).await?;
                 }
@@ -556,7 +563,10 @@ impl<A: RowApplication> Inner<A> {
             Some(old) => self.begin_switch_history(&old, &projected).await?,
             None => None,
         };
-        for table in installed.mergeable() {
+        for table in installed
+            .mergeable()
+            .chain(removed_replayed(&installed, &record.schema))
+        {
             self.touch(&table.sql_name);
             self.conn
                 .execute(
@@ -586,9 +596,11 @@ impl<A: RowApplication> Inner<A> {
                         self.conn.execute(index.create_sql.clone(), ()).await?;
                     }
                 }
+                TableClass::Replayed => self.rebuild_replayed(&installed, table).await?,
                 _ => self.replace_indexes(&installed, table).await?,
             }
         }
+        self.reshape_undo(&installed, &record.schema).await?;
         if switching.is_some() {
             self.install_history_for(&projected).await?;
         }
@@ -789,6 +801,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
 /// Whether either schema's tables carry unique indexes or foreign keys, or
 /// the new one partitions a table: a shadow fills from its table's scope
 /// alone, and partitioned rows are stored under each partition's.
+/// Replayed tables of `installed` that `schema` no longer declares.
+fn removed_replayed<'a>(
+    installed: &'a LogicalSchema,
+    schema: &'a LogicalSchema,
+) -> impl Iterator<Item = &'a rocky_core::LogicalTable> {
+    installed.tables.iter().filter(|table| {
+        table.class == TableClass::Replayed && schema.table(&table.sql_name).is_none()
+    })
+}
+
 fn constrained(
     installed: &LogicalSchema,
     schema: &LogicalSchema,

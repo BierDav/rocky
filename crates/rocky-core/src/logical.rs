@@ -1205,9 +1205,8 @@ impl LogicalSchema {
         if let Err(error) = self.installable() {
             return vec![error];
         }
-        // Neither profile replays intents yet; features_13 phase 4 adds it
-        // to the secure profile, built only for its tests until then.
-        let replaying = cfg!(feature = "intent-replay") && profile == Profile::Secure;
+        // Only the secure profile replays intents.
+        let replaying = profile == Profile::Secure;
         let replayed: Vec<_> = self
             .tables
             .iter()
@@ -1666,21 +1665,18 @@ mod tests {
             reason(Mergeable, Mergeable, [true, false]),
             Some(Incompatibility::Coordinated)
         );
-        // Only the secure profile replays, and only behind `intent-replay`.
+        // Only the secure profile replays.
         let mut schema = schema();
         schema.tables[0].class = Replayed;
-        let refused = Err(SchemaError::Incompatible {
-            table: "items".into(),
-            reason: Incompatibility::Unsupported(Replayed),
-        });
         assert_eq!(schema.installable(), Ok(()));
-        assert_eq!(schema.supported_on(Profile::Trusted), refused);
-        let secure = if cfg!(feature = "intent-replay") {
-            Ok(())
-        } else {
-            refused
-        };
-        assert_eq!(schema.supported_on(Profile::Secure), secure);
+        assert_eq!(
+            schema.supported_on(Profile::Trusted),
+            Err(SchemaError::Incompatible {
+                table: "items".into(),
+                reason: Incompatibility::Unsupported(Replayed),
+            })
+        );
+        assert_eq!(schema.supported_on(Profile::Secure), Ok(()));
     }
     #[test]
     fn schemas_that_cannot_converge_are_refused() {

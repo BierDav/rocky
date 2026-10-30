@@ -150,6 +150,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        self.reshape_undo(&before, &schema).await?;
         self.record_projection_access(&projected).await?;
         self.refresh_history_for(&projected).await?;
         self.conn

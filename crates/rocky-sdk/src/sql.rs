@@ -318,13 +318,18 @@ impl Transaction {
     }
     /// Waits for local durability. A commit is never retried automatically. Cancellation while committing can
     /// leave its outcome uncertain; reconcile before repeating application work.
-    pub async fn commit(self) -> Result<(), SqlFailure> {
-        let result = self
-            .connection
-            .execute(self.connection.statement(), "COMMIT".into(), Vec::new())
-            .await;
+    /// Returns the published transaction, whose replay outcome
+    /// `Database::transaction_outcome` reports; `None` when nothing replicated changed.
+    pub async fn commit(self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
+        let result = async {
+            self.connection
+                .execute(self.connection.statement(), "COMMIT".into(), Vec::new())
+                .await?;
+            self.connection.committed().await
+        }
+        .await;
         self.connection.close().await;
-        result.map(drop)
+        result
     }
     pub async fn rollback(self) -> Result<(), SqlFailure> {
         let result = self

@@ -108,6 +108,12 @@ pub struct LogicalIndex {
     pub create_sql: String,
     /// Required on a unique index of a mergeable table; omitted otherwise.
     pub on_conflict: Option<ConflictPolicy>,
+    /// Replayed only: rule expressions indexed after `columns`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expressions: Vec<String>,
+    /// Replayed only: the rule expression choosing the indexed rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,12 +123,44 @@ pub struct LogicalForeignKey {
     pub references: Vec<String>,
     pub on_delete: String,
     pub on_update: String,
+    /// Replayed only: checked when the transaction ends rather than after
+    /// each statement. A mergeable table's keys are always deferred.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalView {
     pub name: String,
     pub create_sql: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalAssertion {
+    pub name: String,
+    pub select_sql: String,
+}
+
+/// A cross-row invariant of replayed tables: a `SELECT` that returns the
+/// rows violating it. It reads replayed tables of one partition group.
+impl LogicalAssertion {
+    /// The tables it reads, lowercase, sorted; empty for an assertion
+    /// schema install refuses.
+    pub fn tables(&self) -> Vec<String> {
+        match crate::deterministic::assertion_tables(&self.select_sql) {
+            crate::deterministic::AssertionShape::Reads(tables) => tables
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+    pub fn reads_table(&self, table: &str) -> bool {
+        self.tables()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(table))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,6 +200,8 @@ pub struct LogicalSchema {
     /// Sorted by name, each table's identity.
     pub tables: Vec<LogicalTable>,
     pub views: Vec<LogicalView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<LogicalAssertion>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +210,9 @@ pub enum Incompatibility {
     UniqueConstraint,
     ForeignKey,
     CheckConstraint,
+    /// A replayed table's expression or an assertion calls a function
+    /// outside the deterministic allowlist, named.
+    Function(String),
     GeneratedColumn,
     NullableKey(String),
     Affinity(String),
@@ -195,9 +238,13 @@ pub enum Incompatibility {
     /// A foreign key from a coordinated table to an uncoordinated one, named
     /// by its first column.
     CoordinatedReference(String),
+    /// An assertion that is not one deterministic `SELECT` of replayed
+    /// tables in one partition group, and why.
+    Assertion(String),
     /// A table class this profile cannot keep convergent yet.
     Unsupported(TableClass),
 }
+
 /// Why a foreign key from `table` to `target` mixes replication classes.
 fn class_reference(
     table: &LogicalTable,
@@ -376,7 +423,31 @@ pub fn foreign_key_clause(key: &LogicalForeignKey) -> String {
         list(&key.references)
     )
 }
-/// The delete actions a foreign key of a mergeable table may declare.
+/// The clause of a foreign key of a replayed table: SQLite performs its
+/// delete action inside the transaction that deletes the parent.
+pub fn replayed_foreign_key_clause(key: &LogicalForeignKey) -> String {
+    let deferred = if key.deferred {
+        " DEFERRABLE INITIALLY DEFERRED"
+    } else {
+        ""
+    };
+    format!(
+        "FOREIGN KEY({}) REFERENCES {}({}) ON DELETE {}{deferred}",
+        key.columns
+            .iter()
+            .map(|name| quote(name))
+            .collect::<Vec<_>>()
+            .join(","),
+        quote(&key.table),
+        key.references
+            .iter()
+            .map(|name| quote(name))
+            .collect::<Vec<_>>()
+            .join(","),
+        key.on_delete
+    )
+}
+/// The delete actions a foreign key may declare.
 pub const DELETE_CASCADE: &str = "CASCADE";
 pub const DELETE_SET_NULL: &str = "SET NULL";
 fn reserved(name: &str) -> bool {
@@ -385,7 +456,7 @@ fn reserved(name: &str) -> bool {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Token {
+pub(crate) enum Token {
     Word(String),
     Quoted(String),
     Literal,
@@ -445,10 +516,10 @@ fn spanned(sql: &str) -> Option<Vec<(Token, std::ops::Range<usize>)>> {
     }
     Some(tokens)
 }
-fn tokenize(sql: &str) -> Option<Vec<Token>> {
+pub(crate) fn tokenize(sql: &str) -> Option<Vec<Token>> {
     Some(spanned(sql)?.into_iter().map(|(token, _)| token).collect())
 }
-fn keyword(token: &Token, expected: &str) -> bool {
+pub(crate) fn keyword(token: &Token, expected: &str) -> bool {
     matches!(token, Token::Word(word) if word.eq_ignore_ascii_case(expected))
 }
 /// The `COLLATE` name each column of a `CREATE TABLE` statement declares.
@@ -550,6 +621,26 @@ pub fn bind_rule(rule: &str, bind: impl Fn(&str) -> Option<String>) -> Option<St
     bound.push_str(&rule[copied..]);
     Some(bound)
 }
+/// Whether `sql` could be one expression of a declaration: its parentheses
+/// balance and it holds no subquery or statement separator. SQLite and the
+/// function allowlist judge the rest at install.
+pub(crate) fn single_expression(sql: &str) -> bool {
+    let Some(tokens) = tokenize(sql).filter(|tokens| !tokens.is_empty()) else {
+        return false;
+    };
+    let mut depth = 0usize;
+    for token in &tokens {
+        match token {
+            Token::Symbol('(') => depth += 1,
+            Token::Symbol(')') if depth == 0 => return false,
+            Token::Symbol(')') => depth -= 1,
+            Token::Symbol(';') => return false,
+            token if keyword(token, "SELECT") => return false,
+            _ => {}
+        }
+    }
+    depth == 0
+}
 /// Whether `rule` is a valid derived expression over `columns`.
 pub fn derived_rule(rule: &str, columns: &[&str]) -> bool {
     bind_rule(rule, |column| columns.contains(&column).then(String::new)).is_some()
@@ -637,7 +728,7 @@ impl LogicalTable {
                 || reserved(&index.name)
                 || !create
                 || statement.contains(&Token::Symbol(';'))
-                || index.columns.is_empty()
+                || (index.columns.is_empty() && self.class != TableClass::Replayed)
                 || index
                     .columns
                     .iter()
@@ -698,8 +789,34 @@ impl LogicalTable {
         if self.class == TableClass::Replayed {
             // SQLite enforces a replayed table's constraints during replay;
             // references are checked across tables by the schema.
+            let statement = tokenize(&self.create_sql).unwrap_or_default();
+            let references = statement
+                .iter()
+                .filter(|token| keyword(token, "REFERENCES"))
+                .count();
+            if references != self.foreign_keys.len() {
+                return Err(Incompatibility::ForeignKey);
+            }
+            for key in &self.foreign_keys {
+                let clause = replayed_foreign_key_clause(key);
+                if ![DELETE_CASCADE, DELETE_SET_NULL].contains(&key.on_delete.as_str())
+                    || key.on_update != "NO ACTION"
+                    || !(self.create_sql.contains(&format!("{clause},"))
+                        || self.create_sql.contains(&format!("{clause})")))
+                {
+                    return Err(Incompatibility::Reference(
+                        key.columns.first().cloned().unwrap_or_default(),
+                    ));
+                }
+            }
             if let Some((index, _)) = self.policy_indexes().next() {
                 return Err(Incompatibility::ConflictPolicy(index.name.clone()));
+            }
+            if let Some(function) = std::iter::once(&self.create_sql)
+                .chain(self.indexes.iter().map(|index| &index.create_sql))
+                .find_map(|sql| crate::deterministic::refused_function(sql))
+            {
+                return Err(Incompatibility::Function(function));
             }
             return Ok(());
         }
@@ -716,6 +833,7 @@ impl LogicalTable {
         if self.auto_generate || has("AUTOINCREMENT") {
             return Err(Incompatibility::AutoGeneratedKey);
         }
+
         if has("UNIQUE")
             || self.indexes.iter().any(|index| {
                 index.unique && !self.is_identity_index(index) && index.on_conflict.is_none()
@@ -756,6 +874,7 @@ impl LogicalTable {
             let clause = foreign_key_clause(key);
             let set_null = key.on_delete == DELETE_SET_NULL;
             let refused = !(key.on_delete == DELETE_CASCADE || set_null)
+                || key.deferred
                 || key.on_update != "NO ACTION"
                 || !(self.create_sql.contains(&format!("{clause},"))
                     || self.create_sql.contains(&format!("{clause})")))
@@ -850,6 +969,8 @@ struct ReplicatedReference<'a> {
     columns: Vec<&'a str>,
     table: &'a str,
     on_delete: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    deferred: bool,
 }
 #[derive(Serialize)]
 struct ReplicatedTable<'a> {
@@ -864,6 +985,18 @@ struct ReplicatedTable<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     partition_group: Option<&'a str>,
     existence_log: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replayed: Option<ReplayedConstraints<'a>>,
+}
+/// What SQLite enforces when a replayed table's transactions replay: every
+/// replica must run the same statements and assertions.
+#[derive(Serialize)]
+struct ReplayedConstraints<'a> {
+    create_sql: &'a str,
+    /// Sorted.
+    indexes: Vec<&'a str>,
+    /// The assertions reading the table, in declaration order.
+    assertions: Vec<&'a LogicalAssertion>,
 }
 #[derive(Serialize)]
 struct Replicated<'a> {
@@ -909,6 +1042,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
                 .table(&key.table)
                 .map_or(key.table.as_str(), |parent| parent.sql_name.as_str()),
             on_delete: &key.on_delete,
+            deferred: key.deferred,
         })
         .collect();
     references.sort();
@@ -927,6 +1061,23 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
             .collect(),
         partition_group: table.partition_group.as_deref(),
         existence_log: table.existence_log,
+        replayed: (table.class == TableClass::Replayed).then(|| {
+            let mut indexes: Vec<_> = table
+                .indexes
+                .iter()
+                .map(|index| index.create_sql.as_str())
+                .collect();
+            indexes.sort_unstable();
+            ReplayedConstraints {
+                create_sql: &table.create_sql,
+                indexes,
+                assertions: schema
+                    .assertions
+                    .iter()
+                    .filter(|assertion| assertion.reads_table(&table.sql_name))
+                    .collect(),
+            }
+        }),
     }
 }
 /// The replicated shape of a table's key, in key order, for comparison.
@@ -1055,6 +1206,17 @@ impl LogicalSchema {
                 || !names.insert(view.name.to_ascii_lowercase())
             {
                 return invalid(format!("view name {}", view.name));
+            }
+        }
+        let mut assertion_names = BTreeSet::new();
+        for assertion in &self.assertions {
+            let tokens = tokenize(&assertion.select_sql).unwrap_or_default();
+            if !identifier(&assertion.name)
+                || !assertion_names.insert(assertion.name.to_ascii_lowercase())
+                || !matches!(tokens.first(), Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))
+                || tokens.contains(&Token::Symbol(';'))
+            {
+                return invalid(format!("assertion {} must be one SELECT", assertion.name));
             }
         }
         Ok(())
@@ -1197,6 +1359,44 @@ impl LogicalSchema {
                 return incompatible(&table.sql_name, Incompatibility::SupportRow(reason));
             }
         }
+        for assertion in &self.assertions {
+            if let Err(reason) = self.assertion_installable(assertion) {
+                return incompatible(&assertion.name, reason);
+            }
+        }
+        Ok(())
+    }
+    /// An assertion reads replayed tables that replay in one order and
+    /// partition alike: all unpartitioned, or all of one partition group.
+    fn assertion_installable(&self, assertion: &LogicalAssertion) -> Result<(), Incompatibility> {
+        use crate::deterministic::{AssertionShape, assertion_tables};
+        let refused = |reason: &str| Err(Incompatibility::Assertion(reason.into()));
+        let names = match assertion_tables(&assertion.select_sql) {
+            AssertionShape::Reads(names) => names,
+            AssertionShape::Function(function) => return Err(Incompatibility::Function(function)),
+            AssertionShape::Refused(reason) => return refused(&reason),
+        };
+        let mut tables = Vec::with_capacity(names.len());
+        for name in &names {
+            match self.table(name) {
+                Some(table) if table.class == TableClass::Replayed => tables.push(table),
+                Some(_) => return refused(&format!("{name} is not a replayed table")),
+                None => return refused(&format!("{name} is not a table")),
+            }
+        }
+        fn group(table: &LogicalTable) -> Option<&str> {
+            (!table.partition_by.is_empty())
+                .then(|| table.partition_group.as_deref().unwrap_or(&table.sql_name))
+        }
+        let Some(first) = tables.first() else {
+            return refused("reads no table");
+        };
+        if tables
+            .iter()
+            .any(|table| group(table) != group(first) || table.coordinated != first.coordinated)
+        {
+            return refused("tables must share one partition group and replay order");
+        }
         Ok(())
     }
     /// Every reason `profile` cannot install the schema, in table order.
@@ -1242,7 +1442,8 @@ impl LogicalSchema {
             return found;
         }
         for table in &self.tables {
-            if !table.class.typed() {
+            // A replayed derived column is SQLite's own generated column.
+            if !table.class.typed() || table.class == TableClass::Replayed {
                 continue;
             }
             for column in &table.columns {
@@ -1468,12 +1669,13 @@ mod tests {
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
             partition_group: None,
-                indexes: vec![LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None }],
+                indexes: vec![LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None, expressions: Vec::new(), predicate: None }],
                 foreign_keys: Vec::new(),
 
                 existence_log: false,
             }],
             views: Vec::new(),
+            assertions: Vec::new(),
         }
     }
     #[test]
@@ -1490,6 +1692,7 @@ mod tests {
             references: vec!["ID".into()],
             on_delete: DELETE_CASCADE.into(),
             on_update: "NO ACTION".into(),
+            deferred: false,
         };
         table.columns.push(column("link", Affinity::Integer));
         table.create_sql.pop();
@@ -1572,6 +1775,8 @@ mod tests {
             }],
             create_sql: "CREATE INDEX by_title ON items(title)".into(),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         });
         local.source.identity = "def".into();
         local.installable().unwrap();
@@ -1635,13 +1840,17 @@ mod tests {
             let items = &mut schema.tables[0];
             items.class = child;
             items.coordinated = coordinated[0];
-            items.foreign_keys.push(LogicalForeignKey {
+            let key = LogicalForeignKey {
                 table: "parents".into(),
                 columns: vec!["id".into()],
                 references: vec!["id".into()],
-                on_delete: "NO ACTION".into(),
+                on_delete: DELETE_CASCADE.into(),
                 on_update: "NO ACTION".into(),
-            });
+                deferred: false,
+            };
+            items.create_sql.pop();
+            items.create_sql += &format!(", {})", replayed_foreign_key_clause(&key));
+            items.foreign_keys.push(key);
             schema.tables.push(parents);
             schema.tables.sort_by(|a, b| a.sql_name.cmp(&b.sql_name));
             match schema.installable() {
@@ -1717,6 +1926,7 @@ mod tests {
                 references: vec!["id".into()],
                 on_delete: "NO ACTION".into(),
                 on_update: "NO ACTION".into(),
+                deferred: false,
             })),
             Some(Incompatibility::ForeignKey)
         );
@@ -1729,6 +1939,7 @@ mod tests {
             None
         );
     }
+
     #[test]
     fn derived_rules_are_single_deterministic_expressions() {
         let columns = ["title", "count"];

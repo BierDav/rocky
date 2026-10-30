@@ -20,6 +20,8 @@ mod history;
 mod key;
 mod key_epoch;
 pub use key_epoch::KeyEpoch;
+mod deterministic;
+pub use deterministic::DETERMINISTIC_FUNCTIONS;
 mod logical;
 mod migration;
 pub use migration::*;

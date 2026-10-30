@@ -111,6 +111,55 @@ fn read(conn: &Connection, checked: &Checked) -> Result<Rows, String> {
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())
 }
+
+#[test]
+fn assertions_see_only_the_held_partition_of_their_own_tables() {
+    // A holds two rows, B and C one each.
+    let conn = db(&["A", "B", "C"]);
+    let capped = |list: &str| {
+        let checked = check_assertion(
+            "SELECT list, COUNT(*) FROM items GROUP BY list HAVING COUNT(*) > 1",
+            &[],
+            &items(&[list], &[]),
+        )
+        .unwrap();
+        assert_eq!(checked.params, vec![text(list)]);
+        read(&conn, &checked).unwrap()
+    };
+    assert_eq!(capped("A"), vec![vec![text("A"), int(2)]]);
+    assert_eq!(capped("B"), Rows::new());
+    let rules = items(&["B"], &[]);
+    for (sql, refusal) in [
+        (
+            "SELECT * FROM items i JOIN other o ON o.id = i.id",
+            IntentRefusal::Unsupported(
+                "the assertion reads other, which is not one of its tables".into(),
+            ),
+        ),
+        (
+            "SELECT * FROM items WHERE amount > random()",
+            IntentRefusal::Random("random".into()),
+        ),
+        (
+            "WITH x AS (SELECT * FROM items) SELECT * FROM x",
+            IntentRefusal::Unsupported("WITH in a replayed statement".into()),
+        ),
+        (
+            "SELECT * FROM items WHERE amount > ?",
+            IntentRefusal::Unsupported("an assertion binds no parameters".into()),
+        ),
+        (
+            "DELETE FROM items",
+            IntentRefusal::Unsupported("an assertion is one SELECT".into()),
+        ),
+    ] {
+        assert_eq!(
+            check_assertion(sql, &[], &rules).unwrap_err(),
+            refusal,
+            "{sql}"
+        );
+    }
+}
 fn rows(conn: &Connection, filter: &str) -> Vec<(i64, String, i64, i64)> {
     conn.prepare(&format!(
         "SELECT id, list, pos, amount FROM items WHERE {filter} ORDER BY id"

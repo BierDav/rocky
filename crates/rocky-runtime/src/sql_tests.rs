@@ -89,12 +89,15 @@ pub(crate) fn schema() -> LogicalSchema {
                 }],
                 create_sql: INDEX.into(),
                 on_conflict: None,
+                expressions: Vec::new(),
+                predicate: None,
             }],
             foreign_keys: Vec::new(),
 
             existence_log: false,
         }],
         views: Vec::new(),
+        assertions: Vec::new(),
     }
 }
 fn decode(payload: &[u8]) -> Result<(String, Option<String>), Refused> {

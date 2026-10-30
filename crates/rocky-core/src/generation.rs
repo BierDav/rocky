@@ -290,6 +290,7 @@ mod tests {
             update_policy: UpdatePolicy::Changed,
             tables,
             views: Vec::new(),
+            assertions: Vec::new(),
         }
     }
     fn items(columns: &[(&str, bool)]) -> LogicalTable {
@@ -317,6 +318,8 @@ mod tests {
             }],
             create_sql: "CREATE INDEX items_name ON items(name)".into(),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         });
         assert_eq!(classify(&old, &indexed), Ok(SchemaChange::Local));
         let added = schema(vec![
@@ -467,6 +470,8 @@ mod tests {
             }],
             create_sql: "CREATE UNIQUE INDEX shelves_label ON shelves(label)".into(),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         });
         let old = schema(vec![items(&[("name", true), ("note", false)]), shelves]);
         let new = schema(vec![items(&[("name", true)])]);

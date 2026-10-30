@@ -1,6 +1,6 @@
 # 5. Replayed constraints
 
-Status: planned. Owner: `rocky-core` (`logical.rs` installability and
+Status: complete; see the [evidence](05-replayed-constraints-evidence.md). Owner: `rocky-core` (`logical.rs` installability and
 the assertion declaration), `rocky-storage` (assertion checks),
 `rocky-secure` (replayed row record, replay), `rocky-sdk` and
 `sdks/uniffi` (schema declaration). Depends on
@@ -12,8 +12,8 @@ the assertion declaration), `rocky-storage` (assertion checks),
 Replayed tables get real SQL constraints: unique indexes, foreign keys,
 complex `CHECK` expressions and cross-row assertions. SQLite or Rocky
 checks them during each replayed transaction. A violation drops the
-transaction; nothing is hidden, nulled or revealed later. Per-field
-stamps leave the replayed row record.
+transaction; nothing is hidden, nulled or revealed later. Replayed projections keep no row records or per-field stamps; only
+transaction undo is retained until sealing.
 
 Today `installable` refuses every `CHECK` (`Incompatibility::CheckConstraint`)
 and unique indexes need `SetNull` or `LatestWins`. Both exist because
@@ -30,7 +30,10 @@ replayed tables.
   JSON functions from the allowlist and generated columns referenced by a
   check. Schema install refuses a check that names a function outside the
   allowlist, with that function's name. SQLite semantics apply unchanged
-  and are documented in the SDK:
+  and are documented in the SDK. A generated column is declared as a
+  `derived` column of the replayed table, stored by SQLite. Unique indexes
+  may also declare expression terms and a `where` predicate in the derived
+  rule grammar.
   - A check is evaluated per statement, not at commit. A transaction that
     passes through an invalid intermediate row fails even if its final
     state is valid; use one multi-column `UPDATE` instead.
@@ -72,10 +75,11 @@ replayed tables.
   If the parent arrives later but is ordered earlier, the rewind redoes
   the child, which then succeeds. Replayed tables have no induced
   fan-out; the features_12 phase 2 exception never applies to them.
-- **No field stamps.** The replayed row record keeps fields, deletion,
-  identity, key, creation hash and creation proof/stamp. It has no
-  per-field `stamps` and no stamp `authors` map. Format change to the
-  replayed row record only.
+- **No field stamps.** Replayed tables keep no row record at all, so they
+  have no per-field `stamps` and no stamp `authors` map.
+- **Outcome records.** An outcome depends on partitions linked by foreign
+  keys or assertions, so a record carries a digest of their prefixes and
+  rewinds follow them. Row format 14.
 - **Cost.** Statement budgets from phase 4 apply to tables without
   assertions. Each assertion run adds its own statements; the evidence
   records them per assertion. Assertions over large partitions need
@@ -98,7 +102,7 @@ replayed tables.
    totals, an insert, update and delete each able to violate, and a later
    transaction that releases capacity letting an earlier-dropped one
    succeed after a rewind places it differently.
-5. Remove field stamps from the replayed row record. Format bump.
+5. No field stamps on replayed rows, which keep no row record.
 6. Convergence fixtures carried from the prototype's constraint tests:
    a composite many-to-many graph (720 permutations), complex checks
    (120), expression and partial unique indexes, cascades, and assertion

@@ -11,6 +11,8 @@ pub struct Schema {
     pub tables: Vec<rocky_core::TableDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<rocky_core::LogicalView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<rocky_core::LogicalAssertion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_policy: Option<rocky_core::UpdatePolicy>,
     /// SQL the first issuer to sign the schema's generation runs once, after
@@ -181,6 +183,7 @@ impl Schema {
                 .update_policy
                 .unwrap_or(rocky_core::UpdatePolicy::Changed),
             views: self.views.clone(),
+            assertions: self.assertions.clone(),
             tables: self.tables.clone(),
         })
     }
@@ -202,6 +205,7 @@ impl Schema {
             version,
             tables: Vec::new(),
             views: Vec::new(),
+            assertions: Vec::new(),
             update_policy: None,
             migrations: Vec::new(),
         })
@@ -216,6 +220,13 @@ impl SchemaBuilder {
     #[must_use]
     pub fn view(mut self, view: rocky_core::LogicalView) -> Self {
         self.0.views.push(view);
+        self
+    }
+    /// An invariant across rows or tables of one partition group, run at the
+    /// end of each transaction writing a table it reads.
+    #[must_use]
+    pub fn assertion(mut self, assertion: rocky_core::LogicalAssertion) -> Self {
+        self.0.assertions.push(assertion);
         self
     }
     #[must_use]
@@ -247,6 +258,7 @@ impl Table {
             class,
             coordinated: false,
             columns: Vec::new(),
+            checks: Vec::new(),
             primary_key: vec!["id".into()],
             partition_by: Vec::new(),
             partition_group: None,
@@ -273,6 +285,15 @@ impl Table {
     #[must_use]
     pub fn index(mut self, index: rocky_core::IndexDefinition) -> Self {
         self.0.indexes.push(index);
+        self
+    }
+    /// A `CHECK` of a replayed table, using deterministic functions only.
+    /// SQLite's semantics apply: it holds after each statement, so assign
+    /// columns that must change together in one `UPDATE`, and a NULL result
+    /// passes, so add `IS NOT NULL` where absence is invalid.
+    #[must_use]
+    pub fn check(mut self, expression: impl Into<String>) -> Self {
+        self.0.checks.push(expression.into());
         self
     }
     /// Access the complete language-neutral definition for advanced schema settings.

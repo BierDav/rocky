@@ -81,10 +81,48 @@ pub(super) struct History {
     pub(super) columns: Vec<String>,
     /// Quoted primary key columns.
     key: Vec<String>,
-    /// Quoted columns of each unique index.
-    uniques: Vec<Vec<String>>,
+    /// What each unique index compares.
+    uniques: Vec<Unique>,
     row_kind: bool,
 }
+/// One unique index: its quoted columns, then its expressions and predicate
+/// as rules over logical column names.
+struct Unique {
+    columns: Vec<String>,
+    expressions: Vec<String>,
+    predicate: Option<String>,
+}
+
+impl Unique {
+    /// `rule` over `image`'s columns. Installed rules always bind.
+    fn bound(rule: &str, image: &str) -> Option<String> {
+        rocky_core::bind_rule(rule, |name| Some(format!("{image}.{}", quoted(name))))
+    }
+    /// Whether rows `a` and `b` clash on this index. An unbound rule widens
+    /// it, and recording a row that did not clash is harmless.
+    fn clash(&self, a: &str, b: &str) -> String {
+        let mut terms: Vec<String> = self
+            .columns
+            .iter()
+            .map(|column| format!("{a}.{column} IS {b}.{column}"))
+            .collect();
+        for rule in &self.expressions {
+            if let (Some(left), Some(right)) = (Self::bound(rule, a), Self::bound(rule, b)) {
+                terms.push(format!("({left}) IS ({right})"));
+            }
+        }
+        if let Some(rule) = &self.predicate
+            && let (Some(left), Some(right)) = (Self::bound(rule, a), Self::bound(rule, b))
+        {
+            terms.push(format!("({left}) AND ({right})"));
+        }
+        if terms.is_empty() {
+            return "1".into();
+        }
+        terms.join(" AND ")
+    }
+}
+
 impl History {
     pub(super) fn of(typed: &Typed) -> Vec<Self> {
         typed
@@ -107,7 +145,11 @@ impl History {
                         .indexes
                         .iter()
                         .filter(|index| index.unique)
-                        .map(|index| index.columns.iter().map(|c| column(&c.name)).collect())
+                        .map(|index| Unique {
+                            columns: index.columns.iter().map(|c| column(&c.name)).collect(),
+                            expressions: index.expressions.clone(),
+                            predicate: index.predicate.clone(),
+                        })
                         .collect(),
                     row_kind: logical.column("row_kind").is_some(),
                 })
@@ -188,7 +230,7 @@ impl History {
             .map(|unique| {
                 self.record_rows(&format!(
                     "{} AND NOT ({})",
-                    Self::same(unique, "r", image),
+                    unique.clash("r", image),
                     Self::same(&self.key, "r", own)
                 ))
             })
@@ -1388,5 +1430,23 @@ impl<A: RowApplication> Inner<A> {
             self.conn.execute(sql, ()).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unique_tests {
+    use super::Unique;
+
+    #[test]
+    fn expression_and_partial_indexes_clash_on_their_own_terms() {
+        let unique = Unique {
+            columns: vec!["\"team\"".into()],
+            expressions: vec!["lower(handle)".into()],
+            predicate: Some("lead = 1".into()),
+        };
+        assert_eq!(
+            unique.clash("r", "NEW"),
+            "r.\"team\" IS NEW.\"team\" AND (lower(r.\"handle\")) IS (lower(NEW.\"handle\")) AND (r.\"lead\" = 1) AND (NEW.\"lead\" = 1)"
+        );
     }
 }

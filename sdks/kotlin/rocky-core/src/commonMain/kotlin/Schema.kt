@@ -10,11 +10,13 @@ data class Schema(
     val updatePolicy: UpdatePolicy = UpdatePolicy.Changed,
     val views: Map<String, String> = emptyMap(),
     val migrations: List<Migration> = emptyList(),
+    val assertions: List<Assertion> = emptyList(),
 ) {
     init {
         require(migrations.zipWithNext().all { (a, b) -> a.version < b.version } && migrations.all { it.version <= version }) { "migrations name ascending versions up to $version" }
         require(application.matches(IDENTIFIER) && version > 0 && tables.isNotEmpty() && tables.size <= 64)
         require(tables.map { it.name }.distinct().size == tables.size)
+        require(assertions.map { it.name }.distinct().size == assertions.size) { "duplicate assertion" }
         validatePartitionGroups(tables)
         validateReferences(tables)
         for (table in tables) {
@@ -33,6 +35,7 @@ data class Schema(
         put("tables", JsonArray(tables.sortedBy { it.name }.map { it.definition() }))
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
+        if (assertions.isNotEmpty()) put("assertions", assertionsJson())
         if (migrations.isNotEmpty()) put("migrations", JsonArray(migrations.map { it.json() }))
     }.toString()
 
@@ -44,10 +47,12 @@ data class Schema(
             put("publisher", publisher.lowercase())
             put("application", application)
             if (views.isNotEmpty()) put("views", viewsJson())
+            if (assertions.isNotEmpty()) put("assertions", assertionsJson())
             put("update_policy", updatePolicy.wire)
             put("tables", JsonArray(tables.sortedBy { it.name }.map { it.definition() }))
         }.toString()
     }
+    private fun assertionsJson() = JsonArray(assertions.sortedBy { it.name }.map { it.json() })
     private fun viewsJson(): JsonArray = JsonArray(
         views.entries.sortedBy { it.key }.map { (name, select) ->
             buildJsonObject {
@@ -117,6 +122,8 @@ data class Table(
     val partitionGroup: String? = null,
     /** The table whose grants this one follows; see [TableBuilder.grantedLike]. */
     val grantedLike: String? = null,
+    /** See [TableBuilder.check]. */
+    val checks: List<String> = emptyList(),
 ) {
     init {
         require(name.matches(IDENTIFIER) && columns.isNotEmpty() && columns.size <= 128)
@@ -128,6 +135,7 @@ data class Table(
         grantedLike?.let { put("granted_like", it) }
         put("class", tableClass.wire)
         put("columns", JsonArray(columns.map { it.definition() }))
+        if (checks.isNotEmpty()) put("checks", JsonArray(checks.map(::JsonPrimitive)))
         put("primary_key", JsonArray(primaryKey.map(::JsonPrimitive)))
         put("indexes", JsonArray(indexes.sortedBy { it.name }.map { it.json() }))
         if (foreignKeys.isNotEmpty()) put("foreign_keys", JsonArray(foreignKeys.sortedBy { it.columns.joinToString(",") }.map { it.json() }))

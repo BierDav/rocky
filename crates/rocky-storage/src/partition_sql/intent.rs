@@ -17,101 +17,7 @@ use std::{
 /// transaction's bundle, so this equals rocky-secure's `MAX_BUNDLE_FRAMES`.
 pub const MAX_INTENT_PARTITIONS: usize = 64;
 
-/// SQLite functions whose result depends only on their arguments and the
-/// engine build. Part of the engine identity a tip records.
-pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
-    // Scalar.
-    "abs",
-    "char",
-    "coalesce",
-    "concat",
-    "concat_ws",
-    "format",
-    "glob",
-    "hex",
-    "ifnull",
-    "iif",
-    "instr",
-    "length",
-    "like",
-    "likelihood",
-    "likely",
-    "lower",
-    "ltrim",
-    "max",
-    "min",
-    "nullif",
-    "octet_length",
-    "printf",
-    "quote",
-    "replace",
-    "round",
-    "rtrim",
-    "sign",
-    "substr",
-    "substring",
-    "trim",
-    "typeof",
-    "unhex",
-    "unicode",
-    "unlikely",
-    "upper",
-    "zeroblob",
-    // Exact math; transcendental functions use the platform's libm.
-    "ceil",
-    "ceiling",
-    "floor",
-    "mod",
-    "trunc",
-    // Aggregate.
-    "avg",
-    "count",
-    "group_concat",
-    "string_agg",
-    "sum",
-    "total",
-    // Window.
-    "cume_dist",
-    "dense_rank",
-    "first_value",
-    "lag",
-    "last_value",
-    "lead",
-    "nth_value",
-    "ntile",
-    "percent_rank",
-    "rank",
-    "row_number",
-    // JSON.
-    "json",
-    "json_array",
-    "json_array_length",
-    "json_error_position",
-    "json_extract",
-    "json_group_array",
-    "json_group_object",
-    "json_insert",
-    "json_object",
-    "json_patch",
-    "json_pretty",
-    "json_quote",
-    "json_remove",
-    "json_replace",
-    "json_set",
-    "json_type",
-    "json_valid",
-    "jsonb",
-    "jsonb_array",
-    "jsonb_extract",
-    "jsonb_group_array",
-    "jsonb_group_object",
-    "jsonb_insert",
-    "jsonb_object",
-    "jsonb_patch",
-    "jsonb_remove",
-    "jsonb_replace",
-    "jsonb_set",
-];
+pub use rocky_core::DETERMINISTIC_FUNCTIONS;
 /// Date and time functions: deterministic only when every argument is
 /// bound and none reads the clock or the local time zone.
 const CLOCK_FUNCTIONS: &[&str] = &[
@@ -244,6 +150,52 @@ pub fn written_table(sql: &str, views: &[rocky_core::LogicalView]) -> Option<Str
     target(&prepare(sql, views).ok()?.statement)
         .ok()
         .map(|(name, _)| name)
+}
+
+/// Checks an assertion: one deterministic `SELECT` reading only `tables`,
+/// each filtered to its held partitions whether or not the `SELECT` names
+/// them, so that it sees exactly the transaction's partition.
+pub fn check_assertion(
+    sql: &str,
+    views: &[rocky_core::LogicalView],
+    tables: &BTreeMap<String, TablePartitions>,
+) -> Result<Checked, IntentRefusal> {
+    let prepared = prepare(sql, views)?;
+    let statement = &prepared.statement;
+    if !matches!(statement, Statement::Query(_)) {
+        return Err(IntentRefusal::Unsupported(
+            "an assertion is one SELECT".into(),
+        ));
+    }
+    let mut bindings = Bindings {
+        params: &[],
+        placeholders: BTreeMap::new(),
+        values: BTreeMap::new(),
+        numbers: BTreeMap::new(),
+    };
+    if let ControlFlow::Break(error) = statement.visit(&mut bindings) {
+        return Err(IntentRefusal::Unsupported(error));
+    }
+    if bindings.bind().map_err(IntentRefusal::Unsupported)? != 0 {
+        return Err(IntentRefusal::Unsupported(
+            "an assertion binds no parameters".into(),
+        ));
+    }
+    if let ControlFlow::Break(refusal) = statement.visit(&mut Determinism {
+        bindings: &bindings,
+    }) {
+        return Err(refusal);
+    }
+    if let Some(name) = prepared
+        .tables()
+        .iter()
+        .find(|name| !tables.contains_key(*name))
+    {
+        return Err(IntentRefusal::Unsupported(format!(
+            "the assertion reads {name}, which is not one of its tables"
+        )));
+    }
+    Ok(prepared.check_assertion(&[], tables)?)
 }
 
 /// Refuses a replayed table's schema whose keys replicas would assign.

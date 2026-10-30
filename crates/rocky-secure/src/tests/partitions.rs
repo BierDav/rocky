@@ -458,7 +458,10 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 13);
+    assert_eq!(
+        fa.operation().unwrap().header.extensions.row_format,
+        crate::wire::ROW_FORMAT
+    );
     assert_eq!(
         reader.receive(fa.clone()).await.unwrap(),
         ReceiveStatus::Applied

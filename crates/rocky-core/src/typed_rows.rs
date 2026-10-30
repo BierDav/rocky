@@ -505,12 +505,13 @@ mod tests {
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
             partition_group: None,
-                indexes: vec![crate::LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![crate::IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None }],
+                indexes: vec![crate::LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![crate::IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None, expressions: Vec::new(), predicate: None }],
                 foreign_keys: Vec::new(),
 
                 existence_log: false,
             }],
             views: Vec::new(),
+            assertions: Vec::new(),
         };
         TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap()
     }

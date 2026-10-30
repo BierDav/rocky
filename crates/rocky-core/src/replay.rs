@@ -128,6 +128,10 @@ pub struct OutcomeRecord {
     /// Each member the publisher replayed, by index, with what its
     /// partition applied before it: the last sequence per author.
     pub replayed: Vec<(u16, Vec<BaseMark>)>,
+    /// A digest of what the partitions linked to the members by foreign keys
+    /// or assertions applied before them, which outcomes depend on too;
+    /// `None` without any. Bounded, as a link can reach every partition.
+    pub linked: Option<crate::Commitment>,
     /// `None` when applied.
     pub dropped: Option<DropReason>,
     /// The replaying engine, reported when two records disagree.

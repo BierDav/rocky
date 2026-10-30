@@ -383,7 +383,7 @@ mod tests {
         // The portable builder supplies both required columns.
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]).unwrap();
         let descriptor = definition.build().unwrap();
-        // Definitions are format 6; the descriptors they build are format 5.
+        // Definitions and descriptors use the current format.
         for format in [0, 1, 2, 3, 4, 5, 7] {
             definition.format = format;
             assert!(
@@ -398,7 +398,7 @@ mod tests {
             assert!(error.contains("unsupported schema"), "{error}");
         }
         assert_eq!(descriptor.format, rocky_core::LOGICAL_SCHEMA_FORMAT);
-        for format in [0, 1, 2, 3, 4, 6] {
+        for format in [0, 1, 2, 3, 4, 6, 7] {
             let mut old = descriptor.clone();
             old.format = format;
             let error = crate::TypedApp::new(old, &[]).err().unwrap().to_string();

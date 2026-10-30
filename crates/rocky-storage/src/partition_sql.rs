@@ -2,7 +2,7 @@
 mod intent;
 pub use intent::{
     DETERMINISTIC_FUNCTIONS, IntentRefusal, MAX_INTENT_PARTITIONS, PartitionStatement, SplitError,
-    check_replayed_table, split_intent, written_table,
+    check_assertion, check_replayed_table, split_intent, written_table,
 };
 use rocky_core::{KeyColumn, PartitionValue, SqlValue};
 use sqlparser::ast::*;
@@ -300,6 +300,7 @@ fn mentions_kind(expr: &Expr) -> bool {
 struct Checker<'a> {
     tables: &'a BTreeMap<String, TablePartitions>,
     bindings: &'a Bindings<'a>,
+    assertion: bool,
 }
 impl Checker<'_> {
     fn body(&self, body: &SetExpr) -> Result<(), Refusal> {
@@ -386,17 +387,20 @@ impl Checker<'_> {
                     .get(&(alias.clone(), column.name.to_ascii_lowercase()))
                 else {
                     // Every partition may be read: one that waits refuses it.
-                    if !rule.waiting.is_empty() {
+                    if !rule.waiting.is_empty() && !self.assertion {
                         return Err(incomplete());
                     }
                     if real {
                         tuples.clear();
                         break;
                     }
-                    return Err(format!(
-                        "{name}: a partial table needs held partition equality/IN or row_kind = 0"
-                    )
-                    .into());
+                    if !self.assertion {
+                        return Err(format!(
+                            "{name}: a partial table needs held partition equality/IN or row_kind = 0"
+                        )
+                        .into());
+                    }
+                    continue;
                 };
                 if tuples.len().saturating_mul(values.len()) > 4096 {
                     return Err("partition proof quota".into());
@@ -424,11 +428,11 @@ impl Checker<'_> {
                     .collect::<Result<Vec<_>, _>>()
             };
             let waiting = normalized(&rule.waiting)?;
-            if tuples.iter().any(|tuple| waiting.contains(tuple)) {
+            if !self.assertion && tuples.iter().any(|tuple| waiting.contains(tuple)) {
                 return Err(incomplete());
             }
             let held = normalized(&rule.held)?;
-            if !real && tuples.iter().any(|tuple| !held.contains(tuple)) {
+            if !self.assertion && !real && tuples.iter().any(|tuple| !held.contains(tuple)) {
                 return Err(Refusal::Unavailable {
                     table: name.clone(),
                     reason: crate::sql::Unavailable::NotHeld,
@@ -540,6 +544,23 @@ impl Prepared {
         params: &[SqlValue],
         tables: &BTreeMap<String, TablePartitions>,
     ) -> Result<Checked, Refusal> {
+        self.check_mode(params, tables, false)
+    }
+    /// Checks an assertion query and appends the held-partition filters
+    /// without requiring the assertion to state the partition predicate.
+    fn check_assertion(
+        &self,
+        params: &[SqlValue],
+        tables: &BTreeMap<String, TablePartitions>,
+    ) -> Result<Checked, Refusal> {
+        self.check_mode(params, tables, true)
+    }
+    fn check_mode(
+        &self,
+        params: &[SqlValue],
+        tables: &BTreeMap<String, TablePartitions>,
+        assertion: bool,
+    ) -> Result<Checked, Refusal> {
         let mut statement = self.statement.clone();
         let mut bindings = Bindings {
             params,
@@ -554,6 +575,7 @@ impl Prepared {
         let mut checker = Checker {
             tables,
             bindings: &bindings,
+            assertion,
         };
         if let ControlFlow::Break(error) = statement.visit(&mut checker) {
             return Err(error);

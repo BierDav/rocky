@@ -34,6 +34,16 @@ struct Reference {
     columns: Vec<String>,
     table: String,
     on_delete: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deferred: bool,
+}
+/// What a replayed table's replay enforces; see `logical::ReplayedConstraints`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Replayed {
+    create_sql: String,
+    indexes: Vec<String>,
+    assertions: Vec<crate::LogicalAssertion>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +59,8 @@ struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     partition_group: Option<String>,
     existence_log: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replayed: Option<Replayed>,
 }
 impl Table {
     fn columns(&self) -> impl Iterator<Item = &Column> {

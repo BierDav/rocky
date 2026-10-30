@@ -1600,8 +1600,9 @@ mod kept;
 mod partitions;
 mod placements;
 mod recovery;
-mod revocations;
 #[cfg(unix)]
+mod replayed_constraints;
+mod revocations;
 mod roles;
 mod rotation;
 mod sql;

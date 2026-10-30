@@ -14,6 +14,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::OwnedMutexGuard;
 
+/// SQLite's result code for a violated constraint.
+const SQLITE_CONSTRAINT: i32 = 19;
+
 /// A statement's whole result. The committing call carries `committed`.
 #[derive(Clone, Debug)]
 pub struct SecureRows {
@@ -1208,6 +1211,7 @@ impl<A: RowApplication> SecureSql<A> {
         let assigned_policy = typed.rows.schema().update_policy == UpdatePolicy::Assigned;
         let mut writes = Vec::new();
         let mut undo = BTreeMap::<ResourceScope, Vec<super::replay::Undo>>::new();
+        let mut written = Vec::new();
         for touched in touched {
             let table = &plan.tables[touched.table];
             // The author admits its replayed effects as every replica will.
@@ -1216,11 +1220,23 @@ impl<A: RowApplication> SecureSql<A> {
                 let unchecked = inner.unchecked_replayed_admission;
                 #[cfg(not(test))]
                 let unchecked = false;
-                let Some(change) = super::replay::replayed_change(conn, &typed, table, &touched)?
+                let Some((change, image)) =
+                    super::replay::replayed_change(conn, &typed, table, &touched)?
                 else {
                     continue;
                 };
-                if !unchecked && !change.permitted_by(&inner.local_grants(now()?)?) {
+                let logical = typed
+                    .rows
+                    .schema()
+                    .table(&table.name)
+                    .ok_or_else(|| Error::Corrupt("replayed table".into()))?;
+                super::replay::note(&mut written, super::replay::written(logical, &image)?);
+                // Rows only a delete action changed need no grant, as on
+                // every replica.
+                let direct = intents
+                    .iter()
+                    .any(|recorded| recorded.scope.table == change.scope.table);
+                if !unchecked && direct && !change.permitted_by(&inner.local_grants(now()?)?) {
                     return Err(denied(
                         "row/field transition denied; the replayed effects are not granted",
                     ));
@@ -1456,7 +1472,27 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         admit(inner, &self.session)?;
+        // Every replica checks these before releasing the transaction's
+        // savepoint; the author refuses what they would drop.
         let intents = super::intents::grouped(intents)?;
+        if intents.len() > 1 {
+            let named: Vec<(&str, &[rocky_core::replay::IntentStatement])> = intents
+                .iter()
+                .filter_map(|(scope, statements)| {
+                    Some((
+                        typed.rows.table(&scope.table)?.sql_name.as_str(),
+                        statements.as_slice(),
+                    ))
+                })
+                .collect();
+            super::replay::check_member_order(typed.rows.schema(), named.iter().copied())?;
+        }
+        if let Some(violated) = inner.replayed_violation(&written, false).await? {
+            return Err(Error::Sql(SqlError::Statement {
+                code: SQLITE_CONSTRAINT,
+                message: violated,
+            }));
+        }
         // Replayed writes travel only as a plain bundle's intents. Rows of
         // mergeable tables could not drop with them, so they never share a
         // transaction.
@@ -1524,13 +1560,18 @@ impl<A: RowApplication> SecureSql<A> {
             }));
         }
         let encoded = super::bundle::input_bytes(&writes, &[], &intents)?;
-        // The author's execution rewinds like a replay of it.
-        let intents: super::bundle::Intents = intents
+        // The author's execution rewinds like a replay of it. Rows a delete
+        // action changed in a scope without statements undo with the first
+        // member: a rewind undoes every member of a transaction.
+        let mut intents: super::bundle::Intents = intents
             .into_iter()
             .map(|(scope, statements)| {
                 (scope, (statements, undo.remove(&scope).unwrap_or_default()))
             })
             .collect();
+        if let Some((_, (_, first))) = intents.iter_mut().next() {
+            first.extend(undo.into_values().flatten());
+        }
         if encoded.len() > MAX_BUNDLE_BYTES {
             return Err(Error::Quota {
                 resource: "bundle bytes",

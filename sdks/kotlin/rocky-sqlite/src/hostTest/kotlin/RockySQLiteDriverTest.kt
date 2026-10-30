@@ -171,6 +171,43 @@ class RockySQLiteDriverTest {
         writer.close()
     }
 
+    @Test fun replayedTablesDeclareChecksReferencesAndAssertions() = runBlocking {
+        val shop = schema("shop", version = 1) {
+            val teams = table("teams") {
+                tableClass = rocky.TableClass.Replayed
+                integer("cap")
+                text("name")
+                generated(rocky.Column.integer("doubled"), "cap * 2")
+                check("cap BETWEEN 1 AND 2")
+                check("doubled <= 4")
+                index(rocky.Index("teams_name", emptyList(), unique = true, expressions = listOf("lower(name)"), where = "cap > 0"))
+                primaryKey("id")
+            }
+            table("members") {
+                tableClass = rocky.TableClass.Replayed
+                reference("team", teams, rocky.Delete.Cascade, deferred = true)
+                primaryKey("id")
+            }
+            assertion("team_cap", "SELECT t.id FROM teams t JOIN members m ON m.team = t.id GROUP BY t.id HAVING COUNT(*) > MIN(t.cap)")
+        }
+        val json = shop.definitionJson("0".repeat(64))
+        assertTrue("\"cap BETWEEN 1 AND 2\"" in json && "\"deferred\":true" in json && "\"select_sql\"" in json, json)
+        val directory: File = Files.createTempDirectory("rocky-sqlite").toFile()
+        val database = RockyDatabase.local(directory.path, shop)
+        try {
+            val writer = RockySQLiteDriver(database).open("shop")
+            writer.execSQL("BEGIN IMMEDIATE TRANSACTION")
+            writer.insertFrom("teams", "INSERT INTO teams(cap, name, id) VALUES(1, 'a', ?)")
+            assertFails { writer.insertFrom("teams", "INSERT INTO teams(cap, name, id) VALUES(1, 'A', ?)") }
+            assertFails { writer.execSQL("UPDATE teams SET cap = 3") }
+            writer.execSQL("ROLLBACK TRANSACTION")
+            writer.close()
+        } finally {
+            database.close()
+            directory.deleteRecursively()
+        }
+    }
+
     @Test fun aReplayedCommitReportsItsOutcome() = runBlocking {
         val counters = schema("counters", version = 1) {
             table("counters") {

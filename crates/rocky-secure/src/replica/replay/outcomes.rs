@@ -42,6 +42,14 @@ impl<A: RowApplication> Inner<A> {
     /// What the partition applied before the recorded member `hash`: the
     /// last sequence per author.
     async fn prefix(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
+        let prefix = self.prefix_unbounded(scope, hash).await?;
+        if prefix.len() > rocky_core::replay::MAX_OUTCOME_MEMBERS {
+            return Err(denied("outcome prefix quota"));
+        }
+        Ok(prefix)
+    }
+
+    async fn prefix_unbounded(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
         let rows = collect_rows(
             self.conn
                 .query(
@@ -54,9 +62,6 @@ impl<A: RowApplication> Inner<A> {
                 .await?,
         )
         .await?;
-        if rows.len() > rocky_core::replay::MAX_OUTCOME_MEMBERS {
-            return Err(denied("outcome prefix quota"));
-        }
         rows.iter()
             .map(|row| match row.as_slice() {
                 [SqlValue::Integer(author), SqlValue::Integer(sequence)] => Ok(BaseMark {
@@ -66,6 +71,49 @@ impl<A: RowApplication> Inner<A> {
                 _ => Err(Error::Corrupt("replayed prefix".into())),
             })
             .collect()
+    }
+
+    /// A digest of each partition linked to `held`, with what it applied
+    /// before them. Replicas holding other linked partitions differ here,
+    /// so their records never compare.
+    async fn linked_prefixes(
+        &self,
+        held: &[(&EncryptedFrame, u16)],
+    ) -> Result<Option<Commitment>, Error> {
+        let Some((first, _)) = held.first() else {
+            return Ok(None);
+        };
+        let mut own = BTreeSet::new();
+        let mut linked = BTreeSet::new();
+        for (frame, _) in held {
+            let id = self
+                .scope_id(frame.operation_ref()?.header.extensions.scope)
+                .await?;
+            own.insert(id);
+            linked.extend(self.linked_scopes(id).await?);
+        }
+        let hash = first.operation_ref()?.hash;
+        let mut prefixes = Vec::with_capacity(linked.len());
+        for id in linked.difference(&own) {
+            let rows = collect_rows(
+                self.conn
+                    .query("SELECT scope FROM secure_scope_state WHERE id=?", [*id])
+                    .await?,
+            )
+            .await?;
+            let Some([SqlValue::Blob(scope)]) = rows.first().map(Vec::as_slice) else {
+                return Err(Error::Corrupt("replayed scope".into()));
+            };
+            prefixes.push((scope.clone(), self.prefix_unbounded(*id, hash).await?));
+        }
+        if prefixes.is_empty() {
+            return Ok(None);
+        }
+        prefixes.sort();
+        Ok(Some(rocky_core::commitment(
+            "rocky.outcome.linked.v1",
+            &encode(&prefixes)?,
+        )))
     }
 
     /// Every stored record of `transaction`, by publisher.
@@ -205,9 +253,11 @@ impl<A: RowApplication> Inner<A> {
         if unchanged {
             return Ok(());
         }
+        let linked = self.linked_prefixes(held).await?;
         let record = OutcomeRecord {
             transaction,
             replayed,
+            linked,
             dropped,
             engine: engine(),
         };
@@ -258,6 +308,7 @@ impl<A: RowApplication> Inner<A> {
         if let Some((.., other)) = stored.iter().find(|(stored, _, other)| {
             stored.as_slice() != publisher.as_bytes()
                 && other.replayed == record.replayed
+                && other.linked == record.linked
                 && other.dropped != record.dropped
         }) {
             tracing::warn!(

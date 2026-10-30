@@ -72,6 +72,8 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
             }],
             create_sql: format!("CREATE UNIQUE INDEX {name}_identity ON {name}(id)"),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         }],
         foreign_keys: Vec::new(),
 
@@ -282,6 +284,7 @@ impl Lineage {
             update_policy: UpdatePolicy::Changed,
             tables,
             views: Vec::new(),
+            assertions: Vec::new(),
         }
     }
     /// Generation 1 with an index on `title`: a local change.
@@ -296,6 +299,8 @@ impl Lineage {
             }],
             create_sql: "CREATE INDEX items_title ON items(title)".into(),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         });
         schema
     }

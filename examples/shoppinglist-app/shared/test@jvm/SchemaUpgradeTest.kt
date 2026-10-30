@@ -63,8 +63,13 @@ private val ShoppingSchemaV6 = schema("shopping", version = 6) {
  * it edits links it was never granted by name. See `docs/runtime/shopping-schema-7.md`.
  */
 class SchemaUpgradeTest {
+    /** A peer that just reopened may take a few attempts to answer. */
     private fun RockyDatabase.reconciled(): Boolean = runBlocking {
-        syncOnce().peers.any { peer -> peer.attempts.any { it.operation == AttemptOperation.Reconcile && it.outcome == AttemptOutcome.Completed } }
+        repeat(50) {
+            if (syncOnce().peers.any { peer -> peer.attempts.any { it.operation == AttemptOperation.Reconcile && it.outcome == AttemptOutcome.Completed } }) return@runBlocking true
+            kotlinx.coroutines.delay(100)
+        }
+        false
     }
 
     @Test fun `a trusted device migrates version 6 and a version 6 member keeps syncing`() = runBlocking {

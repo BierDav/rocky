@@ -10,10 +10,15 @@ use rocky_core::TableClass;
 use rocky_core::replay::{DropReason, Intent, TransactionOutcome};
 use rocky_storage::partition_sql::{TablePartitions, split_intent};
 
+mod constraints;
 pub(crate) mod outcomes;
+pub(super) use constraints::{
+    Written, cascades, check_member_order, checked, linked, note, written,
+};
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
+    // `violated` names the constraint or assertion a `constraint` drop broke.
+    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
 ];
 
@@ -26,11 +31,26 @@ pub(super) struct Undo {
     pub(super) before: Option<Vec<SqlValue>>,
 }
 
-/// What one member's replay changed: the rows' prior images, and the
-/// identities of the rows it created.
+/// What one member's replay changed: the rows' prior images, the
+/// identities of the rows it created and the partitions it wrote.
 pub(super) struct Replayed {
     undo: Vec<Undo>,
     births: Vec<checkpoint::IdentityMark>,
+    written: Vec<Written>,
+}
+
+/// Why a transaction dropped, and for `Constraint` what it violated.
+pub(super) struct Dropped {
+    pub(super) reason: DropReason,
+    pub(super) violated: Option<String>,
+}
+impl From<DropReason> for Dropped {
+    fn from(reason: DropReason) -> Self {
+        Self {
+            reason,
+            violated: None,
+        }
+    }
 }
 
 /// A partition's replay position: the era, then the stamp.
@@ -195,6 +215,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
         super::bundle::transaction_id(inner.config.node.public_key(), &handle)
     }
 
+    /// The constraint or assertion whose violation dropped `transaction`
+    /// here, as SQLite or the assertion names it.
+    pub async fn transaction_violation(
+        &self,
+        transaction: Commitment,
+    ) -> Result<Option<String>, Error> {
+        let inner = self.inner.lock(Class::Interactive).await;
+        let rows = collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT violated FROM secure_replayed WHERE txn=? AND violated IS NOT NULL LIMIT 1",
+                    [transaction.to_vec()],
+                )
+                .await?,
+        )
+        .await?;
+        match rows.first().map(Vec::as_slice) {
+            None => Ok(None),
+            Some([SqlValue::Text(violated)]) => Ok(Some(violated.clone())),
+            Some(_) => Err(Error::Corrupt("replayed violation".into())),
+        }
+    }
+
     /// How a transaction with replayed writes stands here: `None` until a
     /// member of it has replayed. A drop is final once a seal covers it.
     pub async fn transaction_outcome(
@@ -249,14 +293,108 @@ fn reason_named(name: &str) -> Result<DropReason, Error> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// The other stored scopes whose order can change `scope`'s outcomes:
+    /// partitions of its linked tables holding the same partition values,
+    /// or every partition when only one side is partitioned.
+    async fn linked_scopes(&self, scope: i64) -> Result<Vec<i64>, Error> {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let schema = typed.rows.schema();
+        let links = schema
+            .assertions
+            .iter()
+            .any(|assertion| assertion.tables().len() > 1)
+            || schema
+                .tables
+                .iter()
+                .any(|table| table.class == TableClass::Replayed && !table.foreign_keys.is_empty());
+        if !links {
+            return Ok(Vec::new());
+        }
+        let corrupt = || Error::Corrupt("replayed scope".into());
+        let stored = collect_rows(
+            self.conn
+                .query("SELECT scope FROM secure_scope_state WHERE id=?", [scope])
+                .await?,
+        )
+        .await?;
+        let Some([SqlValue::Blob(blob)]) = stored.first().map(Vec::as_slice) else {
+            return Err(corrupt());
+        };
+        let own: ResourceScope = decode(blob)?;
+        let Some(logical) = typed
+            .rows
+            .table(&own.table)
+            .and_then(|table| schema.table(&table.sql_name))
+        else {
+            return Ok(Vec::new());
+        };
+        let tables = linked(schema, &logical.sql_name);
+        if tables.len() == 1 {
+            return Ok(Vec::new());
+        }
+        let values = |logical, scope| {
+            self.partitions
+                .get(scope)
+                .map(|tuple| super::partition::partition_values(schema, logical, tuple))
+                .transpose()
+        };
+        let own_values = if logical.partition_by.is_empty() {
+            None
+        } else {
+            values(logical, &own)?
+        };
+        let mut scopes = Vec::new();
+        for name in tables
+            .iter()
+            .filter(|name| !name.eq_ignore_ascii_case(&logical.sql_name))
+        {
+            let (Some(projected), Some(other)) = (typed.by_name(name), schema.table(name)) else {
+                return Err(corrupt());
+            };
+            if other.partition_by.is_empty() {
+                scopes.push(projected.scope);
+                continue;
+            }
+            for candidate in self.partitions.keys().filter(|candidate| {
+                candidate.domain == projected.scope.domain
+                    && candidate.table == projected.scope.table
+            }) {
+                if own_values.is_none() || values(other, candidate)? == own_values {
+                    scopes.push(*candidate);
+                }
+            }
+        }
+        let mut ids = Vec::with_capacity(scopes.len());
+        for scope in scopes {
+            if let Some(id) = self.find_scope_id(scope).await? {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
     /// Undoes every unsealed transaction ordered at or after `starts` in
-    /// its partition, and every transaction sharing a member with one,
-    /// latest first. Returns them for redo in canonical order.
+    /// its partition and the partitions linked to it, and every
+    /// transaction sharing a member with one, latest first. Returns them
+    /// for redo in canonical order.
     async fn rewind(&self, starts: Vec<(i64, Order)>) -> Result<Vec<Redo>, Error> {
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut work = starts;
         let mut rewound = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+        let mut links: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
         while let Some((scope, from)) = work.pop() {
+            if !visited.insert((scope, from.clone())) {
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) = links.entry(scope) {
+                entry.insert(self.linked_scopes(scope).await?);
+            }
+            for linked in links.get(&scope).into_iter().flatten() {
+                work.push((*linked, from.clone()));
+            }
             let later = collect_rows(
                 self.conn
                     .query(
@@ -356,23 +494,56 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(corrupt)?,
             );
         }
-        // Every changed row goes first, so a restored image never collides
-        // with a row the member moved; references settle at commit.
+        // References settle at commit. Rows the member created go first, so
+        // a restored image never collides with one of them.
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
         for (table, undo) in tables.iter().zip(undo) {
             self.touch(&table.name);
+            if undo.before.is_none() {
+                self.conn
+                    .execute(&table.delete_by_key(), bindings(undo.key.clone()))
+                    .await?;
+            }
+        }
+        // A row that stands is set back in place: deleting it would run its
+        // delete actions on rows outside this undo.
+        let mut collided = Vec::new();
+        for (table, undo) in tables.iter().zip(undo) {
+            let Some(before) = &undo.before else {
+                continue;
+            };
+            let mut values = table.stored(before);
+            values.extend(undo.key.iter().cloned());
+            let restored = match self
+                .conn
+                .execute(&table.update_image(), bindings(values))
+                .await
+            {
+                Ok(0) => {
+                    self.conn
+                        .execute(&table.insert_image(), bindings(table.stored(before)))
+                        .await
+                }
+                other => other,
+            };
+            match restored {
+                Ok(_) => {}
+                Err(error) if error.is_constraint() => collided.push((table, undo, before)),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Rows that held each other's unique values, as after a swap.
+        for (table, undo, _) in &collided {
             self.conn
                 .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                 .await?;
         }
-        for (table, undo) in tables.iter().zip(undo) {
-            if let Some(before) = &undo.before {
-                self.conn
-                    .execute(&table.insert_image(), bindings(before.clone()))
-                    .await?;
-            }
+        for (table, _, before) in &collided {
+            self.conn
+                .execute(&table.insert_image(), bindings(table.stored(before)))
+                .await?;
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=OFF", ())
@@ -402,7 +573,11 @@ impl<A: RowApplication> Inner<A> {
         let kept: Vec<String> = before
             .iter()
             .flat_map(|before| &before.columns)
-            .filter(|column| table.column(&column.sql_name).is_some())
+            .filter(|column| {
+                table.column(&column.sql_name).is_some_and(|kept| {
+                    !matches!(kept.class, rocky_core::ColumnClass::Derived { .. })
+                })
+            })
             .map(|column| typed::quoted(&column.sql_name))
             .collect();
         let old = format!("secure_rebuild_{name}");
@@ -630,7 +805,7 @@ impl<A: RowApplication> Inner<A> {
                     self.record_replayed(
                         frame,
                         (transaction, *member, members),
-                        Some(reason),
+                        Some(&reason.into()),
                         &[],
                         era,
                     )
@@ -640,6 +815,14 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         self.conn.execute("SAVEPOINT intents", ()).await?;
+        // Members replay in scope order, not in the order the author ran
+        // their statements: references between them settle at the end.
+        let several = intents.len() > 1;
+        if several {
+            self.conn
+                .execute("PRAGMA defer_foreign_keys=ON", ())
+                .await?;
+        }
         let mut replayed = Vec::with_capacity(intents.len());
         let mut dropped = None;
         for (frame, intent, grants, _) in intents {
@@ -651,6 +834,23 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        if dropped.is_none() {
+            let mut written = Vec::new();
+            for row in replayed.iter().flat_map(|replayed| &replayed.written) {
+                note(&mut written, row.clone());
+            }
+            if let Some(violated) = self.replayed_violation(&written, several).await? {
+                dropped = Some(Dropped {
+                    reason: DropReason::Constraint,
+                    violated: Some(violated),
+                });
+            }
+        }
+        if several {
+            self.conn
+                .execute("PRAGMA defer_foreign_keys=OFF", ())
+                .await?;
+        }
         if dropped.is_some() {
             self.conn.execute("ROLLBACK TO intents", ()).await?;
             replayed.clear();
@@ -660,8 +860,14 @@ impl<A: RowApplication> Inner<A> {
             let (undo, births) = replayed.get(index).map_or((&[][..], &[][..]), |replayed| {
                 (replayed.undo.as_slice(), replayed.births.as_slice())
             });
-            self.record_replayed(frame, (transaction, *member, members), dropped, undo, era)
-                .await?;
+            self.record_replayed(
+                frame,
+                (transaction, *member, members),
+                dropped.as_ref(),
+                undo,
+                era,
+            )
+            .await?;
             // A created identity stays reserved, whatever later rewinds do.
             let scope = frame.scope()?;
             for birth in births {
@@ -683,8 +889,13 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .map(|(frame, .., member)| (*frame, *member))
                 .collect();
-            self.publish_outcome(transaction, &held, dropped, time)
-                .await?;
+            self.publish_outcome(
+                transaction,
+                &held,
+                dropped.as_ref().map(|dropped| dropped.reason),
+                time,
+            )
+            .await?;
         }
         #[cfg(any(test, feature = "qualification"))]
         self.crash_at(|point| point == CrashPoint::Apply)?;
@@ -780,7 +991,7 @@ impl<A: RowApplication> Inner<A> {
                     self.record_replayed(
                         frame,
                         (redo.transaction, *member, members),
-                        Some(DropReason::Admission),
+                        Some(&DropReason::Admission.into()),
                         &[],
                         era,
                     )
@@ -807,7 +1018,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         frame: &EncryptedFrame,
         (transaction, member, members): (Commitment, u16, u16),
-        dropped: Option<DropReason>,
+        dropped: Option<&Dropped>,
         undo: &[Undo],
         era: Option<i64>,
     ) -> Result<(), Error> {
@@ -820,7 +1031,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                format!("INSERT INTO secure_replayed VALUES(?,COALESCE(?,{OPEN_ERA}),?,?,?,?,?,?,?,?,0,?)"),
+                format!("INSERT INTO secure_replayed VALUES(?,COALESCE(?,{OPEN_ERA}),?,?,?,?,?,?,?,?,0,?,?)"),
                 bindings(vec![
                     SqlValue::Integer(id),
                     era.map_or(SqlValue::Null, SqlValue::Integer),
@@ -832,10 +1043,13 @@ impl<A: RowApplication> Inner<A> {
                     SqlValue::Blob(transaction.to_vec()),
                     SqlValue::Integer(i64::from(member)),
                     SqlValue::Integer(i64::from(members)),
-                    dropped.map_or(SqlValue::Null, |reason| {
-                        SqlValue::Text(reason_name(reason).into())
+                    dropped.map_or(SqlValue::Null, |dropped| {
+                        SqlValue::Text(reason_name(dropped.reason).into())
                     }),
                     undo_blob(undo)?,
+                    dropped
+                        .and_then(|dropped| dropped.violated.clone())
+                        .map_or(SqlValue::Null, SqlValue::Text),
                 ]),
             )
             .await?;
@@ -851,7 +1065,7 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         intent: &Intent,
         grants: &[rocky_core::ResourceGrant],
-    ) -> Result<Result<Replayed, DropReason>, Error> {
+    ) -> Result<Result<Replayed, Dropped>, Error> {
         let header = &frame.operation_ref()?.header;
         let scope = header.extensions.scope;
         let typed = self
@@ -894,10 +1108,20 @@ impl<A: RowApplication> Inner<A> {
                 |_| Err::<Vec<Vec<SqlValue>>, _>(()),
             ) {
                 Ok(split) if split.len() <= 1 => copies.extend(split),
-                _ => return Ok(Err(DropReason::Schema)),
+                _ => return Ok(Err(DropReason::Schema.into())),
             }
         }
-        let mut plan = typed.plan(&BTreeSet::from([scope]))?;
+        // A delete action changes rows of other replayed tables in the same
+        // transaction: they are captured, admitted and undone with it. The
+        // parents of what changes are read for its foreign keys.
+        let reached = cascades(schema, &logical.sql_name);
+        let mut scopes = BTreeSet::from([scope]);
+        scopes.extend(
+            checked(schema, &reached)
+                .iter()
+                .filter_map(|name| typed.by_name(name).map(|projected| projected.scope)),
+        );
+        let mut plan = typed.plan(&scopes)?;
         let conn = self.conn.connection();
         plan.bind_physical_columns(conn)?;
         let plan = Arc::new(plan);
@@ -936,16 +1160,19 @@ impl<A: RowApplication> Inner<A> {
                 match result {
                     Ok(sqlite::Run::Done(_)) => {}
                     Err(error) if error.is_constraint() => {
-                        return Ok(Some(DropReason::Constraint));
+                        return Ok(Some(Dropped {
+                            reason: DropReason::Constraint,
+                            violated: Some(error.to_string()),
+                        }));
                     }
                     Err(sqlite::Error::Denied | sqlite::Error::Unsupported(_)) => {
-                        return Ok(Some(DropReason::Schema));
+                        return Ok(Some(DropReason::Schema.into()));
                     }
                     // A statement that no longer compiles against the schema.
                     Err(_) if conn.describe(&copy.statement.sql).is_err() => {
-                        return Ok(Some(DropReason::Schema));
+                        return Ok(Some(DropReason::Schema.into()));
                     }
-                    _ => return Ok(Some(DropReason::Engine)),
+                    _ => return Ok(Some(DropReason::Engine.into())),
                 }
             }
             Ok::<_, Error>(None)
@@ -965,18 +1192,23 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Err(reason));
         }
         // Admission runs on the rows this replay produced.
-        let mut undo = Vec::new();
-        let mut births = Vec::new();
+        let (mut undo, mut births, mut written) = (Vec::new(), Vec::new(), Vec::new());
         for touched in touched? {
             let captured = &plan.tables[touched.table];
-            if !captured.name.eq_ignore_ascii_case(&logical.sql_name) {
-                return Ok(Err(DropReason::Engine));
-            }
-            let Some(change) = replayed_change(conn, typed, captured, &touched)? else {
+            let own = captured.name.eq_ignore_ascii_case(&logical.sql_name);
+            let Some(changed) = schema
+                .table(&captured.name)
+                .filter(|_| reached.contains(&captured.name.to_ascii_lowercase()))
+            else {
+                return Ok(Err(DropReason::Engine.into()));
+            };
+            let Some((change, image)) = replayed_change(conn, typed, captured, &touched)? else {
                 continue;
             };
-            if change.scope != scope || !change.permitted_by(grants) {
-                return Ok(Err(DropReason::Admission));
+            // A delete action follows from the parent's change, which the
+            // author's grants admitted, as it is derived for mergeable rows.
+            if own && (change.scope != scope || !change.permitted_by(grants)) {
+                return Ok(Err(DropReason::Admission.into()));
             }
             match self.replayed_birth(&change, header.extensions.author) {
                 Ok(Some(identity)) => births.push(checkpoint::IdentityMark {
@@ -985,15 +1217,20 @@ impl<A: RowApplication> Inner<A> {
                     sequence: identity.sequence(),
                 }),
                 Ok(None) => {}
-                Err(_) => return Ok(Err(DropReason::Admission)),
+                Err(_) => return Ok(Err(DropReason::Admission.into())),
             }
+            note(&mut written, constraints::written(changed, &image)?);
             undo.push(Undo {
                 table: captured.name.clone(),
                 key: touched.key,
                 before: touched.before,
             });
         }
-        Ok(Ok(Replayed { undo, births }))
+        Ok(Ok(Replayed {
+            undo,
+            births,
+            written,
+        }))
     }
 
     /// The identity a replayed change creates. Only its author's own
@@ -1021,14 +1258,14 @@ impl<A: RowApplication> Inner<A> {
 }
 
 /// The change a replayed table's captured row went through, as grants see
-/// it; `None` when it changed nothing, such as an update to equal values,
-/// which needs no right.
+/// it, with its latest image; `None` when it changed nothing, such as an
+/// update to equal values, which needs no right.
 pub(super) fn replayed_change(
     conn: &sqlite::Connection,
     typed: &typed::Typed,
     captured: &rocky_storage::capture::Table,
     touched: &rocky_storage::capture::Touched,
-) -> Result<Option<RowChange>, Error> {
+) -> Result<Option<(RowChange, Vec<SqlValue>)>, Error> {
     let corrupt = |what: &str| Error::Corrupt(format!("replayed row {what}"));
     let projected = typed
         .by_name(&captured.name)
@@ -1058,5 +1295,6 @@ pub(super) fn replayed_change(
         before: touched.before.as_ref().map(fields).transpose()?,
         after: after.as_ref().map(fields).transpose()?,
     };
-    Ok(change.right().is_some().then_some(change))
+    let image = anchor.clone();
+    Ok(change.right().is_some().then_some((change, image)))
 }

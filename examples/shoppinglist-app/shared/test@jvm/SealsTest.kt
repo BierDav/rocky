@@ -78,8 +78,8 @@ class SealsTest {
         assertEquals(listOf("Bread", "Eggs", "Jam", "Milk"), desk.tips.snapshot(second).single().items.map { it.title }.sorted())
 
         await("the laptop to follow both seals", laptop) { laptop.rocky.tips.status().tip == desk.rocky.tips.status().tip && laptop.titles(list).size == 5 }
-        val compaction = laptop.tips.maintain().compaction
-        assertEquals(first, compaction.compacted, "a member keeps one seal uncompacted: $compaction")
+        // Compaction also needs every frame through the seal's frontier, which the titles do not show.
+        await("the laptop to compact the first seal", laptop) { laptop.tips.maintain().compaction.compacted == first }
         assertEquals(KeptSeals(), laptop.rocky.tips.kept())
         assertEquals(listOf("Bread", "Butter", "Eggs", "Jam", "Milk"), laptop.titles(list))
     }

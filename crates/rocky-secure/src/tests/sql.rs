@@ -67,6 +67,8 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
             }],
             create_sql: format!("CREATE UNIQUE INDEX {name}_identity ON {name}(id)"),
             on_conflict: None,
+            expressions: Vec::new(),
+            predicate: None,
         }],
         foreign_keys: Vec::new(),
 
@@ -119,6 +121,7 @@ impl Typed {
                 ),
             ],
             views: Vec::new(),
+            assertions: Vec::new(),
         };
         Self::with_schema(publisher, schema)
     }
@@ -1628,7 +1631,10 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 13);
+    assert_eq!(
+        operation.header.extensions.row_format,
+        crate::wire::ROW_FORMAT
+    );
     assert_eq!(operation.header.extensions.chain, author_chain);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
@@ -2565,4 +2571,39 @@ async fn sql_begin_and_writing_autocommit_are_interactive() {
         assert!(!interactive.is_empty(), "{snapshot:?}");
         assert!(interactive[0].0.contains("replica/sql.rs:"));
     }
+}
+
+/// The epoch advances before the commit's lock holder refreshes readers; a
+/// cursor opened between them waits for the refresh instead of failing.
+#[tokio::test]
+async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
+    use crate::cursor::CursorLimits;
+    let directory = TempDir::new().unwrap();
+    let fixture = Typed::new(UpdatePolicy::Changed);
+    let replica = fixture
+        .open(
+            &directory.path().join("race.db"),
+            &PrivateKey::new(),
+            fixture.full(),
+            &[fixture.items],
+        )
+        .await;
+    let session = sql(&replica, &[fixture.items]).await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    inner
+        .conn
+        .execute("UPDATE secure_read_epoch SET epoch=epoch+1 WHERE id=1", ())
+        .await
+        .unwrap();
+    let opened = tokio::join!(
+        session.cursor("SELECT key FROM items", vec![], CursorLimits::default()),
+        async {
+            // Lets the cursor meet the stale epoch and queue for the lock.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            inner.refresh_readers().await;
+            drop(inner);
+        },
+    )
+    .0;
+    assert!(opened.is_ok(), "{:?}", opened.err());
 }

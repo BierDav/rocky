@@ -14,6 +14,8 @@ use std::{
 pub struct Column {
     pub affinity: Affinity,
     pub derived: bool,
+    /// SQLite computes it, so an image never writes it.
+    pub generated: bool,
 }
 /// One column as a session's catalog describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,10 +112,16 @@ impl Table {
             .map(|index| format!("{}=?", column(index)))
             .collect();
         let selected: Vec<String> = table.columns.iter().map(|c| quoted(&c.sql_name)).collect();
+        let generated = |column: &rocky_core::LogicalColumn| {
+            table.class == TableClass::Replayed
+                && matches!(column.class, ColumnClass::Derived { .. })
+        };
         let derived: Vec<String> = table
             .columns
             .iter()
-            .filter(|column| matches!(column.class, ColumnClass::Derived { .. }))
+            .filter(|column| {
+                matches!(column.class, ColumnClass::Derived { .. }) && !generated(column)
+            })
             .map(|column| format!("{}=?", quoted(&column.sql_name)))
             .collect();
         let without_rowid = crate::scoped_connection::tables(&[&table.create_sql])
@@ -162,7 +170,9 @@ impl Table {
                 .iter()
                 .map(|column| Column {
                     affinity: column.affinity,
-                    derived: matches!(column.class, ColumnClass::Derived { .. }),
+                    derived: matches!(column.class, ColumnClass::Derived { .. })
+                        && !generated(column),
+                    generated: generated(column),
                 })
                 .collect(),
             names: table.columns.iter().map(|c| c.sql_name.clone()).collect(),
@@ -208,9 +218,44 @@ impl Table {
             by_key.join(" AND ")
         )
     }
+    fn written(&self) -> impl Iterator<Item = &String> {
+        self.names
+            .iter()
+            .zip(&self.columns)
+            .filter(|(_, column)| !column.generated)
+            .map(|(name, _)| name)
+    }
+    /// The values of `image` that `update_image` and `insert_image` bind.
+    pub fn stored(&self, image: &[SqlValue]) -> Vec<SqlValue> {
+        image
+            .iter()
+            .zip(&self.columns)
+            .filter(|(_, column)| !column.generated)
+            .map(|(value, _)| value.clone())
+            .collect()
+    }
+    /// Sets the row of a key to an image in declared column order, without
+    /// its generated columns; binds `stored`, then the key.
+    pub fn update_image(&self) -> String {
+        let columns: Vec<String> = self
+            .written()
+            .map(|name| format!("{}=?", quoted(name)))
+            .collect();
+        let by_key: Vec<String> = self
+            .key
+            .iter()
+            .map(|index| format!("{}=?", quoted(&self.names[*index])))
+            .collect();
+        format!(
+            "UPDATE {} SET {} WHERE {}",
+            quoted(&self.physical),
+            columns.join(","),
+            by_key.join(" AND ")
+        )
+    }
     /// Inserts one row image in declared column order.
     pub fn insert_image(&self) -> String {
-        let columns: Vec<String> = self.names.iter().map(|name| quoted(name)).collect();
+        let columns: Vec<String> = self.written().map(|name| quoted(name)).collect();
         format!(
             "INSERT INTO {}({}) VALUES({})",
             quoted(&self.physical),
@@ -287,7 +332,8 @@ impl Plan {
     ) -> Result<(), Error> {
         for table in &mut self.tables {
             let rows = connection.rows(
-                "SELECT name FROM pragma_table_info(?) ORDER BY cid",
+                // Stored generated columns are in hook images.
+                "SELECT name FROM pragma_table_xinfo(?) WHERE hidden<>1 ORDER BY cid",
                 vec![Value::Text(table.physical.clone())],
             )?;
             let names: Vec<_> = rows
@@ -847,6 +893,7 @@ mod tests {
                 local,
             ],
             views: Vec::new(),
+            assertions: Vec::new(),
         };
         let statements = [PLAIN, KEYED, CHILD, LOCAL];
         for sql in statements.iter().chain(&[

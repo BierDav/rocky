@@ -10,13 +10,13 @@ internal fun validateReferences(tables: List<Table>) {
             val target = tables.firstOrNull { it.name.equals(key.table, ignoreCase = true) }
                 ?: throw IllegalArgumentException("${table.name}: a reference names the unknown table ${key.table}")
             val identity = target.identity
-            require(target.tableClass == TableClass.Mergeable) { "${table.name}: a reference to ${target.name} needs a mergeable parent" }
+            require(target.tableClass == table.tableClass && target.tableClass != TableClass.LocalOnly) { "${table.name}: a reference to ${target.name} needs a parent of its own class, mergeable or replayed" }
             if (target.partitionBy.isNotEmpty()) {
                 // Partitioned existence logs would be needed to resolve a reference across groups.
                 require(table.partitionGroup != null && table.partitionGroup == target.partitionGroup) {
                     "${table.name}: a reference to partitioned ${target.name} needs the same explicit partition group; references across groups are refused"
                 }
-            } else if (table.partitionBy.isNotEmpty()) {
+            } else if (table.partitionBy.isNotEmpty() && table.tableClass == TableClass.Mergeable) {
                 require(target.existenceLog) { "${table.name}: a partitioned table references a table of another group only if it is unpartitioned with an existence log; ${target.name} has none" }
             }
             require(key.columns.size == identity.size) { "${table.name}: a reference to ${target.name} names one column per identity column (${identity.joinToString()})" }

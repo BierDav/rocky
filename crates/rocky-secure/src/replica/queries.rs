@@ -155,7 +155,7 @@ impl<A: RowApplication> Inner<A> {
         readers.push(Arc::downgrade(&reader));
         Ok(reader)
     }
-    pub(super) async fn refresh_readers(&self) {
+    pub(crate) async fn refresh_readers(&self) {
         let readers: Vec<_> = {
             let mut readers = self
                 .workspace
@@ -346,6 +346,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+/// Commits one read may race before it reports the conflict.
+const READ_ATTEMPTS: usize = 16;
+
 impl<A: RowApplication> SecureSql<A> {
     /// The tables this session may name: typed tables of its readable
     /// scopes and local tables, with what it may write.
@@ -378,18 +381,47 @@ impl<A: RowApplication> SecureSql<A> {
         params: Vec<SqlValue>,
         limits: CursorLimits,
     ) -> Result<SnapshotCursor, Error> {
-        let readiness = self.reads.snapshot()?;
-        let checked = readiness.statement(sql, &params)?;
-        let analyzed = self.read_statement(&checked.sql)?;
-        self.open_cursor(analyzed.sql, checked.params, &analyzed.tables, limits)
-            .await
+        let open = async || {
+            let readiness = self.reads.snapshot()?;
+            let checked = readiness.statement(sql, &params)?;
+            let analyzed = self.read_statement(&checked.sql)?;
+            self.open_cursor(analyzed.sql, checked.params, &analyzed.tables, limits)
+                .await
+        };
+        self.current_read(open).await
+    }
+    /// Runs `open` until it plans against the committed read state. A commit
+    /// advances the epoch before its lock holder refreshes readers, so a
+    /// plan can lag it; once the lock is free the refresh has run.
+    async fn current_read(
+        &self,
+        mut open: impl AsyncFnMut() -> Result<SnapshotCursor, Error>,
+    ) -> Result<SnapshotCursor, Error> {
+        for _ in 0..READ_ATTEMPTS {
+            match open().await {
+                Err(Error::Conflict) => {
+                    drop(
+                        self.session
+                            .replica
+                            .inner
+                            .lock(crate::replica::Class::Interactive)
+                            .await,
+                    );
+                }
+                result => return result,
+            }
+        }
+        open().await
     }
     /// Opens a snapshot for a read transaction of several statements. It
     /// steps nothing itself; `snapshot_rows` reads each statement's whole
     /// result from it. Its bounds and revocation are a cursor's.
     pub async fn snapshot(&self, limits: CursorLimits) -> Result<SnapshotCursor, Error> {
-        self.open_cursor("SELECT 1".into(), Vec::new(), &BTreeSet::new(), limits)
-            .await
+        self.current_read(async || {
+            self.open_cursor("SELECT 1".into(), Vec::new(), &BTreeSet::new(), limits)
+                .await
+        })
+        .await
     }
     /// Reads one statement's whole result, at most `result_bytes`, from
     /// `snapshot`. Availability is checked as for a cursor.

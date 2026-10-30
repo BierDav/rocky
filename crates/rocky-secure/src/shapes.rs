@@ -806,6 +806,7 @@ mod tests {
             references: vec!["list".into(), "id".into()],
             on_delete: "CASCADE".into(),
             on_update: "NO ACTION".into(),
+            deferred: false,
         });
         LogicalSchema {
             format: 0,
@@ -828,6 +829,7 @@ mod tests {
                 links,
             ],
             views: Vec::new(),
+            assertions: Vec::new(),
         }
     }
     fn shape(statements: &[(&str, Vec<SqlValue>)], rows: &[(&str, Vec<SqlValue>)]) -> Shape {

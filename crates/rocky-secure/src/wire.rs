@@ -47,7 +47,7 @@ pub(crate) struct Extensions {
 }
 
 /// Source-schema ordinals and frame-bound birth statements.
-pub(crate) const ROW_FORMAT: u8 = 13;
+pub(crate) const ROW_FORMAT: u8 = 14;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 

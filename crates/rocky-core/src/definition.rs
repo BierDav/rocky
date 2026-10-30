@@ -3,8 +3,8 @@
 //! See `docs/runtime/schema-definitions.md`.
 use crate::{
     Affinity, Collation, ColumnClass, ConflictPolicy, IndexColumn, LOGICAL_SCHEMA_FORMAT,
-    LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalSchema, LogicalTable, SchemaError,
-    SchemaSource, TableClass, UpdatePolicy, commitment,
+    LogicalAssertion, LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalSchema, LogicalTable,
+    SchemaError, SchemaSource, TableClass, UpdatePolicy, commitment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,8 @@ pub struct SchemaDefinition {
     pub tables: Vec<TableDefinition>,
     #[serde(default)]
     pub views: Vec<crate::LogicalView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<LogicalAssertion>,
 }
 fn changed() -> UpdatePolicy {
     UpdatePolicy::Changed
@@ -46,6 +48,8 @@ pub struct TableDefinition {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub coordinated: bool,
     pub columns: Vec<ColumnDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
     pub primary_key: Vec<String>,
     #[serde(default)]
     pub partition_by: Vec<String>,
@@ -76,6 +80,10 @@ pub struct ForeignKeyDefinition {
     /// The parent table.
     pub table: String,
     pub on_delete: DeleteAction,
+    /// Replayed only: checked when the transaction ends, as SQLite checks
+    /// a deferred key at `COMMIT`, instead of after each statement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +98,8 @@ pub struct ColumnDefinition {
     pub default: Option<serde_json::Value>,
     #[serde(default = "binary")]
     pub collation: Collation,
-    /// An expression over the row's replicated columns.
+    /// An expression over the row's replicated columns. On a replayed table
+    /// it is a stored SQLite generated column.
     #[serde(default)]
     pub derived: Option<String>,
     #[serde(default)]
@@ -109,6 +118,12 @@ pub struct IndexDefinition {
     /// Required for a unique index of a mergeable table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_conflict: Option<ConflictPolicy>,
+    /// Replayed only: terms indexed after `columns`, such as `lower(name)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expressions: Vec<String>,
+    /// Replayed only: indexes just the rows this expression holds for.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
 }
 
 fn invalid<T>(reason: impl Into<String>) -> Result<T, SchemaError> {
@@ -220,8 +235,13 @@ impl SchemaDefinition {
                     }
                     .into(),
                     on_update: "NO ACTION".into(),
+                    deferred: key.deferred,
                 };
-                let clause = crate::foreign_key_clause(&key);
+                let clause = if table.class == TableClass::Replayed {
+                    crate::replayed_foreign_key_clause(&key)
+                } else {
+                    crate::foreign_key_clause(&key)
+                };
                 table.create_sql.pop();
                 table.create_sql.push_str(&format!(", {clause})"));
                 table.foreign_keys.push(key);
@@ -245,6 +265,7 @@ impl SchemaDefinition {
             update_policy: self.update_policy,
             tables,
             views: self.views.clone(),
+            assertions: self.assertions.clone(),
         };
         schema.validate()?;
         Ok(schema)
@@ -281,6 +302,12 @@ impl TableDefinition {
             };
             let default = column.default.as_ref().map(literal).transpose()?;
             let mut part = format!("{} {}", quoted(&column.name), declared(column.affinity));
+            if let (Some(rule), TableClass::Replayed) = (&column.derived, self.class) {
+                if default.is_some() || !crate::logical::single_expression(rule) {
+                    return invalid(format!("{name}.{} generated column", column.name));
+                }
+                part.push_str(&format!(" GENERATED ALWAYS AS ({rule}) STORED"));
+            }
             if column.not_null {
                 part.push_str(" NOT NULL");
             }
@@ -316,6 +343,13 @@ impl TableDefinition {
                 });
             }
         }
+        // Table constraints follow every column.
+        for check in &self.checks {
+            if !crate::logical::single_expression(check) {
+                return invalid(format!("{name} check constraint"));
+            }
+            parts.push(format!("CHECK ({check})"));
+        }
         let key: Vec<String> = self
             .primary_key
             .iter()
@@ -329,7 +363,7 @@ impl TableDefinition {
             if !crate::identifier(&index.name) {
                 return invalid(format!("{name} index {}", index.name));
             }
-            let terms: Vec<String> = index
+            let mut terms: Vec<String> = index
                 .columns
                 .iter()
                 .map(|column| {
@@ -337,6 +371,22 @@ impl TableDefinition {
                     format!("{}{order}", quoted(&column.name))
                 })
                 .collect();
+            let names: Vec<&str> = columns.iter().map(|c| c.sql_name.as_str()).collect();
+            let mut fragments = index.expressions.iter().chain(&index.predicate).peekable();
+            if fragments.peek().is_some()
+                && (self.class != TableClass::Replayed
+                    || !fragments.all(|sql| crate::logical::derived_rule(sql, &names)))
+            {
+                return invalid(format!(
+                    "{name} index {}: expressions and predicates need a replayed table and one expression each",
+                    index.name
+                ));
+            }
+            terms.extend(index.expressions.iter().cloned());
+            let predicate = index
+                .predicate
+                .as_ref()
+                .map_or(String::new(), |sql| format!(" WHERE {sql}"));
             if index.on_conflict.is_some() && !index.unique {
                 return invalid(format!(
                     "{name}: on_conflict needs a unique index {}",
@@ -348,7 +398,7 @@ impl TableDefinition {
                 crate::unique_index_sql(name, &index.name, &index.columns)
             } else {
                 format!(
-                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({})",
+                    "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({}){predicate}",
                     quoted(&index.name),
                     quoted(name),
                     terms.join(",")
@@ -360,6 +410,8 @@ impl TableDefinition {
                 columns: index.columns.clone(),
                 create_sql,
                 on_conflict: index.on_conflict,
+                expressions: index.expressions.clone(),
+                predicate: index.predicate.clone(),
             });
         }
         let mut identity = self.partition_by.clone();
@@ -399,6 +451,8 @@ impl TableDefinition {
                         .join(",")
                 ),
                 on_conflict: None,
+                expressions: Vec::new(),
+                predicate: None,
             });
         }
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -513,7 +567,7 @@ mod tests {
 
     #[test]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        // Definitions are format 6; the descriptors they build are format 5.
+        // Definitions and the descriptors they build use the current format.
         for format in [0, 1, 2, 3, 4, 5, 7] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
@@ -523,7 +577,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 4, 6] {
+        for format in [0, 1, 2, 3, 4, 6, 7] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -1012,5 +1066,261 @@ mod partition_tests {
         let schema = own_id.build().unwrap();
         assert!(schema.table("items").unwrap().indexes.is_empty());
         schema.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replayed_tests {
+    use super::*;
+    use crate::{Incompatibility, Profile};
+
+    /// `teams` and its `members` replay in partition group `org`; `notes`
+    /// stays mergeable.
+    fn definition(extra: serde_json::Value) -> SchemaDefinition {
+        let mut json = serde_json::json!({
+            "format": 6,
+            "publisher": "1111111111111111111111111111111111111111111111111111111111111111",
+            "application": "replayed",
+            "tables": [
+                {"name": "teams", "class": "replayed",
+                 "columns": [{"name": "org", "type": "text", "not_null": true},
+                             {"name": "name", "type": "text", "not_null": true},
+                             {"name": "cap", "type": "integer", "not_null": true}],
+                 "checks": ["cap BETWEEN 1 AND 10"],
+                 "primary_key": ["org", "id"], "partition_by": ["org"], "partition_group": "org"},
+                {"name": "members", "class": "replayed",
+                 "columns": [{"name": "org", "type": "text", "not_null": true},
+                             {"name": "team", "type": "integer", "not_null": true},
+                             {"name": "email", "type": "text", "not_null": true}],
+                 "primary_key": ["org", "id"], "partition_by": ["org"], "partition_group": "org",
+                 "indexes": [{"name": "members_email", "unique": true,
+                              "columns": [{"name": "org", "descending": false},
+                                          {"name": "email", "descending": false}]}],
+                 "foreign_keys": [{"columns": ["org", "team"], "table": "teams",
+                                   "on_delete": "cascade", "deferred": true}]},
+                {"name": "notes", "class": "mergeable",
+                 "columns": [{"name": "body", "type": "text"}], "primary_key": ["id"]}
+            ],
+            "assertions": [{"name": "team_cap",
+                            "select_sql": "SELECT t.id FROM teams t JOIN members m ON m.org = t.org AND m.team = t.id GROUP BY t.id HAVING COUNT(*) > MIN(t.cap)"}]
+        });
+        if let serde_json::Value::Object(extra) = extra {
+            for (key, value) in extra {
+                json[key] = value;
+            }
+        }
+        SchemaDefinition::parse(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+    fn refusal(definition: &SchemaDefinition) -> Option<(String, Incompatibility)> {
+        match definition.build().unwrap().supported_on(Profile::Secure) {
+            Ok(()) => None,
+            Err(SchemaError::Incompatible { table, reason }) => Some((table, reason)),
+            Err(error) => panic!("{error}"),
+        }
+    }
+    fn table<'a>(definition: &'a mut SchemaDefinition, name: &str) -> &'a mut TableDefinition {
+        definition
+            .tables
+            .iter_mut()
+            .find(|table| table.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn replayed_tables_install_checks_unique_indexes_and_their_declared_references() {
+        let schema = definition(serde_json::Value::Null).build().unwrap();
+        schema.supported_on(Profile::Secure).unwrap();
+        let teams = schema.table("teams").unwrap();
+        assert!(teams.create_sql.contains(
+            "\"row_kind\" INTEGER NOT NULL DEFAULT 0, CHECK (cap BETWEEN 1 AND 10), PRIMARY KEY"
+        ));
+        let members = schema.table("members").unwrap();
+        assert!(members.create_sql.ends_with(
+            "FOREIGN KEY(\"org\",\"team\") REFERENCES \"teams\"(\"org\",\"id\") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED)"
+        ));
+        assert!(members.foreign_keys[0].deferred);
+        // An immediate key is checked per statement.
+        let mut immediate = definition(serde_json::Value::Null);
+        table(&mut immediate, "members").foreign_keys[0].deferred = false;
+        let immediate = immediate.build().unwrap();
+        assert!(
+            immediate
+                .table("members")
+                .unwrap()
+                .create_sql
+                .ends_with("ON DELETE CASCADE)")
+        );
+        // What replays is what replicas agree on.
+        assert_ne!(
+            schema.replicated_fingerprint(),
+            immediate.replicated_fingerprint()
+        );
+        let mut capped = definition(serde_json::Value::Null);
+        table(&mut capped, "teams").checks = vec!["cap BETWEEN 1 AND 20".into()];
+        assert_ne!(
+            schema.manifest(&[]).hash(),
+            capped.build().unwrap().manifest(&[]).hash()
+        );
+        let mut uncapped = schema.clone();
+        uncapped.assertions.clear();
+        assert_ne!(
+            schema.replicated_fingerprint(),
+            uncapped.replicated_fingerprint()
+        );
+        // A descriptor's references must match its statement.
+        let mut hidden = schema.clone();
+        let members = hidden
+            .tables
+            .iter_mut()
+            .find(|table| table.sql_name == "members")
+            .unwrap();
+        members.create_sql = members.create_sql.replace(" ON DELETE CASCADE", "");
+        assert_eq!(
+            hidden.installable(),
+            Err(SchemaError::Incompatible {
+                table: "members".into(),
+                reason: Incompatibility::Reference("org".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn replayed_tables_declare_generated_columns_and_index_terms() {
+        let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut json = serde_json::json!({
+                "format": 6, "publisher": "00".repeat(32), "application": "terms",
+                "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
+                    "columns": [{"name": "name", "type": "text", "not_null": true},
+                                {"name": "cap", "type": "integer", "not_null": true},
+                                {"name": "double", "type": "integer", "derived": "cap * 2"}],
+                    "checks": ["double < 10"],
+                    "indexes": [{"name": "by_name", "unique": true, "columns": [],
+                                 "expressions": ["lower(name)"], "where": "cap > 0"}]}]
+            });
+            edit(&mut json);
+            SchemaDefinition::parse(&serde_json::to_vec(&json).unwrap())?.build()
+        };
+        let schema = parsed(&|_| {}).unwrap();
+        schema.supported_on(Profile::Secure).unwrap();
+        let items = schema.table("items").unwrap();
+        assert!(
+            items
+                .create_sql
+                .contains("GENERATED ALWAYS AS (cap * 2) STORED")
+        );
+        assert!(
+            items.indexes[0]
+                .create_sql
+                .ends_with("(lower(name)) WHERE cap > 0")
+        );
+        for (pointer, sql) in [
+            ("/tables/0/indexes/0/where", "cap > random()"),
+            ("/tables/0/indexes/0/expressions/0", "lower(absent)"),
+            ("/tables/0/indexes/0/where", "cap > 0; DROP TABLE items"),
+            ("/tables/0/indexes/0/where", "cap > (SELECT 1)"),
+            (
+                "/tables/0/columns/2/derived",
+                "cap) STORED, x INTEGER AS (1",
+            ),
+            ("/tables/0/checks/0", "cap > 0) CHECK (1"),
+        ] {
+            let refused = parsed(&|json| *json.pointer_mut(pointer).unwrap() = sql.into());
+            assert!(matches!(refused, Err(SchemaError::Invalid(_))), "{sql}");
+        }
+        let refused = parsed(&|json| json["tables"][0]["class"] = "mergeable".into());
+        assert!(matches!(refused, Err(SchemaError::Invalid(_))));
+    }
+
+    #[test]
+    fn replayed_checks_accept_deterministic_expressions_and_name_other_functions() {
+        let mut complex = definition(serde_json::Value::Null);
+        table(&mut complex, "teams").checks = vec![
+            "CASE WHEN cap > 5 THEN length(name) > 3 ELSE name <> '' END".into(),
+            "name NOT IN ('admin', 'root') AND name NOT LIKE '%!%' AND name GLOB '[a-z]*'".into(),
+            "coalesce(nullif(trim(name), ''), 'x') <> 'x' OR cap * 2 + 1 BETWEEN 3 AND 21".into(),
+            "json_valid(json_object('n', name)) AND substr(upper(name), 1, 1) <> 'Z'".into(),
+        ];
+        assert_eq!(refusal(&complex), None);
+        for function in ["random", "sqlite_version", "date", "sin"] {
+            let mut refused = definition(serde_json::Value::Null);
+            table(&mut refused, "teams").checks = vec![format!("cap < {function}()")];
+            assert_eq!(
+                refusal(&refused),
+                Some(("teams".into(), Incompatibility::Function(function.into()))),
+                "{function}"
+            );
+        }
+        // Mergeable tables still refuse every CHECK.
+        let mut mergeable = definition(serde_json::Value::Null);
+        table(&mut mergeable, "notes").checks = vec!["length(body) < 10".into()];
+        assert_eq!(
+            refusal(&mergeable),
+            Some(("notes".into(), Incompatibility::CheckConstraint))
+        );
+    }
+
+    #[test]
+    fn replayed_unique_indexes_refuse_conflict_policies() {
+        let mut policy = definition(serde_json::Value::Null);
+        table(&mut policy, "members").indexes[0].on_conflict = Some(ConflictPolicy::LatestWins);
+        assert_eq!(
+            refusal(&policy),
+            Some((
+                "members".into(),
+                Incompatibility::ConflictPolicy("members_email".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn assertions_read_replayed_tables_of_one_partition_group() {
+        let assertion = |sql: &str| {
+            definition(serde_json::json!({
+                "assertions": [{"name": "rule", "select_sql": sql}]
+            }))
+        };
+        let refused = |sql: &str| {
+            refusal(&assertion(sql)).map(|(name, reason)| {
+                assert_eq!(name, "rule");
+                reason
+            })
+        };
+        assert_eq!(
+            refused("SELECT team FROM members GROUP BY team HAVING COUNT(*) > 3"),
+            None
+        );
+        let other = |reason: &str| Some(Incompatibility::Assertion(reason.into()));
+        assert_eq!(
+            refused("SELECT * FROM members m, notes n WHERE n.body = m.email"),
+            other("notes is not a replayed table")
+        );
+        assert_eq!(
+            refused("SELECT * FROM absent"),
+            other("absent is not a table")
+        );
+        assert_eq!(
+            refused("SELECT * FROM members WHERE email = random()"),
+            Some(Incompatibility::Function("random".into()))
+        );
+        assert!(
+            assertion("WITH m AS (SELECT * FROM members) SELECT * FROM m")
+                .build()
+                .is_err()
+        );
+        // Another partition group cannot be checked where the partition is.
+        let mut regrouped = assertion("SELECT * FROM teams JOIN members USING (org)");
+        table(&mut regrouped, "teams").partition_group = Some("teams".into());
+        table(&mut regrouped, "members").foreign_keys.clear();
+        assert_eq!(
+            refusal(&regrouped),
+            Some((
+                "rule".into(),
+                other("tables must share one partition group and replay order").unwrap()
+            ))
+        );
+        // Names are identifiers and unique.
+        let mut duplicate = definition(serde_json::Value::Null);
+        duplicate.assertions.push(duplicate.assertions[0].clone());
+        assert!(duplicate.build().is_err());
     }
 }

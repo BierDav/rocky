@@ -28,7 +28,10 @@ impl Node {
         self.domain()
             .logical()
             .table(name)
-            .filter(|table| table.class == TableClass::Mergeable && !table.partition_by.is_empty())
+            .filter(|table| {
+                matches!(table.class, TableClass::Mergeable | TableClass::Replayed)
+                    && !table.partition_by.is_empty()
+            })
             .ok_or("table is not partitioned")?;
         let partition =
             self.group_partition(&json!({"table": name, "values": request["values"]}))?;

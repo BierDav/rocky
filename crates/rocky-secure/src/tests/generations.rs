@@ -94,6 +94,8 @@ pub(super) struct Lineage {
     pub(super) existence: bool,
     /// Every table is replayed.
     pub(super) replayed: bool,
+    /// `tags` is partitioned by `label`; it requires `replayed`.
+    pub(super) partitioned: bool,
 }
 impl Lineage {
     /// The domain root a replica's tip graph starts from.
@@ -237,6 +239,7 @@ impl Lineage {
             domain,
             existence: false,
             replayed: false,
+            partitioned: false,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -262,6 +265,26 @@ impl Lineage {
         }
         for table in tables.iter_mut().filter(|_| self.replayed) {
             table.class = TableClass::Replayed;
+        }
+        for tags in tables
+            .iter_mut()
+            .filter(|table| self.partitioned && table.sql_name == "tags")
+        {
+            tags.partition_by = vec!["label".into()];
+            tags.primary_key = vec!["label".into(), "key".into()];
+            tags.create_sql = tags
+                .create_sql
+                .replace(" PRIMARY KEY", "")
+                .replace("DEFAULT 0)", "DEFAULT 0,PRIMARY KEY(label,key))");
+            tags.indexes[0].columns.insert(
+                0,
+                IndexColumn {
+                    name: "label".into(),
+                    descending: false,
+                },
+            );
+            tags.indexes[0].create_sql =
+                "CREATE UNIQUE INDEX tags_identity ON tags(label,id)".into();
         }
         // An existence log names rows by `id`.
         for table in tables.iter_mut().filter(|_| self.existence) {
@@ -333,6 +356,27 @@ impl Lineage {
             table: schema.table_id(schema.table(name).unwrap()),
         }
     }
+    /// The scope of the `tags` partition `label`.
+    pub(super) fn tag_partition(&self, label: &str) -> (ResourceScope, rocky_core::PartitionTuple) {
+        let schema = self.schema(3);
+        let tags = schema.table("tags").unwrap();
+        let tuple = rocky_core::PartitionTuple::new([(
+            schema.field_id(tags, tags.column("label").unwrap()),
+            rocky_core::PartitionValue::new(
+                rocky_core::KeyColumn {
+                    affinity: Affinity::Text,
+                    collation: Collation::Binary,
+                },
+                text(label),
+            )
+            .unwrap(),
+        )])
+        .unwrap();
+        (
+            tuple.scope(self.domain, schema.table_id(tags)).unwrap(),
+            tuple,
+        )
+    }
     fn readers(&self, generation: u32) -> BTreeMap<String, Commitment> {
         self.schema(generation)
             .tables
@@ -352,6 +396,7 @@ impl Lineage {
             .tables
             .iter()
             .filter(|table| tables.is_none_or(|tables| tables.contains(&table.sql_name.as_str())))
+            .filter(|table| table.partition_by.is_empty())
             .map(|table| {
                 let fields: Vec<_> = table
                     .columns
@@ -369,6 +414,42 @@ impl Lineage {
                     ],
                     &fields,
                 )
+            })
+            .collect()
+    }
+    /// Every partition of each partitioned table of `generation`.
+    fn partition_grants_of(&self, generation: u32) -> Vec<rocky_credentials::PartitionGrant> {
+        let schema = self.schema(generation);
+        schema
+            .tables
+            .iter()
+            .filter_map(|table| {
+                let column = table.column(table.partition_by.first()?)?;
+                Some(rocky_credentials::PartitionGrant {
+                    domain: self.domain,
+                    table: schema.table_id(table),
+                    selector: rocky_core::PartitionSelector(
+                        [(
+                            schema.field_id(table, column),
+                            rocky_core::PartitionSelection::Any,
+                        )]
+                        .into(),
+                    ),
+                    rows: RowSelection::All,
+                    rights: [
+                        Right::Read,
+                        Right::Insert,
+                        Right::Update,
+                        Right::Delete,
+                        Right::Custody,
+                    ]
+                    .into(),
+                    fields: table
+                        .columns
+                        .iter()
+                        .map(|column| schema.field_id(table, column))
+                        .collect(),
+                })
             })
             .collect()
     }
@@ -432,6 +513,7 @@ impl Lineage {
                     rocky_credentials::AuthorRange::ALL
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                partitions: self.partition_grants_of(generation),
                 trusted: trusted.filter(|_| kind == PrincipalKind::User),
                 ..Default::default()
             })
@@ -450,7 +532,11 @@ impl Lineage {
     pub(super) fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
         let keys = ["items", "tags"]
             .iter()
-            .take(if matches!(generation, 2 | 3) { 2 } else { 1 })
+            .take(if matches!(generation, 2 | 3) && !self.partitioned {
+                2
+            } else {
+                1
+            })
             .enumerate()
             .map(|(index, name)| KeyMaterial::new(self.scope(name), 1, [40 + index as u8; 32]))
             .collect();

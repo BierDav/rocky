@@ -219,6 +219,20 @@ pub fn split_intent<E>(
     params: &[SqlValue],
     views: &[rocky_core::LogicalView],
     tables: &BTreeMap<String, TablePartitions>,
+    evaluate: impl FnMut(&Checked) -> Result<Rows, E>,
+) -> Result<Vec<PartitionStatement>, SplitError<E>> {
+    split_intent_within(sql, params, views, tables, MAX_INTENT_PARTITIONS, evaluate)
+}
+
+/// [`split_intent`] reaching at most `limit` partitions. A migration
+/// replays each partition's copy as its own transaction, so it is not
+/// bound by one bundle's frames.
+pub fn split_intent_within<E>(
+    sql: &str,
+    params: &[SqlValue],
+    views: &[rocky_core::LogicalView],
+    tables: &BTreeMap<String, TablePartitions>,
+    limit: usize,
     mut evaluate: impl FnMut(&Checked) -> Result<Rows, E>,
 ) -> Result<Vec<PartitionStatement>, SplitError<E>> {
     let prepared = prepare(sql, views).map_err(|refusal| keyword(sql).unwrap_or(refusal.into()))?;
@@ -321,7 +335,7 @@ pub fn split_intent<E>(
         Statement::Delete(delete) => split.pinned(delete.selection.as_ref())?,
         _ => Vec::new(),
     };
-    if reached.len() > MAX_INTENT_PARTITIONS {
+    if reached.len() > limit {
         return Err(IntentRefusal::TooManyPartitions(reached.len()).into());
     }
     let mut copies = Vec::with_capacity(reached.len());

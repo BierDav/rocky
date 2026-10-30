@@ -98,6 +98,9 @@ pub struct SecureSql<A: RowApplication> {
     /// The kept seal its reads see instead of the live tables.
     pub(super) seal: Option<Arc<super::SealViews>>,
     parents: BTreeMap<String, String>,
+    /// A migration session splits each statement over every partition it
+    /// reaches; each partition's copy replays as its own transaction.
+    migration: bool,
     #[cfg(any(test, feature = "intent-shapes"))]
     shape: std::sync::Mutex<crate::shapes::Pending>,
 }
@@ -156,10 +159,15 @@ impl<A: RowApplication> SecureSession<A> {
         options: SqlOptions,
     ) -> Result<SecureSql<A>, Error> {
         let mut sql = self.sql(options).await?;
-        let inner = self
+        let mut inner = self
             .replica
             .inner
             .lock(crate::replica::Class::Background)
+            .await;
+        // The program's transaction is the largest a migration writes; it
+        // starts on a cut WAL.
+        inner
+            .checkpoint_over(super::group::WAL_CHECKPOINT_BYTES)
             .await;
         let records = collect_rows(
             inner
@@ -175,6 +183,7 @@ impl<A: RowApplication> SecureSession<A> {
             return Err(denied("migration publication is not staged"));
         };
         let stage: super::staging::SchemaStage = decode(bytes)?;
+        sql.migration = true;
         for (index, table) in stage.parents.iter().enumerate() {
             sql.parents.insert(
                 format!("parent.{}", table.to_ascii_lowercase()),
@@ -240,6 +249,7 @@ impl<A: RowApplication> SecureSession<A> {
             cursors: Arc::default(),
             seal: None,
             parents: BTreeMap::new(),
+            migration: false,
             #[cfg(any(test, feature = "intent-shapes"))]
             shape: Default::default(),
         })
@@ -1115,7 +1125,7 @@ impl<A: RowApplication> SecureSql<A> {
         rows.state = SqlState::Idle;
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
-        qualification_kill("before");
+        super::crash::qualification_kill("before");
         #[cfg(any(test, feature = "intent-shapes"))]
         let origin = self.origin(&target, commit);
         // Only a plain bundle is local authoring alone.
@@ -1148,7 +1158,7 @@ impl<A: RowApplication> SecureSql<A> {
         #[cfg(any(test, feature = "intent-shapes"))]
         self.shape().committed(origin);
         #[cfg(feature = "qualification")]
-        qualification_kill("after");
+        super::crash::qualification_kill("after");
         let current = local && inner.pending_pass_current(inner.commit);
         inner.note_commit().await;
         held.1 = current;
@@ -1493,16 +1503,32 @@ impl<A: RowApplication> SecureSql<A> {
                 message: violated,
             }));
         }
-        // Replayed writes travel only as a plain bundle's intents. Rows of
-        // mergeable tables could not drop with them, so they never share a
-        // transaction.
-        if !intents.is_empty() && (commit != Kind::Plain || !matches!(target, Target::Bundle(_))) {
+        // Replayed writes travel only as a plain bundle's intents, or as a
+        // migration's program. Rows of mergeable tables could not drop with
+        // them, so they never share a transaction.
+        if !intents.is_empty() && (commit != Kind::Plain || matches!(target, Target::Move { .. })) {
             return Err(denied("replayed writes commit only as a plain transaction"));
         }
         if !intents.is_empty() && !writes.is_empty() {
             return Err(denied(
                 "a transaction writes replayed tables or mergeable ones, not both",
             ));
+        }
+        if let Target::Publication(publication) = target
+            && !intents.is_empty()
+        {
+            let committed = SecureCommit {
+                handle: publication,
+                frames: Vec::new(),
+            };
+            let staged = inner
+                .stage_intents(publication, with_undo(intents, undo))
+                .await?;
+            return Ok(if staged {
+                Sealed::Commit(committed)
+            } else {
+                Sealed::Replayed(committed)
+            });
         }
         let handle = match target {
             Target::Move {
@@ -1560,18 +1586,7 @@ impl<A: RowApplication> SecureSql<A> {
             }));
         }
         let encoded = super::bundle::input_bytes(&writes, &[], &intents)?;
-        // The author's execution rewinds like a replay of it. Rows a delete
-        // action changed in a scope without statements undo with the first
-        // member: a rewind undoes every member of a transaction.
-        let mut intents: super::bundle::Intents = intents
-            .into_iter()
-            .map(|(scope, statements)| {
-                (scope, (statements, undo.remove(&scope).unwrap_or_default()))
-            })
-            .collect();
-        if let Some((_, (_, first))) = intents.iter_mut().next() {
-            first.extend(undo.into_values().flatten());
-        }
+        let intents = with_undo(intents, undo);
         if encoded.len() > MAX_BUNDLE_BYTES {
             return Err(Error::Quota {
                 resource: "bundle bytes",
@@ -1642,9 +1657,36 @@ impl<A: RowApplication> SecureSql<A> {
     ) -> Result<Option<Vec<super::intents::Recorded>>, Error> {
         let held = lease.held.as_ref().ok_or(Error::Closed)?;
         held.0
-            .intent_copies(sql, &params, &self.session.status)
+            .intent_copies(
+                sql,
+                &params,
+                &self.session.status,
+                if self.migration {
+                    usize::MAX
+                } else {
+                    rocky_storage::partition_sql::MAX_INTENT_PARTITIONS
+                },
+            )
             .await
     }
+}
+
+/// Each partition's statements with the prior images of the rows they
+/// changed there: the author's execution rewinds like a replay of it. Rows
+/// a delete action changed in a scope without statements undo with the
+/// first member: a rewind undoes every member of a transaction.
+fn with_undo(
+    intents: BTreeMap<ResourceScope, Vec<rocky_core::replay::IntentStatement>>,
+    mut undo: BTreeMap<ResourceScope, Vec<super::replay::Undo>>,
+) -> super::bundle::Intents {
+    let mut intents: super::bundle::Intents = intents
+        .into_iter()
+        .map(|(scope, statements)| (scope, (statements, undo.remove(&scope).unwrap_or_default())))
+        .collect();
+    if let Some((_, (_, first))) = intents.iter_mut().next() {
+        first.extend(undo.into_values().flatten());
+    }
+    intents
 }
 
 /// A statement or commit runs only under the session's current authority.
@@ -1661,15 +1703,6 @@ fn empty<A: RowApplication>(lease: &Lease<A>, state: SqlState) -> SecureRows {
         last_insert_rowid: lease.observed.last_insert_rowid,
         state,
         committed: None,
-    }
-}
-
-// Only qualification builds read this variable. Exit without destructors so
-// SQLite must recover the pending WAL/transaction on the next process open.
-#[cfg(feature = "qualification")]
-fn qualification_kill(point: &str) {
-    if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|selected| selected == point) {
-        std::process::exit(87);
     }
 }
 

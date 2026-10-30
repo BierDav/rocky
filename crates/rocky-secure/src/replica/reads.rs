@@ -107,7 +107,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             bindings(values),
         ).await?).await?;
         let limited = records.len() == 33;
-        let staged = inner.staged().await?;
+        let staged = inner.unsent().await?;
         let mut frames = Vec::new();
         let mut used = 0;
         let mut last = None;

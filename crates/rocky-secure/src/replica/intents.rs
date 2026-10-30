@@ -4,7 +4,7 @@
 use super::*;
 use rocky_core::TableClass;
 use rocky_core::replay::{BaseMark, IntentStatement};
-use rocky_storage::partition_sql::{SplitError, split_intent, written_table};
+use rocky_storage::partition_sql::{SplitError, split_intent_within, written_table};
 
 /// One partition's copy of a statement the transaction ran.
 #[derive(Clone, Debug)]
@@ -16,12 +16,14 @@ pub(crate) struct Recorded {
 impl<A: RowApplication> Inner<A> {
     /// The copies of a write to a replayed table, one per held partition it
     /// reaches, split before it executes. `None` when it writes no replayed
-    /// table; empty when it reaches no held partition.
+    /// table; empty when it reaches no held partition. A statement reaches
+    /// at most `limit` partitions.
     pub(super) async fn intent_copies(
         &self,
         sql: &str,
         params: &[SqlValue],
         status: &SessionStatus,
+        limit: usize,
     ) -> Result<Option<Vec<Recorded>>, Error> {
         let Some(typed) = &self.workspace.typed else {
             return Ok(None);
@@ -49,7 +51,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let rules = self.partition_rules(None, status).await?;
         let conn = self.conn.connection();
-        let copies = split_intent(sql, params, &schema.views, &rules, |read| {
+        let copies = split_intent_within(sql, params, &schema.views, &rules, limit, |read| {
             conn.rows(&read.sql, storage::bindings(read.params.clone()))?
                 .into_iter()
                 .map(|row| row.into_iter().map(storage::sql_value).collect())
@@ -219,6 +221,14 @@ impl<A: RowApplication> Inner<A> {
             )?,
         )?;
         self.verify_frame(&frame, time)?;
+        // A range page carries at most this much; a larger frame could
+        // never reach another replica.
+        if frame.weight() > crate::network::MAX_PAGE_BYTES {
+            return Err(Error::Quota {
+                resource: "intent frame bytes",
+                limit: crate::network::MAX_PAGE_BYTES,
+            });
+        }
         let operation = frame.operation_ref()?;
         self.check_budget(
             usize::try_from(frame.stored_bytes()?).map_err(|_| denied("stored frame size"))?,

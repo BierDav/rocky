@@ -107,7 +107,11 @@ impl Schema {
                     MigrationStep::Insert { insert, .. }
                         if !self.tables.iter().any(|table| {
                             table.name == *insert
-                                && table.class == rocky_core::TableClass::Mergeable
+                                && matches!(
+                                    table.class,
+                                    rocky_core::TableClass::Mergeable
+                                        | rocky_core::TableClass::Replayed
+                                )
                         }) =>
                     {
                         Some(insert)
@@ -116,7 +120,7 @@ impl Schema {
                 })
             {
                 return Err(format!(
-                    "a migration inserts into {table}, which is no mergeable table"
+                    "a migration inserts into {table}, which is no mergeable or replayed table"
                 )
                 .into());
             }

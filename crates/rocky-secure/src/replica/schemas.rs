@@ -1264,6 +1264,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             ));
         };
         let stage: super::staging::SchemaStage = decode(bytes)?;
+        if inner.publication_cursor(publication).await?.is_some() {
+            return Err(denied(
+                "a partially authored schema publication never withdraws",
+            ));
+        }
         // A staged switch to the publication's target, interrupted under
         // the source definition, is withdrawn with the stage.
         let staged = match inner.schema_switch_intent().await? {

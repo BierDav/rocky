@@ -38,7 +38,8 @@ pub enum BlockerKind {
     RestorationGuard,
     /// Frames of a dropped tip on the followed path are missing.
     DroppedTipFrames { count: u64 },
-    /// The followed line has no node of this identity to author with.
+    /// The followed line has no node of this identity to author with, or
+    /// its node's credentials no longer verify.
     LineNode,
     /// Received frames wait to apply.
     PendingFrames { reason: WaitReason, count: u64 },

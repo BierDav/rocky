@@ -419,7 +419,7 @@ impl NativeSession {
                 after,
                 quota,
             } => {
-                if quota > MAX_SECURE_FRAME / 2 {
+                if quota > super::MAX_PAGE_BYTES {
                     return Err(denied("native page quota"));
                 }
                 replica

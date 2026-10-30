@@ -68,7 +68,7 @@ mod rebuild;
 mod recovery;
 mod removal;
 pub(crate) mod replay;
-pub use removal::local_row_counts;
+pub use removal::{local_row_counts, local_table_digests};
 pub use replay::outcomes::OutcomeDivergence;
 mod restore;
 pub(super) mod roles;
@@ -114,7 +114,9 @@ pub use migrate::{PLAN_ROWS, ProjectionPlan};
 pub use offload::RemotePage;
 use p2panda_core::validate_backlink;
 use p2panda_store::operations::LocalOperationStore;
-pub use publication::Publication;
+#[cfg(feature = "qualification")]
+pub use publication::CHUNK_PAGES;
+pub use publication::{PUBLICATION_CHUNK_BUNDLES, Publication};
 pub use queries::Describe;
 use rocky_core::{
     Blocker, BlockerKind, ClearsBy, Commitment, ResourceScope, Right, RowApplication, RowChange,
@@ -772,6 +774,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         constraints::SCHEMA,
         chains::SCHEMA,
         publication::SCHEMA,
+        publication::INTENT_SCHEMA,
         bulk::SCHEMA,
         positions::SCHEMA,
         quarantine::SCHEMA,

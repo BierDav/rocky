@@ -1,6 +1,7 @@
 # 7. Intent migrations
 
-Status: planned. Owner: `rocky-secure` (`replica/publication.rs`,
+Status: complete (2026-10-31); see the
+[evidence](07-intent-migrations-evidence.md). Owner: `rocky-secure` (`replica/publication.rs`,
 migration sessions in `replica/sql.rs`, schema staging), `rocky-sdk`
 (`node/schema_publication.rs`). Depends on [phase 4](04-intent-replay.md).
 Effort: two weeks. Carried over from features_12 phase 5. Follow the

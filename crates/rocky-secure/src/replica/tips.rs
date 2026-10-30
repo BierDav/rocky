@@ -1083,6 +1083,11 @@ impl<A: RowApplication> Inner<A> {
             if lost && self.base_off_path(scope, id).await? {
                 continue;
             }
+            // A replayed scope whose transactions all stay on the path, as
+            // across a migration's close, keeps its rows.
+            if self.replayed_scope(scope) && self.replayed_on_path(id).await? {
+                continue;
+            }
             // Restoring a kept seal's rows replays only what followed it.
             // Without the kept state's identity evidence it rebuilds instead.
             if let Some(rewind) = &rewind

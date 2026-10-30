@@ -437,7 +437,8 @@ impl<A: RowApplication> Inner<A> {
         }
         // The author holds every member: its record lets replicas holding
         // only some of them follow, and lets a seal cover the transaction.
-        if count > 1 && !replayed.is_empty() {
+        // A publication's records follow its migration's initial run.
+        if count > 1 && !replayed.is_empty() && !self.publishing {
             let held: Vec<_> = replayed
                 .iter()
                 .map(|index| (&authored[*index], *index as u16))

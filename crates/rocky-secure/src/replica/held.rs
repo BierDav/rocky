@@ -218,7 +218,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Marks `hashes` offered in a durable transaction before they leave
     /// the device; a push that fails midway still counts as sent.
-    pub(super) async fn offer(&mut self, hashes: &[Hash]) -> Result<(), Error> {
+    pub(crate) async fn offer(&mut self, hashes: &[Hash]) -> Result<(), Error> {
         self.refuse_staged(hashes).await?;
         let mut unoffered = Vec::new();
         for hash in hashes {

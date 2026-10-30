@@ -1141,6 +1141,11 @@ pub(crate) async fn retain(
     Ok(())
 }
 
+/// Rows one statement inserts into a replayed table: its intent carries
+/// them as bound values, and a partition's intent holds at most
+/// `MAX_INTENT_STATEMENTS` statements.
+const REPLAYED_INSERT_ROWS: usize = 1024;
+
 /// Inserts a row of `table` for each row of `select`, with the next id of
 /// its partition, inside the open transaction.
 pub(crate) async fn insert_rows(
@@ -1169,26 +1174,44 @@ pub(crate) async fn insert_rows(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-    let insert = format!(
-        "INSERT INTO {}({},\"id\") VALUES({})",
-        quoted(table),
-        rows.columns
-            .iter()
-            .map(|column| quoted(column))
-            .collect::<Vec<_>>()
-            .join(","),
-        vec!["?"; rows.columns.len() + 1].join(",")
-    );
-    for row in rows.rows {
+    let width = rows.columns.len() + 1;
+    let row = format!("({})", vec!["?"; width].join(","));
+    let insert = |count: usize| {
+        format!(
+            "INSERT INTO {}({},\"id\") VALUES{}",
+            quoted(table),
+            rows.columns
+                .iter()
+                .map(|column| quoted(column))
+                .collect::<Vec<_>>()
+                .join(","),
+            vec![row.as_str(); count].join(",")
+        )
+    };
+    // Mergeable tables keep one statement per row.
+    let batch = if logical.class == rocky_core::TableClass::Replayed {
+        REPLAYED_INSERT_ROWS.min(32_766 / width).max(1)
+    } else {
+        1
+    };
+    let mut values = Vec::new();
+    let mut pending = 0;
+    let total = rows.rows.len();
+    for (index, row) in rows.rows.into_iter().enumerate() {
         let id = if partition.is_empty() {
             sql.next_id(table).await?
         } else {
             let values: Vec<_> = partition.iter().map(|index| row[*index].clone()).collect();
             sql.next_id_partition(table, &values).await?
         };
-        let mut values = row;
+        values.extend(row);
         values.push(rocky_core::SqlValue::Integer(id.integer()));
-        sql.run(&insert, values).await?;
+        pending += 1;
+        if pending == batch || index + 1 == total {
+            sql.run(&insert(pending), std::mem::take(&mut values))
+                .await?;
+            pending = 0;
+        }
     }
     Ok(())
 }

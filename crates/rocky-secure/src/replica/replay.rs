@@ -91,7 +91,7 @@ fn blob_values(mut bytes: &[u8]) -> Result<Vec<SqlValue>, Error> {
 }
 
 /// A member's undo column: `NULL` when it changed nothing.
-fn undo_blob(undo: &[Undo]) -> Result<SqlValue, Error> {
+pub(super) fn undo_blob(undo: &[Undo]) -> Result<SqlValue, Error> {
     if undo.is_empty() {
         return Ok(SqlValue::Null);
     }
@@ -110,7 +110,7 @@ fn undo_blob(undo: &[Undo]) -> Result<SqlValue, Error> {
     Ok(SqlValue::Blob(encode(&rows)?))
 }
 
-fn undo_of(bytes: &[u8]) -> Result<Vec<Undo>, Error> {
+pub(super) fn undo_of(bytes: &[u8]) -> Result<Vec<Undo>, Error> {
     let rows: Vec<(String, serde_bytes::ByteBuf, Option<serde_bytes::ByteBuf>)> =
         decode_bounded(bytes, usize::MAX)?;
     rows.into_iter()
@@ -722,6 +722,30 @@ impl<A: RowApplication> Inner<A> {
                     .is_some_and(|table| table.class == TableClass::Replayed)
             })
         })
+    }
+
+    /// Whether every transaction replayed in the scope stored as `id`
+    /// stays on the workspace's path, so its rows are the path's state. A
+    /// replayed scope keeps no row records to rebuild from.
+    pub(super) async fn replayed_on_path(&self, id: i64) -> Result<bool, Error> {
+        for record in collect_rows(
+            self.conn
+                .query("SELECT hash FROM secure_replayed WHERE scope=?", [id])
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Blob(hash)] = record.as_slice() else {
+                return Err(Error::Corrupt("replayed transaction".into()));
+            };
+            let Some(frame) = self.frame(super::checkpoint::hash_of(hash)?).await? else {
+                return Ok(false);
+            };
+            if !self.visible_in_workspace(&frame.operation()?)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// A seal finalized at depth `era` leaves out the unsealed transactions

@@ -262,6 +262,14 @@ impl Node {
             return self.endorse_migration(&stage).await;
         }
         self.ensure_tip_node().await?;
+        // The program of replayed tables ran and committed; its bundles
+        // continue from their cursor and it never runs again.
+        if self.replica.publication_staged(stage.publication).await? {
+            self.replica
+                .author_staged_publication(stage.publication)
+                .await?;
+            return self.endorse_migration(&stage).await;
+        }
         let program = Schema::parse(std::str::from_utf8(&stage.program)?)?;
         // Every granted scope but the registry: the migration may read and
         // write every partition the issuer holds.
@@ -317,6 +325,10 @@ impl Node {
             }
         }
         sql.commit_publication(stage.publication).await?;
+        drop(sql);
+        self.replica
+            .author_staged_publication(stage.publication)
+            .await?;
         self.endorse_migration(&stage).await
     }
 

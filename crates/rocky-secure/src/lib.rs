@@ -11,6 +11,8 @@ mod replica;
 pub mod shapes;
 mod store;
 mod wire;
+#[cfg(feature = "qualification")]
+pub use replica::CHUNK_PAGES;
 #[cfg(any(test, feature = "qualification"))]
 pub use replica::CrashPoint;
 pub use replica::{
@@ -25,14 +27,15 @@ pub use replica::{
     MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS,
     MAX_EXISTENCE_PAGE, MAX_PLACEMENTS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS,
     MAX_UNCONFIGURED_PEERS, MigrationMembership, MigrationStorage, OutcomeDivergence, PLAN_ROWS,
-    PeerFuture, PeerLag, PeerScopeFrontier, PendingSchema, Placement, PlacementPage,
-    PlacementRequest, ProjectionPlan, PruneBlock, PruneReport, PrunedPage, Publication,
-    ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, Refusal, RemotePage, ReplicaRole,
-    ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage,
-    ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit, SecureConfig, SecurePage,
-    SecureRows, SecureSession, SecureSnapshot, SecureSql, SecureTransaction, SessionStatus,
-    SetSummary, SignedCheckpoint, SignedVoid, Slot, StagedCloseStatus, StateAdvice, TipDevice,
-    TipNodeObservation, TipObservation, TipStatement, UpdateMode, entry_hash, installed_tip_schema,
+    PUBLICATION_CHUNK_BUNDLES, PeerFuture, PeerLag, PeerScopeFrontier, PendingSchema, Placement,
+    PlacementPage, PlacementRequest, ProjectionPlan, PruneBlock, PruneReport, PrunedPage,
+    Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, Refusal, RemotePage,
+    ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig,
+    SchemaStage, ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SecureCommit,
+    SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
+    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, Slot,
+    StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement,
+    UpdateMode, entry_hash, installed_tip_schema,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 /// The credential types live in `rocky-credentials`; these are the same types.
@@ -169,7 +172,7 @@ pub use replica::checkpoint::IMPORT_ATTEMPTS;
 #[doc(hidden)]
 pub use replica::last_in_place_switch_changes;
 pub use replica::replay::ROUTINE_SEAL_TRANSACTIONS;
-pub use replica::{check_replica_format, local_row_counts};
+pub use replica::{check_replica_format, local_row_counts, local_table_digests};
 
 /// One-way reference used by durable peer metadata.
 pub use rocky_credentials::PeerId;

@@ -813,9 +813,13 @@ impl<A: RowApplication> Inner<A> {
     /// Best effort: the commit already succeeded, so a failure waits for the
     /// next transaction.
     pub(crate) async fn checkpoint_if_due(&mut self) {
+        self.checkpoint_over(self.wal_limits.1).await;
+    }
+    /// [`Self::checkpoint_if_due`], truncating once the WAL holds `limit`.
+    pub(super) async fn checkpoint_over(&mut self, limit: u64) {
         self.reclaim_free_pages().await;
         let size = std::fs::metadata(&self.wal).map_or(0, |metadata| metadata.len());
-        let truncate = size >= self.wal_limits.1;
+        let truncate = size >= limit;
         if !truncate {
             if size >= self.wal_limits.0 {
                 self.passive.schedule(size, self.flusher.clone());

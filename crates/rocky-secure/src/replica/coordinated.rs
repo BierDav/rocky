@@ -459,15 +459,26 @@ impl<A: RowApplication> Inner<A> {
     /// Refuses to let staged frames leave through an ordinary path.
     pub(super) async fn refuse_staged(&self, hashes: &[Hash]) -> Result<(), Error> {
         for hash in hashes {
-            let mut found = self
-                .conn
-                .query(
-                    "SELECT 1 FROM secure_staged WHERE hash=?",
-                    [hash.as_bytes().to_vec()],
-                )
-                .await?;
-            if found.next().await?.is_some() {
-                return Err(denied("an uncommitted coordinated entry is never sent"));
+            for (table, refusal) in [
+                (
+                    "secure_staged",
+                    "an uncommitted coordinated entry is never sent",
+                ),
+                (
+                    "secure_publication_unsent",
+                    "a publication still being authored is never sent",
+                ),
+            ] {
+                let mut found = self
+                    .conn
+                    .query(
+                        format!("SELECT 1 FROM {table} WHERE hash=?"),
+                        [hash.as_bytes().to_vec()],
+                    )
+                    .await?;
+                if found.next().await?.is_some() {
+                    return Err(denied(refusal));
+                }
             }
         }
         Ok(())

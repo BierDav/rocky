@@ -104,3 +104,12 @@ impl<A: RowApplication> Inner<A> {
         }
     }
 }
+
+// Only qualification builds read this variable. Exit without destructors so
+// SQLite must recover the pending WAL/transaction on the next process open.
+#[cfg(feature = "qualification")]
+pub(super) fn qualification_kill(point: &str) {
+    if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|selected| selected == point) {
+        std::process::exit(87);
+    }
+}

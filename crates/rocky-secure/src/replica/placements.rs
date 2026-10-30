@@ -162,7 +162,7 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("placement request outside the seal's frontier"));
         }
-        let staged = self.staged().await?;
+        let staged = self.unsent().await?;
         let mut headers = BTreeSet::new();
         let mut chains = BTreeMap::new();
         let mut candidates = Vec::new();

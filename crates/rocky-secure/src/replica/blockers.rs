@@ -326,12 +326,23 @@ impl<A: RowApplication> Inner<A> {
         )])
     }
     /// A device that may write authors with a node of its identity for the
-    /// followed line; until one is registered nothing is written.
+    /// followed line; until one is registered, or while its chain no longer
+    /// verifies, as after a revocation, nothing is written.
     pub(super) fn line_node_blockers(&self) -> Result<Vec<Blocker>, Error> {
-        if self.node_author.is_some() {
-            return Ok(Vec::new());
-        }
-        let writes = self.local_grants(now()?)?.iter().any(|grant| {
+        let time = now()?;
+        let clears_by = match &self.node_author {
+            None => ClearsBy::LocalWork,
+            Some(author)
+                if self
+                    .verified_chain(&author.credentials, &self.config.revocations, time)
+                    .is_ok() =>
+            {
+                return Ok(Vec::new());
+            }
+            // Only new credentials from the application's issuer clear it.
+            Some(_) => ClearsBy::Application,
+        };
+        let writes = self.local_grants(time)?.iter().any(|grant| {
             [Right::Insert, Right::Update, Right::Delete]
                 .iter()
                 .any(|right| grant.rights.contains(right))
@@ -345,7 +356,7 @@ impl<A: RowApplication> Inner<A> {
             vec![blocker(
                 domain_label(&domain),
                 BlockerKind::LineNode,
-                ClearsBy::LocalWork,
+                clears_by,
             )]
         } else {
             Vec::new()

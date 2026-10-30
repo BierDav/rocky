@@ -4,6 +4,8 @@
 mod common;
 #[path = "migrations/prepared_pull.rs"]
 mod prepared_pull;
+#[path = "migrations/replayed.rs"]
+mod replayed;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};

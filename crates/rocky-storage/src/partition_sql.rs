@@ -2,7 +2,7 @@
 mod intent;
 pub use intent::{
     DETERMINISTIC_FUNCTIONS, IntentRefusal, MAX_INTENT_PARTITIONS, PartitionStatement, SplitError,
-    check_assertion, check_replayed_table, split_intent, written_table,
+    check_assertion, check_replayed_table, split_intent, split_intent_within, written_table,
 };
 use rocky_core::{KeyColumn, PartitionValue, SqlValue};
 use sqlparser::ast::*;

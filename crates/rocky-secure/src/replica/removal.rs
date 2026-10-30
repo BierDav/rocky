@@ -23,6 +23,55 @@ pub async fn local_row_counts(path: &Path) -> Result<BTreeMap<Commitment, u64>, 
     Ok(counts)
 }
 
+/// Each named projection table's row count and LtHash digest of its rows,
+/// every column included in name order: replicas holding the same rows,
+/// identities included, have equal digests whatever their history.
+pub async fn local_table_digests(
+    path: &Path,
+    tables: &[&str],
+) -> Result<BTreeMap<String, SetSummary>, Error> {
+    super::check_replica_format(path).await?;
+    let file = crate::sqlite::Connection::open_read_only(path)?;
+    let mut digests = BTreeMap::new();
+    for table in tables {
+        let mut digest = super::checkpoint::Lt::new();
+        let mut count = 0;
+        let mut columns = Vec::new();
+        for column in file.rows(
+            &format!(
+                "SELECT name FROM pragma_table_info({})",
+                typed::quoted(table)
+            ),
+            (),
+        )? {
+            let [crate::sqlite::Value::Text(name)] = column.as_slice() else {
+                return Err(Error::Corrupt("projection column".into()));
+            };
+            columns.push(typed::quoted(name));
+        }
+        columns.sort();
+        for row in file.rows(
+            &format!("SELECT {} FROM {}", columns.join(","), typed::quoted(table)),
+            (),
+        )? {
+            let mut bytes = Vec::new();
+            for value in row {
+                storage::sql_value(value)?.encode(&mut bytes);
+            }
+            digest.add(super::checkpoint::ROW_LABEL, &bytes);
+            count += 1;
+        }
+        digests.insert(
+            (*table).to_owned(),
+            SetSummary {
+                count,
+                digest: digest.digest(),
+            },
+        );
+    }
+    Ok(digests)
+}
+
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn keep_current(
         &self,

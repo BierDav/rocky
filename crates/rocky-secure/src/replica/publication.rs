@@ -1,7 +1,12 @@
 //! Staged publications: one local SQL transaction of any size whose writes
-//! leave as consecutive ordinary bundles. See
-//! `docs/decisions/0071-staged-migration-publication.md`.
+//! leave as consecutive ordinary bundles. A migration of replayed tables
+//! publishes its program instead; see [`intents`].
 use super::*;
+mod intents;
+#[cfg(feature = "qualification")]
+pub use intents::CHUNK_PAGES;
+pub use intents::PUBLICATION_CHUNK_BUNDLES;
+pub(super) use intents::SCHEMA as INTENT_SCHEMA;
 
 pub(super) const SCHEMA: &[&str] = &[
     // `published` counts the leading bundles some peer holds.
@@ -21,6 +26,11 @@ pub struct Publication {
     pub published: u64,
 }
 
+/// The handle of a publication's bundle at `position`.
+#[cfg(test)]
+pub(crate) fn handle(publication: &Commitment, position: u64) -> Commitment {
+    bundle_handle(publication, position)
+}
 /// The handle of a publication's bundle at `position`.
 pub(super) fn bundle_handle(publication: &Commitment, position: u64) -> Commitment {
     rocky_core::commitment(
@@ -125,7 +135,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(frames)
     }
     /// Each member of the bundle under `handle`; None once pruned.
-    async fn bundle_frames(
+    pub(crate) async fn bundle_frames(
         &self,
         handle: &Commitment,
     ) -> Result<Vec<Option<EncryptedFrame>>, Error> {
@@ -220,11 +230,24 @@ impl<A: RowApplication> Inner<A> {
         let authored = self.author_publication(&publication, &chunks).await;
         self.publishing = false;
         let frames = authored?;
-        for position in 0..chunks.len() {
+        self.record_publication(publication, chunks.len() as u64, &frames, migration)
+            .await?;
+        Ok((frames, false))
+    }
+    /// Records the authored `bundles` of `publication`, its migration
+    /// intent for a migration stage, and commits its schema stage.
+    async fn record_publication(
+        &self,
+        publication: Commitment,
+        bundles: u64,
+        frames: &[EncryptedFrame],
+        migration: Option<SchemaStage>,
+    ) -> Result<(), Error> {
+        for position in 0..bundles {
             self.conn
                 .execute(
                     "INSERT INTO secure_publication_frames SELECT o.hash,length(o.header)+length(o.body) FROM secure_bundle_handles h JOIN secure_operations o ON o.hash=h.hash WHERE h.handle=?",
-                    [bundle_handle(&publication, position as u64).to_vec()],
+                    [bundle_handle(&publication, position).to_vec()],
                 )
                 .await?;
         }
@@ -233,15 +256,14 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT INTO secure_publications VALUES(?,?,0)",
                 bindings(vec![
                     SqlValue::Blob(publication.to_vec()),
-                    SqlValue::Integer(chunks.len() as i64),
+                    SqlValue::Integer(bundles as i64),
                 ]),
             )
             .await?;
         if let Some(stage) = migration {
-            self.build_migration_intent(&stage, &frames).await?;
+            self.build_migration_intent(&stage, frames).await?;
         }
-        self.commit_schema_stage(publication).await?;
-        Ok((frames, false))
+        self.commit_schema_stage(publication).await
     }
     async fn author_publication(
         &mut self,

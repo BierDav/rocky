@@ -62,6 +62,9 @@ const WORKING_INTERVAL: Duration = Duration::from_secs(4);
 const REQUEST_LIMIT: Duration = Duration::from_secs(120);
 const IO_CHUNK: usize = 8 * 1024;
 /// The refusal of a peer the merged revocation set revokes.
+/// The most frame bytes one range page may ask for, and so the largest
+/// frame a replica can pull.
+pub(crate) const MAX_PAGE_BYTES: usize = MAX_SECURE_FRAME / 2;
 pub const PEER_REVOKED: &str = "the peer is revoked";
 /// The refusal of a side the merged revocation set revokes: it ends the
 /// session. See `Revoked`.

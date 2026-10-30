@@ -582,7 +582,8 @@ The features_12 write probe and its L0–L4 load scenarios were removed in
 mergeable (`items`) table of the same shape, single-row `UPDATE …
 SET amount=amount+1` through `Database::transaction` (buffered), 50 warm-up
 and 600 samples each; it also reports the local observer notification
-after `commit` returns.
+after `commit` returns. The probe was rerun on 2026-10-30 after the
+implementation and workspace checks completed.
 
 - L0: one device, a write every 10 ms.
 - L2: as features_12 phase 1: a peer over the memory hub authors one small
@@ -605,21 +606,22 @@ target/release/deps/write_latency-<hash> --ignored --nocapture --test-threads=1
 
 Write latency, p50 / p95 / p99 / max (ms), 600 samples each:
 
-| Load | Table | Current round 1 | Current round 2 | Baseline round 1 | Baseline round 2 |
-| --- | --- | --- | --- | --- | --- |
-| L0 | `counters` (replayed; baseline mergeable) | 3.03 / 6.04 / 15.59 / 23.15 | 3.24 / 5.82 / 6.63 / 9.36 | 3.10 / 6.08 / 7.39 / 14.42 | 3.18 / 5.55 / 7.38 / 8.37 |
-| L0 | `items` (mergeable) | 2.78 / 5.52 / 6.73 / 22.30 | 3.14 / 5.87 / 6.83 / 20.19 | 3.16 / 5.69 / 6.91 / 15.60 | 3.11 / 4.82 / 6.16 / 14.32 |
-| L2 | `counters` (replayed; baseline mergeable) | 6.96 / 11.47 / 12.08 / 13.83 | 7.09 / 11.83 / 12.74 / 16.89 | 2.45 / 3.13 / 7.51 / 11.78 | 2.47 / 3.38 / 9.61 / 14.74 |
-| L2 | `items` (mergeable) | 2.57 / 3.46 / 5.92 / 12.28 | 2.47 / 3.33 / 5.62 / 13.21 | 2.46 / 3.09 / 6.33 / 10.25 | 2.74 / 3.69 / 7.05 / 8.62 |
+| Load | Table | Current round 1 | Current round 2 | Baseline round 1 | Baseline round 2 | Current round 3 |
+| --- | --- | --- | --- | --- | --- | --- |
+| L0 | `counters` (replayed; baseline mergeable) | 3.03 / 6.04 / 15.59 / 23.15 | 3.24 / 5.82 / 6.63 / 9.36 | 3.10 / 6.08 / 7.39 / 14.42 | 3.18 / 5.55 / 7.38 / 8.37 | 3.07 / 4.80 / 7.19 / 7.82 |
+| L0 | `items` (mergeable) | 2.78 / 5.52 / 6.73 / 22.30 | 3.14 / 5.87 / 6.83 / 20.19 | 3.16 / 5.69 / 6.91 / 15.60 | 3.11 / 4.82 / 6.16 / 14.32 | 3.03 / 5.48 / 6.52 / 15.65 |
+| L2 | `counters` (replayed; baseline mergeable) | 6.96 / 11.47 / 12.08 / 13.83 | 7.09 / 11.83 / 12.74 / 16.89 | 2.45 / 3.13 / 7.51 / 11.78 | 2.47 / 3.38 / 9.61 / 14.74 | 7.38 / 11.64 / 12.48 / 14.65 |
+| L2 | `items` (mergeable) | 2.57 / 3.46 / 5.92 / 12.28 | 2.47 / 3.33 / 5.62 / 13.21 | 2.46 / 3.09 / 6.33 / 10.25 | 2.74 / 3.69 / 7.05 / 8.62 | 2.61 / 3.64 / 6.07 / 17.15 |
 
 The observer notification arrived within 0.04 ms of `commit` returning in
 every run (p95 0.00 ms).
 
-- **L0 gate (p95 ≤ 3 ms) not met**, by replayed (5.8–6.0 ms) and by the
+- **L0 gate (p95 ≤ 3 ms) not met**, by replayed (4.8–6.0 ms) and by the
   baseline's mergeable writes alike (4.8–6.1 ms): on this host the idle
   write costs the same with and without replay. An earlier unpaired run
   (slice 9's first, load 12–15) measured 2.78 ms for replayed and 5.50 ms
-  for mergeable writes. Not resolved here.
+  for mergeable writes. The quiet-host qualification remains open; this
+  third paired run does not justify changing the gate.
 - **L2 regression for replayed writes**: p50 about 7 ms and p95 about
   11.7 ms against 3.1–3.7 ms for mergeable writes in both trees, while
   receiving the peer's intents. Still within the L1–L4 desktop target
@@ -679,6 +681,9 @@ On working copy `wnmuwymwmtwu`, same host:
 
 - `./scripts/lint` (after `--fix`): passed.
 - `./scripts/check`: passed, 236 unit and 1,509 integration tests.
+- `cargo test --release -p rocky-sdk --test write_latency --no-run` and the
+  ignored L0/L2 probe: passed; 600 samples per table. The new paired results
+  are included in the Slice 9 table above.
 - `cargo check -p rocky-secure -p rocky-sdk --features rocky-sdk/qualification --tests`: passed.
 - `cargo nextest run -p rocky-secure` (default profile, before the last
   edits): 647 of 648 passed; the e2e-tier

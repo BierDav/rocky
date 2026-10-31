@@ -183,8 +183,9 @@ fn reason_name(reason: DropReason) -> &'static str {
     }
 }
 
-/// Unsealed replayed transactions at which an owner seals routinely: a
-/// rewind undoes and redoes at most this many.
+/// Unsealed replayed transactions at which an owner seals routinely. This
+/// does not cap a rewind: it covers every unsealed transaction its closure
+/// reaches, more while no owner seals.
 pub const ROUTINE_SEAL_TRANSACTIONS: u64 = 128;
 
 impl<A: RowApplication> EncryptedReplica<A> {

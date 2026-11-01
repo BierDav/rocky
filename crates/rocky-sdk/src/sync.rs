@@ -134,6 +134,7 @@ impl Transfer {
         if refused {
             self.deny(scope);
         } else {
+            eprintln!("DBG request failed {error}");
             self.fail(scope);
         }
     }

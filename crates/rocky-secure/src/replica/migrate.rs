@@ -258,6 +258,7 @@ impl<A: RowApplication> Inner<A> {
                 Some(old) => inner.begin_switch_history(old, &projected).await?,
                 None => None,
             };
+            let removed = removed_replayed(&installed, &record.schema).next().is_some();
             for table in removed_replayed(&installed, &record.schema) {
                 inner.touch(&table.sql_name);
                 inner
@@ -284,6 +285,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             inner.install_delete_triggers(&projected).await?;
             inner.reshape_undo(&installed, &record.schema).await?;
+            if removed {
+                inner.redo_removed_writes(now()?).await?;
+            }
             inner.install_history().await?;
             inner.end_switch_history(&projected, switching).await?;
             inner.finish_switch(&record).await

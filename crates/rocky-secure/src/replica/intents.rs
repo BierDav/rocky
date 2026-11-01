@@ -24,6 +24,7 @@ impl<A: RowApplication> Inner<A> {
         params: &[SqlValue],
         status: &SessionStatus,
         limit: usize,
+        parents: &BTreeMap<String, String>,
     ) -> Result<Option<Vec<Recorded>>, Error> {
         let Some(typed) = &self.workspace.typed else {
             return Ok(None);
@@ -52,7 +53,18 @@ impl<A: RowApplication> Inner<A> {
         let rules = self.partition_rules(None, status).await?;
         let conn = self.conn.connection();
         let split = split_intent_within(sql, params, &schema.views, &rules, limit, |read| {
-            conn.rows(&read.sql, storage::bindings(read.params.clone()))?
+            // A migration's reads of its parents run on the frozen tables.
+            let sql = match parents.is_empty() {
+                true => read.sql.clone(),
+                false => {
+                    crate::statement::analyze_migration(&read.sql, |name| {
+                        parents.get(name).cloned()
+                    })
+                    .map_err(|rejection| Error::from(crate::sqlite::Error::from(rejection)))?
+                    .sql
+                }
+            };
+            conn.rows(&sql, storage::bindings(read.params.clone()))?
                 .into_iter()
                 .map(|row| row.into_iter().map(storage::sql_value).collect())
                 .collect::<Result<Vec<Vec<_>>, Error>>()

@@ -92,9 +92,9 @@ impl<A: RowApplication> Inner<A> {
             if !self.can_read_key(scope, &local) || !self.holds(scope).await? {
                 return Err(denied("held change requires a readable held scope"));
             }
-            // An intent is held whole: it has no rows for the application
-            // to re-author.
-            if payload.intent().is_some() {
+            // An intent or outcome record is held whole: it has no rows for
+            // the application to re-author.
+            if payload.intent().is_some() || payload.outcome().is_some() {
                 continue;
             }
             let writes = payload.clone().into_writes();
@@ -227,18 +227,21 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        for (frame, _) in frames {
+        for (frame, payload) in frames {
             let operation = frame.operation_ref()?;
             if !migration {
                 self.conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_held_frames VALUES(?,?,?,?)",
-                        [
-                            operation.hash.as_bytes().to_vec(),
-                            id.to_vec(),
-                            encode(&operation.header.extensions.scope)?,
-                            encode(frame)?,
-                        ],
+                        "INSERT OR IGNORE INTO secure_held_frames VALUES(?,?,?,?,?)",
+                        bindings(vec![
+                            SqlValue::Blob(operation.hash.as_bytes().to_vec()),
+                            SqlValue::Blob(id.to_vec()),
+                            SqlValue::Blob(encode(&operation.header.extensions.scope)?),
+                            SqlValue::Blob(encode(frame)?),
+                            SqlValue::Integer(i64::from(
+                                payload.intent().is_some() || payload.outcome().is_some(),
+                            )),
+                        ]),
                     )
                     .await?;
             }
@@ -709,7 +712,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let inner = self.inner.lock(Class::Background).await;
                 source.check(&inner)?;
                 let records = collect_rows(inner.conn.query(
-                    "SELECT f.hash,h.id FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
+                    "SELECT f.hash,h.id IS NOT NULL OR f.intent FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
                     bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Blob(after.clone()), SqlValue::Integer(TOKEN_RECORDS as i64)]),
                 ).await?).await?;
                 #[cfg(any(test, feature = "qualification"))]
@@ -729,7 +732,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         return Err(Error::Corrupt("held frame hash".into()));
                     }
                     after = key.clone();
-                    if matches!(present, SqlValue::Blob(_)) {
+                    if matches!(present, SqlValue::Integer(1)) {
                         if hashing {
                             hash.update(&encode(key)?);
                         } else {
@@ -738,7 +741,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                                 limit: usize::MAX,
                             })?;
                         }
-                    } else if !matches!(present, SqlValue::Null) {
+                    } else if !matches!(present, SqlValue::Integer(0)) {
                         return Err(Error::Corrupt("held token header".into()));
                     }
                 }
@@ -785,7 +788,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("held changes require whole-scope read authority"));
         }
         let records = collect_rows(inner.conn.query(
-            "SELECT f.hash,h.id FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
+            "SELECT f.hash,h.id IS NOT NULL OR f.intent FROM secure_held_frames f LEFT JOIN secure_held h ON h.id=f.id WHERE f.scope=? AND f.hash>? ORDER BY f.hash LIMIT ?",
             bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Blob(after.map(|hash| hash.as_bytes().to_vec()).unwrap_or_default()), SqlValue::Integer(PAGE_RECORDS as i64 + 1)]),
         ).await?).await?;
         #[cfg(any(test, feature = "qualification"))]
@@ -808,12 +811,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .try_into()
                     .map_err(|_| Error::Corrupt("held frame hash".into()))?,
             );
-            if matches!(present, SqlValue::Null) {
-                scanned = Some(id);
-                continue;
-            }
-            if !matches!(present, SqlValue::Blob(_)) {
-                return Err(Error::Corrupt("held source header".into()));
+            // A resolved held change is not served again; a held intent has
+            // no held change and replays wherever its line continues.
+            match present {
+                SqlValue::Integer(1) => {}
+                SqlValue::Integer(0) => {
+                    scanned = Some(id);
+                    continue;
+                }
+                _ => return Err(Error::Corrupt("held source header".into())),
             }
             let bytes = collect_rows(
                 inner
@@ -844,21 +850,35 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok((frames, None))
     }
-    /// Accepts only original frames whose line is closed. Ordinary live frames
-    /// use `receive`; a relay never replaces their author's signature.
+    /// Accepts only original frames whose line is closed: held here, or an
+    /// intent or outcome frame replaying here in the line opened after the
+    /// close.
+    /// Ordinary live frames use `receive`; a relay never replaces their
+    /// author's signature.
     pub async fn receive_held_frames(&self, frames: Vec<EncryptedFrame>) -> Result<(), Error> {
         {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             for frame in &frames {
                 inner.verify_frame_authority(frame, now()?)?;
-                if inner.frame_reach(frame)? != tips::FrameReach::Held {
-                    return Err(denied("held transfer names a live or unrelated frame"));
+                let late = || -> Result<bool, Error> {
+                    let operation = frame.operation_ref()?;
+                    Ok(operation.header.extensions.tip != inner.workspace.tip
+                        && {
+                            let payload = inner.row_payload(frame)?;
+                            payload.intent().is_some() || payload.outcome().is_some()
+                        })
+                };
+                match inner.frame_reach(frame)? {
+                    tips::FrameReach::Held => {}
+                    tips::FrameReach::Live if late()? => {}
+                    _ => return Err(denied("held transfer names a live or unrelated frame")),
                 }
             }
         }
         for status in self.receive_all(frames).await {
             match status? {
                 ReceiveStatus::Held
+                | ReceiveStatus::Applied
                 | ReceiveStatus::Duplicate
                 | ReceiveStatus::PendingDependencies => {}
                 _ => return Err(denied("held transfer was not held")),

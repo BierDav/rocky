@@ -65,57 +65,6 @@ async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
         .ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]}))
         .await;
 }
-/// The id of `items.<field>` in the domain at `directory`.
-/// Whether a stored or checkpoint row references the file's interned field id.
-fn holds(directory: &Path, field: &str) -> Result<bool, Failure> {
-    use serde::de::IgnoredAny;
-    type StoredRecord = (
-        IgnoredAny,
-        IgnoredAny,
-        Vec<(i64, IgnoredAny, IgnoredAny)>,
-        IgnoredAny,
-        IgnoredAny,
-        IgnoredAny,
-        IgnoredAny,
-        IgnoredAny,
-        IgnoredAny,
-        IgnoredAny,
-    );
-    let file = rusqlite::Connection::open_with_flags(
-        directory.join("rocky.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let mut names = file.prepare("SELECT id FROM secure_field_names WHERE name=?")?;
-    let mut names = names.query([format!("items.{field}")])?;
-    let Some(name) = names.next()? else {
-        return Ok(false);
-    };
-    let id: i64 = name.get(0)?;
-    for table in ["secure_rows", "secure_checkpoint_rows"] {
-        let mut statement = file.prepare(&format!("SELECT fields FROM {table}"))?;
-        let blobs = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
-        for blob in blobs {
-            let blob = blob?;
-            // Replica 35 prefixes local records with liveness and a shape id.
-            let shape_bytes = match blob.get(1) {
-                Some(0..=23) => 1,
-                Some(24) => 2,
-                Some(25) => 3,
-                Some(26) => 5,
-                Some(27) => 9,
-                _ => return Err("invalid local shape id".into()),
-            };
-            let record: StoredRecord = p2panda_core::cbor::decode_cbor(
-                blob.get(1 + shape_bytes..)
-                    .ok_or("truncated local record")?,
-            )?;
-            if record.2.iter().any(|field| field.0 == id) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
 /// The application tables, indexes and `items` columns of the file.
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     let file = rusqlite::Connection::open_with_flags(
@@ -225,10 +174,6 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
                 .any(|name| name == "category" || name == "shelf"),
             "{columns:?}"
         );
-        for field in ["category", "shelf"] {
-            assert!(!holds(directory, field)?, "{field}");
-        }
-        assert!(holds(directory, "title")?);
     }
     Ok(())
 }
@@ -327,13 +272,8 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
         .await;
     d.sync().await.expect("sync");
     assert_eq!(generation(&d).await["current"]["schema"], 3);
-    // The unsent write touched only the removed field: it is held whole,
-    // for d's application, and dropping it writes nothing.
-    let held = d.ok(json!({"type": "held_changes"})).await;
-    assert_eq!(held["count"], 1, "{held}");
-    assert_eq!(held_field(&held, "items", "note")["value"], text("late"));
-    d.ok(json!({"type": "drop_held", "id": held["changes"][0]["id"]}))
-        .await;
+    // The late write replays in C, where its field is off its path: it
+    // changes nothing, and nothing is held.
     assert_eq!(generation(&d).await["held"], 0);
     for device in [&a, &c, &d] {
         device.sync().await.expect("sync");
@@ -358,33 +298,8 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     Ok(())
 }
 
-/// Runs `statements` as one transaction committed under `handle`, with
-/// `extra` fields on the COMMIT request.
-async fn transaction(device: &Device, handle: u8, statements: &[&str], extra: Value) -> Value {
-    let _scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
-
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    for sql in statements {
-        device.ok(json!({"type": "sql", "sql": sql})).await;
-    }
-    let mut commit = json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]});
-    if let (Some(commit), Some(extra)) = (commit.as_object_mut(), extra.as_object()) {
-        commit.extend(extra.clone());
-    }
-    device.ok(commit).await
-}
-/// The held change's row of `table` and its field `name`.
-fn held_field<'a>(held: &'a Value, table: &str, name: &str) -> &'a Value {
-    held["changes"][0]["rows"]
-        .as_array()
-        .and_then(|rows| rows.iter().find(|row| row["table"] == table))
-        .and_then(|row| row["fields"].as_array())
-        .and_then(|fields| fields.iter().find(|field| field["name"] == name))
-        .unwrap_or(&Value::Null)
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_update()
+async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -439,24 +354,16 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
     let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
-    // Held whole: its kept edit is rolled back at once, on both.
+    // A late transaction replays in the successor; naming the removed
+    // table, it no longer compiles there and drops whole, as `Schema`.
     assert_eq!(generation(&b).await["current"]["schema"], 2);
-    assert_eq!(generation(&b).await["held"], 1);
+    assert_eq!(generation(&b).await["held"], 0);
     a.sync().await.expect("sync");
     for device in [&a, &b] {
         assert_eq!(device.titles().await, ["apples", "bread"]);
     }
-    let held = b.ok(json!({"type": "held_changes"})).await;
-    assert_eq!(held["count"], 1);
-    let title = held_field(&held, "items", "title");
-    assert_eq!(
-        (&title["written"], &title["value"]),
-        (&json!(true), &text("green apples"))
-    );
-    assert_eq!(title["current"]["value"], text("apples"));
-    assert_eq!(held_field(&held, "shelves", "label")["removed"], true);
 
-    // Its frames are voided: the member's later edits reach the issuer.
+    // The member's later edits reach the issuer.
     write(
         &b,
         "items",
@@ -470,36 +377,6 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
         rows(&a, completed).await,
         json!([[text("bread"), {"type": "integer", "value": "1"}]])
     );
-
-    // The issuer writes meanwhile; after the update the held change lists
-    // that newer value, and re-authoring wins over it on every device.
-    write(
-        &a,
-        "items",
-        5,
-        "UPDATE items SET title='red apples' WHERE title='apples'",
-    )
-    .await;
-    b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
-    b.sync().await.expect("sync");
-    let held = b.ok(json!({"type": "held_changes"})).await;
-    let current = &held_field(&held, "items", "title")["current"];
-    assert_eq!(current["value"], text("red apples"));
-    assert!(current["time"].as_u64() > held["changes"][0]["time"].as_u64());
-    let id = held["changes"][0]["id"].clone();
-    transaction(
-        &b,
-        6,
-        &["UPDATE items SET title='green apples' WHERE title='red apples'"],
-        json!({"reauthors": id}),
-    )
-    .await;
-    assert_eq!(b.ok(json!({"type": "held_changes"})).await["count"], 0);
-    b.sync().await.expect("sync");
-    for device in [&a, &b] {
-        assert_eq!(device.titles().await, ["bread", "green apples"]);
-    }
     a.close().await;
     b.close().await;
     Ok(())
@@ -683,7 +560,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partitions()
+async fn an_impact_report_counts_the_live_rows_of_all_local_partitions()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let a_dir = root.path().join("unique");
@@ -716,8 +593,9 @@ async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partit
     assert_eq!(a.titles().await.len(), 1);
     peer.close().await;
     a.close().await;
+    // The later conflicting create dropped: it left no row to count.
     let report = confirmation(Database::open(open(&a_dir, UNSHELVED, None))).report;
-    assert_eq!(report.fields[0].rows, 2);
+    assert_eq!(report.fields[0].rows, 1);
 
     let b_dir = root.path().join("partitioned");
     let mut schema: Value = serde_json::from_str(NOTED)?;

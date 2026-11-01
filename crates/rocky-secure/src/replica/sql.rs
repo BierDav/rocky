@@ -1258,6 +1258,7 @@ impl<A: RowApplication> SecureSql<A> {
                 } else {
                     rocky_storage::partition_sql::MAX_INTENT_PARTITIONS
                 },
+                &self.parents,
             )
             .await
     }

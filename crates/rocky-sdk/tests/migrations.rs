@@ -184,6 +184,7 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     sync(&b).await;
     // The owner's close wins: the issuer's migration tip stays a branch and
     // its migration is never merged, so no row is there twice.
+    eprintln!("DBG a={} b={}", generation(&a).await, generation(&b).await);
     for device in [&a, &b] {
         assert_eq!(
             rows(device, POSITIONS).await,
@@ -283,6 +284,16 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     // signs and migrates.
     sync(&b).await;
     sync(&a).await;
+    eprintln!("DBG a lists {}", rows(&a, "SELECT title FROM lists").await);
+    for d in [&a_dir, &b_dir] {
+        let file = rusqlite::Connection::open_with_flags(d.join("rocky.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        for sql in ["SELECT hex(substr(hash,1,4)),status,scope FROM secure_operations", "SELECT id,hex(substr(scope,1,8)) FROM secure_scope_state", "SELECT hex(substr(hash,1,4)),scope,dropped FROM secure_replayed", "SELECT count(*) FROM secure_partitions", "SELECT count(*) FROM secure_keys", "SELECT name FROM sqlite_master WHERE name LIKE 'secure_hold%' OR name LIKE 'secure_sub%'", "SELECT * FROM secure_subscriptions", "SELECT * FROM secure_holdings"] {
+            let Ok(mut st) = file.prepare(sql) else { eprintln!("DBG no {sql}"); continue };
+            let n = st.column_count();
+            let rows: Vec<Vec<String>> = st.query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get_ref(i).unwrap())).map(|s| s.chars().take(40).collect()).collect())).unwrap().map(|r| r.unwrap()).collect();
+            eprintln!("DBG {d:?} {sql}: {rows:?}");
+        }
+    }
     a.close().await;
     let a = Device::new(Database::open(open(
         &a_dir,
@@ -351,9 +362,10 @@ async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure>
 
 /// A returning member skips the covered history at the newest listed base.
 #[tokio::test(flavor = "multi_thread")]
-async fn returning_member_uses_the_newest_checkpoint_across_migration_bundles()
--> Result<(), Failure> {
-    converges_on_every_member(rocky_secure::MAX_BUNDLE_ROWS + 1, 2).await
+async fn returning_member_uses_the_newest_checkpoint_after_a_migration() -> Result<(), Failure> {
+    // An unpartitioned seed intent must fit one pulled frame, about 1,100
+    // rows of this shape; `replayed.rs` seeds larger tables by partition.
+    converges_on_every_member(512, 2).await
 }
 
 struct MemberFixture {

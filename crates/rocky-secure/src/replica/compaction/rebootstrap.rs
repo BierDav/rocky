@@ -302,7 +302,11 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [blob.clone()]).await?;
         }
-        for (_, id) in self.domain_scopes(domain).await? {
+        let mut reordered = false;
+        for (scope, id) in self.domain_scopes(domain).await? {
+            if self.replayed_scope(scope) {
+                reordered |= self.join_open_era(id, 0).await?;
+            }
             for table in ["secure_seal_bounds", "secure_seal_drops"] {
                 self.conn
                     .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
@@ -318,6 +322,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         self.rebuild_tip_workspace(domain).await?;
+        if reordered {
+            self.replay_from_frames(now()?).await?;
+        }
         Ok(true)
     }
 }

@@ -1300,9 +1300,12 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         let mut reopened = false;
+        // The open era falls back to the newest seal still finalized.
+        let open = finalized[..valid].last().map_or(0, |known| known.depth);
         for (scope, id) in self.domain_scopes(domain).await? {
             // Members the forgotten seals sealed reopen, with their undo.
             if self.replayed_scope(scope) {
+                reopened |= self.join_open_era(id, open).await?;
                 reopened |= !collect_rows(
                     self.conn
                         .query(

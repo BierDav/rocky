@@ -152,7 +152,6 @@ impl<A: RowApplication> Inner<A> {
                     false => start = self.older_start(*id, &path, &start).await?,
                 }
             };
-            eprintln!("DBG start {id} floor={} seal={} rows={:?} base={} members={}", start.floor, start.seal.is_some(), start.rows.as_ref().map(|r| r.1.len()), start.base, scanned.0.len());
             members.extend(scanned.0);
             covered_members.insert(*id, (start.floor, scanned.1));
             based.insert(*id, std::mem::take(&mut start.based));

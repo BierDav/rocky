@@ -708,7 +708,7 @@ async fn held_tokens_and_pages_bound_raw_rows_and_validate_their_source() {
             for index in 0..100u8 {
                 let mut key = vec![0; 32];
                 key[31] = index;
-                inner.conn.execute("INSERT INTO secure_held_frames VALUES(?,?,?,?)", crate::storage::bindings(vec![SqlValue::Blob(key), SqlValue::Blob(vec![0xff;32]), SqlValue::Blob(crate::encode(&f.public)?), SqlValue::Blob(vec![])])).await?;
+                inner.conn.execute("INSERT INTO secure_held_frames VALUES(?,?,?,?,0)", crate::storage::bindings(vec![SqlValue::Blob(key), SqlValue::Blob(vec![0xff;32]), SqlValue::Blob(crate::encode(&f.public)?), SqlValue::Blob(vec![])])).await?;
             }
             Ok(())
         }).unwrap();

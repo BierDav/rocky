@@ -18,7 +18,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_voids(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,header BLOB NOT NULL,record BLOB,PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_void_records(digest BLOB PRIMARY KEY,record BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_held(id BLOB PRIMARY KEY,change BLOB NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_held_frames(hash BLOB PRIMARY KEY,id BLOB NOT NULL,scope BLOB NOT NULL,frame BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_held_frames(hash BLOB PRIMARY KEY,id BLOB NOT NULL,scope BLOB NOT NULL,frame BLOB NOT NULL,intent INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_held_frames_scope ON secure_held_frames(scope,hash)",
     "CREATE TABLE IF NOT EXISTS secure_held_resolved(id BLOB PRIMARY KEY,authority BLOB NOT NULL) WITHOUT ROWID",
 ];

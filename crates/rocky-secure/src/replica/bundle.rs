@@ -801,6 +801,31 @@ impl<A: RowApplication> Inner<A> {
         required.sort_by_key(|(index, opening)| (opening.scope, opening.sequence, *index));
         Ok(required)
     }
+    /// Whether a member of `frame`'s transaction writes a table the
+    /// installed schema removed: the transaction no longer compiles, though
+    /// no replica holds that member to replay it.
+    pub(super) fn names_removed_table(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(false);
+        };
+        let payload = self.row_payload(frame)?;
+        let Some(membership) = payload.membership() else {
+            return Ok(false);
+        };
+        let count = membership.members.len();
+        for (index, sealed) in membership.members.iter().enumerate() {
+            for key in self.opening_keys() {
+                let aad = member_aad(&membership.transaction, index, count, key.scope)?;
+                if decrypt(&key.key, &aad, sealed).is_ok() {
+                    if key.scope.domain == typed.domain && typed.rows.table(&key.scope.table).is_none() {
+                        return Ok(true);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(false)
+    }
     async fn member(&self, author: PublicKey, opening: &Opening) -> Result<Member, Error> {
         let mut result = self
             .conn

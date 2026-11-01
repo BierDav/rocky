@@ -797,7 +797,6 @@ async fn checks_pass_null_and_hold_after_every_statement() {
             SqlValue::Integer(6),
             SqlValue::Null,
             SqlValue::Integer(range),
-            SqlValue::Integer(0),
         ]]
     );
 }
@@ -910,7 +909,7 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
     let ids_of = |table: &str| -> Vec<SqlValue> {
         expected.rows[table]
             .iter()
-            .map(|row| row[row.len() - 2].clone())
+            .map(|row| row[row.len() - 1].clone())
             .collect()
     };
     assert_eq!(ids_of("teams"), [red, green].map(SqlValue::Integer));

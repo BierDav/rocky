@@ -156,7 +156,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             vec![
                 SqlValue::Text(format!("t{label}")),
                 SqlValue::Integer(
-                    RowIdentity::new(author, (n + label + 1) as u32)
+                    RowIdentity::new(author, (label + 1) as u32)
                         .unwrap()
                         .integer(),
                 ),

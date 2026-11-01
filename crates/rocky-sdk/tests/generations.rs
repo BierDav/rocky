@@ -62,22 +62,6 @@ async fn tag(device: &Device, handle: u8, label: &str) {
         }))
         .await;
 }
-/// Re-authors the held change `held` as one insert into `table`, with the
-/// next id of `table` bound to `sql`'s one parameter.
-async fn reauthor(device: &Device, handle: u8, table: &str, sql: &str, held: Value) {
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    let id = device.ok(json!({"type": "next_id", "table": table})).await["id"].clone();
-    device
-        .ok(json!({
-            "type": "sql",
-            "sql": sql,
-            "values": [{"type": "integer", "value": id.to_string().trim_matches('"')}],
-        }))
-        .await;
-    device
-        .ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32], "reauthors": held}))
-        .await;
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_old_member_follows_main_to_a_published_schema_and_reports_behind() -> Result<(), Failure>
@@ -263,7 +247,7 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_old_device_offline_across_a_migration_gets_its_writes_back_and_reauthors_them()
+async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in_the_successor()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -307,35 +291,22 @@ async fn an_old_device_offline_across_a_migration_gets_its_writes_back_and_reaut
         positions
     );
 
-    // An old application, offline, writes the closed tip. A migration
-    // admits no late frames: its write returns to it as a held change.
+    // An old application, offline, writes the closed tip. The late
+    // transaction replays in the migration's tip, under its schema; the
+    // old application, which cannot follow there, keeps its own state.
     c.add(6, "stale").await;
     c.sync().await.expect("sync");
     c.sync().await.expect("sync");
     let status = generation(&c).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "behind");
-    assert_eq!(status["held"], 1);
-    assert_eq!(a.titles().await, ["apples", "bread", "cherries"]);
-    assert_eq!(
-        rows(&c, "SELECT title, position FROM items ORDER BY position").await,
-        positions
-    );
-    let held = c.ok(json!({"type": "held_changes"})).await;
-    assert_eq!(held["count"], 1);
-    // Its application re-authors the write on the new tip; it converges.
-    let id = held["changes"][0]["id"].clone();
-    reauthor(
-        &c,
-        7,
-        "items",
-        "INSERT INTO items(key,completed,position,title,id) VALUES('stale',0,'','stale',?)",
-        id,
-    )
-    .await;
     assert_eq!(c.ok(json!({"type": "held_changes"})).await["count"], 0);
-    c.sync().await.expect("sync");
+    a.sync().await.expect("sync");
     assert_eq!(a.titles().await, ["apples", "bread", "cherries", "stale"]);
+    assert_eq!(
+        rows(&a, "SELECT position FROM items WHERE title='stale'").await,
+        json!([[text("")]])
+    );
     c.close().await;
 
     // A member updated to the new application writes the new tip directly.
@@ -973,8 +944,8 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     b.sync().await.expect("sync");
     a.sync().await.expect("sync");
     // The owner's seal wins: both devices end on its tip. The issuer's tip
-    // stays a branch, listed as `main/1`, and its write on it returns as a
-    // held change for its application.
+    // stays a branch, listed as `main/1`, and its unsent write on it goes
+    // with the losing line: an intent has no rows to re-author.
     assert_eq!(tip(&a).await, tip(&b).await);
     let inspected = b.ok(json!({"type": "tips", "action": "inspect"})).await;
     let losers = inspected["bookmarks"][0]["losers"]
@@ -989,28 +960,11 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
             json!([[text("fruit")]])
         );
         assert_eq!(device.titles().await, ["apples", "bread"]);
-    }
-    let held = b.ok(json!({"type": "held_changes"})).await;
-    assert_eq!(held["count"], 1, "{held}");
-    let id = held["changes"][0]["id"].clone();
-    reauthor(
-        &b,
-        6,
-        "tags",
-        "INSERT INTO tags(key,label,id) VALUES('dairy','dairy',?)",
-        id,
-    )
-    .await;
-    b.sync().await.expect("sync");
-    for device in [&a, &b] {
-        assert_eq!(
-            rows(device, "SELECT label FROM tags ORDER BY label").await,
-            json!([[text("dairy")], [text("fruit")]])
-        );
         let status = generation(device).await;
         assert_eq!(status["manifest"], left["manifest"]);
         assert_eq!(status["current"]["schema"], 2);
     }
+    assert_eq!(b.ok(json!({"type": "held_changes"})).await["count"], 0);
     assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     b.close().await;
     a.close().await;
@@ -1088,7 +1042,7 @@ async fn a_device_on_main_never_fetches_or_installs_a_dev_branch_schema() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes_are_held()
+async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes_replay_after_it()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -1117,12 +1071,14 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     introduce(&a, &b).await;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
+    a.sync().await.expect("sync");
     // The member is on the new schema with the migration's rows; its write
-    // made meanwhile is held, never merged across the migration.
+    // made meanwhile replays after the migration, under the new schema.
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
-    assert_eq!(status["held"], 1);
+    assert_eq!(status["held"], 0);
     let positions = json!([
+        [text("bread"), text("")],
         [text("apples"), text("0000")],
         [text("cherries"), text("0001")]
     ]);

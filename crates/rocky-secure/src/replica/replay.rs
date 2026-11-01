@@ -583,6 +583,11 @@ impl<A: RowApplication> Inner<A> {
         path: Option<&super::schemas::PathFields>,
     ) -> Result<(), Error> {
         let old = |name: &str| typed::quoted(&format!("secure_rebuild_{name}"));
+        // A rename leaves trigger bodies alone: a history trigger may name a
+        // history table the switch already dropped.
+        self.conn
+            .execute("PRAGMA legacy_alter_table=ON", ())
+            .await?;
         let mut copies = Vec::new();
         for table in tables {
             let name = &table.sql_name;
@@ -606,16 +611,23 @@ impl<A: RowApplication> Inner<A> {
                         && path.fields.contains(&schema.field_id(table, column))
                 })
             };
-            let kept: Vec<String> = before
+            // A field that became required takes its default where it held
+            // none.
+            let kept: Vec<(String, String)> = before
                 .columns
                 .iter()
-                .filter(|column| {
-                    table.column(&column.sql_name).is_some_and(|kept| {
+                .filter_map(|column| {
+                    let kept = table.column(&column.sql_name).filter(|kept| {
                         !matches!(kept.class, rocky_core::ColumnClass::Derived { .. })
                             && on_path(kept)
-                    })
+                    })?;
+                    let name = typed::quoted(&column.sql_name);
+                    let value = match (&kept.default, kept.not_null && !column.not_null) {
+                        (Some(default), true) => format!("COALESCE({name},{default})"),
+                        _ => name.clone(),
+                    };
+                    Some((name, value))
                 })
-                .map(|column| typed::quoted(&column.sql_name))
                 .collect();
             self.conn
                 .execute(
@@ -625,6 +637,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             copies.push((*table, before, kept));
         }
+        self.conn
+            .execute("PRAGMA legacy_alter_table=OFF", ())
+            .await?;
         for table in tables {
             self.conn.execute(table.create_sql.clone(), ()).await?;
         }
@@ -633,13 +648,15 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         for (table, _, kept) in &copies {
             if !kept.is_empty() {
+                let (columns, values): (Vec<_>, Vec<_>) = kept.iter().cloned().unzip();
                 self.conn
                     .execute(
                         format!(
-                            "INSERT INTO {}({columns}) SELECT {columns} FROM {}",
+                            "INSERT INTO {}({}) SELECT {} FROM {}",
                             typed::quoted(&table.sql_name),
+                            columns.join(","),
+                            values.join(","),
                             old(&table.sql_name),
-                            columns = kept.join(",")
                         ),
                         (),
                     )
@@ -794,8 +811,6 @@ impl<A: RowApplication> Inner<A> {
     /// of the workspace's path after its base, so its rows are the path's
     /// state. A replayed scope keeps no row records to rebuild from.
     pub(super) async fn replayed_on_path(&self, id: i64) -> Result<bool, Error> {
-        let dbg = self.checkpoint_record(id, true).await?;
-        eprintln!("DBG on_path {id} record={:?} path={:?}", dbg.as_ref().map(|r| (r.position, r.signed.as_ref().map(|s| s.statement.seal))), self.workspace.typed.as_ref().map(|t| self.path_seals(t.domain).map(|p| p.iter().map(|k| k.id().ok()).collect::<Vec<_>>())));
         let floor = match self.checkpoint_record(id, true).await? {
             None => 0,
             Some(record) => {
@@ -815,7 +830,7 @@ impl<A: RowApplication> Inner<A> {
         for record in collect_rows(
             self.conn
                 .query(
-                    "SELECT a.hash,r.hash IS NOT NULL FROM secure_applied a LEFT JOIN secure_replayed r ON r.hash=a.hash WHERE a.scope=? AND (r.hash IS NOT NULL OR a.position>?)",
+                    "SELECT a.hash,r.hash IS NOT NULL FROM secure_applied a LEFT JOIN secure_replayed r ON r.hash=a.hash WHERE a.scope=?1 AND (r.hash IS NOT NULL OR a.position>?2) UNION ALL SELECT r.hash,1 FROM secure_replayed r JOIN secure_operations o ON o.hash=r.hash WHERE r.scope=?1 AND NOT EXISTS(SELECT 1 FROM secure_applied a WHERE a.hash=r.hash)",
                     [id, floor],
                 )
                 .await?,
@@ -833,7 +848,6 @@ impl<A: RowApplication> Inner<A> {
                 }
                 None => false,
             };
-            eprintln!("DBG member {id} {:?} visible={visible} replayed={replayed}", &hash[..4]);
             if visible != (*replayed != 0) {
                 return Ok(false);
             }
@@ -928,7 +942,15 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         if members > 1 {
             let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
-            if let Some(reason) = self.remote_drop(transaction, &held).await? {
+            let removed = match intents.first() {
+                Some((frame, ..)) => self.names_removed_table(frame)?,
+                None => false,
+            };
+            let remote = match removed {
+                true => Some(DropReason::Schema),
+                false => self.remote_drop(transaction, &held).await?,
+            };
+            if let Some(reason) = remote {
                 for (frame, .., member) in intents {
                     self.record_replayed(
                         frame,
@@ -1056,6 +1078,60 @@ impl<A: RowApplication> Inner<A> {
         self.replay_transaction(transaction, intents, era, time)
             .await?;
         self.redo(redo, time).await
+    }
+
+    /// Replays the open transactions that write a table a schema switch
+    /// removed, with what follows them: they no longer compile and drop
+    /// whole.
+    pub(super) async fn redo_removed_writes(&self, time: u64) -> Result<(), Error> {
+        let mut starts = Vec::new();
+        for row in collect_rows(
+            self.conn
+                .query(
+                    "SELECT era,clock,author,sequence,hash,scope FROM secure_replayed WHERE sealed=0 AND dropped IS NULL",
+                    (),
+                )
+                .await?,
+        )
+        .await?
+        {
+            let order = order_of(&row)?;
+            let [.., SqlValue::Blob(hash), SqlValue::Integer(scope)] = row.as_slice() else {
+                return Err(Error::Corrupt("replayed member".into()));
+            };
+            if let Some(frame) = self.frame(super::checkpoint::hash_of(hash)?).await?
+                && self.names_removed_table(&frame)?
+            {
+                starts.push((*scope, order));
+            }
+        }
+        if starts.is_empty() {
+            return Ok(());
+        }
+        let redo = self.rewind(starts).await?;
+        self.redo(redo, time).await
+    }
+
+    /// Moves scope `id`'s open members of eras after `open` into it, as
+    /// the seals that began those eras are forgotten. Returns whether that
+    /// reorders them, as when they came from several eras.
+    pub(super) async fn join_open_era(&self, id: i64, open: i64) -> Result<bool, Error> {
+        let eras = collect_rows(
+            self.conn
+                .query(
+                    "SELECT DISTINCT era FROM secure_replayed WHERE scope=? AND sealed=0 AND era>?",
+                    [id, open],
+                )
+                .await?,
+        )
+        .await?;
+        self.conn
+            .execute(
+                "UPDATE secure_replayed SET era=? WHERE scope=? AND sealed=0 AND era>?",
+                [open, id, open],
+            )
+            .await?;
+        Ok(eras.len() > 1)
     }
 
     async fn open_era(&self, domain: rocky_core::Scope) -> Result<i64, Error> {

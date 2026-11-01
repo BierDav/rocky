@@ -1343,15 +1343,6 @@ async fn an_issuer_automatically_acquires_the_target_seal_when_main_changes_line
         b.sync().await.expect("automatic target-state acquisition");
     }
     assert_eq!(ok(&b, "status", json!({})).await["tip"], branch);
-    {
-        let file = rusqlite::Connection::open_with_flags(b_dir.join("rocky.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        for sql in ["SELECT scope,position,hex(substr(hash,1,4)) FROM secure_applied", "SELECT scope,era,sealed,hex(substr(hash,1,4)),dropped FROM secure_replayed", "SELECT scope,position FROM secure_checkpoints", "SELECT id FROM secure_scope_state", "SELECT scope,count(*) FROM secure_replayed_base GROUP BY scope", "SELECT depth,hex(substr(seal,1,4)) FROM secure_finalized", "SELECT scope, depth, position FROM secure_seal_bounds"] {
-            let mut st = file.prepare(sql).unwrap();
-            let n = st.column_count();
-            let rows: Vec<Vec<String>> = st.query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get_ref(i).unwrap())).collect())).unwrap().map(|r| r.unwrap()).collect();
-            eprintln!("DBG {sql}: {rows:?}");
-        }
-    }
     assert_eq!(b.titles().await, ["inherited"]);
     b.add(3, "issuer continues").await;
     for _ in 0..2 {

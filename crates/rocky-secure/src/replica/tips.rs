@@ -306,10 +306,33 @@ impl<A: RowApplication> Inner<A> {
             }
             match seal.successor().map_err(credential)? {
                 Some(next) => cursor = next,
-                None => return Ok(FrameReach::Held),
+                // A late frame of a line closed on the followed path replays
+                // in the line opened there.
+                None => match self.opened_after(scope, &seal)? {
+                    Some(next) => cursor = next,
+                    None => return Ok(FrameReach::Held),
+                },
             }
         }
         Ok(FrameReach::Unfollowed)
+    }
+    /// The migration successor of closed `seal` the followed path enters.
+    fn opened_after(&self, scope: Scope, seal: &SignedSeal) -> Result<Option<TipId>, Error> {
+        let path = self.path_seals(scope)?;
+        let id = seal.id().map_err(credential)?;
+        let Some(index) = path.iter().position(|known| known.id().ok() == Some(id)) else {
+            return Ok(None);
+        };
+        let next = path
+            .get(index + 1)
+            .map_or(self.workspace.tip, |next| next.statement.tip);
+        let graph = self.graph_for(scope)?;
+        for opening in &graph.openings {
+            if opening.tip().map_err(credential)? == next {
+                return Ok(Self::migrates(graph, seal, opening)?.then_some(next));
+            }
+        }
+        Ok(None)
     }
     fn refresh_visible(
         &self,
@@ -342,7 +365,7 @@ impl<A: RowApplication> Inner<A> {
             .collect::<BTreeSet<_>>();
         for name in names {
             for (from, to) in graph.bookmark_path(name).map_err(credential)? {
-                if !graph.continues_any(from, to).map_err(credential)?
+                if !Self::line_continues(graph, from, to)?
                     && graph.line_root(from).is_ok_and(|line| line == source_line)
                 {
                     bounds.push(self.common_frontier(scope, from, to)?);
@@ -351,7 +374,25 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(bounds)
     }
-    /// A branch inherits only its opening seal's frontier. Continuations take late writes.
+    /// Whether `opening` is the migration successor of closed `seal`: a new
+    /// schema, whose late transactions replay there.
+    fn migrates(
+        graph: &TipGraph,
+        seal: &SignedSeal,
+        opening: &rocky_credentials::SignedTipOpening,
+    ) -> Result<bool, Error> {
+        Ok(seal.statement.action == rocky_credentials::SealAction::Close
+            && graph.schema_any(seal.statement.tip).map_err(credential)?
+                != opening.statement.schema)
+    }
+    /// Whether `to` continues `from`'s line: through continuations and
+    /// migration successors, which take its late writes.
+    fn line_continues(graph: &TipGraph, from: TipId, to: TipId) -> Result<bool, Error> {
+        let path = Self::walk_frame_path(graph, from, to, Vec::new(), false)?;
+        Ok(matches!(path.end, PathEnd::Visible) && path.bounds.is_empty())
+    }
+    /// A branch inherits only its opening seal's frontier. Continuations and
+    /// migration successors take late writes.
     pub(super) fn visible_frame(
         &self,
         graph: &TipGraph,
@@ -439,7 +480,9 @@ impl<A: RowApplication> Inner<A> {
                     let seal = graph
                         .seal_by_id(opening.statement.seal)
                         .map_err(credential)?;
-                    bounds.push(seal.statement.frontier.clone());
+                    if !Self::migrates(graph, seal, opening)? {
+                        bounds.push(seal.statement.frontier.clone());
+                    }
                     parent = Some(seal.statement.tip);
                     break;
                 }
@@ -1148,7 +1191,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        eprintln!("DBG rebuild replay={replay} reopened={reopened} replayed={replayed:?}");
         if replay {
             // A kept seal's rows serve when every replayed scope may start
             // there.

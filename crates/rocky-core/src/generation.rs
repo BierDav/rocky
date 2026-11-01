@@ -27,11 +27,22 @@ impl SchemaChange {
 pub enum Unsupported {
     /// Another publisher or application name.
     Application,
+    /// Type or collation of `table.field` changed: a field id names one
+    /// value domain in every stored image and replayed statement.
+    ChangedField(String),
+    /// A required field of an existing table needs a default: rows written
+    /// before it hold no value for it.
+    RequiredField(String),
 }
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Application => f.write_str("another publisher or application"),
+            Self::ChangedField(field) => write!(f, "field {field} changed type"),
+            Self::RequiredField(field) => write!(
+                f,
+                "required field {field} of an existing table needs a default"
+            ),
         }
     }
 }
@@ -72,18 +83,47 @@ pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     removed
 }
 
-/// Classifies `new` against the installed `old`.
+/// Classifies `new` against the installed `old`. Names are the identity of
+/// tables and fields: a rename is a removal and an addition, and a name
+/// keeps its type and collation. A field may become required only with a
+/// default, which rows holding none take.
 pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
     }
-    Ok(if old == new {
-        SchemaChange::Unchanged
-    } else if old.replicated_fingerprint() == new.replicated_fingerprint() {
-        SchemaChange::Local
-    } else {
-        SchemaChange::Replicated
-    })
+    if old == new {
+        return Ok(SchemaChange::Unchanged);
+    }
+    if old.replicated_fingerprint() == new.replicated_fingerprint() {
+        return Ok(SchemaChange::Local);
+    }
+    let defaulted = |column: &crate::LogicalColumn| {
+        column
+            .default
+            .as_deref()
+            .is_some_and(|value| !value.eq_ignore_ascii_case("NULL"))
+    };
+    for after in new.typed() {
+        let Some(before) = old.typed().find(|table| table.sql_name == after.sql_name) else {
+            continue;
+        };
+        for now in after
+            .columns
+            .iter()
+            .filter(|column| column.class == ColumnClass::Replicated)
+        {
+            let field = || format!("{}.{}", after.sql_name, now.sql_name);
+            match before.column(&now.sql_name) {
+                Some(was) if was.affinity != now.affinity || was.collation != now.collation => {
+                    return Err(Unsupported::ChangedField(field()));
+                }
+                Some(was) if was.not_null || !now.not_null || defaulted(now) => {}
+                None if !now.not_null || defaulted(now) => {}
+                _ => return Err(Unsupported::RequiredField(field())),
+            }
+        }
+    }
+    Ok(SchemaChange::Replicated)
 }
 
 /// The schema generation of a definition.
@@ -186,5 +226,26 @@ mod tests {
         let mut renamed = old.clone();
         renamed.application = "other".into();
         assert_eq!(classify(&old, &renamed), Err(Unsupported::Application));
+    }
+
+    #[test]
+    fn a_name_keeps_its_type_and_a_required_field_needs_a_default() {
+        let old = schema(vec![items(&[("name", true), ("note", false)])]);
+        let mut retyped = old.clone();
+        retyped.tables[0].columns[1].affinity = Affinity::Integer;
+        assert_eq!(
+            classify(&old, &retyped),
+            Err(Unsupported::ChangedField("items.name".into()))
+        );
+        for added in [("note", true), ("extra", true)] {
+            let new = schema(vec![items(&[("name", true), added])]);
+            assert_eq!(
+                classify(&old, &new),
+                Err(Unsupported::RequiredField(format!("items.{}", added.0)))
+            );
+        }
+        let mut required = schema(vec![items(&[("name", true), ("note", true)])]);
+        required.tables[0].columns[2].default = Some("''".into());
+        assert_eq!(classify(&old, &required), Ok(SchemaChange::Replicated));
     }
 }

@@ -338,6 +338,7 @@ async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     d.restored(items).await.unwrap();
     d.settle().await.unwrap();
     assert_eq!(tags(&d).await, tags(&a).await);
+    assert_eq!(tag_rows(&d).await, tag_rows(&a).await);
 }
 
 /// A seals with item `q`; B, which never received it, writes its own `q`
@@ -372,7 +373,6 @@ async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
     a.audit(items).await.unwrap();
     a.audit(tag_scope).await.unwrap();
     assert!(tags(&a).await.is_empty());
-    assert_eq!(tag_rows(&d).await, tag_rows(&a).await);
 }
 
 /// The rows of `sql` on `replica`, read under its lock.

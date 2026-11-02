@@ -14,6 +14,8 @@ pub struct Configuration {
     coordination: Option<Coordination>,
 }
 impl Configuration {
+    /// The bookmark `create` makes and follows on the genesis tip.
+    pub const BOOKMARK: &'static str = "main";
     /// Validates the schema before touching the data directory.
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
         let schema = serde_json::to_string(schema)?;
@@ -59,11 +61,33 @@ impl Configuration {
         }
     }
     /// Creates an installation; refuses an existing one. Startup runs off the caller’s async executor.
+    ///
+    /// The creating device owns the domain and follows a new bookmark,
+    /// [`Self::BOOKMARK`], so its sync passes seal routinely: only seals make
+    /// replay drops final and bound the undo history. `Database::create`
+    /// leaves bookmarks to the caller.
     pub async fn create(&self) -> Result<Opened, Failure> {
         let configuration = self.clone();
-        tokio::runtime::Handle::try_current()?
+        let opened = tokio::runtime::Handle::try_current()?
             .spawn_blocking(move || Database::create(configuration.options(), None))
-            .await?
+            .await??;
+        let session = opened.database.session();
+        let followed = async {
+            session.create_bookmark(Self::BOOKMARK, None).await?;
+            session.follow(Self::BOOKMARK).await
+        }
+        .await;
+        if let Err(error) = followed {
+            // Never hand out an owner that silently never seals.
+            opened.database.close().await?;
+            return Err(format!(
+                "created, but could not follow the `{}` bookmark: {error}; open the \
+                 installation and create and follow a bookmark",
+                Self::BOOKMARK
+            )
+            .into());
+        }
+        Ok(opened)
     }
     /// Opens an existing installation. Startup runs off the caller’s async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {

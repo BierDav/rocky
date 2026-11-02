@@ -36,9 +36,13 @@
 //!
 //! Queries buffer one page; collect only results that fit in memory. Register
 //! [`Database::observe_tables`] before querying to avoid missing invalidations.
-//! Transactions roll back on drop and acknowledge local durability on commit.
-//! They never retry application work automatically. Cancellation during commit
-//! can leave its outcome uncertain; reconcile before repeating the write.
+//! Transactions roll back on drop and acknowledge local durability on commit:
+//! [`Database::transaction_with`] with [`Durability::Flushed`] or a later
+//! [`Database::flush`] waits for power-loss durability. They never retry
+//! application work automatically. [`Transaction::token`] names the
+//! transaction before commit, so it can be stored with application rows;
+//! after a restart or an uncertain commit, reconcile through
+//! [`Database::transaction_outcome`] before repeating the write.
 //!
 //! # Replication
 //!
@@ -64,6 +68,8 @@
 //!   that recorded the drop, and [`Database::transaction_outcome`] gives
 //!   the [`DropReason`]. A drop is provisional until a seal covers it:
 //!   [`TransactionOutcome::Dropped`] with `sealed` set is final.
+//!   [`Configuration::create`] follows a bookmark so the owner seals
+//!   routinely; an installation from `Database::create` must follow one.
 //!
 //! Call [`Database::close`] at shutdown to await cleanup. See the `notes` example
 //! for a complete executable application.

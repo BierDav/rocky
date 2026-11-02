@@ -1,5 +1,8 @@
 //! Rust SQL conveniences over the same secure connections used by the bindings.
-use crate::{Connection, ConnectionOptions, Database, Failure, Page, SqlFailure, SqlValue};
+use crate::{
+    Connection, ConnectionOptions, Database, Durability, Failure, Page, SqlFailure, SqlValue,
+    TransactionToken,
+};
 use std::{collections::VecDeque, sync::Arc};
 
 /// Converts a bound parameter without SQL string interpolation.
@@ -50,6 +53,12 @@ impl IntoSqlValue for Vec<u8> {
 impl IntoSqlValue for &[u8] {
     fn into_sql_value(self) -> SqlValue {
         SqlValue::Blob(self.into())
+    }
+}
+/// A token binds as its 32-byte BLOB, e.g. into an application outbox row.
+impl IntoSqlValue for TransactionToken {
+    fn into_sql_value(self) -> SqlValue {
+        SqlValue::Blob(self.0.to_vec())
     }
 }
 impl<T: IntoSqlValue> IntoSqlValue for Option<T> {
@@ -113,6 +122,18 @@ impl FromSqlValue for bool {
             SqlValue::Integer(0) => Ok(false),
             SqlValue::Integer(1) => Ok(true),
             _ => Err(DecodeError("expected boolean integer 0 or 1".into())),
+        }
+    }
+}
+impl FromSqlValue for TransactionToken {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        match value {
+            SqlValue::Blob(bytes) => bytes
+                .as_slice()
+                .try_into()
+                .map(TransactionToken)
+                .map_err(|_| DecodeError("expected a 32-byte transaction token".into())),
+            _ => Err(DecodeError("expected a transaction token BLOB".into())),
         }
     }
 }
@@ -244,10 +265,10 @@ impl Drop for Rows<'_> {
     }
 }
 
-fn options(read_only: bool) -> ConnectionOptions {
+fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
     ConnectionOptions {
         read_only,
-        durability: crate::Durability::Buffered,
+        durability,
         profile: None,
         transaction_timeout: None,
         binding: None,
@@ -256,21 +277,25 @@ fn options(read_only: bool) -> ConnectionOptions {
 impl Database {
     /// Reads on an independent snapshot connection. No statement handles or ORM profile.
     pub async fn query(&self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'static>, Failure> {
-        let connection = self.connect(options(true)).await?;
+        let connection = self.connect(options(true, Durability::Buffered)).await?;
         Ok(Rows::new(Source::Owned(connection), sql, params).await?)
     }
     /// Starts an atomic write. Call `commit` explicitly; dropping rolls it back.
     /// On commit return, the write is visible to readers and observers and survives
     /// an application crash (WAL with `synchronous=NORMAL`), but not power loss.
-    /// The background `settle_commits` flush makes it durable and publishable.
-    /// For a flushed commit, use `Database::connect` with `Durability::Flushed`.
+    /// A background flush makes it durable and publishable; sync never sends
+    /// it earlier. For power-loss durability use `transaction_with(Flushed)`
+    /// or `Database::flush` after commit.
     /// Application callbacks are never automatically retried.
     pub async fn transaction(&self) -> Result<Transaction, Failure> {
-        let connection = self.connect(options(false)).await?;
-        connection
-            .execute(connection.statement(), "BEGIN".into(), Vec::new())
-            .await?;
-        Ok(Transaction { connection })
+        self.transaction_with(Durability::Buffered).await
+    }
+    /// As `transaction`, acknowledging `durability` at commit:
+    /// `Flushed` returns only once the commit survives power loss.
+    pub async fn transaction_with(&self, durability: Durability) -> Result<Transaction, Failure> {
+        let connection = self.connect(options(false, durability)).await?;
+        let token = connection.begin_identified().await?;
+        Ok(Transaction { connection, token })
     }
 }
 
@@ -278,8 +303,19 @@ impl Database {
 #[must_use = "a transaction must be committed or it rolls back"]
 pub struct Transaction {
     connection: Connection,
+    token: TransactionToken,
 }
 impl Transaction {
+    /// The token this transaction commits as, fixed when it begins, so the
+    /// application can store it with its own rows (an outbox, an audit
+    /// record) atomically. `commit` returns it when replicated rows changed;
+    /// otherwise nothing publishes and it never has an outcome. After a
+    /// restart or an uncertain commit, `Database::transaction_outcome`
+    /// reports it: `None` means it did not commit here. Ordering and author
+    /// stamps are still assigned at commit.
+    pub fn token(&self) -> TransactionToken {
+        self.token
+    }
     #[cfg(feature = "qualification")]
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
@@ -320,7 +356,7 @@ impl Transaction {
     /// leave its outcome uncertain; reconcile before repeating application work.
     /// Returns the published transaction, whose replay outcome
     /// `Database::transaction_outcome` reports; `None` when nothing replicated changed.
-    pub async fn commit(self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
+    pub async fn commit(self) -> Result<Option<TransactionToken>, SqlFailure> {
         let result = async {
             self.connection
                 .execute(self.connection.statement(), "COMMIT".into(), Vec::new())

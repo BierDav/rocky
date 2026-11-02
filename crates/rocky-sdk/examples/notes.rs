@@ -14,6 +14,8 @@ async fn main() -> Result<(), Failure> {
         )
         .build()?;
     // Use `open()` on subsequent runs; create refuses to overwrite an installation.
+    // Creating follows the `main` bookmark, so this owner seals routinely
+    // during sync and replay drops become final.
     let directory = std::env::args()
         .skip(1)
         .find(|arg| arg != "--create")

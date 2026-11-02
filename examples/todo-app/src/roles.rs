@@ -68,16 +68,10 @@ pub fn parse_invitation(code: &str) -> Result<(Role, &str), Failure> {
     Ok((role, uri))
 }
 
-/// The bookmark the creator follows; following one is what lets a trusted
-/// device seal, routinely too, which makes drops final.
-pub const BOOKMARK: &str = "main";
-
-/// Creates the first device, which is trusted.
+/// Creates the first device, which is trusted. `Configuration::create`
+/// follows its bookmark, so this device seals routinely and drops become final.
 pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, Failure> {
     let todos = Todos::new(configuration.create().await?.database);
-    let session = todos.database.session();
-    session.create_bookmark(BOOKMARK, None).await?;
-    session.follow(BOOKMARK).await?;
     todos.register(Role::Trusted, name).await?;
     Ok(todos)
 }

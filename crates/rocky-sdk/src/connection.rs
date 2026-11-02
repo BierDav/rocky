@@ -366,6 +366,9 @@ pub(crate) struct State {
     seal: Option<rocky_core::Commitment>,
     /// The transaction the last `COMMIT` published, as outcomes name it.
     committed: Option<rocky_core::TransactionToken>,
+    /// The handle the open transaction commits under, chosen when it
+    /// begins so its token is known before `COMMIT`.
+    handle: Option<rocky_core::Commitment>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -401,6 +404,7 @@ impl State {
             declared,
             seal,
             committed: None,
+            handle: None,
         };
         state.sql().await?;
         Ok(state)
@@ -486,6 +490,23 @@ impl State {
     /// What the last `COMMIT` published; `None` when it published nothing.
     pub(crate) fn committed(&self) -> Option<rocky_core::TransactionToken> {
         self.committed
+    }
+    /// Begins a write transaction under a fresh handle and returns the
+    /// token its `COMMIT` publishes, if it changes replicated rows. The
+    /// token derives only from this node and the handle; ordering and
+    /// stamps are still assigned at commit.
+    pub(crate) async fn begin_identified(
+        &mut self,
+    ) -> Result<rocky_core::TransactionToken, Failure> {
+        if self.read_only {
+            return Err(failure(code::READONLY, "a reader connection cannot write").into());
+        }
+        self.write("BEGIN", Vec::new()).await?;
+        // Before any statement, so the session does not hold the replica yet.
+        let handle: rocky_core::Commitment = rand::random();
+        let token = rocky_core::TransactionToken(self.node.replica.transaction_of(handle).await);
+        self.handle = Some(handle);
+        Ok(token)
     }
 
     /// `PRAGMA query_only` as SQLite keeps it per connection: a writer
@@ -632,6 +653,7 @@ impl State {
             // Nothing reached the session: ending the transaction is local.
             SqlControl::Commit | SqlControl::Rollback if self.begin.is_some() => {
                 self.begin = None;
+                self.handle = None;
                 return Ok(Pending::rows(Vec::new(), Vec::new()));
             }
             _ => {}
@@ -641,7 +663,11 @@ impl State {
         if matches!(control, SqlControl::Savepoint(_)) {
             self.open = true;
         }
-        let ran = self.sql().await?.run(sql, params).await;
+        let handle = if ending { self.handle.take() } else { None };
+        let ran = match (&control, handle) {
+            (SqlControl::Commit, Some(handle)) => self.sql().await?.commit(handle).await,
+            _ => self.sql().await?.run(sql, params).await,
+        };
         if matches!(control, SqlControl::Commit) {
             self.committed = None;
             if let Ok(rows) = &ran
@@ -834,6 +860,8 @@ pub(crate) enum Call {
     },
     InTransaction,
     Committed,
+    /// `BEGIN` under a handle chosen now; replies with its token.
+    Begin,
 }
 pub(crate) enum Reply {
     Page(Page),
@@ -859,6 +887,10 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
         }
         Call::InTransaction => Ok(Reply::Flag(state.in_transaction())),
         Call::Committed => Ok(Reply::Token(state.committed())),
+        Call::Begin => state
+            .begin_identified()
+            .await
+            .map(|token| Reply::Token(Some(token))),
     };
     reply.map_err(sql_failure)
 }

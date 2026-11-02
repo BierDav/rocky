@@ -235,3 +235,142 @@ fn configuration_without_a_tokio_runtime_returns_an_error() -> Result<(), Failur
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(), Failure> {
+    use rocky_sdk::{Network, transport::memory::Hub};
+    use std::sync::Arc;
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let configuration = Configuration::new(directory.path(), &schema()?)?
+        .network(Network::Owned(hub.connector("owner")));
+    let db = configuration.create().await?.database;
+    let session = db.session();
+    session.set_automatic_sync(false).await?;
+    let status = session.tip_status().await?;
+    assert_eq!(status.bookmark.as_deref(), Some(Configuration::BOOKMARK));
+    let genesis = status.tip;
+    // Enough replayed transactions for the owner's routine seal.
+    for index in 0..128 {
+        let mut tx = db.transaction().await?;
+        let id = tx.next_id("notes", vec![]).await?;
+        tx.execute(
+            "INSERT INTO notes(id,body) VALUES(?,?)",
+            params![id, format!("note {index}")],
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    session.sync_once().await?;
+    let sealed = session.tip_status().await?;
+    assert_eq!(sealed.bookmark.as_deref(), Some(Configuration::BOOKMARK));
+    assert_ne!(
+        sealed.tip, genesis,
+        "the routine seal moved the bookmark on"
+    );
+    db.close().await?;
+    let db = configuration.open().await?.database;
+    assert_eq!(
+        db.session().tip_status().await?.bookmark.as_deref(),
+        Some(Configuration::BOOKMARK)
+    );
+    db.close().await
+}
+
+fn outbox_schema() -> Result<Schema, Failure> {
+    Schema::builder("outbox_application", 1)
+        .table(Table::replayed("orders").column(Column::new("item", Affinity::Text).required()))
+        .table(
+            Table::replayed("outbox")
+                .column(Column::new("order_id", Affinity::Integer).required())
+                .column(Column::new("txn", Affinity::Blob).required()),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_restart()
+-> Result<(), Failure> {
+    use rocky_sdk::{TransactionOutcome, TransactionToken};
+    let directory = tempfile::tempdir()?;
+    let configuration = Configuration::new(directory.path(), &outbox_schema()?)?;
+    let db = configuration.create().await?.database;
+    let mut tx = db.transaction().await?;
+    let token = tx.token();
+    let id = tx.next_id("orders", vec![]).await?;
+    tx.execute(
+        "INSERT INTO orders(id,item) VALUES(?,?)",
+        params![id, "book"],
+    )
+    .await?;
+    let outbox = tx.next_id("outbox", vec![]).await?;
+    tx.execute(
+        "INSERT INTO outbox(id,order_id,txn) VALUES(?,?,?)",
+        params![outbox, id, token],
+    )
+    .await?;
+    assert_eq!(tx.commit().await?, Some(token));
+
+    // A rolled-back transaction's token never gets an outcome.
+    let mut tx = db.transaction().await?;
+    let abandoned = tx.token();
+    assert_ne!(abandoned, token);
+    let id = tx.next_id("orders", vec![]).await?;
+    tx.execute(
+        "INSERT INTO orders(id,item) VALUES(?,?)",
+        params![id, "pen"],
+    )
+    .await?;
+    tx.rollback().await?;
+    db.close().await?;
+
+    let db = configuration.open().await?.database;
+    let rows = db
+        .query("SELECT txn FROM outbox", params![])
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(rows.len(), 1);
+    let stored = rows[0].get::<TransactionToken>("txn")?;
+    assert_eq!(stored, token);
+    assert_eq!(
+        db.transaction_outcome(stored).await?,
+        Some(TransactionOutcome::Applied)
+    );
+    assert_eq!(db.transaction_outcome(abandoned).await?, None);
+    db.close().await
+}
+
+#[tokio::test]
+async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() -> Result<(), Failure>
+{
+    use rocky_sdk::{Durability, TransactionOutcome};
+    let directory = tempfile::tempdir()?;
+    let configuration = Configuration::new(directory.path(), &schema()?)?;
+    let db = configuration.create().await?.database;
+    let mut tokens = Vec::new();
+    for durability in [Durability::Flushed, Durability::Buffered] {
+        let mut tx = db.transaction_with(durability).await?;
+        let id = tx.next_id("notes", vec![]).await?;
+        tx.execute(
+            "INSERT INTO notes(id,body) VALUES(?,?)",
+            params![id, format!("{durability:?}")],
+        )
+        .await?;
+        let token = tx.token();
+        assert_eq!(tx.commit().await?, Some(token));
+        tokens.push(token);
+    }
+    // Every commit that returned before the call, buffered ones included.
+    db.flush().await?;
+    db.close().await?;
+    let db = configuration.open().await?.database;
+    for token in tokens {
+        assert_eq!(
+            db.transaction_outcome(token).await?,
+            Some(TransactionOutcome::Applied)
+        );
+    }
+    assert!(db.flush().await.is_ok());
+    db.close().await
+}

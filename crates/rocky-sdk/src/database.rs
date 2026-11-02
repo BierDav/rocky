@@ -131,6 +131,7 @@ enum Command {
         rocky_core::TransactionToken,
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
+    Flush(oneshot::Sender<Result<(), Failure>>),
 }
 /// The scope and the network service a database opened with.
 type Greeting = Result<(String, Option<u64>), Failure>;
@@ -493,6 +494,14 @@ impl Database {
             .request(|reply| Command::Outcome(token, reply))
             .await?
     }
+    /// Returns once every transaction committed before the call is durable
+    /// against power loss, as `Durability::Flushed` acknowledges at commit.
+    /// Durability is a prefix of the local log, so a buffered transaction
+    /// whose `commit` returned (its token included) is covered. Use it
+    /// before an irreversible external effect of buffered work.
+    pub async fn flush(&self) -> Result<(), Failure> {
+        self.shared.request(Command::Flush).await?
+    }
     /// Committed changes of `tables`, or of every table. Register before
     /// reading what the changes invalidate.
     pub async fn observe_tables(
@@ -655,6 +664,15 @@ impl Connection {
     pub async fn committed(&self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
         match self.call(connection::Call::Committed).await? {
             connection::Reply::Token(token) => Ok(token),
+            _ => Err(connection::failure(connection::code::MISUSE, "no token")),
+        }
+    }
+    /// `BEGIN` under a handle chosen now: the token its commit publishes.
+    pub(crate) async fn begin_identified(
+        &self,
+    ) -> Result<rocky_core::TransactionToken, SqlFailure> {
+        match self.call(connection::Call::Begin).await? {
+            connection::Reply::Token(Some(token)) => Ok(token),
             _ => Err(connection::failure(connection::code::MISUSE, "no token")),
         }
     }
@@ -1726,6 +1744,12 @@ async fn run_inner(
                         .await
                         .map_err(Failure::from);
                     let _ = reply.send(observed);
+                });
+            }
+            Command::Flush(reply) => {
+                crate::reactor::spawn_in(&mut tasks, "flush", async move {
+                    let flushed = node.replica.flush().await.map(drop).map_err(Failure::from);
+                    let _ = reply.send(flushed);
                 });
             }
             Command::Outcome(token, reply) => {

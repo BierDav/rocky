@@ -163,6 +163,7 @@ impl<A: RowApplication> Inner<A> {
                 digest: handle_digest.digest(),
             },
             custody: create::no_custody()?,
+            outcomes: SealedOutcomes::default(),
         };
         let signed = self.sign_checkpoint(statement)?;
         // Only a signer with checkpoint authority states another node's base.

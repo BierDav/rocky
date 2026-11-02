@@ -31,7 +31,9 @@ async fn format_template() -> (Fixture, TempDir, std::path::PathBuf, PrivateKey)
 #[tokio::test]
 async fn unsupported_checkpoint_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
+    for version in [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19,
+    ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -79,7 +81,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[tokio::test]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..43).chain([44]) {
+    for version in (0..44).chain([45]) {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();

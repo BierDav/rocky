@@ -81,10 +81,12 @@
 //!   [`TableChange::dropped`] names dropped transactions after the commit
 //!   that recorded the drop, and [`Database::transaction_outcome`] gives
 //!   the [`DropReason`]. A drop is provisional until a seal covers it:
-//!   [`TransactionOutcome::Dropped`] with `sealed` set is final.
-//!   [`TransactionOutcome::Covered`] is final too: the device took the
-//!   covering seal's rows as a base and no longer knows how its own
-//!   transaction ended there.
+//!   [`TransactionOutcome::Dropped`] with `sealed` set is final. A device
+//!   that takes a seal's rows as a checkpoint learns how its own covered
+//!   transactions ended from the seal's signed drop list: `Applied`, or
+//!   `Dropped` with `sealed` set. The list names the newest 512 drops; an
+//!   older covered transaction it cannot place reads as `None`, as one past
+//!   the device's 4,096 kept outcomes does.
 //!   [`Configuration::create`] follows a bookmark so the owner seals
 //!   routinely; an installation from `Database::create` must follow one.
 //!

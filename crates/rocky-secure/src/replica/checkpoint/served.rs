@@ -151,7 +151,7 @@ impl<A: RowApplication> Inner<A> {
     /// Inside the caller's transaction, signs replayed scope `id`'s rows at
     /// kept `seal` and keeps them to serve. None when the seal is not kept
     /// under the installed schema, the replay base lies past it, or the
-    /// covered identities are no longer known.
+    /// covered identities or its outcomes are no longer known.
     async fn sign_kept(
         &mut self,
         scope: ResourceScope,
@@ -194,6 +194,15 @@ impl<A: RowApplication> Inner<A> {
             .filter(|marks| self.check_base_identities(scope, tip, &rows, marks).is_ok())
         else {
             return Ok(None);
+        };
+        let outcomes = match &previous {
+            Some((_, signed)) if signed.statement.seal == Some(seal) => {
+                signed.statement.outcomes.clone()
+            }
+            _ => match self.seal_outcomes(id, seal).await? {
+                Some(outcomes) => outcomes,
+                None => return Ok(None),
+            },
         };
         for sql in [
             "DELETE FROM secure_served WHERE scope=?",
@@ -254,6 +263,7 @@ impl<A: RowApplication> Inner<A> {
                 digest: handle_digest.digest(),
             },
             custody: self.custody_summary(id, through).await?,
+            outcomes,
         };
         let signed = self.sign_checkpoint(statement)?;
         self.conn

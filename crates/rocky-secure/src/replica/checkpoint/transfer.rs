@@ -2812,7 +2812,7 @@ impl<A: RowApplication> Inner<A> {
                         return Err(denied("checkpoint frontier forks a retained log"));
                     }
                     self.place_superseded(&header, encoded).await?;
-                    self.keep_covered(id, hash).await?;
+                    self.keep_covered(id, hash, &statement.outcomes).await?;
                     for sql in [
                         "DELETE FROM secure_operations WHERE hash=?",
                         "DELETE FROM secure_outbox WHERE hash=?",

@@ -9,9 +9,10 @@ use crate::replica::checkpoint::Sets;
 
 pub(in crate::replica) const SCHEMA: &[&str] = &[
     // Rows at each finalized, uncompacted seal; `secure_replayed_seals`
-    // marks the seals a scope's rows were taken at, empty ones included.
-    // They stay while the seal leaves the path and comes back.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID",
+    // marks the seals a scope's rows were taken at, empty ones included,
+    // with the seal's encoded `SealedOutcomes`. They stay while the seal
+    // leaves the path and comes back.
+    "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_replayed_seal_rows(scope INTEGER NOT NULL,seal BLOB NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,seal,row)) WITHOUT ROWID",
     // Rows at the scope's checkpoint, and those of an import in progress.
     "CREATE TABLE IF NOT EXISTS secure_replayed_base(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
@@ -313,15 +314,20 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Takes the rows of every replayed scope of `scopes` at `seal`, just
-    /// finalized: the live rows with every open member undone.
+    /// finalized through each applied position: the live rows with every
+    /// open member undone, and the seal's outcomes.
     pub(in crate::replica) async fn take_seal_rows(
         &self,
         seal: Commitment,
-        scopes: &[(ResourceScope, i64)],
+        scopes: &[(ResourceScope, i64, i64)],
     ) -> Result<(), Error> {
+        let throughs: BTreeMap<i64, i64> = scopes
+            .iter()
+            .map(|(_, id, through)| (*id, *through))
+            .collect();
         let scopes: Vec<_> = scopes
             .iter()
-            .copied()
+            .map(|(scope, id, _)| (*scope, *id))
             .filter(|(scope, _)| self.replayed_scope(*scope) && self.has_scope_key(*scope))
             .collect();
         if scopes.is_empty() {
@@ -335,10 +341,18 @@ impl<A: RowApplication> Inner<A> {
         )?;
         let ordinals = self.field_ordinals(fields).await?;
         for (id, images) in taken {
+            let through = *throughs
+                .get(&id)
+                .ok_or_else(|| Error::Corrupt("replayed scope".into()))?;
+            let outcomes = self.sealed_outcomes(id, through).await?;
             self.conn
                 .execute(
-                    "INSERT OR REPLACE INTO secure_replayed_seals VALUES(?,?)",
-                    bindings(vec![SqlValue::Integer(id), SqlValue::Blob(seal.to_vec())]),
+                    "INSERT OR REPLACE INTO secure_replayed_seals VALUES(?,?,?)",
+                    bindings(vec![
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(seal.to_vec()),
+                        SqlValue::Blob(encode(&outcomes)?),
+                    ]),
                 )
                 .await?;
             self.conn
@@ -442,6 +456,29 @@ impl<A: RowApplication> Inner<A> {
         self.stored_images("secure_replayed_seal_rows", id, Some(seal))
             .await
             .map(Some)
+    }
+    /// The outcomes taken at `seal`; none when they were not taken.
+    pub(in crate::replica) async fn seal_outcomes(
+        &self,
+        id: i64,
+        seal: Commitment,
+    ) -> Result<Option<crate::replica::checkpoint::SealedOutcomes>, Error> {
+        match collect_rows(
+            self.conn
+                .query(
+                    "SELECT outcomes FROM secure_replayed_seals WHERE scope=? AND seal=?",
+                    bindings(vec![SqlValue::Integer(id), SqlValue::Blob(seal.to_vec())]),
+                )
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Blob(outcomes)]) => Ok(Some(decode(outcomes)?)),
+            Some(_) => Err(Error::Corrupt("sealed outcomes".into())),
+            None => Ok(None),
+        }
     }
     /// The rows of `table`, `secure_replayed_base` or
     /// `secure_replayed_staged`, or of a seal, ordered by row id.

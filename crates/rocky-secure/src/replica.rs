@@ -91,8 +91,9 @@ pub use admission::MAX_UNCONFIGURED_PEERS;
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{
     AuditReport, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
-    CoveredMark, CustodySummary, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport,
-    PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
+    CoveredMark, CustodySummary, LogPosition, MAX_CHECKPOINT_LOGS, MAX_SEALED_OUTCOMES, PruneBlock,
+    PruneReport, PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SealedOutcome,
+    SealedOutcomes, SealedTransaction, SetSummary, SignedCheckpoint,
 };
 pub use coordinated::{Refusal, StagedCloseStatus};
 pub use evict::EvictReport;

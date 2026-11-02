@@ -119,7 +119,7 @@ impl<A: RowApplication> Inner<A> {
         }
     }
     /// Moves the records of scope `id`'s members this node authored to
-    /// `secure_kept_outcomes`, keeping a member a base covered as covered,
+    /// `secure_kept_outcomes`, keeping what a base decided for a member,
     /// and keeps only the newest `KEPT_OUTCOMES`.
     async fn keep_outcomes(&self, id: i64) -> Result<(), Error> {
         let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
@@ -127,30 +127,11 @@ impl<A: RowApplication> Inner<A> {
         };
         self.conn
             .execute(
-                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.covered=0",
+                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.based=0",
                 [id, i64::from(author)],
             )
             .await?;
         self.prune_kept_outcomes(KEPT_OUTCOMES).await
-    }
-    /// Notes that a base covers the member `hash` of scope `id`: if this
-    /// node authored it, its outcome is final at the base's seal, though
-    /// which one is known here only when its record was already sealed.
-    pub(in crate::replica) async fn keep_covered(&self, id: i64, hash: &[u8]) -> Result<(), Error> {
-        let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
-            return Ok(());
-        };
-        self.conn
-            .execute(
-                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,1 FROM secure_replayed WHERE hash=? AND scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET covered=1",
-                bindings(vec![
-                    SqlValue::Blob(hash.to_vec()),
-                    SqlValue::Integer(id),
-                    SqlValue::Integer(i64::from(author)),
-                ]),
-            )
-            .await?;
-        Ok(())
     }
     /// Keeps the newest `limit` kept outcomes.
     pub(crate) async fn prune_kept_outcomes(&self, limit: i64) -> Result<(), Error> {

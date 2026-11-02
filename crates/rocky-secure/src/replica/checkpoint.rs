@@ -148,8 +148,107 @@ pub struct CustodySummary {
     /// Retained covered operations nobody acknowledged: sole copies.
     pub sole: SetSummary,
 }
+/// Transactions `SealedOutcomes` lists at most: the newest by stamp.
+pub const MAX_SEALED_OUTCOMES: usize = 512;
+/// Bytes a listed violation name may have.
+pub const MAX_SEALED_VIOLATION: usize = 256;
+/// How a transaction a seal reached ended there.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SealedOutcome {
+    /// Final at the seal, with the constraint, assertion or restriction it
+    /// violated, if any.
+    Dropped {
+        reason: rocky_core::replay::DropReason,
+        violation: Option<String>,
+    },
+    /// The frontier covers it, but the seal left it open while it awaits
+    /// outcome records; the rows hold none of its effects.
+    Open,
+}
+/// One listed transaction, by the stamp of its member in the scope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SealedTransaction {
+    pub stamp: Stamp,
+    pub transaction: Commitment,
+    pub outcome: SealedOutcome,
+}
+/// What the seal decided for the replayed scope's transactions, for a
+/// replica that takes its rows as a base without their frames. Every
+/// transaction it covers that is not listed applied, unless its stamp is at
+/// or before `horizon`. Replicas at one seal state the same list.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SealedOutcomes {
+    /// Every drop through the seal and the transactions it left open, the
+    /// newest `MAX_SEALED_OUTCOMES` by stamp, in stamp order.
+    pub listed: Vec<SealedTransaction>,
+    /// The newest stamp left out to keep the bound.
+    pub horizon: Option<Stamp>,
+}
+impl SealedOutcomes {
+    /// Refuses a list no replica produces.
+    pub(super) fn check(&self) -> Result<(), &'static str> {
+        if self.listed.len() > MAX_SEALED_OUTCOMES
+            || self
+                .listed
+                .windows(2)
+                .any(|pair| pair[0].stamp >= pair[1].stamp)
+            || self.horizon.as_ref().is_some_and(|horizon| {
+                self.listed.len() < MAX_SEALED_OUTCOMES
+                    || self
+                        .listed
+                        .first()
+                        .is_some_and(|first| first.stamp <= *horizon)
+            })
+            || self.listed.iter().any(|listed| match &listed.outcome {
+                SealedOutcome::Dropped { reason, violation } => {
+                    violation.as_ref().is_some_and(|violation| {
+                        violation.len() > MAX_SEALED_VIOLATION
+                            || !matches!(
+                                reason,
+                                rocky_core::replay::DropReason::Constraint
+                                    | rocky_core::replay::DropReason::Restricted
+                            )
+                    })
+                }
+                SealedOutcome::Open => false,
+            })
+        {
+            return Err("sealed outcomes");
+        }
+        Ok(())
+    }
+    /// How a covered transaction of stamp `stamp` ended: `None` when the
+    /// list cannot tell.
+    pub(in crate::replica) fn of(
+        &self,
+        stamp: &Stamp,
+        transaction: &Commitment,
+    ) -> Option<Option<&SealedOutcome>> {
+        match self
+            .listed
+            .binary_search_by(|listed| listed.stamp.cmp(stamp))
+        {
+            Ok(index) if self.listed[index].transaction == *transaction => {
+                Some(Some(&self.listed[index].outcome))
+            }
+            Ok(_) => None,
+            Err(_)
+                if self
+                    .horizon
+                    .as_ref()
+                    .is_some_and(|horizon| stamp <= horizon) =>
+            {
+                None
+            }
+            Err(_) => Some(None),
+        }
+    }
+}
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 17;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 18;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -181,6 +280,9 @@ pub struct CheckpointStatement {
     /// Mutation handles the signer retains.
     pub handles: SetSummary,
     pub custody: CustodySummary,
+    /// A replayed scope's drops and open transactions at the seal; empty
+    /// for other scopes.
+    pub outcomes: SealedOutcomes,
 }
 /// How a checkpoint's state is held. See `docs/runtime/encrypted-checkpoints.md`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,7 +320,8 @@ impl CheckpointStatement {
                     count: 0,
                     digest: [0; 32],
                 })
-            && self.custody == create::no_custody()?)
+            && self.custody == create::no_custody()?
+            && self.outcomes == SealedOutcomes::default())
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -340,6 +443,7 @@ impl SignedCheckpoint {
         {
             return Err(denied("invalid checkpoint signature or frontier"));
         }
+        statement.outcomes.check().map_err(denied)?;
         if statement.no_frames() && !statement.canonical_no_frames()? {
             return Err(denied("a no-frames checkpoint must be empty at a seal"));
         }

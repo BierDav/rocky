@@ -295,23 +295,64 @@ evidence.
 - **Outcomes were lost on reset, and kept ones could be wrong**
   (`rocky-secure`).
   - Fix: `secure_kept_outcomes(hash, txn, scope, clock, dropped, sealed,
-    violated, covered)` keeps only members this node authored (its author
-    number). Finality is what the record held. Nothing is inferred from a
-    frame's absence.
-  - `supersede` marks an own member that an installed base covers as
-    `covered`. Such a member reports the new
-    `TransactionOutcome::Covered` (final; the base holds its effects if it
-    applied) unless its record was already final. `rocky-core` gains the
-    variant and the `rocky-sdk` docs name it. `todo-app`'s `dropped`
-    treats it as not dropped.
-  - Precedence across members: final drop, final apply, covered,
-    provisional drop, applied.
+    violated, based)` keeps only members this node authored (its author
+    number). Finality is what the record held, or what an installed
+    base's sealed outcomes decided (`based`, below). Nothing is inferred
+    from a frame's absence.
+  - Precedence across members: final drop, final apply, unknown past a
+    base's horizon (reads `None`), provisional drop, applied.
   - Pruning: kept rows shadowed by a live record go at each seal
     finalization (`seal_replayed`) and after a rederive. At most
     `KEPT_OUTCOMES` (4,096) stay, newest by clock. Older ones read as
-    `None`. A lost compacted seal resets kept `sealed` and `covered`.
+    `None`. A lost compacted seal resets kept `sealed` and `based`.
   - Format: still `rocky.encrypted-replica.v43` (unreleased; layout
     changed in place).
+- **A base's covered outcomes said neither applied nor dropped**
+  (`rocky-secure`, `rocky-core`). `TransactionOutcome::Covered` is
+  removed.
+  - Fix: `CheckpointStatement.outcomes: SealedOutcomes` (checkpoint
+    format 18). A replayed scope's base at a seal states every drop
+    through the seal (transaction, member stamp, `DropReason`, violation
+    name cut to 256 bytes) and each transaction the frontier covers that
+    the seal left open (awaiting outcome records). It is the newest
+    `MAX_SEALED_OUTCOMES` (512) by stamp; `horizon` is the newest stamp
+    left out. It is signed with the statement, like the rows' LtHash.
+    `verify_signature` refuses a list out of stamp order, past the bound,
+    with a horizon on a list that is not full, or with a violation on a
+    reason other than `constraint`/`restricted`. Other scopes and
+    no-frames bases state an empty list.
+  - Taken at seal finalization with the seal rows
+    (`secure_replayed_seals.outcomes`): the current base's drops, every
+    sealed drop since, and the open members through the seal. Compaction
+    and served kept seals sign the seal's list; a kept seal without one is
+    not served.
+  - Import (`supersede` → `keep_covered`): an own covered member becomes
+    `Dropped { sealed: true }` with the listed reason and violation, or
+    `Applied` final when unlisted (`based = 1`; later records do not
+    overwrite it). An open one keeps its record, provisional. One whose
+    sealed record contradicts the list refuses the import.
+  - Still unknown: an own covered member that is unlisted and at or
+    before a full list's horizon (more than 512 later drops or open
+    transactions in the scope). It reads `None`, as an outcome past
+    `KEPT_OUTCOMES` does. `TransactionOutcome::Applied` carries no
+    finality bit; only `Dropped` says `sealed`.
+  - Open members, which this fix does not change: the base frontier
+    covers them, but the seal rows undo their effects. An importer
+    supersedes their frames, so it never replays them, and its later
+    seals can differ from replicas that did. This is inferred from the
+    code, not tested.
+  - Tests (`tests::compaction::cascades`), each failing with
+    `keep_covered`'s lookup disabled:
+    `an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record`
+    (replaces `…_reports_covered_…`; final `constraint` drop with A's
+    violation), `an_applied_outcome_a_base_covers_is_final`,
+    `replicas_at_one_seal_report_identical_outcomes` (A, B through A's
+    bases, C replaying frames; A's and C's statements state the same
+    list) and `a_forged_drop_list_is_refused_on_import` (altered unsigned,
+    four malformed re-signed lists, a list contradicting a sealed own
+    record). `an_authored_outcome_survives_imports_and_restarts_after_compaction`
+    fails too. Frozen checkpoint vectors were regenerated with a dropped
+    and an open entry; `verify.py` checks them.
 - **`finalize_arrived`** counts the unverified-scope pass only when a
   scope verified. It finalizes at most `ARRIVED_SEALS_PER_PASS` (4) seals
   per call. A rederive counts as one step.
@@ -329,9 +370,9 @@ evidence.
   - † `no_seal_finalizes_while_rows_wait_to_be_derived_again`
   - † `an_evicted_parent_leaves_what_a_replica_never_holding_it_replays`:
     rows and outcomes equal a fresh partial replica holding only `tags`.
-  - † `an_outcome_a_base_covers_reports_covered_never_its_stale_record`:
-    before the fix, B reported `Applied`, while A's seal dropped the
-    transaction (`constraint`, final).
+  - † `an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record`
+    (renamed; see above): before the fix, B reported `Applied`, while
+    A's seal dropped the transaction (`constraint`, final).
   - † `kept_outcomes_go_once_records_return_and_stay_bounded`
   - † `a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change`
   - † `a_cancelled_direct_import_reaches_no_rows_and_marks_nothing`

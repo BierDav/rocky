@@ -959,7 +959,7 @@ impl<A: RowApplication> Inner<A> {
         let taken: Vec<_> = changes
             .iter()
             .filter(|change| change.replayed)
-            .map(|change| (change.scope, change.id))
+            .map(|change| (change.scope, change.id, change.through))
             .collect();
         self.take_seal_rows(seal_id, &taken).await?;
         for (_, id, rows) in drops {
@@ -1518,7 +1518,12 @@ impl<A: RowApplication> Inner<A> {
             self.forget_seal_rows(id, target.depth).await?;
             return Ok(false);
         }
-        let rows = match self.seal_rows(id, target.seal).await? {
+        let taken = self.seal_rows(id, target.seal).await?;
+        let outcomes = match taken {
+            Some(_) => self.seal_outcomes(id, target.seal).await?,
+            None => None,
+        };
+        let rows = match taken {
             Some(rows) => rows,
             // Already the base: nothing was finalized since.
             None if base.is_some_and(|(_, signed)| signed.statement.seal == Some(target.seal)) => {
@@ -1544,6 +1549,10 @@ impl<A: RowApplication> Inner<A> {
                     "a replayed scope's rows at its seal are missing".into(),
                 ));
             }
+        };
+        let outcomes = match outcomes {
+            Some(outcomes) => outcomes,
+            None => self.sealed_outcomes(id, through).await?,
         };
         let sets = replay::base_sets(&rows);
         let (frontier, operations) = self.covered_frontier(id, base, through).await?;
@@ -1591,6 +1600,7 @@ impl<A: RowApplication> Inner<A> {
                 digest: handle_digest.digest(),
             },
             custody: self.custody_summary(id, through).await?,
+            outcomes,
         };
         let signed = self.sign_checkpoint(statement)?;
         self.clear_seal_anchor(id).await?;
@@ -1881,6 +1891,7 @@ impl<A: RowApplication> Inner<A> {
                 digest: handle_digest.digest(),
             },
             custody: self.custody_summary(id, through).await?,
+            outcomes: checkpoint::SealedOutcomes::default(),
         };
         let signed = self.sign_checkpoint(statement)?;
         self.clear_seal_anchor(id).await?;

@@ -114,6 +114,32 @@ fn signed() -> SignedCheckpoint {
                     digest: Lt::new().digest(),
                 },
             },
+            outcomes: SealedOutcomes {
+                listed: vec![
+                    SealedTransaction {
+                        stamp: Stamp {
+                            clock: 5,
+                            author: 7,
+                            sequence: 1,
+                        },
+                        transaction: [16; 32],
+                        outcome: SealedOutcome::Dropped {
+                            reason: rocky_core::replay::DropReason::Constraint,
+                            violation: Some("UNIQUE constraint failed: items.name".into()),
+                        },
+                    },
+                    SealedTransaction {
+                        stamp: Stamp {
+                            clock: 6,
+                            author: 7,
+                            sequence: 2,
+                        },
+                        transaction: [17; 32],
+                        outcome: SealedOutcome::Open,
+                    },
+                ],
+                horizon: None,
+            },
         },
         &node,
         credentials,

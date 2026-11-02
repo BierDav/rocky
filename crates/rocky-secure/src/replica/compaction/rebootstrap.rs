@@ -311,7 +311,7 @@ impl<A: RowApplication> Inner<A> {
             // from them is provisional again.
             self.conn
                 .execute(
-                    "UPDATE secure_kept_outcomes SET sealed=0,covered=0 WHERE scope=?",
+                    "UPDATE secure_kept_outcomes SET sealed=0,based=0 WHERE scope=?",
                     [id],
                 )
                 .await?;

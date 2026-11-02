@@ -15,6 +15,7 @@ mod constraints;
 pub(crate) mod outcomes;
 mod rebuild;
 mod restrictions;
+mod sealed;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 pub(super) use constraints::{
     Written, cascades, check_member_order, checked, linked, note, written,
@@ -29,10 +30,11 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
     // Outcomes of members this node authored whose record a scope reset
     // removed, so a transaction's outcome outlives an import or a replay
-    // from frames. `sealed` is the finality its record had; `covered` that
-    // an installed base's seal covers it, which makes it final even when
-    // the outcome there is not known here.
-    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,covered INTEGER NOT NULL) WITHOUT ROWID",
+    // from frames. `sealed` is the finality its record had; `based` that an
+    // installed base's sealed outcomes decided it instead, and records no
+    // longer change it. A based member neither sealed nor dropped lay past
+    // the base's horizon: its outcome is unknown here.
+    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_kept_outcomes_txn ON secure_kept_outcomes(txn)",
     // Scopes whose clear changed rows of other scopes: the domain's rows
     // are derived again once none waits.
@@ -44,7 +46,7 @@ pub(super) const SCHEMA: &[&str] = &[
 
 /// A transaction's members as replayed here, live records first, then the
 /// kept outcomes of members whose record a reset removed.
-const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.covered FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
+const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.based FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
 /// A row as it stood before a replayed transaction changed it. An applied,
 /// unsealed member keeps these until a seal covers it; they never leave
@@ -271,14 +273,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
 impl<A: RowApplication> Inner<A> {
     /// A transaction's outcome from its members, with the violation of the
     /// member that decides a drop. A final member decides; then a member a
-    /// base covers, whose outcome at that seal is final but unknown here;
-    /// then a provisional drop.
+    /// base covers past its horizon, which leaves the outcome unknown; then
+    /// a provisional drop.
     async fn outcome_of(
         &self,
         transaction: Commitment,
     ) -> Result<Option<(TransactionOutcome, Option<String>)>, Error> {
         let corrupt = || Error::Corrupt("replayed outcome".into());
-        let mut decided: Option<(u8, TransactionOutcome, Option<String>)> = None;
+        let mut decided: Option<(u8, Option<TransactionOutcome>, Option<String>)> = None;
         for row in collect_rows(
             self.conn
                 .query(OUTCOME_MEMBERS, [transaction.to_vec()])
@@ -290,7 +292,7 @@ impl<A: RowApplication> Inner<A> {
                 dropped,
                 SqlValue::Integer(sealed),
                 violated,
-                SqlValue::Integer(covered),
+                SqlValue::Integer(based),
             ] = row.as_slice()
             else {
                 return Err(corrupt());
@@ -299,34 +301,28 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Text(violated) => Some(violated.clone()),
                 _ => None,
             };
-            let (rank, outcome) = match (dropped, *sealed != 0, *covered != 0) {
-                (SqlValue::Text(name), true, _) => (
-                    0,
-                    TransactionOutcome::Dropped {
-                        reason: reason_named(name)?,
-                        sealed: true,
-                    },
-                ),
-                (SqlValue::Null, true, _) => (1, TransactionOutcome::Applied),
-                (_, false, true) => (2, TransactionOutcome::Covered),
-                (SqlValue::Text(name), false, false) => (
-                    3,
-                    TransactionOutcome::Dropped {
-                        reason: reason_named(name)?,
-                        sealed: false,
-                    },
-                ),
-                (SqlValue::Null, false, false) => (4, TransactionOutcome::Applied),
+            let reason = match dropped {
+                SqlValue::Text(name) => Some(reason_named(name)?),
+                SqlValue::Null => None,
                 _ => return Err(corrupt()),
             };
+            let drop = |reason, sealed| Some(TransactionOutcome::Dropped { reason, sealed });
+            let (rank, outcome) = match (reason, *sealed != 0, *based != 0) {
+                (Some(reason), true, _) => (0, drop(reason, true)),
+                (None, true, _) => (1, Some(TransactionOutcome::Applied)),
+                // Past the base's horizon: final there, unknown here.
+                (None, false, true) => (2, None),
+                (Some(reason), false, _) => (3, drop(reason, false)),
+                (None, false, false) => (4, Some(TransactionOutcome::Applied)),
+            };
             if decided.as_ref().is_none_or(|(best, ..)| rank < *best) {
-                let violated = matches!(outcome, TransactionOutcome::Dropped { .. })
+                let violated = matches!(outcome, Some(TransactionOutcome::Dropped { .. }))
                     .then_some(violated)
                     .flatten();
                 decided = Some((rank, outcome, violated));
             }
         }
-        Ok(decided.map(|(_, outcome, violated)| (outcome, violated)))
+        Ok(decided.and_then(|(_, outcome, violated)| outcome.map(|outcome| (outcome, violated))))
     }
 }
 

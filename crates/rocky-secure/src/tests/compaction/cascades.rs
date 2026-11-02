@@ -3,6 +3,7 @@
 //! `SET NULL`, and keeps its rows through every refill of `items`.
 use super::super::generations::{identity_insert, select, session};
 use super::*;
+use rocky_core::replay::TransactionOutcome;
 
 fn linked() -> Lineage {
     let mut lineage = Lineage::new();
@@ -529,54 +530,250 @@ async fn no_seal_finalizes_while_rows_wait_to_be_derived_again() {
     );
 }
 
-/// B tags `p` before it hears that A deleted it; A orders the delete first
-/// and drops the tag, seals and compacts. B's own record still says the
-/// tag applied, provisionally: once B takes A's bases, which cover the tag,
-/// it reports the transaction covered, never an outcome the base may
-/// contradict. B keeps outcomes only of what it authored.
-#[tokio::test]
-async fn an_outcome_a_base_covers_reports_covered_never_its_stale_record() {
-    let lineage = linked();
-    let dir = TempDir::new().unwrap();
+/// A and B hold `p` and `q`. B tags both before it hears that A deleted
+/// `p`; A orders the delete first and drops the tag of `p`, seals and
+/// compacts. B's own records still say both tags applied, provisionally.
+/// Returns A, B, their keys and B's two transactions: dropped, applied.
+async fn tagged_before_a_seal_drops_one(
+    lineage: &Lineage,
+    dir: &TempDir,
+) -> (Replica, Replica, [PrivateKey; 2], Commitment, Commitment) {
     let keys = [PrivateKey::new(), PrivateKey::new()];
-    let a = open(&lineage, &dir, "a", &keys[0]).await;
-    follow_main(&lineage, &a).await;
+    let a = open(lineage, dir, "a", &keys[0]).await;
+    follow_main(lineage, &a).await;
     insert(&a, "p", "parent").await;
-    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    insert(&a, "q", "other").await;
+    let b = open(lineage, dir, "b", &keys[1]).await;
     let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
     for scope in [items, tag_scope] {
-        sync_scope(&lineage, &a, &b, &keys[1], scope).await;
+        sync_scope(lineage, &a, &b, &keys[1], scope).await;
     }
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    session(&a)
-        .await
-        .run("DELETE FROM items WHERE key=?", vec![text("p")])
-        .await
-        .unwrap();
+    delete(&a, "p").await;
     let late = tag(&b, "t", "p").await;
-    let applied = Some(rocky_core::replay::TransactionOutcome::Applied);
+    let kept = tag(&b, "u", "q").await;
+    let applied = Some(TransactionOutcome::Applied);
     assert_eq!(b.transaction_outcome(late).await.unwrap(), applied);
-    sync_scope(&lineage, &b, &a, &keys[0], tag_scope).await;
-    let dropped = Some(rocky_core::replay::TransactionOutcome::Dropped {
+    sync_scope(lineage, &b, &a, &keys[0], tag_scope).await;
+    seal(lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(a.transaction_outcome(late).await.unwrap(), sealed_drop());
+    assert_eq!(a.transaction_outcome(kept).await.unwrap(), applied);
+    (a, b, keys, late, kept)
+}
+fn sealed_drop() -> Option<TransactionOutcome> {
+    Some(TransactionOutcome::Dropped {
         reason: rocky_core::replay::DropReason::Constraint,
         sealed: true,
-    });
-    seal(&lineage, &a).await;
-    a.compact(lineage.domain, 0).await.unwrap();
-    assert_eq!(a.transaction_outcome(late).await.unwrap(), dropped);
-    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
-    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
-    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    })
+}
+/// B takes A's bases of both scopes.
+async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateKey) {
+    crate::tests::exchange_graphs(a, b, lineage.domain).await;
+    for scope in [lineage.scope("items"), lineage.scope("tags")] {
+        import_checkpoint(lineage, a, b, key, scope).await;
+    }
+}
+
+/// Once B takes A's bases, which cover its tags, it reports how A's seal
+/// decided them, from the bases' sealed outcomes, never its stale records:
+/// the dropped tag as a final `constraint` drop with A's violation. B
+/// keeps outcomes only of what it authored.
+#[tokio::test]
+async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record() {
+    let lineage = linked();
+    let dir = TempDir::new().unwrap();
+    let (a, b, keys, late, _) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
+    let violation = a.transaction_violation(late).await.unwrap();
+    assert!(violation.is_some());
+    import_both(&lineage, &a, &b, &keys[1]).await;
     assert_eq!(tags(&b).await, tags(&a).await);
+    assert_eq!(b.transaction_outcome(late).await.unwrap(), sealed_drop());
+    assert_eq!(b.transaction_violation(late).await.unwrap(), violation);
     assert_eq!(
-        b.transaction_outcome(late).await.unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Covered)
+        stored(
+            &b,
+            "SELECT txn,dropped,sealed,based FROM secure_kept_outcomes WHERE txn IN(SELECT txn FROM secure_kept_outcomes WHERE dropped IS NOT NULL)"
+        )
+        .await,
+        vec![vec![
+            SqlValue::Blob(late.to_vec()),
+            text("constraint"),
+            SqlValue::Integer(1),
+            SqlValue::Integer(1),
+        ]]
     );
-    assert_eq!(b.transaction_violation(late).await.unwrap(), None);
+}
+
+/// A covered tag the seal applied reports `Applied` from the base, as a
+/// final outcome no record changes afterwards.
+#[tokio::test]
+async fn an_applied_outcome_a_base_covers_is_final() {
+    let lineage = linked();
+    let dir = TempDir::new().unwrap();
+    let (a, b, keys, _, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
+    import_both(&lineage, &a, &b, &keys[1]).await;
     assert_eq!(
-        stored(&b, "SELECT txn,covered FROM secure_kept_outcomes").await,
-        vec![vec![SqlValue::Blob(late.to_vec()), SqlValue::Integer(1)]]
+        b.transaction_outcome(kept).await.unwrap(),
+        Some(TransactionOutcome::Applied)
     );
+    assert_eq!(b.transaction_violation(kept).await.unwrap(), None);
+    assert_eq!(
+        stored(
+            &b,
+            &format!(
+                "SELECT dropped,sealed,based FROM secure_kept_outcomes WHERE txn=x'{}'",
+                hex(&kept)
+            )
+        )
+        .await,
+        vec![vec![
+            SqlValue::Null,
+            SqlValue::Integer(1),
+            SqlValue::Integer(1)
+        ]]
+    );
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A, B through A's bases and C replaying every frame itself report the
+/// same outcome and violation for each of B's transactions, and A and C
+/// state the same sealed outcomes at the seal.
+#[tokio::test]
+async fn replicas_at_one_seal_report_identical_outcomes() {
+    let lineage = linked();
+    let dir = TempDir::new().unwrap();
+    let (a, b, keys, late, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
+    import_both(&lineage, &a, &b, &keys[1]).await;
+    let c_key = PrivateKey::new();
+    let c = open(&lineage, &dir, "c", &c_key).await;
+    let tag_scope = lineage.scope("tags");
+    crate::tests::exchange_graphs(&a, &c, lineage.domain).await;
+    c.follow_bookmark(lineage.domain, "main").await.unwrap();
+    for scope in [lineage.scope("items"), tag_scope] {
+        sync_scope(&lineage, &a, &c, &c_key, scope).await;
+    }
+    c.finalize_arrived(lineage.domain).await.unwrap();
+    c.compact(lineage.domain, 0).await.unwrap();
+    for token in [late, kept] {
+        let outcome = a.transaction_outcome(token).await.unwrap();
+        let violation = a.transaction_violation(token).await.unwrap();
+        for replica in [&b, &c] {
+            assert_eq!(replica.transaction_outcome(token).await.unwrap(), outcome);
+            assert_eq!(
+                replica.transaction_violation(token).await.unwrap(),
+                violation
+            );
+        }
+    }
+    let peer = PrivateKey::new();
+    let credentials = lineage.credentials(3, &peer);
+    let mut stated = Vec::new();
+    for replica in [&a, &c] {
+        replica
+            .admit_peer(
+                peer.public_key(),
+                &credentials,
+                replica.followed_tip().await,
+            )
+            .await
+            .unwrap();
+        let offered = replica
+            .checkpoint_offer(peer.public_key(), &credentials, tag_scope)
+            .await
+            .unwrap()
+            .expect("a checkpoint at the seal");
+        stated.push((offered.statement.seal, offered.statement.outcomes));
+    }
+    assert_eq!(stated[0], stated[1]);
+    let listed = &stated[0].1.listed;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].transaction, late);
+}
+
+/// A drop list altered after signing, or signed but no replica's, is
+/// refused before anything is staged; one that contradicts an outcome
+/// this replica already sealed is refused at install.
+#[tokio::test]
+async fn a_forged_drop_list_is_refused_on_import() {
+    use crate::{SealedOutcome, SealedOutcomes, SealedTransaction};
+    let lineage = linked();
+    let dir = TempDir::new().unwrap();
+    let (a, b, keys, late, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    let tag_scope = lineage.scope("tags");
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = a
+        .checkpoint_offer(keys[1].public_key(), &credentials, tag_scope)
+        .await
+        .unwrap()
+        .unwrap();
+    let a_credentials = lineage.credentials(3, &keys[0]);
+    let resigned = |edit: &dyn Fn(&mut SealedOutcomes)| {
+        let mut statement = offered.statement.clone();
+        edit(&mut statement.outcomes);
+        crate::SignedCheckpoint::sign(statement, &keys[0], a_credentials.clone()).unwrap()
+    };
+    let listed = offered.statement.outcomes.listed[0].clone();
+    let mut altered = offered.clone();
+    altered.statement.outcomes.listed.clear();
+    let mut refused = vec![altered];
+    for edit in [
+        // Out of stamp order.
+        (|o: &mut SealedOutcomes| {
+            let mut first = o.listed[0].clone();
+            first.stamp.clock += 1;
+            first.transaction = [7; 32];
+            o.listed.insert(0, first);
+        }) as fn(&mut SealedOutcomes),
+        // A horizon on a list that is not full.
+        |o| o.horizon = Some(o.listed[0].stamp.clone()),
+        // A violation only constraints and restrictions name.
+        |o| {
+            o.listed[0].outcome = SealedOutcome::Dropped {
+                reason: rocky_core::replay::DropReason::Admission,
+                violation: Some("x".into()),
+            }
+        },
+        // Past the bound.
+        |o| {
+            let first = o.listed[0].clone();
+            o.listed = (0..=crate::MAX_SEALED_OUTCOMES as u64)
+                .map(|sequence| SealedTransaction {
+                    stamp: crate::replica::Stamp {
+                        sequence,
+                        ..first.stamp.clone()
+                    },
+                    ..first.clone()
+                })
+                .collect();
+        },
+    ] {
+        refused.push(resigned(&edit));
+    }
+    for forged in refused {
+        assert!(b.begin_rebootstrap(forged).await.is_err());
+        assert!(b.rebootstrap_progress(tag_scope).await.unwrap().is_none());
+    }
+    // B's own records, made final as a seal B finalized itself would:
+    // both tags applied there. A base stating the same imports; A's,
+    // which drops one, contradicts B's seal and is refused.
+    b.seal_replayed_for_test(tag_scope).await.unwrap();
+    b.cover_for_test(tag_scope, &SealedOutcomes::default())
+        .await
+        .unwrap();
+    assert!(
+        b.cover_for_test(tag_scope, &offered.statement.outcomes)
+            .await
+            .is_err()
+    );
+    assert_eq!(late, listed.transaction);
+    let _ = kept;
 }
 
 /// Kept outcomes go once their member's record is back and a seal covers

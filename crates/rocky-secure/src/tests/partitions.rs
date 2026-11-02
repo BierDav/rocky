@@ -708,7 +708,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 17);
+    assert_eq!(cp.statement.format, 18);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     reader.rebuild_projection(f.scope("A")).await.unwrap();
     assert_eq!(

@@ -3,8 +3,8 @@
 //! See `docs/runtime/schema-definitions.md`.
 use crate::{
     Affinity, Collation, ColumnClass, IndexColumn, LOGICAL_SCHEMA_FORMAT, LogicalAssertion,
-    LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalSchema, LogicalTable, SchemaError,
-    SchemaSource, TableClass, commitment,
+    LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalRestriction, LogicalSchema,
+    LogicalTable, SchemaError, SchemaSource, TableClass, commitment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,8 @@ pub struct SchemaDefinition {
     pub views: Vec<crate::LogicalView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<LogicalAssertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions: Vec<LogicalRestriction>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -246,6 +248,7 @@ impl SchemaDefinition {
             tables,
             views: self.views.clone(),
             assertions: self.assertions.clone(),
+            restrictions: self.restrictions.clone(),
         };
         schema.validate()?;
         Ok(schema)
@@ -984,5 +987,93 @@ mod replayed_tests {
         let mut duplicate = definition(serde_json::Value::Null);
         duplicate.assertions.push(duplicate.assertions[0].clone());
         assert!(duplicate.build().is_err());
+    }
+
+    #[test]
+    fn restrictions_name_replayed_tables_and_rule_predicates_over_their_columns() {
+        let restricted = |restriction: serde_json::Value| {
+            definition(serde_json::json!({ "restrictions": [restriction] }))
+        };
+        let invalid = |restriction: serde_json::Value| match restricted(restriction).build() {
+            Err(SchemaError::Invalid(reason)) => reason,
+            other => panic!("{other:?}"),
+        };
+        let accepted = restricted(serde_json::json!({
+            "name": "fixed_caps", "table": "teams", "when": "cap >= 5 AND lower(name) = 'core'",
+            "refuse_update": true, "refuse_delete": false
+        }));
+        let schema = accepted.build().unwrap();
+        schema.supported_on(Profile::Secure).unwrap();
+        let teams = schema.table("teams").unwrap();
+        assert_eq!(schema.restrictions_of(teams).count(), 1);
+        // Replicas must agree on restrictions: they are part of what replays.
+        assert_ne!(
+            schema.replicated_fingerprint(),
+            definition(serde_json::Value::Null)
+                .build()
+                .unwrap()
+                .replicated_fingerprint()
+        );
+        let rule = |when: &str| {
+            invalid(serde_json::json!({
+                "name": "rule", "table": "teams", "when": when,
+                "refuse_update": true, "refuse_delete": true
+            }))
+        };
+        // Only the row's own columns and the rule functions.
+        for when in [
+            "absent = 1",
+            "random() > 0",
+            "cap > (SELECT 1)",
+            "cap > ?",
+            "teams.cap > 1",
+            "cap > 1; DELETE FROM teams",
+        ] {
+            assert!(rule(when).starts_with("restriction rule:"), "{when}");
+        }
+        assert_eq!(
+            invalid(serde_json::json!({
+                "name": "rule", "table": "absent", "refuse_update": true, "refuse_delete": true
+            })),
+            "restriction rule: absent is not a table"
+        );
+        assert_eq!(
+            invalid(serde_json::json!({
+                "name": "rule", "table": "teams", "refuse_update": false, "refuse_delete": false
+            })),
+            "restriction rule refuses nothing"
+        );
+        // A local column differs between devices; replay cannot judge it.
+        let mut local = restricted(serde_json::json!({
+            "name": "rule", "table": "notes", "when": "draft = 1",
+            "refuse_update": true, "refuse_delete": true
+        }));
+        let notes = table(&mut local, "notes");
+        let mut draft = notes.columns[0].clone();
+        draft.name = "draft".into();
+        draft.affinity = Affinity::Integer;
+        draft.local_only = true;
+        notes.columns.push(draft);
+        assert!(matches!(local.build(), Err(SchemaError::Invalid(_))));
+        // A local table never replays.
+        let mut unreplayed = restricted(serde_json::json!({
+            "name": "rule", "table": "notes", "refuse_update": true, "refuse_delete": true
+        }));
+        table(&mut unreplayed, "notes").class = TableClass::LocalOnly;
+        assert_eq!(
+            refusal(&unreplayed),
+            Some((
+                "rule".into(),
+                Incompatibility::Restriction("notes is not a replayed table".into())
+            ))
+        );
+        // Names are identifiers and unique.
+        let mut duplicate = definition(serde_json::json!({ "restrictions": [
+            {"name": "rule", "table": "teams", "refuse_update": true, "refuse_delete": true},
+            {"name": "RULE", "table": "notes", "refuse_update": true, "refuse_delete": true}
+        ]}));
+        assert!(duplicate.build().is_err());
+        duplicate.restrictions.pop();
+        duplicate.build().unwrap();
     }
 }

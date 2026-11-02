@@ -1076,6 +1076,21 @@ impl<A: RowApplication> SecureSql<A> {
                 .table(&table.name)
                 .ok_or_else(|| Error::Corrupt("replayed table".into()))?;
             super::replay::note(&mut written, super::replay::written(logical, &image)?);
+            // Restrictions judge every changed row, delete actions included.
+            if !unchecked
+                && let Some(violated) = super::replay::restricted(
+                    conn,
+                    typed.rows.schema(),
+                    logical,
+                    touched.before.as_deref(),
+                    change.right(),
+                )?
+            {
+                return Err(Error::Sql(SqlError::Statement {
+                    code: SQLITE_CONSTRAINT,
+                    message: violated,
+                }));
+            }
             // Rows only a delete action changed need no grant, as on
             // every replica.
             let direct = intents

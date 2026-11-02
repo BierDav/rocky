@@ -115,6 +115,16 @@ external effects or confuse its replication outbox with an application outbox.
   map application membership/permissions to Rocky grants. Application role rows
   must not be implied to grant authority automatically.
 
+Status (2026-11-02): schema restrictions cover the transition-check part.
+A restriction names a replayed table, an optional rule predicate over the
+row before the transaction, and whether it refuses updates, deletes or both
+(`LogicalRestriction::immutable`, `append_only`). Author commit refuses a
+violation; replay drops the transaction with `DropReason::Restricted`,
+including through delete actions and delete-and-reinsert moves. Evidence:
+`rocky-secure` `tests::replayed_constraints::restrictions` (every delivery
+order of five concurrent transactions against a trigger-based reference
+replay). Actor association and grant mapping are not addressed by it.
+
 Applications define which records become immutable and how corrections work.
 These requirements do not prescribe a new trigger system or a business audit
 service, and do not change features_13's unsupported-trigger boundary.

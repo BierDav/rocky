@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod convergence;
+mod restrictions;
 
 /// `teams` own `members` (cascade, immediate) and `orders` own `lines`
 /// (cascade, deferred). `team_cap` bounds a team's members by its `cap`;
@@ -527,6 +528,9 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
             db.execute_batch(&index.create_sql).unwrap();
         }
     }
+    for trigger in reference_restrictions(&c.schema) {
+        db.execute_batch(&trigger).unwrap();
+    }
     db.execute_batch("BEGIN").unwrap();
     let mut outcomes = BTreeMap::new();
     for transaction in order {
@@ -545,10 +549,18 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
         if several {
             db.execute_batch("PRAGMA defer_foreign_keys=ON").unwrap();
         }
+        let mut reason = DropReason::Constraint;
         let failed = held.iter().copied().flatten().any(|statement| {
             let params: Vec<_> = statement.params.iter().map(sql_value).collect();
-            db.execute(&statement.sql, rusqlite::params_from_iter(params))
-                .is_err()
+            match db.execute(&statement.sql, rusqlite::params_from_iter(params)) {
+                Ok(_) => false,
+                Err(error) => {
+                    if error.to_string().starts_with("restriction ") {
+                        reason = DropReason::Restricted;
+                    }
+                    true
+                }
+            }
         }) || db
             .prepare("PRAGMA foreign_key_check")
             .unwrap()
@@ -575,7 +587,7 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
             transaction,
             if failed {
                 TransactionOutcome::Dropped {
-                    reason: DropReason::Constraint,
+                    reason,
                     sealed: false,
                 }
             } else {
@@ -613,6 +625,41 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
         );
     }
     Canonical { rows, outcomes }
+}
+
+/// The schema's restrictions as plain SQLite triggers, for the reference
+/// replay: they judge each statement's old row, which equals the row before
+/// the transaction in fixtures that change a row once per transaction.
+fn reference_restrictions(schema: &LogicalSchema) -> Vec<String> {
+    let mut triggers = Vec::new();
+    for restriction in &schema.restrictions {
+        let table = schema.table(&restriction.table).unwrap();
+        let when = restriction
+            .bind_when(table, |column| format!("OLD.\"{}\"", column.sql_name))
+            .unwrap();
+        let raise = format!("SELECT RAISE(ABORT, 'restriction {}')", restriction.name);
+        if restriction.refuse_update {
+            let changed: Vec<String> = table
+                .columns
+                .iter()
+                .filter(|column| column.class == rocky_core::ColumnClass::Replicated)
+                .map(|column| format!("OLD.\"{0}\" IS NOT NEW.\"{0}\"", column.sql_name))
+                .collect();
+            triggers.push(format!(
+                "CREATE TRIGGER \"{}_update\" BEFORE UPDATE ON \"{}\" WHEN ({when}) AND ({}) BEGIN {raise}; END",
+                restriction.name,
+                table.sql_name,
+                changed.join(" OR ")
+            ));
+        }
+        if restriction.refuse_delete {
+            triggers.push(format!(
+                "CREATE TRIGGER \"{}_delete\" BEFORE DELETE ON \"{}\" WHEN ({when}) BEGIN {raise}; END",
+                restriction.name, table.sql_name
+            ));
+        }
+    }
+    triggers
 }
 
 /// Frames ordered latest stamp first, so a receiver rewinds at every step.

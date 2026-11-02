@@ -142,6 +142,67 @@ impl LogicalAssertion {
             .any(|name| name.eq_ignore_ascii_case(table))
     }
 }
+/// A transition check of a replayed table: a row that matched `when` as it
+/// stood before a transaction may not be updated or deleted by it, as
+/// `refuse_update` and `refuse_delete` say. Checked on the before and after
+/// images of the author's commit and of every replay, cascaded and
+/// SET NULL changes included. Unlike an assertion, which judges only the
+/// state a transaction leaves, it judges the change itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalRestriction {
+    pub name: String,
+    pub table: String,
+    /// A rule expression over the row's replicated or derived columns;
+    /// every row when absent. A row matches when it is true, not NULL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    pub refuse_update: bool,
+    pub refuse_delete: bool,
+}
+impl LogicalRestriction {
+    /// Rows matching `when` never change or go: posted invoices.
+    pub fn immutable(
+        name: impl Into<String>,
+        table: impl Into<String>,
+        when: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            table: table.into(),
+            when: Some(when.into()),
+            refuse_update: true,
+            refuse_delete: true,
+        }
+    }
+    /// No row of `table` ever changes or goes: an audit log.
+    pub fn append_only(name: impl Into<String>, table: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            table: table.into(),
+            when: None,
+            refuse_update: true,
+            refuse_delete: true,
+        }
+    }
+    /// `when` with each column replaced by `bind(column)`; `None` when it
+    /// names anything but a replicated or derived column of `table`.
+    pub fn bind_when(
+        &self,
+        table: &LogicalTable,
+        bind: impl Fn(&LogicalColumn) -> String,
+    ) -> Option<String> {
+        let Some(when) = &self.when else {
+            return Some("1".into());
+        };
+        bind_rule(when, |name| {
+            table
+                .column(name)
+                .filter(|column| column.class != ColumnClass::LocalOnly)
+                .map(&bind)
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
@@ -176,6 +237,8 @@ pub struct LogicalSchema {
     pub views: Vec<LogicalView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<LogicalAssertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions: Vec<LogicalRestriction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +257,8 @@ pub enum Incompatibility {
     /// An assertion that is not one deterministic `SELECT` of replayed
     /// tables in one partition group, and why.
     Assertion(String),
+    /// A restriction on a table that is not replayed.
+    Restriction(String),
     /// A table class this profile cannot keep convergent yet.
     Unsupported(TableClass),
 }
@@ -749,6 +814,9 @@ struct ReplayedConstraints<'a> {
     indexes: Vec<&'a str>,
     /// The assertions reading the table, in declaration order.
     assertions: Vec<&'a LogicalAssertion>,
+    /// Its restrictions, in declaration order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    restrictions: Vec<&'a LogicalRestriction>,
 }
 #[derive(Serialize)]
 struct Replicated<'a> {
@@ -812,6 +880,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
                 .iter()
                 .filter(|assertion| assertion.reads_table(&table.sql_name))
                 .collect(),
+            restrictions: schema.restrictions_of(table).collect(),
         },
     }
 }
@@ -983,7 +1052,38 @@ impl LogicalSchema {
                 return invalid(format!("assertion {} must be one SELECT", assertion.name));
             }
         }
+        let mut restriction_names = BTreeSet::new();
+        for restriction in &self.restrictions {
+            let name = &restriction.name;
+            if !identifier(name) || !restriction_names.insert(name.to_ascii_lowercase()) {
+                return invalid(format!("restriction name {name}"));
+            }
+            let Some(table) = self.table(&restriction.table) else {
+                return invalid(format!(
+                    "restriction {name}: {} is not a table",
+                    restriction.table
+                ));
+            };
+            if !restriction.refuse_update && !restriction.refuse_delete {
+                return invalid(format!("restriction {name} refuses nothing"));
+            }
+            if restriction.bind_when(table, |_| String::new()).is_none() {
+                return invalid(format!(
+                    "restriction {name}: when must be one rule expression over {}'s replicated columns",
+                    table.sql_name
+                ));
+            }
+        }
         Ok(())
+    }
+    /// The restrictions of `table`, in declaration order.
+    pub fn restrictions_of<'a>(
+        &'a self,
+        table: &'a LogicalTable,
+    ) -> impl Iterator<Item = &'a LogicalRestriction> {
+        self.restrictions
+            .iter()
+            .filter(|restriction| restriction.table.eq_ignore_ascii_case(&table.sql_name))
     }
     /// Checks stored descriptor format before an opener changes the file.
     pub fn check_stored_row_identity(bytes: &[u8]) -> Result<(), SchemaError> {
@@ -1062,6 +1162,20 @@ impl LogicalSchema {
         for assertion in &self.assertions {
             if let Err(reason) = self.assertion_installable(assertion) {
                 return incompatible(&assertion.name, reason);
+            }
+        }
+        for restriction in &self.restrictions {
+            if self
+                .table(&restriction.table)
+                .is_some_and(|table| table.class != TableClass::Replayed)
+            {
+                return incompatible(
+                    &restriction.name,
+                    Incompatibility::Restriction(format!(
+                        "{} is not a replayed table",
+                        restriction.table
+                    )),
+                );
             }
         }
         Ok(())
@@ -1262,6 +1376,7 @@ mod tests {
             }],
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         }
     }
     #[test]

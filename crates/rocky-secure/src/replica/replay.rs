@@ -14,14 +14,17 @@ mod base;
 mod constraints;
 pub(crate) mod outcomes;
 mod rebuild;
+mod restrictions;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 pub(super) use constraints::{
     Written, cascades, check_member_order, checked, linked, note, written,
 };
 pub(super) use rebuild::Clear;
+pub(super) use restrictions::restricted;
 
 pub(super) const SCHEMA: &[&str] = &[
-    // `violated` names the constraint or assertion a `constraint` drop broke;
+    // `violated` names the constraint or assertion a `constraint` drop broke,
+    // or the restriction of a `restricted` one;
     // `births` the identities an applied member created, for checkpoints.
     "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
@@ -56,7 +59,8 @@ pub(super) struct Replayed {
     written: Vec<Written>,
 }
 
-/// Why a transaction dropped, and for `Constraint` what it violated.
+/// Why a transaction dropped, and for `Constraint` or `Restricted` what it
+/// violated.
 pub(super) struct Dropped {
     pub(super) reason: DropReason,
     pub(super) violated: Option<String>,
@@ -195,6 +199,7 @@ fn reason_name(reason: DropReason) -> &'static str {
     match reason {
         DropReason::Constraint => "constraint",
         DropReason::Admission => "admission",
+        DropReason::Restricted => "restricted",
         DropReason::Schema => "schema",
         DropReason::Engine => "engine",
     }
@@ -232,8 +237,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         super::bundle::transaction_id(self.node, &handle)
     }
 
-    /// The constraint or assertion whose violation dropped `transaction`
-    /// here, as SQLite or the assertion names it.
+    /// The constraint, assertion or restriction whose violation dropped
+    /// `transaction` here, as SQLite or the declaration names it.
     pub async fn transaction_violation(
         &self,
         transaction: Commitment,
@@ -303,6 +308,7 @@ fn reason_named(name: &str) -> Result<DropReason, Error> {
     Ok(match name {
         "constraint" => DropReason::Constraint,
         "admission" => DropReason::Admission,
+        "restricted" => DropReason::Restricted,
         "schema" => DropReason::Schema,
         "engine" => DropReason::Engine,
         _ => return Err(Error::Corrupt("replayed drop reason".into())),
@@ -1507,6 +1513,20 @@ impl<A: RowApplication> Inner<A> {
             }
             if own && (change.scope != scope || !named.permitted_by(grants)) {
                 return Ok(Err(DropReason::Admission.into()));
+            }
+            // Delete actions are checked too: a cascade cannot remove what
+            // a restriction keeps.
+            if let Some(violated) = restricted(
+                conn,
+                schema,
+                changed,
+                touched.before.as_deref(),
+                change.right(),
+            )? {
+                return Ok(Err(Dropped {
+                    reason: DropReason::Restricted,
+                    violated: Some(violated),
+                }));
             }
             match self.replayed_birth(&change, header.extensions.author) {
                 Ok(Some(identity)) => births.push(checkpoint::IdentityMark {

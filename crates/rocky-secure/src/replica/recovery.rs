@@ -5,7 +5,8 @@ use super::*;
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Applies pending frames, rebuilds scopes whose rebootstrap replays the
-    /// frames they hold, ends restorations whose own log is back, forgets
+    /// frames they hold, ends restorations whose own log is back, derives
+    /// rows a scope's clear left waiting again, forgets
     /// dropped tip frames a listed base covers and ends a seal rebootstrap
     /// no scope waits for. One scope's failure does not stop the others;
     /// the first is returned once all ran.
@@ -31,8 +32,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for scope in self.restoring().await? {
             keep(self.restored(scope).await);
         }
+        keep(self.rederive().await);
         keep(self.forget_covered_drops().await);
         first.map_or(Ok(()), Err)
+    }
+    /// Derives the replayed rows again where a scope's clear left them
+    /// waiting and nothing it needs waits any more.
+    pub async fn rederive(&self) -> Result<(), Error> {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        if let Some(domain) = inner.workspace.typed.as_ref().map(|typed| typed.domain) {
+            inner.retry_rederive(domain).await?;
+        }
+        Ok(())
     }
     /// Whether `scope` applied a frame whose author is revoked now: its
     /// rows are restored from a checkpoint, never kept from frames.

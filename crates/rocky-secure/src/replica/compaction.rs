@@ -1046,6 +1046,13 @@ impl<A: RowApplication> Inner<A> {
         if self.schema_switching().await? {
             return Ok((0, Some("the schema switch is unfinished".into())));
         }
+        // A seal finalized over rows a clear left incomplete would decide
+        // members against them, and their outcomes would turn final.
+        let (rederived, waits) = self.retry_rederive(domain).await?;
+        if let Some(reason) = waits {
+            return Ok((usize::from(rederived), Some(reason)));
+        }
+        count += usize::from(rederived);
         // A pulled state a scope needs becomes its base before readiness is
         // judged; until installed it covers nothing.
         if !rows(&self.conn, "SELECT 1 FROM secure_pulled LIMIT 1")
@@ -1187,6 +1194,9 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Why the next seal of the followed path is not finalized yet.
     pub(super) async fn finalization_waits(&self, domain: Scope) -> Result<Option<String>, Error> {
+        if let Some(waits) = self.rederive_waits(domain).await? {
+            return Ok(Some(waits));
+        }
         let finalized = self.finalized(domain).await?;
         let path = self.path_seals(domain)?;
         let next = offset(&path, &finalized).map(|start| start + finalized.len());
@@ -2028,13 +2038,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let (_, waiting) = inner.finalize_ready(domain).await?;
+        // A base taken while the rows wait to be derived again would sign
+        // them as they are.
+        let rederiving = inner.rederive_marked && inner.retry_rederive(domain).await?.1.is_some();
         // Without a newer seal, the base is signed again where it stands
         // when a learned revocation or key epoch left it stale.
         let target = match inner.compaction_target(domain, keep).await? {
             Some(target) => Some(target),
             None => inner.compacted_target(domain).await?,
         };
-        if let Some(target) = target {
+        if let Some(target) = target.filter(|_| !rederiving) {
             inner.compact_to(domain, &target).await?;
         }
         let mut report = CompactReport {
@@ -2082,7 +2095,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// and publishes a revision only when one finalized: a member's drops
     /// turn final as seals arrive, not only after its next local write
     /// queues maintenance. At most `ARRIVED_SEALS_PER_PASS` finalize per
-    /// call; later passes take the rest. Returns how many finalized.
+    /// call; later passes take the rest. Rows a clear left waiting are
+    /// derived again first, which counts as one. Returns how many
+    /// finalized.
     pub async fn finalize_arrived(&self, domain: Scope) -> Result<usize, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;

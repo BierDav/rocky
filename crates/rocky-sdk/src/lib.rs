@@ -68,6 +68,9 @@
 //!   that recorded the drop, and [`Database::transaction_outcome`] gives
 //!   the [`DropReason`]. A drop is provisional until a seal covers it:
 //!   [`TransactionOutcome::Dropped`] with `sealed` set is final.
+//!   [`TransactionOutcome::Covered`] is final too: the device took the
+//!   covering seal's rows as a base and no longer knows how its own
+//!   transaction ended there.
 //!   [`Configuration::create`] follows a bookmark so the owner seals
 //!   routinely; an installation from `Database::create` must follow one.
 //!

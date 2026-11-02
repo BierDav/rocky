@@ -3,78 +3,175 @@
 use super::*;
 use rocky_credentials::SignedSeal;
 
-/// Why a replayed scope's rows are cleared.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::replica) enum Clear {
-    /// Its history restarts and fills it again: from a base, or from frames
-    /// that apply again. Rows of other scopes its delete actions reach are
-    /// derived again from their own history once it is whole.
-    Refill,
-    /// The device stops holding it. Rows of held scopes that reference its
-    /// rows follow their declared delete action, as SQLite applies it; their
-    /// outcomes stay as replayed. Holding the scope again refills it.
-    Evict,
+/// Own outcomes kept after their records left, newest first; older ones
+/// read as unknown.
+pub(in crate::replica) const KEPT_OUTCOMES: i64 = 4096;
+
+/// What `rederive_replayed` did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::replica) enum Rederived {
+    /// No clear left rows to derive again.
+    Unmarked,
+    /// The domain's replayed rows were derived again.
+    Done,
+    /// A marked scope still needs something first.
+    Waiting(&'static str),
+    /// A rebuild of the same inputs left a foreign key violated; it is not
+    /// tried again until they change.
+    Stuck(String),
+}
+impl Rederived {
+    /// Why seal finalization and compaction wait, if they do.
+    pub(in crate::replica) fn waits(&self) -> Option<String> {
+        match self {
+            Self::Unmarked | Self::Done => None,
+            Self::Waiting(reason) => Some(format!(
+                "the replayed rows wait to be derived again: {reason}"
+            )),
+            Self::Stuck(violation) => Some(format!(
+                "the replayed rows cannot be derived again: {violation}"
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Marks `scope` as a clear that reached other scopes does.
+    pub(crate) async fn mark_rederive_for_test(&self, scope: ResourceScope) -> Result<(), Error> {
+        let mut inner = self.inner.lock(Class::Background).await;
+        let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
+        inner
+            .conn
+            .execute("INSERT INTO secure_replayed_rederive VALUES(?)", [id])
+            .await?;
+        inner.rederive_marked = true;
+        Ok(())
+    }
 }
 
 impl<A: RowApplication> Inner<A> {
     /// Forgets replayed scope `scope`'s replay, inside the caller's
     /// transaction: its rows (its partition's, or the whole unpartitioned
-    /// table) and where its members stood. Their outcomes stay readable.
+    /// table) and where its members stood. Outcomes of members this node
+    /// authored stay readable, with the finality they had.
     ///
     /// SQLite runs delete actions inside the transaction and cannot switch
-    /// foreign keys off there, so clearing a parent reaches rows of other
-    /// scopes. Putting reached rows back as they stood would not match a
-    /// replica that never cleared: the parent's own refill may delete,
-    /// recreate or rekey it. On a refill, every scope that a delete action
-    /// of this table reaches and that holds history marks the scope instead:
-    /// once nothing it needs waits, `rederive_replayed` rebuilds the
-    /// domain's replayed rows from bases and frames in canonical order,
-    /// exactly as a fresh replica of the same state would.
+    /// foreign keys off there, so clearing a parent can change rows of other
+    /// scopes. Putting them back as they stood would not match a replica
+    /// that never cleared: the parent's refill may delete, recreate or rekey
+    /// it, and an evicted parent leaves its children as a replica that never
+    /// held it replays them. When the clear changed any row outside the
+    /// scope, the scope is marked: once nothing it needs waits,
+    /// `rederive_replayed` rebuilds the domain's replayed rows from bases and
+    /// frames in canonical order, as a fresh replica holding the same scopes
+    /// computes them. Seals do not finalize meanwhile.
     pub(in crate::replica) async fn clear_replayed(
-        &self,
+        &mut self,
         scope: ResourceScope,
-        clear: Clear,
     ) -> Result<(), Error> {
         let (table, condition, values) = self.scope_rows(scope)?;
         let id = self.find_scope_id(scope).await?;
         if let Some(id) = id {
-            if clear == Clear::Refill && self.reaches_history(scope, id).await? {
-                self.conn
-                    .execute(
-                        "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
-                        [id],
-                    )
-                    .await?;
-            }
-            self.conn
-                .execute(
-                    "INSERT INTO secure_kept_outcomes SELECT hash,txn,dropped,sealed,violated FROM secure_replayed WHERE scope=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated",
-                    [id],
-                )
-                .await?;
+            self.keep_outcomes(id).await?;
             self.conn
                 .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
                 .await?;
         }
         self.touch(&table);
+        let quoted = typed::quoted(&table);
+        let held = self
+            .count(
+                &format!("SELECT COUNT(*) FROM {quoted} WHERE {condition}"),
+                values.clone(),
+            )
+            .await?;
+        let before = self.conn.connection().total_changes()?;
         self.conn
             .execute(
-                format!("DELETE FROM {} WHERE {condition}", typed::quoted(&table)),
+                format!("DELETE FROM {quoted} WHERE {condition}"),
                 bindings(values),
+            )
+            .await?;
+        // Delete actions and the `SET NULL` triggers count in the
+        // connection's total changes: more than the scope's rows reached
+        // others. (The SQL function is replaced for replay.)
+        let changed = self.conn.connection().total_changes()? - before;
+        if let Some(id) = id.filter(|_| changed > held as u64) {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
+                    [id],
+                )
+                .await?;
+            self.rederive_marked = true;
+        }
+        Ok(())
+    }
+    async fn count(&self, sql: &str, values: Vec<SqlValue>) -> Result<i64, Error> {
+        match collect_rows(self.conn.query(sql, bindings(values)).await?)
+            .await?
+            .first()
+            .map(Vec::as_slice)
+        {
+            Some([SqlValue::Integer(count)]) => Ok(*count),
+            _ => Err(Error::Corrupt("replayed row count".into())),
+        }
+    }
+    /// Moves the records of scope `id`'s members this node authored to
+    /// `secure_kept_outcomes`, keeping a member a base covered as covered,
+    /// and keeps only the newest `KEPT_OUTCOMES`.
+    async fn keep_outcomes(&self, id: i64) -> Result<(), Error> {
+        let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.covered=0",
+                [id, i64::from(author)],
+            )
+            .await?;
+        self.prune_kept_outcomes(KEPT_OUTCOMES).await
+    }
+    /// Notes that a base covers the member `hash` of scope `id`: if this
+    /// node authored it, its outcome is final at the base's seal, though
+    /// which one is known here only when its record was already sealed.
+    pub(in crate::replica) async fn keep_covered(&self, id: i64, hash: &[u8]) -> Result<(), Error> {
+        let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,1 FROM secure_replayed WHERE hash=? AND scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET covered=1",
+                bindings(vec![
+                    SqlValue::Blob(hash.to_vec()),
+                    SqlValue::Integer(id),
+                    SqlValue::Integer(i64::from(author)),
+                ]),
             )
             .await?;
         Ok(())
     }
-    /// `clear_replayed` for a refill, then `rows`, a base at a seal of tip
+    /// Keeps the newest `limit` kept outcomes.
+    pub(crate) async fn prune_kept_outcomes(&self, limit: i64) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "DELETE FROM secure_kept_outcomes WHERE hash IN(SELECT hash FROM secure_kept_outcomes ORDER BY clock DESC,hash LIMIT -1 OFFSET ?)",
+                [limit],
+            )
+            .await?;
+        Ok(())
+    }
+    /// `clear_replayed`, then `rows`, a base at a seal of tip
     /// `source`, become the scope's rows. The caller rederives once the
     /// operations after the base apply again.
     pub(in crate::replica) async fn replace_replayed(
-        &self,
+        &mut self,
         scope: ResourceScope,
         source: TipId,
         rows: &[(Commitment, Vec<u8>)],
     ) -> Result<(), Error> {
-        self.clear_replayed(scope, Clear::Refill).await?;
+        self.clear_replayed(scope).await?;
         self.restore_images(scope, source, rows).await
     }
     /// The scope's replayed table and the condition selecting its rows.
@@ -99,99 +196,23 @@ impl<A: RowApplication> Inner<A> {
         let values = super::super::partition::partition_values(schema, logical, tuple)?;
         Ok((logical.sql_name.clone(), condition, values))
     }
-    /// Whether a scope other than `scope` (stored as `id`) of a table that
-    /// the delete actions of `scope`'s table reach, transitively and through
-    /// any foreign key, its own table included, holds replay history: rows,
-    /// a base or replayed members.
-    async fn reaches_history(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
-        let corrupt = || Error::Corrupt("replayed scope".into());
-        let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
-        let schema = typed.rows.schema();
-        let (table, condition, values) = self.scope_rows(scope)?;
-        let mut reached = BTreeSet::new();
-        let mut work = vec![table.to_ascii_lowercase()];
-        while let Some(parent) = work.pop() {
-            for child in schema.tables.iter().filter(|child| {
-                child.class == TableClass::Replayed
-                    && child
-                        .foreign_keys
-                        .iter()
-                        .any(|key| key.table.eq_ignore_ascii_case(&parent))
-            }) {
-                if reached.insert(child.sql_name.to_ascii_lowercase()) {
-                    work.push(child.sql_name.to_ascii_lowercase());
-                }
-            }
-        }
-        if reached.is_empty() {
-            return Ok(false);
-        }
-        for name in &reached {
-            let Some(projected) = typed.by_name(name) else {
-                continue;
-            };
-            let sql = match name.eq_ignore_ascii_case(&table) {
-                true => format!(
-                    "SELECT 1 FROM {} WHERE NOT({condition}) LIMIT 1",
-                    typed::quoted(&projected.table.sql_name)
-                ),
-                false => format!(
-                    "SELECT 1 FROM {} LIMIT 1",
-                    typed::quoted(&projected.table.sql_name)
-                ),
-            };
-            let bound = match name.eq_ignore_ascii_case(&table) {
-                true => values.clone(),
-                false => Vec::new(),
-            };
-            if !collect_rows(self.conn.query(sql, bindings(bound)).await?)
-                .await?
-                .is_empty()
-            {
-                return Ok(true);
-            }
-        }
-        for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
-            let [SqlValue::Integer(other), SqlValue::Blob(blob)] = record.as_slice() else {
-                return Err(corrupt());
-            };
-            if *other == id {
-                continue;
-            }
-            let other_scope: ResourceScope = decode(blob)?;
-            let reaches = other_scope.domain == scope.domain
-                && typed
-                    .rows
-                    .table(&other_scope.table)
-                    .is_some_and(|table| reached.contains(&table.sql_name.to_ascii_lowercase()));
-            if reaches
-                && !collect_rows(
-                    self.conn
-                        .query(
-                            "SELECT 1 WHERE EXISTS(SELECT 1 FROM secure_replayed WHERE scope=?1) OR EXISTS(SELECT 1 FROM secure_replayed_base WHERE scope=?1)",
-                            [*other],
-                        )
-                        .await?,
-                )
-                .await?
-                .is_empty()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
     /// Inside the caller's transaction, rebuilds the replayed rows of the
-    /// followed domain from bases and frames once no scope a refill marked
-    /// still waits: none needs a seal rebootstrap or holds pending frames,
-    /// and no direct import other than `importing` fills one. A rebuild
-    /// that would leave a foreign key violated (a parent still missing)
-    /// rolls back and the marks stay for the next attempt.
+    /// followed domain from bases and frames once no scope a clear marked
+    /// still waits: none needs a seal rebootstrap, holds pending frames or
+    /// is being evicted, and no direct import other than `importing` fills
+    /// one.
+    ///
+    /// The rebuild is everything canonical replay derives from what this
+    /// device holds, so it equals a fresh replica holding the same scopes:
+    /// a member that references a row of a scope not held drops, as there.
+    /// Only a restored base row whose parent the rebuild lacks can leave a
+    /// foreign key violated, a state no fresh replica commits either; then
+    /// the rebuild rolls back and is stuck until its inputs change.
     pub(in crate::replica) async fn rederive_replayed(
         &self,
         importing: Option<ResourceScope>,
         time: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Rederived, Error> {
         let corrupt = || Error::Corrupt("rederived scope".into());
         let marked = rows(
             &self.conn,
@@ -199,10 +220,10 @@ impl<A: RowApplication> Inner<A> {
         )
         .await?;
         if marked.is_empty() {
-            return Ok(());
+            return Ok(Rederived::Unmarked);
         }
         let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(());
+            return Ok(Rederived::Waiting("the replayed tables are not installed"));
         };
         let domain = typed.domain;
         let waiting: BTreeSet<ResourceScope> = self
@@ -227,19 +248,24 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             }
             cleared.push(id);
-            if waiting.contains(&scope)
-                || !collect_rows(
-                    self.conn
-                        .query(
-                            "SELECT 1 FROM secure_operations WHERE scope=? AND status='pending' LIMIT 1",
-                            [blob.clone()],
-                        )
-                        .await?,
-                )
-                .await?
-                .is_empty()
+            if waiting.contains(&scope) {
+                return Ok(Rederived::Waiting("a scope needs a seal rebootstrap"));
+            }
+            if !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_operations WHERE scope=? AND status='pending' LIMIT 1",
+                        [blob.clone()],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty()
             {
-                return Ok(());
+                return Ok(Rederived::Waiting("a scope holds pending frames"));
+            }
+            if self.holding(scope).await? == Some(super::super::roles::Holding::Evicting) {
+                return Ok(Rederived::Waiting("a scope is being evicted"));
             }
         }
         if self
@@ -247,56 +273,206 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .any(|scope| scope.domain == domain && Some(*scope) != importing)
         {
-            return Ok(());
+            return Ok(Rederived::Waiting("a direct import fills a scope"));
+        }
+        let inputs = self.rederive_inputs().await?;
+        if let Some([SqlValue::Blob(stuck), SqlValue::Text(violation)]) = rows(
+            &self.conn,
+            "SELECT inputs,violation FROM secure_replayed_stuck",
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+            && *stuck == inputs
+        {
+            return Ok(Rederived::Stuck(violation.clone()));
         }
         self.conn.execute("SAVEPOINT rederive", ()).await?;
         let rebuilt = async {
+            // Unmarked first, so the rebuild publishes the outcomes it
+            // decides; a rollback marks the scopes again.
+            for id in &cleared {
+                self.conn
+                    .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [*id])
+                    .await?;
+            }
             self.replay_from_frames(time).await?;
-            self.replayed_keys_hold().await
+            self.replayed_violation_any().await
         }
         .await;
+        let undo = async || -> Result<(), Error> {
+            self.conn.execute("ROLLBACK TO rederive", ()).await?;
+            self.conn.execute("RELEASE rederive", ()).await?;
+            Ok(())
+        };
         match rebuilt {
-            Ok(true) => {
+            Ok(None) => {
                 self.conn.execute("RELEASE rederive", ()).await?;
-                for id in cleared {
-                    self.conn
-                        .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [id])
-                        .await?;
-                }
-                Ok(())
+                self.conn
+                    .execute("DELETE FROM secure_replayed_stuck", ())
+                    .await?;
+                self.prune_shadowed_outcomes(None).await?;
+                Ok(Rederived::Done)
             }
-            other => {
-                self.conn.execute("ROLLBACK TO rederive", ()).await?;
-                self.conn.execute("RELEASE rederive", ()).await?;
-                other.map(drop)
+            Ok(Some(violation)) => {
+                undo().await?;
+                tracing::warn!(%violation, "replayed rows cannot be derived again");
+                self.conn
+                    .execute(
+                        "INSERT OR REPLACE INTO secure_replayed_stuck VALUES(1,?,?)",
+                        bindings(vec![
+                            SqlValue::Blob(inputs),
+                            SqlValue::Text(violation.clone()),
+                        ]),
+                    )
+                    .await?;
+                Ok(Rederived::Stuck(violation))
+            }
+            // A rewound transaction's partition key is not held yet.
+            Err(Error::Rejected(reason)) if reason == KEY_WAITS => {
+                undo().await?;
+                Ok(Rederived::Waiting(KEY_WAITS))
+            }
+            Err(error) => {
+                undo().await?;
+                Err(error)
             }
         }
     }
-    /// Whether every foreign key of the replayed tables holds.
-    async fn replayed_keys_hold(&self) -> Result<bool, Error> {
+    /// Derives the domain's replayed rows again if a clear left them
+    /// waiting, in a transaction of its own. Callers hold the replica as
+    /// background work, so like a rewind it starts only when no interactive
+    /// waiter is registered. Returns whether it rebuilt, and why seal
+    /// finalization and compaction of `domain` wait, if they do.
+    pub(in crate::replica) async fn retry_rederive(
+        &mut self,
+        domain: rocky_core::Scope,
+    ) -> Result<(bool, Option<String>), Error> {
+        if !self.rederive_marked
+            || self
+                .workspace
+                .typed
+                .as_ref()
+                .is_some_and(|typed| typed.domain != domain)
+        {
+            return Ok((false, None));
+        }
+        let time = now()?;
+        let result = transaction!(self, |inner| {
+            let result = inner.rederive_replayed(None, time).await?;
+            if result == Rederived::Done {
+                inner
+                    .conn
+                    .execute(
+                        "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                        (),
+                    )
+                    .await?;
+            }
+            Ok(result)
+        })?;
+        match result {
+            Rederived::Unmarked => self.rederive_marked = false,
+            Rederived::Done => {
+                self.rederive_marked =
+                    !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
+                        .await?
+                        .is_empty();
+                self.publish_revision().await?;
+            }
+            Rederived::Waiting(_) | Rederived::Stuck(_) => {}
+        }
+        Ok((result == Rederived::Done, result.waits()))
+    }
+    /// Why seal finalization of `domain` waits for rows to be derived
+    /// again, without trying: a diagnostic for status reads.
+    pub(in crate::replica) async fn rederive_waits(
+        &self,
+        domain: rocky_core::Scope,
+    ) -> Result<Option<String>, Error> {
+        if !self.rederive_marked
+            || self
+                .workspace
+                .typed
+                .as_ref()
+                .is_none_or(|typed| typed.domain != domain)
+            || rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
+                .await?
+                .is_empty()
+        {
+            return Ok(None);
+        }
+        let stuck = rows(&self.conn, "SELECT violation FROM secure_replayed_stuck").await?;
+        Ok(match stuck.first().map(Vec::as_slice) {
+            Some([SqlValue::Text(violation)]) => Rederived::Stuck(violation.clone()),
+            _ => Rederived::Waiting("not tried yet"),
+        }
+        .waits())
+    }
+    /// What a rebuild derives from: applied and pending frames, bases,
+    /// finalized seals, holdings and the followed tip. A stuck rebuild is
+    /// tried again only once one of them changed.
+    async fn rederive_inputs(&self) -> Result<Vec<u8>, Error> {
+        let mut bytes = values_blob(
+            rows(
+                &self.conn,
+                "SELECT (SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='secure_applied'),(SELECT COUNT(*) FROM secure_operations WHERE status='pending'),(SELECT COALESCE(group_concat(c,','),'') FROM (SELECT scope||':'||sequence||':'||position AS c FROM secure_checkpoints ORDER BY scope,sequence)),(SELECT COALESCE(group_concat(f,','),'') FROM (SELECT hex(seal) AS f FROM secure_finalized ORDER BY domain,depth)),(SELECT COALESCE(group_concat(h,','),'') FROM (SELECT hex(scope)||state AS h FROM secure_subscriptions ORDER BY scope)),(SELECT COUNT(*) FROM secure_scope_state)",
+            )
+            .await?
+            .first()
+            .ok_or_else(|| Error::Corrupt("rederive inputs".into()))?,
+        );
+        bytes.extend_from_slice(&self.workspace.tip.0);
+        Ok(rocky_core::commitment("rocky.rederive.inputs.v1", &bytes).to_vec())
+    }
+    /// A foreign key of the replayed tables that does not hold, named by
+    /// child and parent table.
+    async fn replayed_violation_any(&self) -> Result<Option<String>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(true);
+            return Ok(None);
         };
         for table in typed.rows.schema().tables.iter().filter(|table| {
             table.class == TableClass::Replayed
                 && !table.foreign_keys.is_empty()
                 && typed.by_name(&table.sql_name).is_some()
         }) {
-            if !collect_rows(
+            if let Some([_, _, SqlValue::Text(parent), ..]) = collect_rows(
                 self.conn
                     .query(
-                        "SELECT 1 FROM pragma_foreign_key_check(?) LIMIT 1",
+                        "SELECT * FROM pragma_foreign_key_check(?) LIMIT 1",
                         [table.sql_name.clone()],
                     )
                     .await?,
             )
             .await?
-            .is_empty()
+            .first()
+            .map(Vec::as_slice)
             {
-                return Ok(false);
+                return Ok(Some(format!(
+                    "a row of {} references a missing row of {parent}",
+                    table.sql_name
+                )));
             }
         }
-        Ok(true)
+        Ok(None)
+    }
+    /// Deletes kept outcomes whose member has a live record again, of scope
+    /// `id` or of every scope.
+    pub(in crate::replica) async fn prune_shadowed_outcomes(
+        &self,
+        id: Option<i64>,
+    ) -> Result<(), Error> {
+        match id {
+            Some(id) => self.conn.execute(
+                "DELETE FROM secure_kept_outcomes WHERE scope=?1 AND hash IN(SELECT hash FROM secure_replayed WHERE scope=?1)",
+                [id],
+            ).await?,
+            None => self.conn.execute(
+                "DELETE FROM secure_kept_outcomes WHERE hash IN(SELECT hash FROM secure_replayed)",
+                (),
+            ).await?,
+        };
+        Ok(())
     }
 
     /// Rebuilds every replayed table from its frames inside the caller's

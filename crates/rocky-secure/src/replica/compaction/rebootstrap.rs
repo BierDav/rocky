@@ -242,7 +242,7 @@ impl<A: RowApplication> Inner<A> {
         self.store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
             .await?;
         if self.replayed_scope(scope) {
-            return self.clear_replayed(scope, replay::Clear::Refill).await;
+            return self.clear_replayed(scope).await;
         }
         self.reproject(scope).await
     }
@@ -307,6 +307,14 @@ impl<A: RowApplication> Inner<A> {
             if self.replayed_scope(scope) {
                 reordered |= self.join_open_era(id, 0).await?;
             }
+            // The finalized seals are forgotten: what a kept outcome took
+            // from them is provisional again.
+            self.conn
+                .execute(
+                    "UPDATE secure_kept_outcomes SET sealed=0,covered=0 WHERE scope=?",
+                    [id],
+                )
+                .await?;
             for table in ["secure_seal_bounds", "secure_seal_drops"] {
                 self.conn
                     .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])

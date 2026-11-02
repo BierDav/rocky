@@ -32,6 +32,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if inner.eviction_step(scope, &mut report).await? {
                 inner.load_direct().await?;
+                // Held rows the evicted scope's delete actions changed are
+                // derived again against what this device still holds.
+                inner.retry_rederive(scope.domain).await?;
                 return Ok(report);
             }
         }

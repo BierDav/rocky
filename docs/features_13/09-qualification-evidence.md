@@ -247,43 +247,112 @@ evidence.
   `replay_scope(reset = true)` (seal rebootstrap from frames),
   `abort_direct` (aborted direct import) and eviction (`clear_typed`).
   SQLite runs delete actions inside the transaction and cannot switch
-  foreign keys off there. Fix 3's reinstate also checked only the base,
-  so it missed rows whose parent the reapplied operations bring back.
-  It also tracked one foreign key per child table.
-  - Fix: one helper, `clear_replayed(scope, Clear::{Refill, Evict})`.
-    A refill whose table's delete actions reach another scope with
-    history marks the scope (`secure_replayed_rederive`). Once no marked
-    scope waits for a rebootstrap, pending frames or a direct import, the
-    domain's replayed rows are rebuilt from bases and frames
-    (`rederive_replayed`, at the end of `switch_to_staged` and of
-    `settle_seal_rebootstrap`). The rebuild runs in a savepoint and rolls
-    back while a foreign key is still violated. Reinstate is deleted.
-  - Eviction rule: rows of held scopes follow their declared delete
-    action, and their outcomes stay as replayed. Holding the parent again
-    refills it.
-  - `abort_direct` cannot reach rows today. A direct import keeps the
-    scope's table empty until the switch, and its frames wait.
-- **Outcomes were lost on reset** (`rocky-secure`). Clearing a scope
-  deleted its `secure_replayed` records, so `transaction_outcome` returned
-  `None`.
-  - Fix: records move to `secure_kept_outcomes`.
-    `transaction_outcome` and `transaction_violation` read live records,
-    then kept ones. A kept member whose frame is gone was covered by a
-    seal and reports as final.
-  - Format: the replica identity is `rocky.encrypted-replica.v43`.
+  foreign keys off there.
+  - Fix: one helper, `clear_replayed(scope)`. When the clear changes any
+    row outside the scope (the connection's total changes exceed the
+    scope's row count), the scope is marked (`secure_replayed_rederive`).
+    `rederive_replayed` then rebuilds the domain's replayed rows from
+    bases and frames once no marked scope waits for a seal rebootstrap,
+    pending frames, an eviction or a direct import. The rebuild runs in a
+    savepoint. Reinstate is deleted.
+  - A mark is retried wherever its wait can end: at the end of
+    `switch_to_staged` and `settle_seal_rebootstrap`, at the end of
+    `settle`, in `recover_locally` (`EncryptedReplica::rederive`), at
+    the last eviction step, and before every finalization pass
+    (`finalize_ready`/`finalize_at_most`, so maintenance, `finalize_arrived`
+    and `compact` retry too). Every caller holds the replica as background
+    work, so like a rewind a rederive starts only when no interactive
+    waiter is registered.
+  - While a mark is pending, no seal finalizes, `compact` writes no base,
+    and multi-member outcome records are not published. The rebuild
+    unmarks inside its savepoint before replaying, so it publishes what
+    it decides. `CompactionStatus::waiting`, `CompactReport::waiting` and
+    the `FinalizationWaiting` blocker name the reason.
+  - A rebuild that leaves a foreign key violated rolls back. It is
+    recorded in `secure_replayed_stuck` with a digest of its inputs:
+    applied and pending frames, bases, finalized seals, subscriptions,
+    scope count and followed tip. Until that digest changes, a retry only
+    reports "cannot be derived again: a row of T references a missing row
+    of P" and does not rebuild. A violation can come only from a restored
+    base row whose parent the rebuild lacks. Replayed members check their
+    keys at each transaction, so a member that references a row of an
+    unheld scope drops (`constraint`), as on a fresh replica. A fresh
+    replica cannot commit such a base either: `restore_images` defers
+    foreign keys to the commit. This last point is inferred from the
+    code, not tested.
+  - A `KEY_WAITS` refusal inside the rebuild rolls it back and leaves the
+    mark (it no longer aborts the import). `reset_replay_ledger` runs for
+    every scope of the domain on purpose: the rebuild replays every
+    scope, so every scope's replay ledger restarts from its base marks.
+    Permanent identity marks are separate and untouched.
+  - `abort_direct` reaches no rows: a direct import's scope holds nothing.
+    So it no longer leaves a spurious mark.
+  - Eviction: held rows that the evicted scope's delete actions changed
+    are derived again against what the device still holds. They equal a
+    fresh partial replica that never held the scope: a tag that references
+    an item drops (`constraint`), with a `CASCADE` or a `SET NULL`
+    reference alike.
+- **Outcomes were lost on reset, and kept ones could be wrong**
+  (`rocky-secure`).
+  - Fix: `secure_kept_outcomes(hash, txn, scope, clock, dropped, sealed,
+    violated, covered)` keeps only members this node authored (its author
+    number). Finality is what the record held. Nothing is inferred from a
+    frame's absence.
+  - `supersede` marks an own member that an installed base covers as
+    `covered`. Such a member reports the new
+    `TransactionOutcome::Covered` (final; the base holds its effects if it
+    applied) unless its record was already final. `rocky-core` gains the
+    variant and the `rocky-sdk` docs name it. `todo-app`'s `dropped`
+    treats it as not dropped.
+  - Precedence across members: final drop, final apply, covered,
+    provisional drop, applied.
+  - Pruning: kept rows shadowed by a live record go at each seal
+    finalization (`seal_replayed`) and after a rederive. At most
+    `KEPT_OUTCOMES` (4,096) stay, newest by clock. Older ones read as
+    `None`. A lost compacted seal resets kept `sealed` and `covered`.
+  - Format: still `rocky.encrypted-replica.v43` (unreleased; layout
+    changed in place).
 - **`finalize_arrived`** counts the unverified-scope pass only when a
   scope verified. It finalizes at most `ARRIVED_SEALS_PER_PASS` (4) seals
-  per call.
+  per call. A rederive counts as one step.
 - Tests (`tests::compaction::cascades`, two references from `tags` into
-  `items`, a cascade and a `SET NULL`):
+  `items`, a cascade and a `SET NULL`). The tests marked † fail when
+  their fix is disabled (checked by reverting each):
   - `a_parent_replayed_from_frames_keeps_the_rows_that_reference_it`
   - `an_imported_parent_base_keeps_children_of_rows_applied_over_it`
-    (real import with reapply; replicas converge on rows and drops)
   - `an_authored_outcome_survives_imports_and_restarts_after_compaction`
-  - `an_evicted_parent_takes_its_children_by_their_delete_action`
+  - † `children_return_when_a_frame_that_waited_through_an_import_arrives`:
+    an `items` frame waits for its predecessor through an import, then
+    arrives by sync. Disabling every retry point fails it; with only the
+    `settle` retry disabled, maintenance's finalization retry still
+    restores the rows.
+  - † `no_seal_finalizes_while_rows_wait_to_be_derived_again`
+  - † `an_evicted_parent_leaves_what_a_replica_never_holding_it_replays`:
+    rows and outcomes equal a fresh partial replica holding only `tags`.
+  - † `an_outcome_a_base_covers_reports_covered_never_its_stale_record`:
+    before the fix, B reported `Applied`, while A's seal dropped the
+    transaction (`constraint`, final).
+  - † `kept_outcomes_go_once_records_return_and_stay_bounded`
+  - † `a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change`
+  - † `a_cancelled_direct_import_reaches_no_rows_and_marks_nothing`
+  - `an_outcome_survives_a_replay_from_frames_and_a_restart` guards the
+    redesign; it is not a regression test of an old defect.
+  - `a_partitioned_child_of_an_unpartitioned_parent_is_refused`: the
+    requested fixture (`partitioned` plus `linked`) is refused by
+    `rocky-core` (`CrossScopeReference`). Partitioned references need the
+    same partition group, so no reference reaches across partitions into
+    another table's scopes. A self-reference inside one partition is not
+    exercised; its intra-scope cascade does not mark.
   - `scope_local::an_idle_finalization_pass_publishes_nothing`
-  - The first three fail with re-derivation and kept outcomes disabled.
-    The eviction and idle tests document behavior and pass either way.
-  - The fixture-only test
-    `a_base_of_a_parent_scope_keeps_the_children_of_rows_it_keeps` and
-    its hook are removed.
+- **Rederive cost (F5, measured, not bounded).** Change `yvwwmlup`
+  (parent `07a2901d`) plus these edits, Apple M5 Pro, release build,
+  load average 10–45 (shared host), one sample each, `cargo test
+  --release -p rocky-secure --lib
+  tests::compaction::cascades::rederive_of_100000_rows -- --ignored
+  --nocapture`. Fixture: 100,000 `items` rows in 1,000 transactions.
+  - Rederive from frames: 8.84 s.
+  - Rederive from a base, after seal and compaction: 1.31 s.
+  - Fill: 10.1 s.
+
+  The whole rebuild holds the replica in one step without yielding.
+  Bounding it is phase 10's question.

@@ -403,6 +403,9 @@ pub(super) struct Inner<A> {
     /// Scopes whose import writes verified pages straight into their rows;
     /// operations for them wait until the import ends.
     direct: BTreeSet<ResourceScope>,
+    /// Whether a scope may be marked for `rederive_replayed`; cleared only
+    /// after a committed check finds none.
+    rederive_marked: bool,
     /// This device's verified partition selectors for an authority and
     /// second: every statement of a partitioned schema asks for them.
     local_selectors: std::sync::Mutex<Option<LocalSelectors>>,
@@ -1037,6 +1040,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             follow_pass: Default::default(),
             context_epoch: AtomicU64::new(0),
             direct: BTreeSet::new(),
+            rederive_marked: true,
             notifications,
             frames: watch::channel(()).0,
             imported: watch::channel(0).0,

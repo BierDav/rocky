@@ -904,7 +904,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.store_scope_state(id, 0, 0, &Lt::new(), 0).await?;
         if self.replayed_scope(scope) {
-            self.clear_replayed(scope, replay::Clear::Refill).await?;
+            self.clear_replayed(scope).await?;
         }
         self.reproject(scope).await?;
         self.reseed_ledger(scope, id).await?;
@@ -2778,6 +2778,7 @@ impl<A: RowApplication> Inner<A> {
         statement: &CheckpointStatement,
         report: &mut RebootstrapReport,
     ) -> Result<Vec<Hash>, Error> {
+        let id = self.scope_id(scope).await?;
         let mut reapply = Vec::new();
         let mut cursor = Vec::new();
         let mut bytes = 0;
@@ -2811,6 +2812,7 @@ impl<A: RowApplication> Inner<A> {
                         return Err(denied("checkpoint frontier forks a retained log"));
                     }
                     self.place_superseded(&header, encoded).await?;
+                    self.keep_covered(id, hash).await?;
                     for sql in [
                         "DELETE FROM secure_operations WHERE hash=?",
                         "DELETE FROM secure_outbox WHERE hash=?",

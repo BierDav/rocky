@@ -113,6 +113,10 @@ pub enum TransactionOutcome {
         #[serde(rename = "final")]
         sealed: bool,
     },
+    /// Final: a seal covers the transaction and this replica took that
+    /// seal's rows as a base, which hold its effects if it applied there.
+    /// Its own record no longer says how it ended.
+    Covered,
 }
 
 /// Members one outcome record may name.

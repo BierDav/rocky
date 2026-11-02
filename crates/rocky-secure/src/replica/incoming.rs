@@ -59,6 +59,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
             }
             if !result? {
+                // Frames a clear's marked scope waited for may stand now.
+                if let Some(domain) = inner.workspace.typed.as_ref().map(|typed| typed.domain) {
+                    inner.retry_rederive(domain).await?;
+                }
                 return Ok(());
             }
         }

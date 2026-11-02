@@ -213,6 +213,15 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Ok(());
         };
+        // Rows a clear left incomplete decide nothing others should drop
+        // by; the rebuild publishes what it decides.
+        if self.rederive_marked
+            && !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
+                .await?
+                .is_empty()
+        {
+            return Ok(());
+        }
         let grants = self.local_grants(time)?;
         let mut replayed = Vec::with_capacity(held.len());
         let mut logs = Vec::new();

@@ -84,6 +84,8 @@ pub(super) struct Lineage {
     pub(super) domain: Scope,
     /// `tags` is partitioned by `label`.
     pub(super) partitioned: bool,
+    /// `tags` references `items` twice: `item` cascades, `also` nulls.
+    pub(super) linked: bool,
 }
 impl Lineage {
     /// The domain root a replica's tip graph starts from.
@@ -226,6 +228,7 @@ impl Lineage {
             publisher,
             domain,
             partitioned: false,
+            linked: false,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -248,6 +251,27 @@ impl Lineage {
                     column("label", Affinity::Text, true),
                 ],
             ));
+        }
+        for tags in tables
+            .iter_mut()
+            .filter(|table| self.linked && table.sql_name == "tags")
+        {
+            let mut clauses = Vec::new();
+            for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
+                tags.columns.push(column(name, Affinity::Integer, false));
+                let key = rocky_core::LogicalForeignKey {
+                    table: "items".into(),
+                    columns: vec![name.into()],
+                    references: vec!["id".into()],
+                    on_delete: action.into(),
+                    on_update: "NO ACTION".into(),
+                    deferred: false,
+                };
+                clauses.push(tags.foreign_key_sql(&key));
+                tags.foreign_keys.push(key);
+            }
+            let sql = tags.create_sql.strip_suffix(')').unwrap();
+            tags.create_sql = format!("{sql},item INTEGER,also INTEGER,{})", clauses.join(","));
         }
         for tags in tables
             .iter_mut()

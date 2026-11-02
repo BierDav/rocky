@@ -242,7 +242,7 @@ impl<A: RowApplication> Inner<A> {
         self.store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
             .await?;
         if self.replayed_scope(scope) {
-            return self.reset_replayed(scope).await;
+            return self.clear_replayed(scope, replay::Clear::Refill).await;
         }
         self.reproject(scope).await
     }
@@ -282,8 +282,8 @@ impl<A: RowApplication> Inner<A> {
         if !self.seal_rebootstraps(domain).await?.is_empty() {
             return Ok(false);
         }
-
         if self.compaction_lost(domain).await?.is_none() {
+            self.rederive_replayed(None, now()?).await?;
             return Ok(true);
         }
         for (scope, id) in self.domain_scopes(domain).await? {
@@ -325,6 +325,7 @@ impl<A: RowApplication> Inner<A> {
         if reordered {
             self.replay_from_frames(now()?).await?;
         }
+        self.rederive_replayed(None, now()?).await?;
         Ok(true)
     }
 }

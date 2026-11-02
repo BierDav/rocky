@@ -3,29 +3,59 @@
 use super::*;
 use rocky_credentials::SignedSeal;
 
-/// Rows of another replayed table that the delete actions of clearing a
-/// scope reach, as they stood, with the foreign key that reached them.
-struct Reached {
-    table: String,
-    key: rocky_core::LogicalForeignKey,
-    columns: Vec<String>,
-    rows: Vec<Vec<SqlValue>>,
+/// Why a replayed scope's rows are cleared.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::replica) enum Clear {
+    /// Its history restarts and fills it again: from a base, or from frames
+    /// that apply again. Rows of other scopes its delete actions reach are
+    /// derived again from their own history once it is whole.
+    Refill,
+    /// The device stops holding it. Rows of held scopes that reference its
+    /// rows follow their declared delete action, as SQLite applies it; their
+    /// outcomes stay as replayed. Holding the scope again refills it.
+    Evict,
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Forgets replayed scope `scope`'s replay, as its history restarts:
-    /// its rows (its partition's, or the whole unpartitioned table) and
-    /// where its members stood.
-    pub(in crate::replica) async fn reset_replayed(
+    /// Forgets replayed scope `scope`'s replay, inside the caller's
+    /// transaction: its rows (its partition's, or the whole unpartitioned
+    /// table) and where its members stood. Their outcomes stay readable.
+    ///
+    /// SQLite runs delete actions inside the transaction and cannot switch
+    /// foreign keys off there, so clearing a parent reaches rows of other
+    /// scopes. Putting reached rows back as they stood would not match a
+    /// replica that never cleared: the parent's own refill may delete,
+    /// recreate or rekey it. On a refill, every scope that a delete action
+    /// of this table reaches and that holds history marks the scope instead:
+    /// once nothing it needs waits, `rederive_replayed` rebuilds the
+    /// domain's replayed rows from bases and frames in canonical order,
+    /// exactly as a fresh replica of the same state would.
+    pub(in crate::replica) async fn clear_replayed(
         &self,
         scope: ResourceScope,
+        clear: Clear,
     ) -> Result<(), Error> {
-        if let Some(id) = self.find_scope_id(scope).await? {
+        let (table, condition, values) = self.scope_rows(scope)?;
+        let id = self.find_scope_id(scope).await?;
+        if let Some(id) = id {
+            if clear == Clear::Refill && self.reaches_history(scope, id).await? {
+                self.conn
+                    .execute(
+                        "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
+                        [id],
+                    )
+                    .await?;
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO secure_kept_outcomes SELECT hash,txn,dropped,sealed,violated FROM secure_replayed WHERE scope=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated",
+                    [id],
+                )
+                .await?;
             self.conn
                 .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
                 .await?;
         }
-        let (table, condition, values) = self.scope_rows(scope)?;
         self.touch(&table);
         self.conn
             .execute(
@@ -35,21 +65,17 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// `reset_replayed`, then `rows`, a base at a seal of tip `source`,
-    /// become the scope's rows. Rows of other scopes that clearing reaches
-    /// through delete actions are put back as they stood wherever their
-    /// parent row is back, so one scope's base never takes another scope's
-    /// rows; those whose parent the base lacks stay as the action left them.
+    /// `clear_replayed` for a refill, then `rows`, a base at a seal of tip
+    /// `source`, become the scope's rows. The caller rederives once the
+    /// operations after the base apply again.
     pub(in crate::replica) async fn replace_replayed(
         &self,
         scope: ResourceScope,
         source: TipId,
         rows: &[(Commitment, Vec<u8>)],
     ) -> Result<(), Error> {
-        let reached = self.reached_rows(scope).await?;
-        self.reset_replayed(scope).await?;
-        self.restore_images(scope, source, rows).await?;
-        self.reinstate(reached).await
+        self.clear_replayed(scope, Clear::Refill).await?;
+        self.restore_images(scope, source, rows).await
     }
     /// The scope's replayed table and the condition selecting its rows.
     fn scope_rows(&self, scope: ResourceScope) -> Result<(String, String, Vec<SqlValue>), Error> {
@@ -73,161 +99,204 @@ impl<A: RowApplication> Inner<A> {
         let values = super::super::partition::partition_values(schema, logical, tuple)?;
         Ok((logical.sql_name.clone(), condition, values))
     }
-    /// Rows of other replayed tables that delete actions reach when the
-    /// scope's rows are cleared, transitively, parents before children.
-    async fn reached_rows(&self, scope: ResourceScope) -> Result<Vec<Reached>, Error> {
+    /// Whether a scope other than `scope` (stored as `id`) of a table that
+    /// the delete actions of `scope`'s table reach, transitively and through
+    /// any foreign key, its own table included, holds replay history: rows,
+    /// a base or replayed members.
+    async fn reaches_history(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
         let corrupt = || Error::Corrupt("replayed scope".into());
+        let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
+        let schema = typed.rows.schema();
         let (table, condition, values) = self.scope_rows(scope)?;
-        let schema = self
-            .workspace
-            .typed
-            .as_ref()
-            .ok_or_else(corrupt)?
-            .rows
-            .schema();
-        let mut seen = BTreeSet::from([table.to_ascii_lowercase()]);
-        let mut work = std::collections::VecDeque::from([(table, condition)]);
-        let mut reached = Vec::new();
-        while let Some((parent, condition)) = work.pop_front() {
-            for child in schema
-                .tables
-                .iter()
-                .filter(|child| child.class == TableClass::Replayed)
-            {
-                for key in child.foreign_keys.iter().filter(|key| {
-                    key.table.eq_ignore_ascii_case(&parent) && key.on_delete != "NO ACTION"
-                }) {
-                    if !seen.insert(child.sql_name.to_ascii_lowercase()) {
-                        continue;
-                    }
-                    let list = |names: &[String]| {
-                        names
-                            .iter()
-                            .map(|name| typed::quoted(name))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    };
-                    let columns: Vec<String> = child
-                        .columns
+        let mut reached = BTreeSet::new();
+        let mut work = vec![table.to_ascii_lowercase()];
+        while let Some(parent) = work.pop() {
+            for child in schema.tables.iter().filter(|child| {
+                child.class == TableClass::Replayed
+                    && child
+                        .foreign_keys
                         .iter()
-                        .filter(|column| {
-                            !matches!(column.class, rocky_core::ColumnClass::Derived { .. })
-                        })
-                        .map(|column| column.sql_name.clone())
-                        .collect();
-                    let reaches = format!(
-                        "({}) IN (SELECT {} FROM {} WHERE {condition})",
-                        list(&key.columns),
-                        list(&key.references),
-                        typed::quoted(&parent)
-                    );
-                    let rows = collect_rows(
-                        self.conn
-                            .query(
-                                format!(
-                                    "SELECT {} FROM {} WHERE {reaches}",
-                                    list(&columns),
-                                    typed::quoted(&child.sql_name)
-                                ),
-                                bindings(values.clone()),
-                            )
-                            .await?,
-                    )
-                    .await?;
-                    work.push_back((child.sql_name.clone(), reaches));
-                    reached.push(Reached {
-                        table: child.sql_name.clone(),
-                        key: key.clone(),
-                        columns,
-                        rows,
-                    });
+                        .any(|key| key.table.eq_ignore_ascii_case(&parent))
+            }) {
+                if reached.insert(child.sql_name.to_ascii_lowercase()) {
+                    work.push(child.sql_name.to_ascii_lowercase());
                 }
             }
         }
-        Ok(reached)
+        if reached.is_empty() {
+            return Ok(false);
+        }
+        for name in &reached {
+            let Some(projected) = typed.by_name(name) else {
+                continue;
+            };
+            let sql = match name.eq_ignore_ascii_case(&table) {
+                true => format!(
+                    "SELECT 1 FROM {} WHERE NOT({condition}) LIMIT 1",
+                    typed::quoted(&projected.table.sql_name)
+                ),
+                false => format!(
+                    "SELECT 1 FROM {} LIMIT 1",
+                    typed::quoted(&projected.table.sql_name)
+                ),
+            };
+            let bound = match name.eq_ignore_ascii_case(&table) {
+                true => values.clone(),
+                false => Vec::new(),
+            };
+            if !collect_rows(self.conn.query(sql, bindings(bound)).await?)
+                .await?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
+            let [SqlValue::Integer(other), SqlValue::Blob(blob)] = record.as_slice() else {
+                return Err(corrupt());
+            };
+            if *other == id {
+                continue;
+            }
+            let other_scope: ResourceScope = decode(blob)?;
+            let reaches = other_scope.domain == scope.domain
+                && typed
+                    .rows
+                    .table(&other_scope.table)
+                    .is_some_and(|table| reached.contains(&table.sql_name.to_ascii_lowercase()));
+            if reaches
+                && !collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT 1 WHERE EXISTS(SELECT 1 FROM secure_replayed WHERE scope=?1) OR EXISTS(SELECT 1 FROM secure_replayed_base WHERE scope=?1)",
+                            [*other],
+                        )
+                        .await?,
+                )
+                .await?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
-    /// Puts reached rows back as they stood where their parent row exists.
-    async fn reinstate(&self, reached: Vec<Reached>) -> Result<(), Error> {
-        let corrupt = || Error::Corrupt("reached row".into());
-        let schema = self
-            .workspace
-            .typed
-            .as_ref()
-            .ok_or_else(corrupt)?
-            .rows
-            .schema();
-        for Reached {
-            table,
-            key,
-            columns,
-            rows,
-        } in reached
-        {
-            let logical = schema.table(&table).ok_or_else(corrupt)?;
-            let position = |name: &String| {
-                columns
-                    .iter()
-                    .position(|column| column.eq_ignore_ascii_case(name))
-                    .ok_or_else(corrupt)
-            };
-            let referencing = key
-                .columns
-                .iter()
-                .map(position)
-                .collect::<Result<Vec<_>, _>>()?;
-            let primary = logical
-                .primary_key
-                .iter()
-                .map(position)
-                .collect::<Result<Vec<_>, _>>()?;
-            let equal = |names: &[String]| {
-                names
-                    .iter()
-                    .map(|name| format!("{}=?", typed::quoted(name)))
-                    .collect::<Vec<_>>()
-            };
-            let name = typed::quoted(&table);
-            let parent = format!(
-                "SELECT 1 FROM {} WHERE {}",
-                typed::quoted(&key.table),
-                equal(&key.references).join(" AND ")
-            );
-            let update = format!(
-                "UPDATE {name} SET {} WHERE {}",
-                equal(&columns).join(","),
-                equal(&logical.primary_key).join(" AND ")
-            );
-            let insert = format!(
-                "INSERT INTO {name}({}) VALUES({})",
-                columns
-                    .iter()
-                    .map(|column| typed::quoted(column))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                vec!["?"; columns.len()].join(",")
-            );
-            self.touch(&table);
-            for row in rows {
-                let values: Vec<SqlValue> = referencing
-                    .iter()
-                    .map(|index| row[*index].clone())
-                    .collect();
-                // A null key references nothing, so no action reached it.
-                if values.iter().any(|value| matches!(value, SqlValue::Null))
-                    || collect_rows(self.conn.query(&parent, bindings(values)).await?)
-                        .await?
-                        .is_empty()
-                {
+    /// Inside the caller's transaction, rebuilds the replayed rows of the
+    /// followed domain from bases and frames once no scope a refill marked
+    /// still waits: none needs a seal rebootstrap or holds pending frames,
+    /// and no direct import other than `importing` fills one. A rebuild
+    /// that would leave a foreign key violated (a parent still missing)
+    /// rolls back and the marks stay for the next attempt.
+    pub(in crate::replica) async fn rederive_replayed(
+        &self,
+        importing: Option<ResourceScope>,
+        time: u64,
+    ) -> Result<(), Error> {
+        let corrupt = || Error::Corrupt("rederived scope".into());
+        let marked = rows(
+            &self.conn,
+            "SELECT r.scope,s.scope FROM secure_replayed_rederive r LEFT JOIN secure_scope_state s ON s.id=r.scope",
+        )
+        .await?;
+        if marked.is_empty() {
+            return Ok(());
+        }
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(());
+        };
+        let domain = typed.domain;
+        let waiting: BTreeSet<ResourceScope> = self
+            .seal_rebootstraps(domain)
+            .await?
+            .into_iter()
+            .map(|need| need.scope)
+            .collect();
+        let mut cleared = Vec::new();
+        for record in &marked {
+            let (id, blob) = match record.as_slice() {
+                [SqlValue::Integer(id), SqlValue::Blob(blob)] => (*id, blob),
+                // A scope no longer stored has nothing to wait for.
+                [SqlValue::Integer(id), SqlValue::Null] => {
+                    cleared.push(*id);
                     continue;
                 }
-                let mut bound = row.clone();
-                bound.extend(primary.iter().map(|index| row[*index].clone()));
-                if self.conn.execute(&update, bindings(bound)).await? == 0 {
-                    self.conn.execute(&insert, bindings(row)).await?;
-                }
+                _ => return Err(corrupt()),
+            };
+            let scope: ResourceScope = decode(blob)?;
+            if scope.domain != domain {
+                continue;
+            }
+            cleared.push(id);
+            if waiting.contains(&scope)
+                || !collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT 1 FROM secure_operations WHERE scope=? AND status='pending' LIMIT 1",
+                            [blob.clone()],
+                        )
+                        .await?,
+                )
+                .await?
+                .is_empty()
+            {
+                return Ok(());
             }
         }
-        Ok(())
+        if self
+            .direct
+            .iter()
+            .any(|scope| scope.domain == domain && Some(*scope) != importing)
+        {
+            return Ok(());
+        }
+        self.conn.execute("SAVEPOINT rederive", ()).await?;
+        let rebuilt = async {
+            self.replay_from_frames(time).await?;
+            self.replayed_keys_hold().await
+        }
+        .await;
+        match rebuilt {
+            Ok(true) => {
+                self.conn.execute("RELEASE rederive", ()).await?;
+                for id in cleared {
+                    self.conn
+                        .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [id])
+                        .await?;
+                }
+                Ok(())
+            }
+            other => {
+                self.conn.execute("ROLLBACK TO rederive", ()).await?;
+                self.conn.execute("RELEASE rederive", ()).await?;
+                other.map(drop)
+            }
+        }
+    }
+    /// Whether every foreign key of the replayed tables holds.
+    async fn replayed_keys_hold(&self) -> Result<bool, Error> {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(true);
+        };
+        for table in typed.rows.schema().tables.iter().filter(|table| {
+            table.class == TableClass::Replayed
+                && !table.foreign_keys.is_empty()
+                && typed.by_name(&table.sql_name).is_some()
+        }) {
+            if !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM pragma_foreign_key_check(?) LIMIT 1",
+                        [table.sql_name.clone()],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Rebuilds every replayed table from its frames inside the caller's

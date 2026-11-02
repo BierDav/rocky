@@ -438,7 +438,7 @@ impl<A: RowApplication> Inner<A> {
     }
     pub(crate) async fn clear_typed(&self, scope: ResourceScope) -> Result<(), Error> {
         if self.replayed_scope(scope) {
-            return self.reset_replayed(scope).await;
+            return self.clear_replayed(scope, replay::Clear::Evict).await;
         }
         self.require_declared(scope, "eviction")
     }

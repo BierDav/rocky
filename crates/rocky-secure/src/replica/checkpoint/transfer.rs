@@ -904,7 +904,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.store_scope_state(id, 0, 0, &Lt::new(), 0).await?;
         if self.replayed_scope(scope) {
-            self.reset_replayed(scope).await?;
+            self.clear_replayed(scope, replay::Clear::Refill).await?;
         }
         self.reproject(scope).await?;
         self.reseed_ledger(scope, id).await?;
@@ -2651,6 +2651,9 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         self.reseed_ledger(scope, id).await?;
+        // Rows other scopes' delete actions lost come back once the scope's
+        // operations stand again on its base.
+        self.rederive_replayed(Some(scope), time).await?;
         self.clear_staging(id).await?;
         self.conn
             .execute(

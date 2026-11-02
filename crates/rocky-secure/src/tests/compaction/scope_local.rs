@@ -117,3 +117,29 @@ async fn a_lost_compaction_holds_back_every_scope_of_its_domain() {
     replica.audit(items).await.unwrap();
     replica.audit(tags).await.unwrap();
 }
+
+/// A recovery pass with nothing to finalize changes nothing: a scope that
+/// never verifies (here `tags`, with no base at the seal) does not count
+/// as finalized work, so no revision is published.
+#[tokio::test]
+async fn an_idle_finalization_pass_publishes_nothing() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "one", "one").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    import_checkpoint(&lineage, &a, &b, &keys[1], lineage.scope("items")).await;
+    b.finalize_arrived(lineage.domain).await.unwrap();
+    let mut revision = b.observe_revision();
+    revision.borrow_and_update();
+    for _ in 0..3 {
+        assert_eq!(b.finalize_arrived(lineage.domain).await.unwrap(), 0);
+    }
+    assert!(!revision.has_changed().unwrap());
+}

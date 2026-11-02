@@ -970,6 +970,7 @@ async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched(
 
 mod anchors;
 pub(in crate::tests) mod audit;
+mod cascades;
 mod deferred;
 mod eligibility;
 mod identities;

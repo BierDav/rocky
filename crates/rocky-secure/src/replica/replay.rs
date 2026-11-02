@@ -18,13 +18,26 @@ pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 pub(super) use constraints::{
     Written, cascades, check_member_order, checked, linked, note, written,
 };
+pub(super) use rebuild::Clear;
 
 pub(super) const SCHEMA: &[&str] = &[
     // `violated` names the constraint or assertion a `constraint` drop broke;
     // `births` the identities an applied member created, for checkpoints.
     "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
+    // Outcomes of members whose record a scope reset removed, so a
+    // transaction's outcome outlives an import or a replay from frames.
+    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_kept_outcomes_txn ON secure_kept_outcomes(txn)",
+    // Scopes a refill cleared whose delete actions reach other scopes'
+    // history: the domain's rows are derived again once none waits.
+    "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)",
 ];
+
+/// A transaction's members as replayed here, live records first, then the
+/// kept outcomes of members whose record a reset removed. A kept member
+/// whose frame is no longer retained was covered by a seal: final.
+const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed OR NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=k.hash),k.violated FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
 /// A row as it stood before a replayed transaction changed it. An applied,
 /// unsealed member keeps these until a seal covers it; they never leave
@@ -230,7 +243,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .query(
-                    "SELECT violated FROM secure_replayed WHERE txn=? AND violated IS NOT NULL LIMIT 1",
+                    format!("SELECT violated FROM ({OUTCOME_MEMBERS}) WHERE violated IS NOT NULL LIMIT 1"),
                     [transaction.to_vec()],
                 )
                 .await?,
@@ -254,7 +267,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .query(
-                    "SELECT dropped,sealed FROM secure_replayed WHERE txn=? ORDER BY dropped IS NULL,sealed LIMIT 1",
+                    format!("SELECT dropped,sealed FROM ({OUTCOME_MEMBERS}) ORDER BY dropped IS NULL,sealed LIMIT 1"),
                     [transaction.to_vec()],
                 )
                 .await?,
@@ -283,22 +296,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(Class::Background).await;
         let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
         transaction!(inner, |inner| inner.seal_replayed(id, i64::MAX).await)
-    }
-    /// Replaces `scope`'s rows with a base of its own live rows, as a
-    /// checkpoint import at the current tip does, keeping those `keep`
-    /// accepts by row id.
-    pub(crate) async fn rebase_replayed_for_test(
-        &self,
-        scope: ResourceScope,
-        keep: impl Fn(Commitment) -> bool,
-    ) -> Result<(), Error> {
-        let mut inner = self.inner.lock(Class::Background).await;
-        let mut rows = inner.replayed_images(scope).await?;
-        rows.retain(|(row, _)| keep(*row));
-        let tip = inner.workspace.tip;
-        transaction!(inner, |inner| inner
-            .replace_replayed(scope, tip, &rows)
-            .await)
     }
 }
 

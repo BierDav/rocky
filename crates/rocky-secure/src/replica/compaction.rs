@@ -20,6 +20,10 @@ mod readiness;
 mod rebootstrap;
 pub use rebootstrap::{FrameReplay, SealRebootstrap};
 
+/// Seals `finalize_arrived` finalizes in one recovery or sync pass, so
+/// that a pass under the background lock stays bounded.
+pub const ARRIVED_SEALS_PER_PASS: usize = 4;
+
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_seal_anchors(scope INTEGER PRIMARY KEY,frontier BLOB NOT NULL) WITHOUT ROWID",
     // Seals of the followed path this replica finalized, oldest first. The
@@ -1080,7 +1084,11 @@ impl<A: RowApplication> Inner<A> {
                     transaction!(self, |inner| inner
                         .finalize_seal(domain, &seal, &unverified, false)
                         .await)?;
-                    count += 1;
+                    // Only a scope it verified is work done: one that never
+                    // verifies must not count on every pass.
+                    if self.unverified_scopes(domain).await?.len() < unverified.len() {
+                        count += 1;
+                    }
                 }
                 return Ok((count, None));
             };
@@ -2073,11 +2081,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Finalizes the followed path's seals whose frames this replica holds
     /// and publishes a revision only when one finalized: a member's drops
     /// turn final as seals arrive, not only after its next local write
-    /// queues maintenance. Returns how many finalized.
+    /// queues maintenance. At most `ARRIVED_SEALS_PER_PASS` finalize per
+    /// call; later passes take the rest. Returns how many finalized.
     pub async fn finalize_arrived(&self, domain: Scope) -> Result<usize, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
-        let (finalized, _) = inner.finalize_ready(domain).await?;
+        let (finalized, _) = inner
+            .finalize_at_most(domain, ARRIVED_SEALS_PER_PASS)
+            .await?;
         if finalized > 0 {
             inner = flush_guard(inner, &self.inner).await?;
             inner.publish_revision().await?;

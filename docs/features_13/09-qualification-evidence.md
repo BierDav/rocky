@@ -238,3 +238,52 @@ evidence.
   `for` range and a manual `is_multiple_of` (clippy), and a test that used
   `tempfile` without depending on it. With those fixed, `./scripts/check`
   passes: 229 unit and 1,290 integration tests.
+
+## Post-qualification fixes
+
+- **Scope resets took other scopes' rows** (`rocky-secure`, closes the
+  open "frames-reset path still cascades" item). All four replayed
+  scope-reset paths were affected: `replace_replayed` (checkpoint import),
+  `replay_scope(reset = true)` (seal rebootstrap from frames),
+  `abort_direct` (aborted direct import) and eviction (`clear_typed`).
+  SQLite runs delete actions inside the transaction and cannot switch
+  foreign keys off there. Fix 3's reinstate also checked only the base,
+  so it missed rows whose parent the reapplied operations bring back.
+  It also tracked one foreign key per child table.
+  - Fix: one helper, `clear_replayed(scope, Clear::{Refill, Evict})`.
+    A refill whose table's delete actions reach another scope with
+    history marks the scope (`secure_replayed_rederive`). Once no marked
+    scope waits for a rebootstrap, pending frames or a direct import, the
+    domain's replayed rows are rebuilt from bases and frames
+    (`rederive_replayed`, at the end of `switch_to_staged` and of
+    `settle_seal_rebootstrap`). The rebuild runs in a savepoint and rolls
+    back while a foreign key is still violated. Reinstate is deleted.
+  - Eviction rule: rows of held scopes follow their declared delete
+    action, and their outcomes stay as replayed. Holding the parent again
+    refills it.
+  - `abort_direct` cannot reach rows today. A direct import keeps the
+    scope's table empty until the switch, and its frames wait.
+- **Outcomes were lost on reset** (`rocky-secure`). Clearing a scope
+  deleted its `secure_replayed` records, so `transaction_outcome` returned
+  `None`.
+  - Fix: records move to `secure_kept_outcomes`.
+    `transaction_outcome` and `transaction_violation` read live records,
+    then kept ones. A kept member whose frame is gone was covered by a
+    seal and reports as final.
+  - Format: the replica identity is `rocky.encrypted-replica.v43`.
+- **`finalize_arrived`** counts the unverified-scope pass only when a
+  scope verified. It finalizes at most `ARRIVED_SEALS_PER_PASS` (4) seals
+  per call.
+- Tests (`tests::compaction::cascades`, two references from `tags` into
+  `items`, a cascade and a `SET NULL`):
+  - `a_parent_replayed_from_frames_keeps_the_rows_that_reference_it`
+  - `an_imported_parent_base_keeps_children_of_rows_applied_over_it`
+    (real import with reapply; replicas converge on rows and drops)
+  - `an_authored_outcome_survives_imports_and_restarts_after_compaction`
+  - `an_evicted_parent_takes_its_children_by_their_delete_action`
+  - `scope_local::an_idle_finalization_pass_publishes_nothing`
+  - The first three fail with re-derivation and kept outcomes disabled.
+    The eviction and idle tests document behavior and pass either way.
+  - The fixture-only test
+    `a_base_of_a_parent_scope_keeps_the_children_of_rows_it_keeps` and
+    its hook are removed.

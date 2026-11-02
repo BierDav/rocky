@@ -79,7 +79,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[tokio::test]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..42).chain([43]) {
+    for version in (0..43).chain([44]) {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();

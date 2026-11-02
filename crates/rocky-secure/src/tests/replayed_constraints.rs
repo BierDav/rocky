@@ -801,66 +801,6 @@ async fn checks_pass_null_and_hold_after_every_statement() {
     );
 }
 
-/// A base replacing one scope's rows never takes rows of another scope a
-/// delete action reaches: children of a parent the base keeps stay as they
-/// were, those of a parent it lacks go as the cascade takes them.
-#[tokio::test]
-async fn a_base_of_a_parent_scope_keeps_the_children_of_rows_it_keeps() {
-    let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
-    let (devices, ids, _) = devices(
-        &c,
-        root.path(),
-        1,
-        &[
-            "INSERT INTO teams(name,cap,id) VALUES('red',2,#id)",
-            "INSERT INTO teams(name,cap,id) VALUES('blue',2,#id)",
-        ],
-    )
-    .await;
-    let (red, blue) = (ids[0], ids[1]);
-    devices[0]
-        .commit(
-            &c,
-            &[
-                &format!("INSERT INTO members(team,email,id) VALUES({red},'r@example',#id)"),
-                &format!(
-                    "INSERT INTO members(team,email,role,id) VALUES({blue},'b@example','lead',#id)"
-                ),
-            ],
-        )
-        .await
-        .unwrap();
-    let before = devices[0].rows(&c).await;
-    assert_eq!(before["members"].len(), 2);
-
-    devices[0]
-        .replica
-        .rebase_replayed_for_test(c.scope("teams"), |_| true)
-        .await
-        .unwrap();
-    assert_eq!(devices[0].rows(&c).await, before);
-
-    // A base without blue: its member goes with it, red's stays.
-    let app = c.app();
-    let teams = app
-        .tables()
-        .find(|table| table.sql_name == "teams")
-        .unwrap();
-    let blue_row = app
-        .row_id(c.domain.domain, teams, &before["teams"][1])
-        .unwrap();
-    assert!(before["teams"][1].contains(&SqlValue::Integer(blue)));
-    devices[0]
-        .replica
-        .rebase_replayed_for_test(c.scope("teams"), |row| row != blue_row)
-        .await
-        .unwrap();
-    let after = devices[0].rows(&c).await;
-    assert_eq!(after["teams"], before["teams"][..1]);
-    assert_eq!(after["members"], before["members"][..1]);
-}
-
 #[tokio::test]
 async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() {
     let c = Constrained::new();

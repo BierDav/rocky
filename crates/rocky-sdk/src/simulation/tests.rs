@@ -4,7 +4,7 @@
 //! `ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::tests::replay -- --ignored --nocapture`
 use super::{
     driver::{self, Report},
-    schedule::Scenario,
+    schedule::{Fixture, Scenario},
 };
 use crate::Failure;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ const INTEGRATION: Scenario = Scenario {
     nodes: 3,
     steps: 24,
     rounds: 4,
+    fixture: Fixture::Items,
 };
 /// The sweep's size for `seed`: three or four nodes. The integration seeds
 /// already cover the longer scenario; the e2e sweep adds independent seeds.
@@ -22,6 +23,7 @@ fn sweep(seed: u64) -> Scenario {
         nodes: 3 + (seed % 2) as usize,
         steps: 24,
         rounds: 4,
+        fixture: Fixture::Items,
     }
 }
 /// Seeds that do not converge, with the classes of what blocks them.

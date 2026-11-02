@@ -6,5 +6,7 @@
 mod cluster;
 mod driver;
 mod regressions;
+mod relational;
+mod relational_tests;
 mod schedule;
 mod tests;

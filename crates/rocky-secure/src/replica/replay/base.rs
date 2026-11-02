@@ -671,6 +671,9 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(corrupt)?;
         let images = self.current_images(scope, source, rows)?;
         self.touch(&table.name);
+        // Bases of linked scopes restore in any order; their references
+        // settle at commit. Deferral lasts until the transaction ends, so it
+        // stops here: members replayed after the restore check their keys.
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
@@ -679,6 +682,9 @@ impl<A: RowApplication> Inner<A> {
                 .execute(&table.insert_image(), bindings(table.stored(&image)))
                 .await?;
         }
+        self.conn
+            .execute("PRAGMA defer_foreign_keys=OFF", ())
+            .await?;
         Ok(())
     }
 }

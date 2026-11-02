@@ -10,6 +10,84 @@ pub(super) struct Scenario {
     pub(super) nodes: usize,
     pub(super) steps: usize,
     pub(super) rounds: usize,
+    pub(super) fixture: Fixture,
+}
+
+/// The schema a run uses and the writes its schedules draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fixture {
+    /// `items` pairs and `parts` rows, with branches.
+    Items,
+    /// Boards and cards with keys, checks and an assertion, on `main`.
+    Relational,
+}
+impl Fixture {
+    pub(super) fn schema(self) -> &'static str {
+        match self {
+            Self::Items => super::cluster::SCHEMA,
+            Self::Relational => super::relational::SCHEMA,
+        }
+    }
+    /// The tables an invited writer reads.
+    pub(super) fn scopes(self) -> [&'static str; 2] {
+        match self {
+            Self::Items => ["items", "parts"],
+            Self::Relational => ["boards", "cards"],
+        }
+    }
+}
+
+/// A relational write; indices pick among the rows the author reads.
+#[derive(Clone, Debug)]
+pub(super) enum Change {
+    Board {
+        list: String,
+        code: u8,
+        cap: u8,
+    },
+    Card {
+        list: String,
+        board: u8,
+        pinned: Option<u8>,
+        name: u8,
+        points: u8,
+    },
+    /// A board and a card on it, in one transaction of two members.
+    Pair {
+        list: String,
+        code: u8,
+        name: u8,
+        points: u8,
+    },
+    Raise {
+        list: String,
+        card: u8,
+        by: i8,
+    },
+    Recode {
+        list: String,
+        board: u8,
+        code: u8,
+    },
+    DropBoard {
+        list: String,
+        board: u8,
+    },
+    DropCard {
+        list: String,
+        card: u8,
+    },
+    MoveCard {
+        from: String,
+        to: String,
+        card: u8,
+        board: u8,
+    },
+    MoveBoard {
+        from: String,
+        to: String,
+        board: u8,
+    },
 }
 
 /// Nodes are indices; node 0 created the domain and node 1 joined it
@@ -49,6 +127,15 @@ pub(super) enum Action {
     Invite(usize, usize),
     /// Node 0 revokes the node.
     Revoke(usize),
+    /// A relational write.
+    Change(usize, Change),
+    /// The node becomes partial and evicts the list's partitions.
+    Evict(usize, String),
+    /// The node holds the list's partitions again.
+    Hold(usize, String),
+    /// The node's networking goes off or on.
+    Offline(usize),
+    Online(usize),
 }
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,6 +161,11 @@ impl fmt::Display for Action {
             Self::WritePart(node, list) => write!(f, "write {} in {list}", name(node)),
             Self::Invite(by, node) => write!(f, "invite {} by {}", name(node), name(by)),
             Self::Revoke(node) => write!(f, "revoke {}", name(node)),
+            Self::Change(node, change) => write!(f, "change {} {change:?}", name(node)),
+            Self::Evict(node, list) => write!(f, "evict {} {list}", name(node)),
+            Self::Hold(node, list) => write!(f, "hold {} {list}", name(node)),
+            Self::Offline(node) => write!(f, "offline {}", name(node)),
+            Self::Online(node) => write!(f, "online {}", name(node)),
         }
     }
 }
@@ -141,6 +233,9 @@ const POINTS: [CrashPoint; 7] = [
 ];
 
 pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
+    if scenario.fixture == Fixture::Relational {
+        return relational(seed, scenario);
+    }
     let mut draws = Draws::new(seed);
     let total: u64 = WEIGHTS.iter().map(|(_, weight)| weight).sum();
     let mut steps = Vec::with_capacity(scenario.steps);
@@ -277,5 +372,220 @@ fn faults(draws: &mut Draws) -> LinkFaults {
         cuts: draws.below(150) as u16,
         cut_within: 1 + draws.below(64 * 1024) as usize,
         refusals: draws.below(150) as u16,
+    }
+}
+
+/// Lists the relational setup creates and shares with node 1.
+pub(super) const LISTS: [&str; 2] = ["l0", "l1"];
+
+/// Weights of the relational draw: writes and the lifecycle around them.
+const RELATIONAL: [(Lifecycle, u64); 18] = [
+    (Lifecycle::Change, 44),
+    (Lifecycle::Sync, 14),
+    (Lifecycle::SyncPair, 8),
+    (Lifecycle::Sever, 3),
+    (Lifecycle::Heal, 3),
+    (Lifecycle::Advance, 2),
+    (Lifecycle::Restart, 3),
+    (Lifecycle::Crash, 5),
+    (Lifecycle::Seal, 7),
+    (Lifecycle::Compact, 5),
+    (Lifecycle::Partition, 2),
+    (Lifecycle::Share, 4),
+    (Lifecycle::Invite, 4),
+    (Lifecycle::Revoke, 1),
+    (Lifecycle::Evict, 3),
+    (Lifecycle::Hold, 3),
+    (Lifecycle::Offline, 3),
+    (Lifecycle::Online, 3),
+];
+#[derive(Clone, Copy)]
+enum Lifecycle {
+    Change,
+    Sync,
+    SyncPair,
+    Sever,
+    Heal,
+    Advance,
+    Restart,
+    Crash,
+    Seal,
+    Compact,
+    Partition,
+    Share,
+    Invite,
+    Revoke,
+    Evict,
+    Hold,
+    Offline,
+    Online,
+}
+/// Every crash point; those a step does not reach report so.
+const RELATIONAL_POINTS: [CrashPoint; 12] = CrashPoint::ALL;
+
+fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
+    let mut draws = Draws::new(seed);
+    let total: u64 = RELATIONAL.iter().map(|(_, weight)| weight).sum();
+    let mut steps = Vec::with_capacity(scenario.steps);
+    let mut members = 2;
+    let mut revoked = false;
+    let mut lists: Vec<String> = LISTS.iter().map(|list| list.to_string()).collect();
+    while steps.len() < scenario.steps {
+        let index = steps.len();
+        let node = |draws: &mut Draws| draws.below(members as u64) as usize;
+        let other = |draws: &mut Draws| 1 + draws.below(members as u64 - 1) as usize;
+        let signer = |draws: &mut Draws| match draws.chance(800) {
+            true => 0,
+            false => draws.below(members as u64) as usize,
+        };
+        let pair = |draws: &mut Draws| {
+            let a = draws.below(scenario.nodes as u64) as usize;
+            let b = (a + 1 + draws.below(scenario.nodes as u64 - 1) as usize) % scenario.nodes;
+            (a, b)
+        };
+        let mut pick = draws.below(total);
+        let kind = RELATIONAL
+            .iter()
+            .find(|(_, weight)| {
+                let found = pick < *weight;
+                pick = pick.saturating_sub(*weight);
+                found
+            })
+            .map_or(Lifecycle::Change, |(kind, _)| *kind);
+        let list = |draws: &mut Draws| lists[draws.below(lists.len() as u64) as usize].clone();
+        let action = match kind {
+            Lifecycle::Change => {
+                let author = node(&mut draws);
+                Action::Change(author, change(&mut draws, &lists))
+            }
+            Lifecycle::Sync => Action::Sync(node(&mut draws)),
+            Lifecycle::SyncPair => {
+                let (a, b) = pair(&mut draws);
+                Action::SyncPair(a, b)
+            }
+            Lifecycle::Sever => {
+                let (a, b) = pair(&mut draws);
+                Action::Sever(a, b)
+            }
+            Lifecycle::Heal => {
+                let (a, b) = pair(&mut draws);
+                Action::Heal(a, b)
+            }
+            Lifecycle::Advance => Action::Advance(Duration::from_millis(
+                [10, 5_000, 60_000][draws.below(3) as usize],
+            )),
+            Lifecycle::Restart => Action::Restart(node(&mut draws)),
+            Lifecycle::Crash => {
+                let point = draws.below(RELATIONAL_POINTS.len() as u64 + 1) as usize;
+                Action::Crash(node(&mut draws), RELATIONAL_POINTS.get(point).copied())
+            }
+            Lifecycle::Seal => Action::Seal(signer(&mut draws)),
+            Lifecycle::Compact => Action::Compact(signer(&mut draws)),
+            Lifecycle::Partition => {
+                let list = format!("l{index}");
+                lists.push(list.clone());
+                Action::Partition(list)
+            }
+            Lifecycle::Share => {
+                let list = list(&mut draws);
+                Action::Share(list, other(&mut draws))
+            }
+            Lifecycle::Invite if members < scenario.nodes => {
+                members += 1;
+                Action::Invite(draws.below(members as u64 - 1) as usize, members - 1)
+            }
+            Lifecycle::Revoke if !revoked && members > 2 => {
+                revoked = true;
+                Action::Revoke(other(&mut draws))
+            }
+            Lifecycle::Invite | Lifecycle::Revoke => continue,
+            Lifecycle::Evict => {
+                let list = list(&mut draws);
+                Action::Evict(other(&mut draws), list)
+            }
+            Lifecycle::Hold => {
+                let list = list(&mut draws);
+                Action::Hold(other(&mut draws), list)
+            }
+            Lifecycle::Offline => Action::Offline(node(&mut draws)),
+            Lifecycle::Online => Action::Online(node(&mut draws)),
+        };
+        // The lifecycle paths: a member joining after a compacted seal
+        // imports a checkpoint, a crash during that import, a share to a
+        // new member, and a compaction right after a seal.
+        let follow = match &action {
+            Action::Seal(0) if draws.chance(500) => Some(Action::Compact(0)),
+            Action::Compact(_) if members < scenario.nodes && draws.chance(400) => {
+                members += 1;
+                Some(Action::Invite(0, members - 1))
+            }
+            Action::Invite(_, joined) if draws.chance(600) => {
+                Some(Action::Share(lists[0].clone(), *joined))
+            }
+            Action::Share(_, node) if draws.chance(300) => Some(Action::Crash(
+                *node,
+                [None, Some(CrashPoint::Import), Some(CrashPoint::Switch)][draws.below(3) as usize],
+            )),
+            _ => None,
+        };
+        steps.push(action);
+        steps.extend(follow);
+    }
+    steps.truncate(scenario.steps);
+    steps
+}
+
+fn change(draws: &mut Draws, lists: &[String]) -> Change {
+    let list = |draws: &mut Draws| lists[draws.below(lists.len() as u64) as usize].clone();
+    let small = |draws: &mut Draws, below: u64| draws.below(below) as u8;
+    match draws.below(20) {
+        0..=3 => Change::Board {
+            list: list(draws),
+            code: small(draws, 4),
+            // 13 breaks the check where it is written.
+            cap: 3 + small(draws, 11),
+        },
+        4..=8 => Change::Card {
+            list: list(draws),
+            board: small(draws, 8),
+            pinned: draws.chance(500).then(|| small(draws, 8)),
+            name: small(draws, 5),
+            points: small(draws, 6),
+        },
+        9 => Change::Pair {
+            list: list(draws),
+            code: small(draws, 4),
+            name: small(draws, 5),
+            points: small(draws, 7),
+        },
+        10..=12 => Change::Raise {
+            list: list(draws),
+            card: small(draws, 8),
+            by: small(draws, 6) as i8 - 1,
+        },
+        13 => Change::Recode {
+            list: list(draws),
+            board: small(draws, 8),
+            code: small(draws, 4),
+        },
+        14..=15 => Change::DropBoard {
+            list: list(draws),
+            board: small(draws, 8),
+        },
+        16 => Change::DropCard {
+            list: list(draws),
+            card: small(draws, 8),
+        },
+        17..=18 => Change::MoveCard {
+            from: list(draws),
+            to: list(draws),
+            card: small(draws, 8),
+            board: small(draws, 8),
+        },
+        _ => Change::MoveBoard {
+            from: list(draws),
+            to: list(draws),
+            board: small(draws, 8),
+        },
     }
 }

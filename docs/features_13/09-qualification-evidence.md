@@ -356,3 +356,87 @@ evidence.
 
   The whole rebuild holds the replica in one step without yielding.
   Bounding it is phase 10's question.
+
+## Relational lifecycle fuzz
+
+The SDK simulation gains a relational fixture
+(`rocky-sdk` `simulation::relational`, seeds in `relational_tests`).
+`boards` and `cards` are partitioned by `list` in one group. A card has a
+`CASCADE` key to its board and a `SET NULL` pin to another board. Codes
+and names are unique per list from small pools. `CHECK`s bound caps and
+points, and the `board_cap` assertion bounds a board's points.
+
+- **Actions:** concurrent inserts, updates, deletes and moves of boards
+  and cards (moves and board-and-card pairs are two-member bundles);
+  seals, compaction, invites after a compacted seal (checkpoint import),
+  crashes at every `CrashPoint`, restarts, revocation, offline periods,
+  eviction of a list by a partial member (the owner as its full node),
+  holding it again, link faults.
+- **After quiescence:** the owner seals and everyone converges at that
+  seal, every member restarts and converges again. Then:
+  - every holder of a list has the reference's rows;
+  - every holder of all of a transaction's lists has its outcome
+    (reason and `sealed`);
+  - every author can still query its transactions;
+  - no replica shows an orphan, a dangling pin, a failed check or a
+    violated assertion.
+
+  The replica audit and these row checks run after every step.
+- **Reference:** a plain in-memory SQLite database with hand-written
+  DDL. It replays, from scratch, the statements and values the driver
+  bound and committed, in `(era, stamp)` order. Each transaction runs in a
+  savepoint, with keys deferred when it has several members. Replicas
+  supply only the order, through the qualification-only
+  `EncryptedReplica::replayed_positions`.
+- **Fix: restoring rows left keys deferred** (`rocky-secure`).
+  `restore_images` turned on `defer_foreign_keys` and never turned it
+  off. The pragma lasts until the transaction ends, so members replayed
+  after a restore in the same transaction ran with every key deferred.
+  This affects full rebuilds, rederive and checkpoint pages, and a
+  single-member transaction's orphan then applied. Found as seed 2: a
+  board that loses its code after a seal and the card on it.
+  - Fix: deferral ends after the restore.
+  - Tests:
+    `tests::compaction::cascades::a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild`
+    and `relational_tests::regressions::a_card_on_a_board_that_lost_its_code_after_a_seal_audits`,
+    which both fail without the fix.
+- **Open** (minimized, kept as `#[ignore]` reproductions in
+  `relational_tests::regressions`):
+  - Seed 20008: linked scopes rebuild from different seals. A board
+    delete cascades its card, replays after seal 1 and is covered by
+    seal 2. Seal 2 covers no `cards` member, so it takes no `cards` rows.
+    After compaction, the full rebuild restores `cards` at seal 1 and
+    `boards` at seal 2, and the card returns without its board. Taking
+    linked scopes' rows at each seal would also need open cross-scope
+    undo, so this is not a local fix.
+  - Seed 20004: a rebuild after an eviction replays the evicted scope.
+    A board, a seal, then a partial member evicts the list, and its
+    audit's rebuild shows the evicted board.
+  - Seed 20000: a member holding only `l1` never finalizes a seal over
+    the owner's `l0` frames ("missing frames of author 1 through the
+    seal's frontier").
+  - Seed 20007 (shrinks poorly): after a cascade delete in `l0`, the
+    full rebuild's identity ledger differs from the projection.
+  - Seed 1: evicting a list the member was never shared. The release is
+    accepted, the eviction fails with "replica consistency check failed:
+    replayed scope", and a `RestorationGuard` blocks the member from then
+    on. The driver now evicts only shared lists.
+- Soak (`ROCKY_SIM_SEEDS=300`, release, seeds 20000–20299, 3–4 nodes,
+  40 steps, before the driver's era-only position comparison): 146
+  passed, 154 failed. Every failure class matches an open item above or
+  below; none is a reference mismatch of rows.
+  - Audits:
+    - after eviction: 26 seeds;
+    - linked-scope rebuild (`cards`, `boards`): 7;
+    - identity ledger: 8.
+  - Outcomes: 11 seeds where a holder reports no outcome for a
+    transaction that applied, though it holds its rows (it received them
+    through a base, not replay).
+  - Liveness, mostly after eviction:
+    - `RestorationGuard`: 27 seeds, plus 32 with a refused `SyncRequest`;
+    - `FinalizationWaiting` alone: 21 seeds (seed 20000's class).
+  - Reached: 566 applied and 19 dropped transactions checked against the
+    reference; 162 evictions; crash points Apply, Compact, Import, Redo,
+    Rewind, Settle, Switch and UndoDeletion fired; 205 rebootstrap and 37
+    import waits observed.
+

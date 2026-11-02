@@ -62,11 +62,13 @@ pub(super) struct Member {
     pub(super) node_key: Option<String>,
     /// Revoked members never open again.
     pub(super) revoked: bool,
+    schema: &'static str,
 }
 
 impl Member {
-    pub(super) fn new(root: &Path, name: &str) -> Self {
+    pub(super) fn new(root: &Path, name: &str, schema: &'static str) -> Self {
         Self {
+            schema,
             name: name.into(),
             directory: root.join(name),
             keys: Arc::default(),
@@ -81,7 +83,7 @@ impl Member {
         let hosted = Database::host(
             Open {
                 directory: &self.directory,
-                schema: SCHEMA,
+                schema: self.schema,
                 secrets: Some(secrets),
                 identity: None,
                 network: Some(Network::Owned(hub.connector(&self.name))),

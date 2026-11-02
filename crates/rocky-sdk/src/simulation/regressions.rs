@@ -1,7 +1,7 @@
 //! Schedules the sweep found and shrank, kept as fixed regressions.
 use super::{
     driver,
-    schedule::{Action::*, Scenario},
+    schedule::{Action::*, Fixture, Scenario},
 };
 use crate::Failure;
 
@@ -9,6 +9,7 @@ const SIZE: Scenario = Scenario {
     nodes: 4,
     steps: 0,
     rounds: 4,
+    fixture: Fixture::Items,
 };
 
 async fn safe(seed: u64, steps: Vec<super::schedule::Action>) -> Result<(), Failure> {

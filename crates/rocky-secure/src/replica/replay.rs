@@ -330,6 +330,49 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+#[cfg(any(test, feature = "qualification"))]
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Every transaction with a live replay record here, at its earliest
+    /// member's `(era, stamp)`, and whether a seal covers it: what an
+    /// independent reference needs to replay the canonical order.
+    pub async fn replayed_positions(
+        &self,
+    ) -> Result<BTreeMap<Commitment, ((i64, rocky_core::SecureStamp), bool)>, Error> {
+        let inner = self.inner.lock(Class::Background).await;
+        let rows = collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT era,clock,author,sequence,txn,sealed FROM secure_replayed",
+                    (),
+                )
+                .await?,
+        )
+        .await?;
+        let mut positions: BTreeMap<Commitment, (Order, bool)> = BTreeMap::new();
+        for row in &rows {
+            let [.., SqlValue::Blob(txn), SqlValue::Integer(sealed)] = row.as_slice() else {
+                return Err(Error::Corrupt("replayed position".into()));
+            };
+            let txn = Commitment::try_from(txn.as_slice())
+                .map_err(|_| Error::Corrupt("replayed transaction".into()))?;
+            let (order, sealed) = (order_of(row)?, *sealed != 0);
+            match positions.get_mut(&txn) {
+                Some((least, all)) => {
+                    if order < *least {
+                        *least = order;
+                    }
+                    *all &= sealed;
+                }
+                None => {
+                    positions.insert(txn, (order, sealed));
+                }
+            }
+        }
+        Ok(positions)
+    }
+}
+
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Seals everything `scope` applied so far, as a finalized seal would,

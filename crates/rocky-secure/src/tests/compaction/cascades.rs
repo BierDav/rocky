@@ -338,6 +338,40 @@ async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     d.restored(items).await.unwrap();
     d.settle().await.unwrap();
     assert_eq!(tags(&d).await, tags(&a).await);
+}
+
+/// A seals with item `q`; B, which never received it, writes its own `q`
+/// and a tag of it. At A both replay after the seal: B's `q` collides and
+/// drops, so its tag has no parent and drops too. Rebuilding from the
+/// seal's rows must reach the same rows: restoring them must not leave the
+/// keys of the members replayed after them deferred.
+#[tokio::test]
+async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
+    let lineage = linked();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "p", "parent").await;
+    insert(&a, "q", "owner's").await;
+    seal(&lineage, &a).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    insert(&b, "q", "late").await;
+    let late = tag(&b, "x", "q").await;
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    for scope in [items, tag_scope] {
+        sync_scope(&lineage, &b, &a, &keys[0], scope).await;
+    }
+    assert!(tags(&a).await.is_empty());
+    assert!(matches!(
+        a.transaction_outcome(late).await.unwrap(),
+        Some(rocky_core::replay::TransactionOutcome::Dropped { .. })
+    ));
+    a.audit(items).await.unwrap();
+    a.audit(tag_scope).await.unwrap();
+    assert!(tags(&a).await.is_empty());
     assert_eq!(tag_rows(&d).await, tag_rows(&a).await);
 }
 

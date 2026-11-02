@@ -269,7 +269,7 @@ pub trait Connector: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_current_protocols_are_named() {
         assert_eq!(Protocol::named(b"rocky/command/2"), None);
         assert_eq!(Protocol::named(b"rocky/link/1"), None);

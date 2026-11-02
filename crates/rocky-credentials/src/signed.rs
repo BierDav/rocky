@@ -699,7 +699,7 @@ mod tests {
     use super::*;
     use crate::PrivateKey;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_capability_of_the_earlier_format_is_refused_and_names_no_generation() {
         let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
         let grant = ResourceGrant {

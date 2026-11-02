@@ -161,7 +161,7 @@ mod tests {
         digest
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn digests_commute_and_cancel() {
         let (a, b) = ([0xff; 32], [7; 32]);
         let mut one = SetDigest::default();
@@ -182,7 +182,7 @@ mod tests {
     const TRACKED: [&str; 4] = ["plain", "keyed", "loose", "typed"];
     /// The tracked digest must equal a scan after every kind of row change
     /// the engine supports, or a checkpoint would not verify.
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn the_row_hook_follows_every_kind_of_change() {
         let conn = crate::sqlite::Connection::open_in_memory().unwrap();
         for sql in [

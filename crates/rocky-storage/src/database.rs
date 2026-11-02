@@ -1,21 +1,11 @@
-use crate::{Error, sqlite};
-use std::{
-    fs::{File, OpenOptions},
-    path::{Path, PathBuf},
-};
+use crate::{Error, files, sqlite};
+use std::path::{Path, PathBuf};
 
 /// File lifetime is separate from scoped reducer/author/revision scheduling.
-/// `<file>.lock` beside the file: appended, so `a.db` and `a.sqlite` in one
-/// directory do not share a lock.
-fn lock_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".lock");
-    PathBuf::from(name)
-}
-/// The lock file excludes a second process, so one writer owns the file.
+/// One writer owns the file; `files::Owner` excludes the others.
 pub struct DatabaseOwner {
     path: PathBuf,
-    _lock: File,
+    _owner: files::Owner,
 }
 impl DatabaseOwner {
     pub fn path(&self) -> &Path {
@@ -34,36 +24,15 @@ impl DatabaseOwner {
         if path_string == ":memory:" {
             return Err(Error::Incompatible("an on-disk file is required".into()));
         }
+        files::prepare(path).await?;
         check_file_format(path).await?;
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).map_err(Error::Io)?;
-        }
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path(path))
-            .map_err(Error::Io)?;
-        // A child process being spawned briefly shares a just-closed owner's
-        // lock until it execs, so a reopen right after close waits a moment.
-        let mut attempt = 0;
-        while let Err(error) = lock.try_lock() {
-            attempt += 1;
-            if attempt == 10 {
-                return Err(Error::Incompatible(format!(
-                    "replica is already open or file lock unavailable: {error}"
-                )));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
         let owner = Self {
             path: path.to_path_buf(),
-            _lock: lock,
+            _owner: files::Owner::acquire(path).await?,
         };
         check_file_format(path).await?;
         let connection = owner.connect()?;
-        if !std::fs::metadata(path).is_ok_and(|file| file.len() > 0) {
+        if !files::has_data(path) {
             // Only an empty file takes `auto_vacuum`; maintenance reclaims
             // free pages in bounded steps.
             connection
@@ -82,7 +51,7 @@ pub const FILE_FORMAT: i64 = 0x524b5902;
 
 /// Read-only preflight, also used before SDK settings/enrollment writes.
 pub async fn check_file_format(path: &Path) -> Result<(), Error> {
-    if !std::fs::metadata(path).is_ok_and(|file| file.len() > 0) {
+    if !files::has_data(path) {
         return Ok(());
     }
     let conn = sqlite::Connection::open_read_only(path)?;
@@ -123,10 +92,16 @@ pub async fn check_file_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-#[cfg(test)]
+// These inspect the native file layout: the bytes and the lock beside them.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
-    #[tokio::test]
+    fn lock_path(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn unsupported_files_are_refused_before_any_write() {
         for version in [0, FILE_FORMAT - 1, FILE_FORMAT + 1] {
             let directory = tempfile::tempdir().unwrap();
@@ -153,7 +128,7 @@ mod tests {
             assert!(!directory.path().join("file.sqlite-wal").exists());
         }
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn unsupported_stored_descriptors_refuse_before_any_write() {
         for table in [
             "rocky_logical_schema",
@@ -194,7 +169,7 @@ mod tests {
             }
         }
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn application_table_suffixes_are_not_schema_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("application.sqlite");
@@ -214,7 +189,7 @@ mod tests {
         check_file_format(&path).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_new_file_reopens_with_the_current_tag() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("file.sqlite");

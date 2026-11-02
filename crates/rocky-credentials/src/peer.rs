@@ -58,7 +58,7 @@ impl<'de> Deserialize<'de> for PeerId {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_reference_is_stable_distinct_and_contains_no_public_key() {
         let a = crate::PrivateKey::from_bytes(&[1; 32]).public_key();
         let b = crate::PrivateKey::from_bytes(&[2; 32]).public_key();

@@ -1,7 +1,8 @@
 //! Private SQLite adapter. Calls are synchronous and complete before they
 //! return; the `async` signatures only let storage code share one shape with
 //! its async callers. See `docs/runtime/write-concurrency.md`.
-use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex, time::Instant};
+use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex};
+use web_time::Instant;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -439,11 +440,11 @@ pub const HISTORY_TRIGGERS: &str = "secure_kept_";
 pub const HISTORY_TABLES: &str = "secure_history_";
 impl Connection {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::configure(rusqlite::Connection::open(path)?)
+        Self::configure(crate::files::connect(path, rusqlite::OpenFlags::default())?)
     }
     pub fn open_read_only(path: &Path) -> Result<Self> {
         use rusqlite::OpenFlags;
-        let connection = Self::configure(rusqlite::Connection::open_with_flags(
+        let connection = Self::configure(crate::files::connect(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?)?;
@@ -1060,7 +1061,65 @@ pub fn trace_statements(enabled: bool) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
+    /// Replay results depend on the SQLite build, so every target links the
+    /// same amalgamation with the same semantics. Only options that cannot
+    /// change a result differ: threads, mutexes, allocation, mmap, where
+    /// temporary tables live, the OS layer and extension loading (replay
+    /// refuses `load_extension`).
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn every_target_links_the_same_sqlite() {
+        const SOURCE: &str = "2026-06-03 19:12:13 \
+            d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
+        const TARGET_ONLY: &[&str] = &[
+            "ATOMIC_INTRINSICS",
+            "COMPILER",
+            "DEFAULT_WORKER_THREADS",
+            "ENABLE_LOAD_EXTENSION",
+            "MAX_MMAP_SIZE",
+            "MAX_WORKER_THREADS",
+            "MUTEX_OMIT",
+            "MUTEX_PTHREADS",
+            "OMIT_LOAD_EXTENSION",
+            "OS_OTHER",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE",
+            "THREADSAFE",
+        ];
+        const SHARED: &str = "DEFAULT_AUTOVACUUM DEFAULT_CACHE_SIZE=-2000 \
+            DEFAULT_FILE_FORMAT=4 DEFAULT_FOREIGN_KEYS DEFAULT_JOURNAL_SIZE_LIMIT=-1 \
+            DEFAULT_MMAP_SIZE=0 DEFAULT_PAGE_SIZE=4096 DEFAULT_PCACHE_INITSZ=20 \
+            DEFAULT_RECURSIVE_TRIGGERS DEFAULT_SECTOR_SIZE=4096 DEFAULT_SYNCHRONOUS=2 \
+            DEFAULT_WAL_AUTOCHECKPOINT=1000 DEFAULT_WAL_SYNCHRONOUS=2 DIRECT_OVERFLOW_READ \
+            ENABLE_API_ARMOR ENABLE_COLUMN_METADATA ENABLE_DBSTAT_VTAB ENABLE_FTS3 \
+            ENABLE_FTS3_PARENTHESIS ENABLE_FTS5 ENABLE_MEMORY_MANAGEMENT \
+            ENABLE_PREUPDATE_HOOK ENABLE_RTREE ENABLE_STAT4 HAVE_ISNAN \
+            MALLOC_SOFT_LIMIT=1024 MAX_ATTACHED=10 MAX_COLUMN=2000 \
+            MAX_COMPOUND_SELECT=500 MAX_DEFAULT_PAGE_SIZE=8192 MAX_EXPR_DEPTH=1000 \
+            MAX_FUNCTION_ARG=1000 MAX_LENGTH=1000000000 MAX_LIKE_PATTERN_LENGTH=50000 \
+            MAX_PAGE_COUNT=0xfffffffe MAX_PAGE_SIZE=65536 MAX_SQL_LENGTH=1000000000 \
+            MAX_TRIGGER_DEPTH=1000 MAX_VARIABLE_NUMBER=32766 MAX_VDBE_OP=250000000 \
+            SOUNDEX USE_URI";
+        let connection = Connection::open_in_memory().unwrap();
+        let raw = connection.raw().unwrap();
+        assert_eq!(rusqlite::version(), "3.53.2");
+        let source: String = raw
+            .query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source, SOURCE);
+        let mut statement = raw.prepare("PRAGMA compile_options").unwrap();
+        let options = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|option| option.unwrap())
+            .filter(|option| {
+                let name = option.split('=').next().unwrap_or_default();
+                !TARGET_ONLY.contains(&name)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(options.join(" "), SHARED);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn repeated_table_watches_share_one_registration_and_keep_update_tracking() {
         let conn = Connection::open_in_memory().unwrap();
         conn.run_now("CREATE TABLE watched(id INTEGER PRIMARY KEY,value INTEGER)")
@@ -1077,7 +1136,7 @@ mod tests {
         assert_eq!(writes.selected_count([("unwatched", true)]), 0);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn integer_row_watches_isolate_scopes_and_include_moves_and_rollback() {
         let conn = Connection::open_in_memory().unwrap();
         conn.raw().unwrap().execute_batch("CREATE TABLE rows(scope INTEGER, id INTEGER PRIMARY KEY, value TEXT); CREATE TABLE copies(scope INTEGER, id INTEGER PRIMARY KEY);
@@ -1109,9 +1168,9 @@ mod tests {
         assert_eq!(next.count(), 0);
     }
 
-    #[test]
-    fn a_wide_read_only_connection_keeps_first_reads_bounded_and_read_only() {
-        let directory = tempfile::tempdir().unwrap();
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_wide_read_only_connection_keeps_first_reads_bounded_and_read_only() {
+        let directory = crate::files::Scratch::new().await;
         let path = directory.path().join("wide.db");
         let writer = Connection::open(&path).unwrap();
         let mut schema = String::from(
@@ -1147,7 +1206,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_deadline_interrupts_a_long_read_with_a_typed_error() {
         let conn = Connection::open_in_memory().unwrap();
         let count = |limit: i64| {

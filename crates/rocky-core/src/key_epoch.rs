@@ -54,7 +54,7 @@ mod tests {
             values.swap(at, index);
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn up_to_four_siblings_choose_the_lowest_hash_in_every_arrival_order() {
         for seed in 0..16u8 {
             let epochs: Vec<_> = (0..4)

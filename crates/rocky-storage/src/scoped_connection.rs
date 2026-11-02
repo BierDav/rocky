@@ -356,7 +356,7 @@ pub fn tokens(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn namespaces_preserve_same_named_columns_literals_and_case() {
         let conn = ScopedConnection::new(
             crate::sqlite::Connection::open_in_memory().unwrap(),

@@ -249,7 +249,7 @@ mod tests {
         };
         MigrationSum::join(left, right).unwrap()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn proofs_bind_every_position_exact_hash_length_and_tree_shape() {
         for n in 1..10 {
             for index in 0..n {
@@ -270,7 +270,7 @@ mod tests {
             }
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn empty_and_hostile_extents_are_bounded_and_overflow_is_refused() {
         let mut s = statement(0);
         s.root = s.empty().hash;

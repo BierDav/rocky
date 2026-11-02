@@ -140,7 +140,7 @@ fn selector_fixture() -> SelectorFixture {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     let SelectorFixture {
         node,
@@ -175,7 +175,7 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selector_chain_binds_each_slot_to_its_concrete_scope() {
     let SelectorFixture {
         node,
@@ -270,17 +270,17 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn delegated_selectors_cannot_widen_to_every_partition() {
     refuses_wider_partition_grant(grant(None, None, &[Right::Custody], &[]));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn delegated_selectors_cannot_change_the_customer() {
     refuses_wider_partition_grant(grant(Some("other"), None, &[Right::Custody], &[]));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn delegated_partition_rights_cannot_expand() {
     refuses_wider_partition_grant(grant(
         Some("customer-x"),
@@ -290,12 +290,12 @@ fn delegated_partition_rights_cannot_expand() {
     ));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn delegated_partition_fields_cannot_expand() {
     refuses_wider_partition_grant(grant(Some("customer-x"), None, &[Right::Custody], &[1]));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selector_chain_refuses_expired_credentials() {
     let SelectorFixture {
         node,
@@ -322,7 +322,7 @@ fn selector_chain_refuses_expired_credentials() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selector_chain_refuses_a_revoked_delegate() {
     let SelectorFixture {
         node,
@@ -350,7 +350,7 @@ fn selector_chain_refuses_a_revoked_delegate() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selector_chain_renewal_preserves_its_partition_terms() {
     let SelectorFixture {
         publisher,
@@ -417,7 +417,7 @@ fn node_fixture() -> NodeFixture {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn paired_grants_and_partition_nodes_never_expand_authority() {
     let NodeFixture {
         prefix,
@@ -454,7 +454,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
     assert!(!a.rights.is_empty());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_node_signer_rows_keep_their_granted_fields() {
     let NodeFixture {
         publisher,
@@ -489,7 +489,7 @@ fn partition_node_signer_rows_keep_their_granted_fields() {
     assert!(!wrong_field.permitted_by(&grants));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_nodes_bind_the_author_and_sequence() {
     let NodeFixture {
         publisher,
@@ -527,7 +527,7 @@ fn partition_nodes_bind_the_author_and_sequence() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_nodes_cannot_discard_their_selector() {
     let NodeFixture {
         publisher,
@@ -561,7 +561,7 @@ fn partition_nodes_cannot_discard_their_selector() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_node_signer_credentials_verify_after_round_trip() {
     let NodeFixture {
         publisher,
@@ -600,7 +600,7 @@ fn partition_node_signer_credentials_verify_after_round_trip() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_selectors_cannot_be_dropped() {
     let publisher = PrivateKey::new();
     let user = PrivateKey::new();

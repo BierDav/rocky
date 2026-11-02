@@ -396,7 +396,7 @@ mod tests {
         TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap()
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_row_is_named_by_its_key_and_holds_every_column_in_its_type() {
         let rows = rows();
         let table = rows.tables().next().unwrap().clone();
@@ -453,7 +453,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_values_bind_a_row_to_its_scope() {
         let definition = serde_json::json!({"format":6,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         let schema = crate::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())

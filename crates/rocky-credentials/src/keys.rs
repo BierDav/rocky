@@ -171,10 +171,11 @@ impl Vault {
     }
 }
 
-#[cfg(test)]
+// The file provider needs a filesystem.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn files_are_private_and_names_are_checked() -> Result<(), ProviderError> {
         let directory = tempfile::tempdir()?;
         let store = FileKeyProvider::new(directory.path().join("secrets"));
@@ -197,7 +198,7 @@ mod tests {
         assert!(store.load("rocky.a.node")?.is_none());
         Ok(())
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_missing_secret_is_an_error_and_an_existing_one_is_not_replaced() -> Result<(), Error> {
         let directory = tempfile::tempdir().map_err(|error| Error::Provider(error.into()))?;
         let provider: Arc<dyn KeyProvider> = Arc::new(FileKeyProvider::new(directory.path()));

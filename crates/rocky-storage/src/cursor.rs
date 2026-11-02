@@ -13,9 +13,10 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::oneshot;
+use web_time::Instant;
 
 /// Bounds of one cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -799,7 +800,8 @@ fn page(
     Ok(page)
 }
 
-#[cfg(test)]
+// Cursor readers are threads, which wasm32 does not have yet.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
 
@@ -856,7 +858,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_thousand_cursor_leases_reuse_the_worker_and_clear_temporary_views() {
         let file = file(1);
         let host = CursorHost::new();
@@ -894,7 +896,7 @@ mod tests {
         assert_eq!(host.workers(), 0);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn readiness_from_another_commit_is_refused_inside_the_snapshot() {
         let file = file(1);
         let host = CursorHost::new();
@@ -909,7 +911,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_come_from_one_snapshot_and_reset_restarts_it() {
         let file = file(5);
         let host = CursorHost::new();
@@ -980,7 +982,7 @@ mod tests {
         assert_eq!(cursor.next().await.unwrap().rows.len(), 3);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn further_statements_read_the_cursor_snapshot() {
         let file = file(3);
         let host = CursorHost::new();
@@ -1028,7 +1030,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn statements_are_confined_and_pages_are_bounded() {
         let file = file(3);
         let host = CursorHost::new();
@@ -1083,7 +1085,7 @@ mod tests {
         assert!(cursor.next().await.is_err());
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn bounds_revocation_and_host_close_end_cursors_deterministically() {
         let file = file(3);
         let host = CursorHost::new();
@@ -1171,7 +1173,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_session_holds_at_most_its_cursor_quota() {
         let file = file(1);
         let host = CursorHost::new();

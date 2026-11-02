@@ -31,7 +31,7 @@ fn single(signed: &SignedRevocation) -> RevocationSet {
     RevocationSet::try_from(vec![signed.clone()]).unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn every_interleaving_of_merges_yields_one_digest() {
     let publisher = PrivateKey::new();
     let issuers = [issuer(&publisher), issuer(&publisher)];
@@ -94,7 +94,7 @@ fn every_interleaving_of_merges_yields_one_digest() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
     // The owner signs: its statements need no chain valid at their time.
     let publisher = PrivateKey::new();
@@ -140,7 +140,7 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_bad_statement_is_refused_and_changes_nothing() {
     let publisher = PrivateKey::new();
     let issuing = issuer(&publisher);
@@ -249,7 +249,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_revoked_issuers_statement_counts_and_two_issuers_revoke_each_other() {
     let publisher = PrivateKey::new();
     let (a, b) = (issuer(&publisher), issuer(&publisher));
@@ -274,7 +274,7 @@ fn a_revoked_issuers_statement_counts_and_two_issuers_revoke_each_other() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn signing_adds_a_bounded_overhead() {
     let publisher = PrivateKey::new();
     let issuing = issuer(&publisher);

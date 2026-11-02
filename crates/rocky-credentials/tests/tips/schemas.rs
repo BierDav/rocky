@@ -88,7 +88,7 @@ fn main(graph: &mut TipGraph, owner: &PrivateKey) {
         .push(movement(graph, "main", None, Some(graph.genesis()), owner));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn concurrent_migration_history_remains_authenticated_in_every_dependency_order() {
     let owner = PrivateKey::new();
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
@@ -152,7 +152,7 @@ fn concurrent_migration_history_remains_authenticated_in_every_dependency_order(
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn two_migration_openings_on_one_close_resolve_by_move_digest() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -177,7 +177,7 @@ fn two_migration_openings_on_one_close_resolve_by_move_digest() {
     assert_eq!(graph.losing_moves("main").unwrap().len(), 1);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn larger_genesis_minimum_changes_eligibility_without_invalidating_history() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -195,7 +195,7 @@ fn larger_genesis_minimum_changes_eligibility_without_invalidating_history() {
     assert_eq!(graph.bookmark("main").unwrap(), Some(graph.genesis()));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn revoking_each_independent_migration_signer_preserves_historical_authentication() {
     for role in 0..3 {
         let owner = PrivateKey::new();
@@ -246,7 +246,7 @@ fn revoking_each_independent_migration_signer_preserves_historical_authenticatio
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_redirected_continuation_noop_never_blocks_a_migration_move() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -314,7 +314,7 @@ fn a_redirected_continuation_noop_never_blocks_a_migration_move() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn issuer_migration_openings_refuse_other_edges_and_unsupported_minima() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -362,7 +362,7 @@ fn issuer_migration_openings_refuse_other_edges_and_unsupported_minima() {
     assert!(SignedTipOpening::from_bytes(&old.to_bytes().unwrap()).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn schemas_follow_the_requested_tip_and_validate_all_its_ancestry() {
     let owner = PrivateKey::new();
     let mut graph = graph();
@@ -411,7 +411,7 @@ fn schemas_follow_the_requested_tip_and_validate_all_its_ancestry() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn migration_descriptors_require_the_exact_opener_and_certified_initial_writer() {
     use rocky_core::MigrationPublicationStatement;
     use rocky_credentials::{SignedMigrationPublication, device_chain};

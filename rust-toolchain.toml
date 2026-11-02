@@ -1,4 +1,6 @@
 [toolchain]
 channel = "1.99.0"
 profile = "minimal"
-components = ["rustfmt", "clippy"]
+# llvm-tools supplies the llvm-ar that archives SQLite for wasm32.
+components = ["rustfmt", "clippy", "llvm-tools"]
+targets = ["wasm32-unknown-unknown"]

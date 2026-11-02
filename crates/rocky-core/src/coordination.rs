@@ -120,7 +120,7 @@ pub fn genesis(scope: Scope, configuration: Configuration) -> Commitment {
 #[cfg(test)]
 mod commitment_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn incremental_commitments_keep_the_domain_and_payload_encoding() {
         let payload = b"abc\0xyz";
         let expected = "a14fc9ddace9459292e1194e88acfbeab9d76584c7438bdd702f9f62380ba618";

@@ -260,7 +260,7 @@ fn real_text(value: f64) -> String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn reals_are_canonical_and_values_round_trip() {
         assert!(Real::new(f64::NAN).is_none());
         assert_eq!(Real::new(-0.0), Real::new(0.0));
@@ -293,7 +293,7 @@ mod tests {
             assert!(SqlValue::decode(&mut &corrupt[..]).is_err());
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn getters_convert_between_storage_classes() {
         let text = |value: &str| SqlValue::Text(value.into());
         assert_eq!(text(" 12abc").to_integer(), 12);

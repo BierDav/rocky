@@ -350,7 +350,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn assertion_tables_follow_joins_commas_aliases_and_subqueries() {
         assert_eq!(
             reads("SELECT team FROM members GROUP BY team HAVING COUNT(*) > 10"),
@@ -373,7 +373,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_assertion_shapes_are_refused() {
         for (sql, reason) in [
             ("WITH t AS (SELECT 1) SELECT * FROM t", "must be one SELECT"),
@@ -415,7 +415,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn table_expressions_apply_only_checked_arithmetic() {
         for accepted in [
             "CREATE TABLE t (a INTEGER CHECK (a BETWEEN -5 AND +5), b TEXT DEFAULT (-1), \
@@ -447,7 +447,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn table_expressions_call_only_allowlisted_functions() {
         for accepted in [
             "CREATE TABLE t (a INTEGER CHECK (a BETWEEN 0 AND 10), b TEXT, PRIMARY KEY(a), \

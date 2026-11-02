@@ -30,7 +30,7 @@ fn hex(input: &str) -> Vec<u8> {
         })
         .collect()
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn version_one_golden_frames() {
     let create = envelope();
     let bytes = hex(include_str!("fixtures/create-v1.hex"));
@@ -45,7 +45,7 @@ fn version_one_golden_frames() {
     assert_eq!(setter.encode().unwrap(), bytes);
     assert_eq!(Envelope::decode(&bytes).unwrap(), setter);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn malformed_frames_fail_explicitly() {
     let bytes = envelope().encode().unwrap();
     for end in 0..bytes.len() {
@@ -83,7 +83,7 @@ fn malformed_frames_fail_explicitly() {
     frame[136..140].copy_from_slice(&u32::MAX.to_le_bytes());
     assert_eq!(Envelope::decode(&frame), Err(ProtocolError::InvalidLength));
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn dependency_shape_and_counter_limits() {
     assert!(AuthorSequence::new(0).is_err());
     assert!(LamportTime::new(0).is_err());
@@ -116,7 +116,7 @@ fn dependency_shape_and_counter_limits() {
     assert!(operation.validate_dependencies(false).is_err());
     assert!(operation.validate_dependencies(true).is_err());
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn readiness_identity_clocks_and_contiguous_frontier() {
     let create = envelope();
     let mut successor = create.clone();

@@ -10,6 +10,8 @@
 #   scripts/check --integration     only the integration tier
 #   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
 #   scripts/check --doc             also the doc tests
+#   scripts/check --wasm            only wasm32: clippy, then the tests in headless Firefox;
+#                                   the full check includes it
 #   scripts/check --build DIR       clippy, then archive the test binaries in DIR
 #   scripts/check [TIER] --from DIR the same checks with DIR's test binaries,
 #                                   without clippy, which --build ran
@@ -23,13 +25,15 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 tiers=
 build=
 archives=
 clippy=true
 doc=false
+wasm=false
+wasm_only=false
 all=false
 packages=
 changed=
@@ -43,11 +47,18 @@ while [ $# -gt 0 ]; do
     --from) archives=${2:-} && shift ;;
     --no-clippy) clippy=false ;;
     --doc) doc=true ;;
+    --wasm) wasm_only=true ;;
     *) usage ;;
     esac
     shift
 done
 [ -z "$build" ] || [ -n "$archives" ] || usage
+# --wasm adds wasm32 to the tiers, or alone runs only it. The full check,
+# unscoped and without archives, covers wasm32 too.
+wasm=$wasm_only
+if ! $wasm_only && { [ -z "$tiers" ] || $all; } && [ -z "$packages$changed$archives" ]; then
+    wasm=true
+fi
 # Archives always contain the complete validation matrix.
 [ -z "$archives" ] || { [ -z "$packages" ] && [ -z "$changed" ]; } || usage
 # Reject formatting before metadata, nextest discovery or compilation.
@@ -58,6 +69,21 @@ selection='all()'
 if [ -n "$packages$changed" ]; then
     # shellcheck disable=SC2086 # workspace package names are separate arguments
     selection=$(scripts/check-scope $changed $packages)
+fi
+
+# wasm32 is the browser target. Each package's tests run in a dedicated
+# Worker in headless Firefox; see .cargo/config.toml for the runner.
+wasm_packages="rocky-core rocky-credentials rocky-storage"
+run_wasm() {
+    PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
+    set --
+    for package in $wasm_packages; do set -- "$@" -p "$package"; done
+    cargo clippy --locked --target wasm32-unknown-unknown --all-targets "$@" -- -D warnings
+    cargo test --locked --no-fail-fast --target wasm32-unknown-unknown "$@"
+}
+if $wasm_only && [ -z "$tiers" ]; then
+    run_wasm
+    exit
 fi
 
 cargo nextest --version >/dev/null 2>&1 || {
@@ -108,7 +134,7 @@ fi
 # can grow a second set of dependency artifacts. Reuse the full check's LLVM build.
 # Cranelift remains an explicit opt-in. Unit tiers contain library and binary
 # tests; kind(test) targets belong to integration/e2e and need not be built here.
-if [ "$tiers" = " unit" ] && [ -z "$archives" ] && ! $doc; then
+if [ "$tiers" = " unit" ] && [ -z "$archives" ] && ! $doc && ! $wasm; then
     if [ "${ROCKY_CRANELIFT:-0}" = 1 ] && scripts/cranelift installed; then
         exec scripts/test-tiers unit --cranelift --filter "$selection" "--build=--workspace --lib --bins"
     fi
@@ -124,6 +150,9 @@ fi
 status=0
 # shellcheck disable=SC2086 # tiers are fixed names, not shell expressions
 run_tiers $tiers || status=1
+if $wasm; then
+    run_wasm || status=1
+fi
 # nextest skips doc tests, which are opt-in so a check does not compile them.
 if $doc; then
     cargo test --workspace --doc --locked || status=1

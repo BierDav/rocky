@@ -333,7 +333,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn every_observer_receives_changed_outcomes_once() {
         let events = TableEvents::new(scope(1), ["items".into(), "tags".into()]);
         let mut items = TableObserver::new();
@@ -360,7 +360,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn observers_receive_coalesced_changes_of_their_tables_only() {
         let events = TableEvents::new(scope(1), ["Items".into(), "tags".into(), "notes".into()]);
         let mut items = TableObserver::new();
@@ -393,7 +393,7 @@ mod tests {
         assert!(matches!(items.next().await, Err(Error::Closed)));
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn one_observer_follows_tenants_under_their_labels_and_dropped_ones_are_pruned() {
         let first = TableEvents::new(scope(1), ["items".into()]);
         let second = TableEvents::new(scope(2), ["items".into()]);

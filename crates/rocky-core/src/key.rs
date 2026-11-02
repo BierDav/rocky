@@ -99,7 +99,7 @@ mod tests {
         )
         .unwrap()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn components_carry_class_length_and_collation() {
         // Lengths keep ("a","bc") apart from ("ab","c").
         let pair = [column(Affinity::Text, Collation::Binary); 2];
@@ -129,7 +129,7 @@ mod tests {
         .unwrap();
         assert_ne!(blob, text(Collation::Binary, "a"));
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn numeric_components_follow_affinity() {
         let integer = [column(Affinity::Integer, Collation::Binary)];
         let key = |value: SqlValue| key_components(&integer, &[value]);
@@ -158,7 +158,7 @@ mod tests {
             Err(ValueError::Precision)
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn keys_are_bounded_and_bound_to_domain_and_table() {
         let column = [column(Affinity::Blob, Collation::Binary)];
         assert_eq!(

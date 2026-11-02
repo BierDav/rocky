@@ -26,3 +26,12 @@ actionlint 1.7.12 Linux-x86_64 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b
 rustup-init 1.29.1 Darwin-arm64 ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-apple-darwin/rustup-init
 rustup-init 1.29.1 Linux-aarch64 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-unknown-linux-gnu/rustup-init
 rustup-init 1.29.1 Linux-x86_64 dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
+
+# Browser tests of the wasm32 target: wasm-bindgen's runner, which must match
+# the wasm-bindgen version in Cargo.lock, drives headless Firefox through geckodriver.
+wasm-bindgen-test-runner 0.2.129 Darwin-arm64 81d4a23d56b3c3eb8187658329116d50e0b228a93b343825fb71f70179051cd1 https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-aarch64-apple-darwin.tar.gz wasm-bindgen-0.2.129-aarch64-apple-darwin/wasm-bindgen-test-runner
+wasm-bindgen-test-runner 0.2.129 Linux-aarch64 1797c349a0f45d30946e8986b184135e12839ab576c9a04203e85febfc5dcb35 https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-aarch64-unknown-linux-gnu.tar.gz wasm-bindgen-0.2.129-aarch64-unknown-linux-gnu/wasm-bindgen-test-runner
+wasm-bindgen-test-runner 0.2.129 Linux-x86_64 82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz wasm-bindgen-0.2.129-x86_64-unknown-linux-musl/wasm-bindgen-test-runner
+geckodriver 0.37.1 Darwin-arm64 d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz geckodriver
+geckodriver 0.37.1 Linux-aarch64 8fd90b951422fbad5b56539fb344dff66eb3f986d615d8d6fde9f1f62dad610c https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux-aarch64.tar.gz geckodriver
+geckodriver 0.37.1 Linux-x86_64 e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz geckodriver

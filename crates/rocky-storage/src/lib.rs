@@ -5,6 +5,7 @@ pub mod cursor;
 pub mod database;
 pub mod digest;
 pub mod exact;
+pub mod files;
 pub mod observe;
 pub mod parsed;
 pub mod partition_sql;

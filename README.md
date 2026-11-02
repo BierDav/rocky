@@ -42,6 +42,10 @@ cargo run -p todo-desktop
 cargo run -p todo-desktop -- --device --data-dir ./local/todo --lan
 ```
 
+wasm32 (a browser, in a dedicated Worker) is a supported target of the same
+crates; `./scripts/check --wasm` runs clippy for it and the tests in headless
+Firefox. Status and limits are in features_14 R7.
+
 Rust crates live in `crates/`, applications in `examples/` and performance
 probes in `benchmarks/`.
 

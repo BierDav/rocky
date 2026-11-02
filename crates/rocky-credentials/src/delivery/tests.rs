@@ -4,7 +4,7 @@ fn key(seed: u8) -> PrivateKey {
     PrivateKey::from_bytes(&[seed; 32])
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_the_recipient_opens_a_delivery_and_nothing_else_is_in_the_clear() {
     let (recipient, other) = (key(1), key(2));
     let payload = b"group: list, values: [7], envelope: ...".to_vec();
@@ -24,7 +24,7 @@ fn only_the_recipient_opens_a_delivery_and_nothing_else_is_in_the_clear() {
     assert_eq!(SealedDelivery::from_bytes(&bytes).unwrap(), delivery);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_changed_recipient_ephemeral_or_ciphertext_is_refused() {
     let recipient = key(1);
     let delivery = SealedDelivery::seal(recipient.public_key(), b"payload").unwrap();
@@ -47,7 +47,7 @@ fn a_changed_recipient_ephemeral_or_ciphertext_is_refused() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_receipt_verifies_only_for_its_recipient_and_digest() {
     let recipient = key(1);
     let receipt = DeliveryReceipt::sign(&recipient, [9; 32]).unwrap();

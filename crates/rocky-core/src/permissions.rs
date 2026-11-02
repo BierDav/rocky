@@ -287,7 +287,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn an_every_field_grant_covers_fields_added_later() {
         let insert = RowWrite::changed(RowChange {
             scope: scope(),
@@ -305,7 +305,7 @@ mod tests {
         assert!(!grant(&[Right::Insert], &[1, 7]).includes(&every));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn an_assigned_mask_needs_rights_to_every_republished_field() {
         let change = RowChange {
             scope: scope(),

@@ -1,4 +1,5 @@
-target/
+# A directory, or a link to one on another disk.
+target
 .idea/
 .DS_Store
 

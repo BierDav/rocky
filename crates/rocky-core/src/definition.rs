@@ -466,7 +466,7 @@ mod tests {
         ]
     }"#;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_definition_builds_one_descriptor_only_the_secure_profile_replays() {
         let definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
         let schema = definition.build().unwrap();
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(LogicalSchema::parse(&bytes).unwrap(), schema);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
         // Definitions and the descriptors they build use the current format.
         for format in [0, 1, 2, 3, 4, 5, 7] {
@@ -525,7 +525,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn malformed_definitions_are_refused() {
         let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
         definition.publisher = "zz".into();
@@ -546,7 +546,7 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identity_columns_are_implicit_on_every_table_and_fingerprinted() {
         let mut definition = SchemaDefinition::parse(super::tests::DEFINITION.as_bytes()).unwrap();
         definition.format = DEFINITION_FORMAT;
@@ -606,7 +606,7 @@ mod partition_tests {
     fn definition() -> SchemaDefinition {
         SchemaDefinition::parse(br#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_shape_identity_and_manifest_are_bound() {
         let schema = definition().build().unwrap();
         let table = schema.table("items").unwrap();
@@ -640,7 +640,7 @@ mod partition_tests {
         wrong_index.tables[0].indexes[0].columns.remove(0);
         assert!(wrong_index.validate().is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partitioned_tables_refuse_incomplete_indexes_and_references() {
         let reason = |json: &str| match SchemaDefinition::parse(json.as_bytes())
             .unwrap()
@@ -676,7 +676,7 @@ mod partition_tests {
             .supported_on(crate::Profile::Secure)
             .unwrap();
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
         let json = r#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
@@ -696,7 +696,7 @@ mod partition_tests {
         );
         assert!(schema.delete_triggers(|name| name == "items").is_empty());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_table_classes_are_refused() {
         let json = |class: &str| {
             format!(
@@ -708,7 +708,7 @@ mod partition_tests {
             assert!(SchemaDefinition::parse(json(class).as_bytes()).is_err());
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn invalid_and_legacy_partition_declarations_are_refused() {
         for columns in [vec!["absent"], vec!["list", "list"], vec!["id"]] {
             let mut definition = definition();
@@ -787,7 +787,7 @@ mod replayed_tests {
             .unwrap()
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replayed_tables_install_checks_unique_indexes_and_their_declared_references() {
         let schema = definition(serde_json::Value::Null).build().unwrap();
         schema.supported_on(Profile::Secure).unwrap();
@@ -847,7 +847,7 @@ mod replayed_tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replayed_tables_declare_generated_columns_and_index_terms() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
@@ -906,7 +906,7 @@ mod replayed_tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replayed_checks_accept_deterministic_expressions_and_name_other_functions() {
         let mut complex = definition(serde_json::Value::Null);
         table(&mut complex, "teams").checks = vec![
@@ -936,7 +936,7 @@ mod replayed_tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn conflict_policies_existence_logs_and_update_policies_are_refused() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
@@ -958,7 +958,7 @@ mod replayed_tests {
         assert!(parsed(&|json| json["update_policy"] = "assigned".into()).is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn assertions_read_replayed_tables_of_one_partition_group() {
         let assertion = |sql: &str| {
             definition(serde_json::json!({
@@ -1010,7 +1010,7 @@ mod replayed_tests {
         assert!(duplicate.build().is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn restrictions_name_replayed_tables_and_rule_predicates_over_their_columns() {
         let restricted = |restriction: serde_json::Value| {
             definition(serde_json::json!({ "restrictions": [restriction] }))

@@ -68,7 +68,7 @@ fn opening(graph: &TipGraph, seal: &SignedSeal, owner: &PrivateKey) -> SignedTip
     .unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
     let owner = PrivateKey::new();
     let mut graph = graph();
@@ -133,7 +133,7 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
     let owner = PrivateKey::new();
     let issuers = [PrivateKey::new(), PrivateKey::new()];
@@ -204,7 +204,7 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
     assert_eq!(graph.bookmark("main").unwrap(), winner.successor().unwrap());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn concurrent_bookmark_moves_and_backward_move_resolve_without_arrival_order() {
     let owner = PrivateKey::new();
     let mut graph = graph();
@@ -248,7 +248,7 @@ fn concurrent_bookmark_moves_and_backward_move_resolve_without_arrival_order() {
     assert_eq!(graph.bookmark("main").unwrap(), Some(graph.genesis()));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -357,7 +357,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     assert!(wrong.verify(owner.public_key(), &other).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontiers_are_refused() {
     let owner = PrivateKey::new();
     let user = PrivateKey::new();
@@ -438,7 +438,7 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn node_signatures_never_inherit_trusted_identity_control() {
     let owner = PrivateKey::new();
     let identity = PrivateKey::new();
@@ -544,7 +544,7 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
     RevocationSet::try_from(vec![signed]).unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn seals_resolve_by_authority_before_digest_and_revocation_resolves_again() {
     let owner = PrivateKey::new();
     let (issuer, other, trusted) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
@@ -632,7 +632,7 @@ fn seals_resolve_by_authority_before_digest_and_revocation_resolves_again() {
     assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -741,7 +741,7 @@ fn ack(
     .unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again() {
     let owner = PrivateKey::new();
     let issuer = PrivateKey::new();
@@ -852,7 +852,7 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
     use rocky_credentials::{
         CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement, SignedCheckpointRecord,
@@ -913,7 +913,7 @@ fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entries() {
     let owner = PrivateKey::new();
     let trusted = PrivateKey::new();
@@ -979,7 +979,7 @@ fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entr
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn bookmarks_on_a_recovered_tip_follow_the_recovery_and_explicit_moves_come_first() {
     let owner = PrivateKey::new();
     let mut graph = graph();
@@ -1046,7 +1046,7 @@ fn bookmarks_on_a_recovered_tip_follow_the_recovery_and_explicit_moves_come_firs
     assert_eq!(graph.bookmark("main").unwrap(), resumed);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn recovery_finality_binds_the_exact_replaced_head_and_keeps_the_signed_quorum() {
     use rocky_credentials::{
         GENESIS_LINE_FORMAT, GenesisLineStatement, SealFinality, SignedGenesisLine, TerminalAck,
@@ -1119,7 +1119,7 @@ fn recovery_finality_binds_the_exact_replaced_head_and_keeps_the_signed_quorum()
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_seal_in_the_parent_format_without_recovery_is_refused() {
     #[derive(serde::Serialize)]
     struct ParentStatement {
@@ -1160,7 +1160,7 @@ fn a_seal_in_the_parent_format_without_recovery_is_refused() {
     assert!(SignedSeal::from_bytes(&bytes).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority() {
     let graph = graph();
     let owner = PrivateKey::new();

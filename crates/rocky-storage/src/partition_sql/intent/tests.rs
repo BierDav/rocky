@@ -112,7 +112,7 @@ fn read(conn: &Connection, checked: &Checked) -> Result<Rows, String> {
         .map_err(|e| e.to_string())
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn assertions_see_only_the_held_partition_of_their_own_tables() {
     // A holds two rows, B and C one each.
     let conn = db(&["A", "B", "C"]);
@@ -211,7 +211,7 @@ fn partitions(copies: &[PartitionStatement]) -> Vec<Vec<SqlValue>> {
     copies.iter().map(|copy| copy.partition.clone()).collect()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn clock_functions_refuse_unless_fully_bound_without_now() {
     for sql in [
         "UPDATE items SET amount = julianday('now') WHERE list = 'A'",
@@ -242,7 +242,7 @@ fn clock_functions_refuse_unless_fully_bound_without_now() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn random_functions_refuse() {
     assert_eq!(
         refused("UPDATE items SET amount = random() WHERE list = 'A'"),
@@ -254,7 +254,7 @@ fn random_functions_refuse() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn environment_functions_and_engine_tables_refuse() {
     for (sql, name) in [
         (
@@ -290,7 +290,7 @@ fn environment_functions_and_engine_tables_refuse() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn unknown_functions_and_collations_refuse() {
     for (sql, name) in [
         (
@@ -325,7 +325,7 @@ fn unknown_functions_and_collations_refuse() {
     .unwrap();
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn extension_loading_refuses() {
     assert_eq!(
         refused("UPDATE items SET amount = load_extension('x') WHERE list = 'A'"),
@@ -337,7 +337,7 @@ fn extension_loading_refuses() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn rowid_references_refuse() {
     for sql in [
         "UPDATE items SET amount = 1 WHERE list = 'A' AND rowid = 1",
@@ -350,7 +350,7 @@ fn rowid_references_refuse() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn autoincrement_schemas_refuse() {
     assert_eq!(
         check_replayed_table("CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, a TEXT)"),
@@ -360,7 +360,7 @@ fn autoincrement_schemas_refuse() {
         .unwrap();
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn schema_statements_refuse() {
     for sql in [
         "CREATE TABLE t(a)",
@@ -373,7 +373,7 @@ fn schema_statements_refuse() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn pragmas_and_attachments_refuse() {
     assert_eq!(refused("PRAGMA user_version = 3"), IntentRefusal::Pragma);
     assert_eq!(
@@ -383,7 +383,7 @@ fn pragmas_and_attachments_refuse() {
     assert_eq!(refused("DETACH DATABASE y"), IntentRefusal::Attachment);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn reads_are_not_writes() {
     assert_eq!(
         refused("SELECT * FROM items WHERE list = 'A'"),
@@ -392,7 +392,7 @@ fn reads_are_not_writes() {
     assert_eq!(refused("VALUES (1)"), IntentRefusal::NotAWrite);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn partition_column_writes_refuse_as_moves() {
     let moved = IntentRefusal::PartitionMove {
         table: "items".into(),
@@ -408,7 +408,7 @@ fn partition_column_writes_refuse_as_moves() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_filter_that_pins_one_partition_yields_one_copy() {
     let copies = split(
         "UPDATE items SET amount = ? WHERE list = ?",
@@ -443,7 +443,7 @@ fn a_filter_that_pins_one_partition_yields_one_copy() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_statement_reaching_several_partitions_splits_into_equivalent_copies() {
     for (sql, params) in [
         ("UPDATE items SET amount = amount + ?", vec![int(1)]),
@@ -474,7 +474,7 @@ fn a_statement_reaching_several_partitions_splits_into_equivalent_copies() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn reads_of_other_partitions_are_evaluated_once_and_bound() {
     for (sql, params) in [
         (
@@ -562,7 +562,7 @@ fn reads_of_other_partitions_are_evaluated_once_and_bound() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn held_partitions_that_wait_refuse_the_write() {
     let tables = items(&["A"], &["B"]);
     let incomplete = IntentRefusal::Unavailable {
@@ -596,7 +596,7 @@ fn held_partitions_that_wait_refuse_the_write() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn more_than_sixty_four_partitions_refuse_the_statement() {
     let lists: Vec<String> = (0..=MAX_INTENT_PARTITIONS)
         .map(|index| format!("p{index}"))

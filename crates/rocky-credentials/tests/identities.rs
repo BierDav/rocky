@@ -1,6 +1,8 @@
 //! Identities hold permissions; nodes sign under certificates their
 //! identity signed; the publisher key stays with the owner's identity and
 //! issuers sign through their chains. Keys and bytes only.
+// Identities here live in the file provider, which needs a filesystem.
+#![cfg(not(target_family = "wasm"))]
 use rocky_core::{
     AppId, ApplicationManifest, AuthorLogScope, DomainId, DomainRule, MeshId, ResourceGrant,
     ResourceScope, Right, RowSelection, Scope,
@@ -127,7 +129,7 @@ fn node(identity: &dyn IdentityProvider, chain: &CredentialChain) -> (PrivateKey
     (node, certified)
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_file_identity_reopens_and_reserves_each_author_once() {
     let identity = FileIdentity::new();
     let again = identity.reopen();
@@ -145,7 +147,7 @@ fn a_file_identity_reopens_and_reserves_each_author_once() {
     assert!(PrivateKey::new().reserve_author(AuthorRange::ALL).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     let domain = Domain::new();
     let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
@@ -226,7 +228,7 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     let domain = Domain::new();
     let member = FileIdentity::new();
@@ -291,7 +293,7 @@ fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() {
     let domain = Domain::new();
     let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
@@ -401,7 +403,7 @@ fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() 
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
     let identity = FileIdentity::new();
     let (node, answering) = (PrivateKey::new(), PrivateKey::new());

@@ -114,6 +114,79 @@ jobs:
           path: passed
           key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
+  wasm:
+    if: ${{ !inputs.release }}
+    # wasm32 is the browser target: clippy for it, then each wasm package's
+    # tests in a dedicated Worker of the runner image's headless Firefox.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download the exact source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --output "$2" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Look for a passing run of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-wasm-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
+
+      - name: Bootstrap Rustup and register its tool paths
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/ci/install-rustup
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy, llvm-tools
+
+      - uses: ./source/.github/actions/setup-sccache
+        if: steps.passed.outputs.cache-hit != 'true'
+
+      - name: Install the browser test runner and geckodriver
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/tools wasm-bindgen-test-runner geckodriver
+
+      - name: Run clippy and the tests for wasm32
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/check --wasm
+
+      - name: Record the passing tree
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: touch passed
+
+      - uses: actions/cache/save@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          path: passed
+          key: baseline-wasm-${{ runner.os }}-${{ steps.source.outputs.tree }}
+
   build:
     # Compiles once: clippy and the test binaries as nextest archives, plus the
     # test binaries as nextest archives. `check`, `e2e` and `shopping` run those

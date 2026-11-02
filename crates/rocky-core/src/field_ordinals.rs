@@ -58,7 +58,7 @@ mod tests {
     use super::*;
     use crate::{AuthorLogScope, DefinitionItem, DomainId, DomainRule};
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn source_table_names_determine_ordinals_and_reject_foreign_fields() {
         let publisher = [7; 32];
         let mut manifest = ApplicationManifest {

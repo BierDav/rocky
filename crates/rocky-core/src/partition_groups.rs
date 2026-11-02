@@ -155,7 +155,7 @@ mod tests {
             domain: DomainId([3; 16]),
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn different_column_identities_share_group_address_and_install() {
         let schema = definition().build().unwrap();
         schema.supported_on(Profile::Secure).unwrap();
@@ -209,7 +209,7 @@ mod tests {
                 .unwrap()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn compound_slots_use_declaration_order_and_sql_collations() {
         let mut def = definition();
         // Neither column identity nor the column's physical position defines its slot.
@@ -262,7 +262,7 @@ mod tests {
                 .unwrap()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn slot_mismatches_refuse_build_and_installation_naming_both_tables() {
         for mismatch in 0..3 {
             let mut def = definition();
@@ -289,7 +289,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn implicit_groups_are_private_and_names_cannot_be_ambiguous() {
         let mut def = definition();
         for table in &mut def.tables {
@@ -307,7 +307,7 @@ mod tests {
         def.tables[1].partition_by.clear();
         assert!(def.build().is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn group_changes_and_new_tables_are_replicated_changes() {
         let old = definition().build().unwrap();
         let mut def = definition();
@@ -327,7 +327,7 @@ mod tests {
             Ok(SchemaChange::Replicated)
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn descriptor_round_trip_and_previous_partition_format_refusal() {
         let schema = definition().build().unwrap();
         let bytes = schema.canonical().unwrap();

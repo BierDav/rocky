@@ -214,6 +214,40 @@ aggregate-assertion or company-sized-partition performance. Evaluate features_13
 phase 10's existing trigger against these workloads; do not claim bounded
 interactive latency for transitions that have not been qualified.
 
+## R7. Browser clients
+
+- A client node must run in a browser (wasm32-unknown-unknown): open a
+  database, run transactions, observe outcomes and sync with native nodes.
+- wasm32 is a first-class target of the same crates. Target differences stay
+  in narrow seams: the SQLite VFS, task spawning, identity and secret storage,
+  data locations and the iroh transport. Each crate's tests also run in a
+  browser where meaningful.
+- The browser engine is the native engine: the same SQLite build and
+  registered functions, so replay results do not depend on the platform.
+- Networking stays optional and relay-only in a browser (no mDNS, no direct
+  UDP). Native behavior does not change.
+
+Status (2026-11-03): storage foundation done; runtime, SDK and networking not
+yet.
+
+- SQLite: the browser links native's 3.53.2 amalgamation with native's flags
+  (`vendor/sqlite-wasm-rs`); only threading, OS layer, extension loading and
+  temporary storage differ. Evidence: `rocky-storage`
+  `every_target_links_the_same_sqlite` compares version, source id and
+  compile options on both targets.
+- Files live in an OPFS sync-access-handle pool (`rocky-storage` `files`).
+  Rocky's patch adds in-worker locks and a heap wal-index
+  (`vendor/sqlite-wasm-vfs`), so WAL snapshots and several connections per
+  file behave as natively. Evidence: `files::tests` (the same test on both
+  targets).
+- The node must run in a dedicated Worker: OPFS sync access handles exist
+  only there. The pool's handles exclude other workers and tabs, so one tab
+  owns a browser installation at a time.
+- `./scripts/check --wasm` (part of the full check and CI's `wasm` job) runs
+  clippy for wasm32 and the tests of `rocky-core`, `rocky-credentials` and
+  `rocky-storage` in headless Firefox. Not yet in a browser: cursor readers
+  (threads) and the file-backed key and identity providers.
+
 ## Outside Rocky
 
 Application schema design and partition choices; accounting/tax/rounding policy;

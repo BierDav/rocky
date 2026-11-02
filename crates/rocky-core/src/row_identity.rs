@@ -89,7 +89,7 @@ impl<'de> serde::Deserialize<'de> for RowIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn json_preserves_large_ids_as_canonical_strings() {
         let identity = RowIdentity::new(0x7fff_ffff, u32::MAX).unwrap();
         let json = serde_json::to_string(&identity).unwrap();
@@ -109,7 +109,7 @@ mod tests {
             assert!(serde_json::from_str::<RowIdentity>(invalid).is_err());
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identities_have_exact_boundaries_and_never_wrap() {
         let first = RowIdentity::next(1, 0).unwrap();
         assert_eq!(first.integer(), 0x1_0000_0001);

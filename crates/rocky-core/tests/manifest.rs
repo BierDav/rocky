@@ -25,7 +25,7 @@ fn manifest() -> ApplicationManifest {
     }
     manifest
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn canonical_definitions_are_bounded_and_publisher_bound() {
     let manifest = manifest();
     let bytes = manifest.canonical_body();
@@ -55,7 +55,7 @@ fn canonical_definitions_are_bounded_and_publisher_bound() {
     assert!(ApplicationManifest::from_body(&previous).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn wide_definitions_round_trip_with_fields_and_domains_without_changing_encoding() {
     let mut wide = manifest();
     wide.entities.clear();

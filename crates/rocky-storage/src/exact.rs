@@ -161,7 +161,7 @@ mod tests {
         connection.query_row(&format!("SELECT {sql}"), [], |row| row.get(0))
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn every_allowed_function_exists_in_this_sqlite_build() {
         let connection = connection();
         for function in rocky_core::DETERMINISTIC_FUNCTIONS {
@@ -175,7 +175,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn checked_functions_match_sqlite_except_on_overflow() {
         let connection = connection();
         let max = i64::MAX;
@@ -228,7 +228,7 @@ mod tests {
         assert!(text.to_string().contains("INTEGER or REAL"), "{text}");
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn operators_become_checked_calls_and_negative_numbers_stay_literals() {
         assert_eq!(
             checked_statement(

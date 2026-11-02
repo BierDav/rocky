@@ -267,7 +267,7 @@ pub fn classify(sql: &str) -> Result<Control, SqlError> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn transaction_control_is_classified_and_other_text_is_one_statement() {
         let name = |name: &str| name.to_string();
         for (sql, expected) in [

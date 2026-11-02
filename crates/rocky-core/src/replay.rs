@@ -189,7 +189,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn frames_refuse_what_no_author_produces() {
         assert_eq!(frame(1, &[(1, 3), (2, 1)]).check(), Ok(()));
         assert_eq!(frame(0, &[]).check(), Err("intent statement count"));
@@ -207,7 +207,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn outcomes_name_finality() {
         let dropped = TransactionOutcome::Dropped {
             reason: DropReason::Constraint,

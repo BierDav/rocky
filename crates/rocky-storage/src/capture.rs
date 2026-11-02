@@ -957,7 +957,7 @@ mod tests {
         SqlValue::Text(value.into())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn capture_follows_triggers_cascades_key_changes_and_rollback() {
         let (conn, plan) = setup();
         conn.run_now("INSERT INTO plain VALUES(1,'one',1.5),(2,'two',2.0)")
@@ -1035,7 +1035,7 @@ mod tests {
         conn.run_now("ROLLBACK").unwrap();
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn the_gate_refuses_everything_outside_the_session_tables() {
         let (conn, plan) = setup();
         for refused in [
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(capture.lock().unwrap().failure().is_some());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_capture_budget_and_an_untyped_value_latch_a_failure() {
         let (conn, plan) = setup();
         conn.capture()

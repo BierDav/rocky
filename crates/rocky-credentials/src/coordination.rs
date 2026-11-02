@@ -114,7 +114,7 @@ impl SignedTenantAdmission {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn grants_bind_their_signer_application_and_window() {
         let (publisher, tenant) = (PrivateKey::new(), PrivateKey::new());
         let grant = CoordinationGrant {

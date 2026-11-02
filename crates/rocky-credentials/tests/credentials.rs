@@ -124,7 +124,7 @@ fn rights(grants: &[ResourceGrant]) -> BTreeSet<Right> {
         .collect()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     let domain = Domain::new();
     let writer = Profile::Writer {
@@ -179,7 +179,7 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     assert!(Credentials::from_bytes(&bytes).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     let domain = Domain::new();
     let policy = domain.policy();
@@ -288,7 +288,7 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     assert_eq!(rights(&grants), [Right::Read].into());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_login_principal_alone_grants_nothing() {
     let domain = Domain::new();
     let policy = domain.policy();
@@ -329,7 +329,7 @@ fn a_login_principal_alone_grants_nothing() {
     assert_ne!(Publisher(domain.publisher.public_key()).0, principal.0);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn profiles_are_scoped_and_hold_no_schema_right() {
     let domain = Domain::new();
     let custody = Profile::Custody {
@@ -383,7 +383,7 @@ fn profiles_are_scoped_and_hold_no_schema_right() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_identity() {
     let token = [5; 32];
     let profile = Profile::Reader {
@@ -444,7 +444,7 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     assert!(!locked.is_open(&token, NOW));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_joining_issuers_routes_are_bound_by_its_proof() {
     let token = [5; 32];
     let mut invitation = Invitation::open(&token, Profile::Issuer, NOW + 600);
@@ -468,7 +468,7 @@ fn a_joining_issuers_routes_are_bound_by_its_proof() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     let domain = Domain::new();
     let policy = domain.policy();
@@ -596,7 +596,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     let mut resources = Domain::new().resources;
     resources[0].columns.insert("title".into(), [6; 32]);
@@ -668,7 +668,7 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     let domain = Domain::new();
     let policy = domain.policy();
@@ -779,7 +779,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     assert_eq!(renewed.capability.delegations, 2);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn node_leaves_bind_one_number_inside_the_principal_range() {
     let domain = Domain::new();
     let identity = PrivateKey::new();
@@ -880,7 +880,7 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     let domain = Domain::new();
     let policy = domain.policy();

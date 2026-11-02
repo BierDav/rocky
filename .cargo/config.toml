@@ -12,3 +12,14 @@ opt-level = 3
 opt-level = 3
 [profile.test.package.rocky-sdk]
 opt-level = 3
+
+# wasm32 is the browser: its tests run in headless Firefox (scripts/tools
+# installs the runner and geckodriver into local/bin).
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
+
+[env]
+# Browser tests run in a dedicated Worker, where a node runs (OPFS needs it).
+WASM_BINDGEN_USE_DEDICATED_WORKER = "1"
+# Tests never apply a pending browser update, which can wait for a prompt.
+MOZ_DISABLE_UPDATE_PROCESSING = "1"

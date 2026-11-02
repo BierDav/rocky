@@ -480,7 +480,7 @@ fn analyze_with(
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn migration_parents_are_bound_by_position_and_cannot_be_written() {
         let bind = |name: &str| (name == "parent.items").then(|| "secure_frozen_items".into());
         let sql = "INSERT INTO items(title) SELECT parent.items.title FROM parent.items";
@@ -516,7 +516,7 @@ mod tests {
             .sql
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn names_resolve_by_position_and_keep_aliases_literals_and_columns() {
         for (sql, expected) in [
             (
@@ -566,7 +566,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn statements_outside_the_surface_are_refused_before_the_engine() {
         for sql in [
             "PRAGMA user_version = 3",

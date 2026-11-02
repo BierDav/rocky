@@ -86,7 +86,7 @@ pub fn parses() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_text_is_parsed_once_while_it_stays_in_use() {
         let before = parses();
         let sql = "SELECT 1 AS parsed_once_marker";

@@ -12,7 +12,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn hkdf_matches_the_published_vectors() {
     // RFC 4231 test case 6: a key longer than the block is hashed first.
     assert_eq!(
@@ -31,7 +31,7 @@ fn hkdf_matches_the_published_vectors() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn table_keys_are_bound_to_domain_group_table_and_epoch() {
     let secret = [7; 32];
     let key = |secret: &[u8; 32], domain, group, table, epoch| {
@@ -57,7 +57,7 @@ fn table_keys_are_bound_to_domain_group_table_and_epoch() {
     assert!(derive_table_key(&secret, domain(), [4; 32], [5; 32], 0).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
     let issuer = PrivateKey::new();
     let alice = PrivateKey::new();

@@ -24,3 +24,7 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(all(target_arch = "aarch64", target_endian = "little", any(target_vendor = "apple", target_os = "linux", target_os = "android")))'.dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
+
+[dev-dependencies]
+# Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
+wasm-bindgen-test = "0.3"

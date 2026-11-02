@@ -5,7 +5,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn commitments_keep_independent_padding_and_prefix_vectors() {
     let cases: &[(&str, Vec<u8>, &str)] = &[
         (
@@ -64,7 +64,7 @@ fn commitments_keep_independent_padding_and_prefix_vectors() {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn raw_sha256_and_sha512_keep_independent_vectors() {
     let cases: &[(usize, &str, &str)] = &[
         (

@@ -215,7 +215,7 @@ mod tests {
         table("items", all)
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn local_and_replicated_changes_are_told_apart() {
         let old = schema(vec![items(&[("name", true)])]);
         assert_eq!(classify(&old, &old), Ok(SchemaChange::Unchanged));
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(classify(&old, &renamed), Err(Unsupported::Application));
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_name_keeps_its_type_and_a_required_field_needs_a_default() {
         let old = schema(vec![items(&[("name", true), ("note", false)])]);
         let mut retyped = old.clone();

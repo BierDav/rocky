@@ -895,7 +895,7 @@ fn expand_views(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn readiness_references_include_nested_views_subqueries_and_write_targets() {
         let views = vec![
             rocky_core::LogicalView {
@@ -947,7 +947,7 @@ mod tests {
         )]
         .into()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn aliases_in_bindings_or_and_outer_join_proofs_are_checked() {
         let rules = rules();
         for sql in [
@@ -984,7 +984,7 @@ mod tests {
             .is_err()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partial_reads_filter_cached_unheld_rows_without_changing_left_join_semantics() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1029,7 +1029,7 @@ mod tests {
             (10, None)
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_a_waiting_partition_a_read_may_reach_is_incomplete() {
         let mut rules = rules();
         rules.get_mut("items").unwrap().waiting = vec![vec![SqlValue::Text("B".into())]];
@@ -1054,7 +1054,7 @@ mod tests {
         assert!(check("SELECT * FROM items WHERE list='C'", &[], &rules).is_err());
         assert!(!incomplete("SELECT * FROM items WHERE list='C'"));
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn held_values_bind_after_the_callers_parameters_and_keep_the_text_stable() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE items(list TEXT,amount INTEGER); INSERT INTO items VALUES('A',10),('B',20);").unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
         // Too few parameters for a filtered statement is refused, not padded.
         assert!(check_with_views(sql, &[SqlValue::Integer(1)], &rules(), &[]).is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn nested_views_are_expanded_and_cycles_refused() {
         let views = vec![
             rocky_core::LogicalView {

@@ -123,7 +123,7 @@ impl Extension {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn extensions_have_one_version_and_explicit_empty_authority() {
         let current = Extension::new(Extended::default()).unwrap();
         assert_eq!(current.read().unwrap(), Extended::default());

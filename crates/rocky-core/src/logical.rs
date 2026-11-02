@@ -1399,7 +1399,7 @@ mod tests {
             restrictions: Vec::new(),
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn sql_column_and_reference_names_use_ascii_case_insensitive_lookup() {
         let mut schema = schema();
         let table = &mut schema.tables[0];
@@ -1439,7 +1439,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn local_sql_cannot_hide_an_undeclared_reference() {
         let mut schema = schema();
         schema.tables[0].class = TableClass::LocalOnly;
@@ -1465,7 +1465,7 @@ mod tests {
         schema.installable().unwrap();
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn canonical_descriptors_round_trip_and_reject_other_bytes() {
         let schema = schema();
         let bytes = schema.canonical().unwrap();
@@ -1483,7 +1483,7 @@ mod tests {
         missing.tables[0].primary_key = vec!["absent".into()];
         assert!(missing.validate().is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn local_details_keep_the_replicated_identity_and_renames_do_not() {
         let schema = schema();
         let mut local = schema.clone();
@@ -1550,7 +1550,7 @@ mod tests {
             published.table_id(&published.tables[0])
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replayed_tables_refuse_mixed_references() {
         // `items` references `parents` by its identity.
         let reason = |child: TableClass, parent: TableClass| {
@@ -1600,7 +1600,7 @@ mod tests {
         );
         assert_eq!(schema.supported_on(Profile::Secure), Ok(()));
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn references_must_be_declared_and_replayable() {
         let reason = |change: &dyn Fn(&mut LogicalTable)| {
             let mut schema = schema();
@@ -1637,7 +1637,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn derived_rules_are_single_deterministic_expressions() {
         let columns = ["title", "count"];
         for rule in [
@@ -1661,7 +1661,7 @@ mod tests {
             assert!(!derived_rule(rule, &columns), "{rule}");
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn rules_bind_columns_and_statements_declare_collations() {
         let bind = |column: &str| (column == "title").then(|| "?2".to_string());
         assert_eq!(
@@ -1679,7 +1679,7 @@ mod tests {
             ]
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn affinity_follows_the_declared_type() {
         for (declared, affinity) in [
             ("INTEGER", Affinity::Integer),

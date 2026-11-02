@@ -275,7 +275,7 @@ mod tests {
         22, 187, 145, 102, 63, 19, 210, 210, 42, 18, 71, 105, 53, 126, 164, 229, 181, 84, 111, 37,
         76, 225, 158, 106, 90, 17, 78, 4, 162, 74, 177, 237,
     ];
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn sql_equal_values_share_scope_but_domains_tables_and_columns_do_not() {
         let domain = Scope {
             mesh: MeshId([1; 16]),
@@ -320,7 +320,7 @@ mod tests {
         );
         assert!(PartitionTuple::new([([4; 32], text("a")), ([4; 32], text("b"))]).is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn keyed_commitments_are_standard_hmac_sha256() {
         // Python: hmac.new(bytes([9] * 32), b"\x01\0\0\0px", sha256).
         assert_eq!(
@@ -331,7 +331,7 @@ mod tests {
             ]
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn selectors_narrow_without_losing_columns() {
         let all = PartitionSelector(
             [
@@ -358,7 +358,7 @@ mod tests {
             PartitionSelector([([1; 32], PartitionSelection::Only(BTreeSet::new()))].into());
         assert!(!all.includes(&empty));
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn tuples_and_selectors_cross_json_without_map_keys_or_lossy_numbers() {
         let integer = PartitionValue::new(
             KeyColumn {
@@ -384,7 +384,7 @@ mod tests {
             serde_json::to_vec(&vec![([1; 32], text("a")), ([1; 32], text("b"))]).unwrap();
         assert!(serde_json::from_slice::<PartitionTuple>(&duplicate).is_err());
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn decoded_components_are_checked_before_use() {
         for bytes in [
             vec![],

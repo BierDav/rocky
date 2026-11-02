@@ -679,6 +679,8 @@ pub struct EncryptedReplica<A> {
     /// The coordinated log whose terminal entries this trusted node ends
     /// and acknowledges.
     domain_log: Arc<std::sync::RwLock<Option<Arc<dyn rocky_core::DomainLog>>>>,
+    /// This node's key, fixed at open, so transaction ids need no lock.
+    node: PublicKey,
 }
 impl<A> Clone for EncryptedReplica<A> {
     fn clone(&self) -> Self {
@@ -687,6 +689,7 @@ impl<A> Clone for EncryptedReplica<A> {
             queue: self.queue.clone(),
             revisions: self.revisions.clone(),
             domain_log: self.domain_log.clone(),
+            node: self.node,
         }
     }
 }
@@ -1253,6 +1256,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.rebuild_voided().await?;
         inner.verify_open().await?;
         let opening_revocations = inner.opening_revocations.take();
+        let node = inner.config.node.public_key();
         let replica = Self {
             inner: Arc::new(ReplicaLock::new(
                 inner,
@@ -1262,6 +1266,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             queue: Arc::default(),
             revisions,
             domain_log: Arc::default(),
+            node,
         };
         if let Some(revocations) = opening_revocations {
             replica.learn_revocations(&revocations).await?;

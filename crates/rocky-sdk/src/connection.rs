@@ -502,9 +502,8 @@ impl State {
             return Err(failure(code::READONLY, "a reader connection cannot write").into());
         }
         self.write("BEGIN", Vec::new()).await?;
-        // Before any statement, so the session does not hold the replica yet.
         let handle: rocky_core::Commitment = rand::random();
-        let token = rocky_core::TransactionToken(self.node.replica.transaction_of(handle).await);
+        let token = rocky_core::TransactionToken(self.node.replica.transaction_of(handle));
         self.handle = Some(handle);
         Ok(token)
     }
@@ -676,7 +675,7 @@ impl State {
                     .as_ref()
                     .filter(|commit| !commit.frames.is_empty())
             {
-                let transaction = self.node.replica.transaction_of(commit.handle).await;
+                let transaction = self.node.replica.transaction_of(commit.handle);
                 self.committed = Some(rocky_core::TransactionToken(transaction));
             }
         }

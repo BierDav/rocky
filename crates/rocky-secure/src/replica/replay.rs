@@ -215,9 +215,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
     /// The identity of the transaction this replica committed under
     /// `handle`, as outcomes and observers name it.
-    pub async fn transaction_of(&self, handle: Commitment) -> Commitment {
-        let inner = self.inner.lock(Class::Interactive).await;
-        super::bundle::transaction_id(inner.config.node.public_key(), &handle)
+    pub fn transaction_of(&self, handle: Commitment) -> Commitment {
+        super::bundle::transaction_id(self.node, &handle)
     }
 
     /// The constraint or assertion whose violation dropped `transaction`

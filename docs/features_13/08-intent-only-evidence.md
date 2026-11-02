@@ -393,9 +393,10 @@ Decisions:
 
 ### Completion gate
 
-- **Line count: not met.** `rocky-secure` non-test lines: 60,532 against
-  62,627 at the features_13 start (2,095 fewer; the gate asks
-  2,500, ≤ 60,127) and 70,561 at the phase start (10,029 fewer).
+- **Line count: not met.** `rocky-secure` non-test lines: 60,798 after
+  Session 6 (60,532 in Session 5) against 62,627 at the features_13 start
+  (1,829 fewer; the gate asks 2,500, ≤ 60,127) and 70,561 at the phase
+  start (9,763 fewer).
   Phase 8 removed about 11,000 lines (existence logs, the
   constraint resolver, coordinated entries, `shapes.rs`, register
   merging, shadow tables); slice 3's replayed checkpoints and record-free
@@ -421,8 +422,8 @@ Decisions:
 - **Statement budgets hold** (`tests::sql::intents`, debug build, this
   change): single-row author 79 / 43 (≤ 43), single-row receive 86 / 32
   (≤ 45), 32-row receive 4.65625 / 3.6875 statements per row (≤ 6.5).
-- **Sync non-regression rows:** see Measurements.
-- `./scripts/lint` passes; `./scripts/check`: see Verification. The
+- **Sync non-regression rows:** hold after Session 6; see its measurements.
+- `./scripts/lint` and `./scripts/check` pass; see Session 6. The
   Kotlin and shopping app checks no longer exist.
 
 ### Limits
@@ -434,3 +435,89 @@ Decisions:
   transport race, not replication; not fixed here.
 - Replayed writes' L2 latency regression (phase 4) is unchanged and
   unprofiled; phase 9 qualifies devices.
+
+## Session 6 (2026-11-02): sync non-regression
+
+Slice 6 had not been measured. The paired 100k replayed fill
+(`rocky-sdk` `tests/migrations/replayed.rs`
+`replayed::fill_of_100000_replayed_rows`, release, 3 trials) against the
+phase-start build (`c860b4e8`, `/tmp/rocky-p8start-target`) showed fill
+25.7–25.9 s against 4.1–4.4 s, member pull 27.2–27.8 s against 10.3–11.2 s,
+files of 80 / 90 MB and peak WAL above 64 MiB. All of it was slice 3's
+replayed seal rows and bases. Fixes, in profile order:
+
+- **A forward schema switch replays nothing.** `rebuild_tip_workspace`
+  replayed every member on a schema switch whose target `TipGraph::continues`
+  did not reach. That walks seal successors only, so a migration's opening
+  counted as sideways. It now uses `line_continues`, which follows
+  migration successors.
+- **Rows at a seal are read in one scan per table.** `take_seal_rows`
+  scanned the whole table once per partition (128 × 100k `row_scope`
+  calls); it now buckets one scan by partition.
+- **Rows at a seal no longer rewind.** Taking them rewound every open
+  member inside a savepoint (100k `UPDATE`s, then a rollback). They are now
+  the live scan with each row an open member changed replaced by its undo
+  image before the earliest such member, computed in memory.
+  `rewind` also caches each table's plan instead of planning per undo entry.
+- **Stored images name fields by ordinal.** Images keyed each value by its
+  32-byte field id, about three quarters of a row's bytes. The stored form in
+  `secure_replayed_{base,staged,seal_rows}` uses a varint ordinal from
+  `secure_replayed_fields`; digests, pages and every reader still see the
+  full image (`FieldOrdinals::{pack, unpack}`). Base and seal-row tables
+  shrank from 39.5 / 43.5 MB to 13.5 / 15.7 MB. Kept-seal pages
+  (`secure_served_rows`) stay full.
+- **Finalization and compaction start on a cut WAL.** Each finalization
+  transaction and each per-scope compaction transaction first waits for a
+  running passive checkpoint, then truncates past the passive size
+  (`Inner::cut_wal`), as a publication step does. Without the wait, the
+  truncation was refused and the WAL reached 71 / 82 MB.
+- **Format.** The replica identity is `rocky.encrypted-replica.v42`, the
+  phase's one replica format bump; earlier files are refused at open.
+
+Release builds, same host. The phase-start trials ran back to back with
+a current run before the WAL fix (fill 5.70–5.78 s, pull 11.65–12.08 s;
+load 4.7–7.8). The current column is the final change's three trials,
+about 30 minutes later:
+
+| Measure | Current | Phase start | Gate |
+| --- | --- | --- | --- |
+| Issuer fill open | 5.68–5.81 s | 4.14–4.35 s | ≤ 70 s |
+| Member pull | 11.30–11.83 s | 10.76–10.86 s | ≤ 110% of paired (1.04–1.09) |
+| Issuer file | 52.8–52.9 MB | 29.9 MB | ≤ 300 MB |
+| Member file | 61.4 MB | 42.2–42.3 MB | ≤ 80 MB |
+| Peak WAL seed / fill / pull | 52.4 / 62.9 / 43.9 MB max | 46.1 / 43.9 / 43.7 MB max | ≤ 64 MiB (67.1 MB) |
+
+The member's digest equals the issuer's in every trial. The remaining fill
+and file costs are the replayed bases and seal rows that slice 3 added: the
+phase-start build had none and could not prune replayed history. The
+pull ratio sits near the gate; phase 9 requalifies it on a quiet host.
+`prepared_pull::member_pull_of_100000_rows`, the mergeable fixture of
+features_11/12, no longer runs (no mergeable tables remain), so the
+replayed fill is this row's fixture, as in phase 7.
+
+Other fixes:
+
+- **Concurrent registry writes converge.** `rocky-sdk`
+  `registry::concurrent_enrollments_and_renewals_at_two_issuers_converge`
+  failed most runs, at `ce3ca1fd` too. Two issuers inserted the same
+  `(node, entry)` registry key; replay dropped the later transaction as a
+  whole (`UNIQUE constraint failed`), losing the device enrolled with it.
+  Registry inserts are now upserts: `ON CONFLICT(node, entry) DO NOTHING`
+  for kept entries, `DO UPDATE SET value` for replaced ones.
+- Clippy findings from the previous change (`rocky-core` single-element
+  loop, `rebuild.rs` type complexity, a needless borrow in `tips.rs`).
+- Tests: `replay::base::tests::a_stored_image_unpacks_to_the_full_image`;
+  `formats::unsupported_replica_formats_refuse_before_writes` refuses
+  v0–v41 and v43.
+
+Verification: `./scripts/lint` passes. `cargo nextest run -p rocky-secure
+-p rocky-sdk`: 856 run, 841 passed; the failures were three fixed above,
+the known `devices_converge_over_iroh` flake, and eleven 60 s timeouts,
+all in the load-only set Session 5 lists (not rerun alone here).
+
+`./scripts/check` passes on the final change: unit 226, integration 1,283.
+One earlier run failed
+`node::sync_tests::change_driven::live_links::an_idle_linked_pair_dials_nothing_for_an_hour`
+(bytes written during the idle hour, under the full run's load). It passed
+25 of 25 runs alone and in the passing check; it is recorded as a
+load-only flake.

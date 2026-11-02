@@ -308,7 +308,7 @@ impl<A: RowApplication> Inner<A> {
                 Some(next) => cursor = next,
                 // A late frame of a line closed on the followed path replays
                 // in the line opened there.
-                None => match self.opened_after(scope, &seal)? {
+                None => match self.opened_after(scope, seal)? {
                     Some(next) => cursor = next,
                     None => return Ok(FrameReach::Held),
                 },
@@ -1109,11 +1109,7 @@ impl<A: RowApplication> Inner<A> {
         // itself; any other compiles every member again.
         let sideways = match self.schema_switch_intent().await? {
             Some((scope, _, source, target)) => {
-                source != target
-                    && !self
-                        .graph_for(scope)?
-                        .continues(source, target)
-                        .unwrap_or(false)
+                source != target && !Self::line_continues(self.graph_for(scope)?, source, target)?
             }
             None => false,
         };

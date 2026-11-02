@@ -809,6 +809,12 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) async fn checkpoint_if_due(&mut self) {
         self.checkpoint_over(self.wal_limits.1).await;
     }
+    /// Cuts the WAL to the passive size before a large transaction, after
+    /// any running passive checkpoint, which would refuse the truncation.
+    pub(super) async fn cut_wal(&mut self) {
+        self.passive.clone().wait().await;
+        self.checkpoint_over(WAL_CHECKPOINT_BYTES).await;
+    }
     /// [`Self::checkpoint_if_due`], truncating once the WAL holds `limit`.
     pub(super) async fn checkpoint_over(&mut self, limit: u64) {
         self.reclaim_free_pages().await;

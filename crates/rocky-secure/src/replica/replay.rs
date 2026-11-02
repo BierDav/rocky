@@ -14,7 +14,7 @@ mod base;
 mod constraints;
 pub(crate) mod outcomes;
 mod rebuild;
-pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets};
+pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 pub(super) use constraints::{
     Written, cascades, check_member_order, checked, linked, note, written,
 };
@@ -457,8 +457,9 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        let mut plans = BTreeMap::new();
         for (hash, _, _, undo) in rewound.values().rev() {
-            self.undo(undo).await?;
+            self.undo(undo, &mut plans).await?;
             self.conn
                 .execute(
                     "DELETE FROM secure_replayed WHERE hash=?",
@@ -494,24 +495,39 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Restores the rows one member changed to their state before it.
-    async fn undo(&self, undo: &[Undo]) -> Result<(), Error> {
+    /// `plans` caches each table's plan by its lowercase name.
+    async fn undo(
+        &self,
+        undo: &[Undo],
+        plans: &mut BTreeMap<String, rocky_storage::capture::Table>,
+    ) -> Result<(), Error> {
         if undo.is_empty() {
             return Ok(());
         }
         let corrupt = || Error::Corrupt("undo record".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
-        let mut tables = Vec::with_capacity(undo.len());
         for undo in undo {
+            let name = undo.table.to_ascii_lowercase();
+            if plans.contains_key(&name) {
+                continue;
+            }
             let projected = typed.by_name(&undo.table).ok_or_else(corrupt)?;
-            tables.push(
-                typed
-                    .plan(&BTreeSet::from([projected.scope]))?
-                    .tables
-                    .into_iter()
-                    .find(|table| table.name.eq_ignore_ascii_case(&undo.table))
-                    .ok_or_else(corrupt)?,
-            );
+            let table = typed
+                .plan(&BTreeSet::from([projected.scope]))?
+                .tables
+                .into_iter()
+                .find(|table| table.name.eq_ignore_ascii_case(&undo.table))
+                .ok_or_else(corrupt)?;
+            plans.insert(name, table);
         }
+        let tables = undo
+            .iter()
+            .map(|undo| {
+                plans
+                    .get(&undo.table.to_ascii_lowercase())
+                    .ok_or_else(corrupt)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         // References settle at commit. Rows the member created go first, so
         // a restored image never collides with one of them.
         self.conn

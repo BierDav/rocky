@@ -288,7 +288,7 @@ bump in its evidence.
 | 5 | [Replayed constraints](05-replayed-constraints.md) | 4 | 2–3 w | Unique, FK, complex `CHECK` and assertions in replay; no field stamps or induced fan-out |
 | 6 | [Symbolic fast path](06-symbolic-fast-path.md) | 3, 5 | 2 w | `rocky-symbolic`, merged only if proven and faster; [proven equal, not faster in the mix: not merged](06-symbolic-fast-path-evidence.md) |
 | 7 | [Intent migrations](07-intent-migrations.md) | 4 | 2 w | Migrations publish as intents; bounded, resumable |
-| 8 | [Intent only](08-intent-only.md) | 5, 6, 7 | 3 w | `Mergeable`, registers and resolver deleted; replayed checkpoints; [complete, 2,095 of 2,500 lines removed](08-intent-only-evidence.md) |
+| 8 | [Intent only](08-intent-only.md) | 5, 6, 7 | 3 w | `Mergeable`, registers and resolver deleted; replayed checkpoints; [complete, 1,829 of 2,500 lines removed; sync rows hold](08-intent-only-evidence.md) |
 | 9 | [Qualification](09-qualification.md) | 1, 2, 8 | 1 w | Devices, convergence fuzz, sync non-regression |
 | 10 (deferred) | [Bounded transitions](10-bounded-transitions.md) (planned; design after 8, code on trigger) | 8; 9 and its trigger | 1–1.5 w design, then ~1 w per kind | Transitions, rewinds and seal finalization in bounded steps |
 

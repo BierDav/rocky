@@ -1335,11 +1335,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 break;
             }
             had_records = true;
+            // A replayed base stores field ordinals; served rows are full.
+            let ordinals = match (replayed, &served) {
+                (true, served::Served::Base) => Some(inner.stored_field_ordinals().await?),
+                _ => None,
+            };
             for record in &records {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                     return Err(Error::Corrupt("checkpoint row".into()));
                 };
                 if replayed {
+                    let fields = match &ordinals {
+                        Some(ordinals) => ordinals.unpack(fields)?,
+                        None => fields.clone(),
+                    };
                     let weight = ROW_OVERHEAD + fields.len();
                     if plain.rows.len() == page_rows || used + weight > budget {
                         if stored.is_some() {
@@ -1358,7 +1367,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     scanned = Some(row_of(row)?);
                     plain.rows.push(PageRow {
                         row: row.clone(),
-                        fields: fields.clone(),
+                        fields,
                         clock: 0,
                     });
                     continue;
@@ -2175,6 +2184,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?;
             }
             let mut sets = staging.sets.clone();
+            let fields = replay::fields_of(rows.iter().map(|(_, image)| image.as_slice()))?;
+            let ordinals = inner.field_ordinals(fields).await?;
             for (row, image) in &rows {
                 replay::add_row(&mut sets, row, image);
                 inner
@@ -2184,7 +2195,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         bindings(vec![
                             SqlValue::Integer(id),
                             SqlValue::Blob(row.to_vec()),
-                            SqlValue::Blob(image.clone()),
+                            SqlValue::Blob(ordinals.pack(image)?),
                         ]),
                     )
                     .await?;

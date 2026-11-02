@@ -1094,6 +1094,9 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Ok((count, Some(reason)));
             }
+            // A finalization writes every replayed scope's rows at the seal;
+            // it starts on a cut WAL, as a publication step does.
+            self.cut_wal().await;
             transaction!(self, |inner| {
                 let keep = inner
                     .keeps_finalized(domain, seal.id().map_err(credential)?)
@@ -1444,6 +1447,8 @@ impl<A: RowApplication> Inner<A> {
         // The seal is marked compacted with the last scope, never apart.
         let last = scopes.len().checked_sub(1);
         for (index, (scope, id)) in scopes.into_iter().enumerate() {
+            // Each scope writes its base; the WAL stays below the hard limit.
+            self.cut_wal().await;
             transaction!(self, |inner| {
                 inner.compact_scope(scope, id, target, seal).await?;
                 inner.fault(checkpoint::Stage::Compact)?;

@@ -441,12 +441,15 @@ type Member = (Order, i64, Commitment, (Hash, u16));
 
 /// Where a replayed scope's rebuild starts: rows at a seal of the path and
 /// the last applied position below which nothing replays.
+/// Rows by row id with their images.
+type Images = Vec<(Commitment, Vec<u8>)>;
+
 #[derive(Default)]
 struct Start {
     floor: i64,
     /// The seal the rows were taken at, when not the replay base's.
     seal: Option<(Commitment, SignedSeal)>,
-    rows: Option<(TipId, Vec<(Commitment, Vec<u8>)>)>,
+    rows: Option<(TipId, Images)>,
     /// The identity marks the replay base on the path signs.
     based: Vec<checkpoint::CoveredMark>,
     /// The rows are the replay base: no older start exists.

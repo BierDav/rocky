@@ -1,7 +1,9 @@
 //! A replayed scope's rows at a seal: its replay base. Replayed tables keep
 //! no row records, so a checkpoint of one carries `(row id, image)` pairs
 //! committed by an LtHash, and a rebuild starts from them. An image keys
-//! each value by its field id, so it outlives the seal's schema.
+//! each value by its field id, so it outlives the seal's schema. Stored
+//! images name each field id by its ordinal in `secure_replayed_fields`;
+//! digests and pages use the full image.
 use super::*;
 use crate::replica::checkpoint::Sets;
 
@@ -14,6 +16,8 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     // Rows at the scope's checkpoint, and those of an import in progress.
     "CREATE TABLE IF NOT EXISTS secure_replayed_base(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_replayed_staged(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    // The field ids stored images name; never deleted.
+    "CREATE TABLE IF NOT EXISTS secure_replayed_fields(ordinal INTEGER PRIMARY KEY,field BLOB NOT NULL UNIQUE)",
 ];
 
 const ROW_LABEL: &str = "rocky.replayed-row.v1";
@@ -28,20 +32,123 @@ fn fields_blob(fields: &RowFields) -> Vec<u8> {
     bytes
 }
 
-fn blob_fields(mut bytes: &[u8]) -> Result<RowFields, Error> {
-    let corrupt = || Error::Corrupt("replayed base image".into());
+fn blob_fields(bytes: &[u8]) -> Result<RowFields, Error> {
     let mut fields = RowFields::new();
+    for (field, value) in image_fields(bytes)? {
+        if fields.insert(*field, value.to_vec()).is_some() {
+            return Err(Error::Corrupt("replayed base image".into()));
+        }
+    }
+    Ok(fields)
+}
+
+/// One field id of an image with its encoded value.
+type ImageField<'a> = (&'a [u8; 32], &'a [u8]);
+
+/// Each field id of an image with its encoded value.
+fn image_fields(mut bytes: &[u8]) -> Result<Vec<ImageField<'_>>, Error> {
+    let corrupt = || Error::Corrupt("replayed base image".into());
+    let mut fields = Vec::new();
     while !bytes.is_empty() {
         let (field, rest) = bytes.split_first_chunk::<32>().ok_or_else(corrupt)?;
-        let mut value = rest;
-        SqlValue::decode(&mut value).map_err(|_| corrupt())?;
-        let (encoded, rest) = rest.split_at(rest.len() - value.len());
-        if fields.insert(*field, encoded.to_vec()).is_some() {
-            return Err(corrupt());
-        }
+        let (value, rest) = split_value(rest).ok_or_else(corrupt)?;
+        fields.push((field, value));
         bytes = rest;
     }
     Ok(fields)
+}
+
+/// One encoded value and what follows it.
+fn split_value(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut rest = bytes;
+    SqlValue::decode(&mut rest).ok()?;
+    Some(bytes.split_at(bytes.len() - rest.len()))
+}
+
+/// Per lowercase table name, each row key an open member changed with the
+/// row's image before the earliest of them; none when it was created.
+type Undone = BTreeMap<String, BTreeMap<Vec<u8>, Option<Vec<SqlValue>>>>;
+
+/// The encoded primary key of a row image.
+fn key_bytes(key: &[usize], image: &[SqlValue]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for index in key {
+        if let Some(value) = image.get(*index) {
+            value.encode(&mut bytes);
+        }
+    }
+    bytes
+}
+
+/// The field ids `images` name.
+pub(in crate::replica) fn fields_of<'a>(
+    images: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<BTreeSet<[u8; 32]>, Error> {
+    let mut fields = BTreeSet::new();
+    for image in images {
+        for (field, _) in image_fields(image)? {
+            fields.insert(*field);
+        }
+    }
+    Ok(fields)
+}
+
+/// The field dictionary of stored images, both ways.
+#[derive(Default)]
+pub(in crate::replica) struct FieldOrdinals {
+    ordinals: BTreeMap<[u8; 32], u64>,
+    fields: BTreeMap<u64, [u8; 32]>,
+}
+
+impl FieldOrdinals {
+    /// `image` as stored: each field's ordinal as a LEB128 varint, then its
+    /// value.
+    pub(in crate::replica) fn pack(&self, image: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut packed = Vec::with_capacity(image.len() / 4);
+        for (field, value) in image_fields(image)? {
+            let mut ordinal = *self
+                .ordinals
+                .get(field)
+                .ok_or_else(|| Error::Corrupt("replayed field ordinal".into()))?;
+            loop {
+                let byte = (ordinal & 0x7f) as u8;
+                ordinal >>= 7;
+                if ordinal == 0 {
+                    packed.push(byte);
+                    break;
+                }
+                packed.push(byte | 0x80);
+            }
+            packed.extend_from_slice(value);
+        }
+        Ok(packed)
+    }
+    /// The full image of a stored one.
+    pub(in crate::replica) fn unpack(&self, mut packed: &[u8]) -> Result<Vec<u8>, Error> {
+        let corrupt = || Error::Corrupt("replayed stored image".into());
+        let mut image = Vec::with_capacity(packed.len() * 4);
+        while !packed.is_empty() {
+            let mut ordinal = 0u64;
+            let mut shift = 0;
+            loop {
+                let (&byte, rest) = packed.split_first().ok_or_else(corrupt)?;
+                packed = rest;
+                if shift > 56 {
+                    return Err(corrupt());
+                }
+                ordinal |= u64::from(byte & 0x7f) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            let (value, rest) = split_value(packed).ok_or_else(corrupt)?;
+            image.extend_from_slice(self.fields.get(&ordinal).ok_or_else(corrupt)?);
+            image.extend_from_slice(value);
+            packed = rest;
+        }
+        Ok(image)
+    }
 }
 
 /// Adds one base row to `sets`.
@@ -61,13 +168,60 @@ pub(in crate::replica) fn base_sets(rows: &[(Commitment, Vec<u8>)]) -> Sets {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// The stored images' field dictionary, with every field of `fields`.
+    pub(in crate::replica) async fn field_ordinals(
+        &self,
+        fields: BTreeSet<[u8; 32]>,
+    ) -> Result<FieldOrdinals, Error> {
+        let ordinals = self.stored_field_ordinals().await?;
+        let missing: Vec<_> = fields
+            .into_iter()
+            .filter(|field| !ordinals.ordinals.contains_key(field))
+            .collect();
+        if missing.is_empty() {
+            return Ok(ordinals);
+        }
+        for field in missing {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_replayed_fields(field) VALUES(?)",
+                    [field.to_vec()],
+                )
+                .await?;
+        }
+        self.stored_field_ordinals().await
+    }
+    /// The stored images' field dictionary.
+    pub(in crate::replica) async fn stored_field_ordinals(&self) -> Result<FieldOrdinals, Error> {
+        let mut ordinals = FieldOrdinals::default();
+        for record in rows(
+            &self.conn,
+            "SELECT ordinal,field FROM secure_replayed_fields",
+        )
+        .await?
+        {
+            let [SqlValue::Integer(ordinal), SqlValue::Blob(field)] = record.as_slice() else {
+                return Err(Error::Corrupt("replayed field ordinal".into()));
+            };
+            let ordinal = u64::try_from(*ordinal)
+                .map_err(|_| Error::Corrupt("replayed field ordinal".into()))?;
+            let field: [u8; 32] = field
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Corrupt("replayed field ordinal".into()))?;
+            ordinals.ordinals.insert(field, ordinal);
+            ordinals.fields.insert(ordinal, field);
+        }
+        Ok(ordinals)
+    }
     /// The live rows of replayed scope `scope`, by row id.
     pub(in crate::replica) async fn replayed_images(
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<(Commitment, Vec<u8>)>, Error> {
-        self.scanned_images(scope, None)
+        self.scanned_images(&[scope], None, &Undone::new())
             .await?
+            .and_then(|mut scanned| scanned.remove(&scope))
             .ok_or_else(|| Error::Corrupt("replayed scope".into()))
     }
     /// The rows of replayed scope `scope` at kept `seal`, marked `mark`,
@@ -77,18 +231,26 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         kept: (Commitment, i64),
     ) -> Result<Option<Vec<(Commitment, Vec<u8>)>>, Error> {
-        self.scanned_images(scope, Some(kept)).await
+        Ok(self
+            .scanned_images(&[scope], Some(kept), &Undone::new())
+            .await?
+            .and_then(|mut scanned| scanned.remove(&scope)))
     }
+    /// The rows of each of `scopes`, partitions of one table, from a single
+    /// scan of it, each row of `undone` replaced by its image there.
+    #[allow(clippy::type_complexity)]
     async fn scanned_images(
         &self,
-        scope: ResourceScope,
+        scopes: &[ResourceScope],
         kept: Option<(Commitment, i64)>,
-    ) -> Result<Option<Vec<(Commitment, Vec<u8>)>>, Error> {
+        undone: &Undone,
+    ) -> Result<Option<BTreeMap<ResourceScope, Vec<(Commitment, Vec<u8>)>>>, Error> {
         let corrupt = || Error::Corrupt("replayed scope".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
-        let projected = typed.by_scope(scope).ok_or_else(corrupt)?;
+        let first = *scopes.first().ok_or_else(corrupt)?;
+        let projected = typed.by_scope(first).ok_or_else(corrupt)?;
         let table = typed
-            .plan(&BTreeSet::from([scope]))?
+            .plan(&scopes.iter().copied().collect())?
             .tables
             .into_iter()
             .find(|table| table.name.eq_ignore_ascii_case(&projected.table.sql_name))
@@ -109,7 +271,10 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         };
-        let mut images = Vec::new();
+        let mut images: BTreeMap<_, Vec<_>> =
+            scopes.iter().map(|scope| (*scope, Vec::new())).collect();
+        let undone = undone.get(&table.name.to_ascii_lowercase());
+        let mut live = Vec::new();
         for values in self
             .conn
             .connection()
@@ -119,9 +284,18 @@ impl<A: RowApplication> Inner<A> {
             let image = table
                 .image(&values)
                 .map_err(|_| Error::Corrupt("replayed row image".into()))?;
-            if typed.row_scope(projected, &image)? != scope {
+            if undone.is_some_and(|undone| undone.contains_key(&key_bytes(&table.key, &image))) {
                 continue;
             }
+            live.push(image);
+        }
+        let before = undone
+            .into_iter()
+            .flat_map(|undone| undone.values().flatten().cloned());
+        for image in live.into_iter().chain(before) {
+            let Some(rows) = images.get_mut(&typed.row_scope(projected, &image)?) else {
+                continue;
+            };
             let row = typed
                 .rows
                 .row_id(typed.domain.domain, &projected.table, &image)
@@ -130,9 +304,11 @@ impl<A: RowApplication> Inner<A> {
                 .rows
                 .fields(&projected.table, &image)
                 .map_err(|_| Error::Corrupt("replayed row image".into()))?;
-            images.push((row, fields_blob(&fields)));
+            rows.push((row, fields_blob(&fields)));
         }
-        images.sort_unstable();
+        for rows in images.values_mut() {
+            rows.sort_unstable();
+        }
         Ok(Some(images))
     }
 
@@ -151,40 +327,13 @@ impl<A: RowApplication> Inner<A> {
         if scopes.is_empty() {
             return Ok(());
         }
-        let mut starts = Vec::new();
-        for record in collect_rows(
-            self.conn
-                .query(
-                    "SELECT DISTINCT scope FROM secure_replayed WHERE sealed=0",
-                    (),
-                )
-                .await?,
-        )
-        .await?
-        {
-            let [SqlValue::Integer(scope)] = record.as_slice() else {
-                return Err(Error::Corrupt("replayed member".into()));
-            };
-            if let Some(first) = self.first_open(*scope).await? {
-                starts.push((*scope, first));
-            }
-        }
-        let taken = if starts.is_empty() {
-            self.images_of(&scopes).await?
-        } else {
-            // The rewind only reads the rows at the seal; it rolls back.
-            self.conn.execute("SAVEPOINT seal_rows", ()).await?;
-            let touched = self.take_oracle_state();
-            let taken = async {
-                self.rewind(starts).await?;
-                self.images_of(&scopes).await
-            }
-            .await;
-            self.restore_oracle_state(touched);
-            self.conn.execute("ROLLBACK TO seal_rows", ()).await?;
-            self.conn.execute("RELEASE seal_rows", ()).await?;
-            taken?
-        };
+        let taken = self.images_at_seal(&scopes).await?;
+        let fields = fields_of(
+            taken
+                .iter()
+                .flat_map(|(_, images)| images.iter().map(|(_, image)| image.as_slice())),
+        )?;
+        let ordinals = self.field_ordinals(fields).await?;
         for (id, images) in taken {
             self.conn
                 .execute(
@@ -206,7 +355,7 @@ impl<A: RowApplication> Inner<A> {
                             SqlValue::Integer(id),
                             SqlValue::Blob(seal.to_vec()),
                             SqlValue::Blob(row.to_vec()),
-                            SqlValue::Blob(image),
+                            SqlValue::Blob(ordinals.pack(&image)?),
                         ]),
                     )
                     .await?;
@@ -214,30 +363,61 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    async fn first_open(&self, scope: i64) -> Result<Option<Order>, Error> {
-        collect_rows(
+    /// The rows of each of `scopes` with every open member undone, one
+    /// scan per table. A row an open member changed takes its image before
+    /// the earliest of them; no row is written.
+    #[allow(clippy::type_complexity)]
+    async fn images_at_seal(
+        &self,
+        scopes: &[(ResourceScope, i64)],
+    ) -> Result<Vec<(i64, Vec<(Commitment, Vec<u8>)>)>, Error> {
+        let mut undone = Undone::new();
+        for record in collect_rows(
             self.conn
                 .query(
-                    "SELECT era,clock,author,sequence FROM secure_replayed WHERE scope=? AND sealed=0 ORDER BY era,clock,author,sequence LIMIT 1",
-                    [scope],
+                    "SELECT undo FROM secure_replayed WHERE sealed=0 AND undo IS NOT NULL ORDER BY era,clock,author,sequence",
+                    (),
                 )
                 .await?,
         )
         .await?
-        .first()
-        .map(|row| order_of(row))
-        .transpose()
-    }
-    #[allow(clippy::type_complexity)]
-    async fn images_of(
-        &self,
-        scopes: &[(ResourceScope, i64)],
-    ) -> Result<Vec<(i64, Vec<(Commitment, Vec<u8>)>)>, Error> {
-        let mut taken = Vec::with_capacity(scopes.len());
-        for (scope, id) in scopes {
-            taken.push((*id, self.replayed_images(*scope).await?));
+        {
+            let [SqlValue::Blob(undo)] = record.as_slice() else {
+                return Err(Error::Corrupt("replayed member".into()));
+            };
+            for undo in super::undo_of(undo)? {
+                let mut key = Vec::new();
+                for value in &undo.key {
+                    value.encode(&mut key);
+                }
+                undone
+                    .entry(undo.table.to_ascii_lowercase())
+                    .or_default()
+                    .entry(key)
+                    .or_insert(undo.before);
+            }
         }
-        Ok(taken)
+        let mut tables: BTreeMap<_, Vec<ResourceScope>> = BTreeMap::new();
+        for (scope, _) in scopes {
+            tables.entry(scope.table).or_default().push(*scope);
+        }
+        let mut scanned = BTreeMap::new();
+        for table in tables.values() {
+            scanned.extend(
+                self.scanned_images(table, None, &undone)
+                    .await?
+                    .ok_or_else(|| Error::Corrupt("replayed scope".into()))?,
+            );
+        }
+        scopes
+            .iter()
+            .map(|(scope, id)| {
+                scanned
+                    .remove(scope)
+                    .map(|rows| (*id, rows))
+                    .ok_or_else(|| Error::Corrupt("replayed scope".into()))
+            })
+            .collect()
     }
 
     /// The rows taken at `seal`; none when they were not taken.
@@ -281,13 +461,15 @@ impl<A: RowApplication> Inner<A> {
                 vec![SqlValue::Integer(id)],
             ),
         };
+        let ordinals = self.stored_field_ordinals().await?;
         collect_rows(self.conn.query(sql, bindings(params)).await?)
             .await?
             .into_iter()
             .map(|record| match record.as_slice() {
-                [SqlValue::Blob(row), SqlValue::Blob(image)] => {
-                    Ok((super::super::checkpoint::row_of(row)?, image.clone()))
-                }
+                [SqlValue::Blob(row), SqlValue::Blob(image)] => Ok((
+                    super::super::checkpoint::row_of(row)?,
+                    ordinals.unpack(image)?,
+                )),
                 _ => Err(Error::Corrupt("replayed base row".into())),
             })
             .collect()
@@ -303,6 +485,8 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute("DELETE FROM secure_replayed_base WHERE scope=?", [id])
             .await?;
+        let fields = fields_of(rows.iter().map(|(_, image)| image.as_slice()))?;
+        let ordinals = self.field_ordinals(fields).await?;
         for (row, image) in rows {
             self.conn
                 .execute(
@@ -310,7 +494,7 @@ impl<A: RowApplication> Inner<A> {
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(row.to_vec()),
-                        SqlValue::Blob(image.clone()),
+                        SqlValue::Blob(ordinals.pack(image)?),
                     ]),
                 )
                 .await?;
@@ -496,5 +680,39 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_image_unpacks_to_the_full_image() {
+        let mut ordinals = FieldOrdinals::default();
+        // Ordinals past one varint byte.
+        for (ordinal, byte) in [(1u64, 1u8), (300, 2), (1 << 20, 3)] {
+            ordinals.ordinals.insert([byte; 32], ordinal);
+            ordinals.fields.insert(ordinal, [byte; 32]);
+        }
+        let fields = RowFields::from([
+            ([1; 32], encoded(SqlValue::Integer(-7))),
+            ([2; 32], encoded(SqlValue::Text("list".into()))),
+            ([3; 32], encoded(SqlValue::Null)),
+        ]);
+        let image = fields_blob(&fields);
+        let packed = ordinals.pack(&image).unwrap();
+        assert!(packed.len() < image.len());
+        assert_eq!(ordinals.unpack(&packed).unwrap(), image);
+        assert_eq!(blob_fields(&image).unwrap(), fields);
+        // A field outside the dictionary is refused, never dropped.
+        let unknown = fields_blob(&RowFields::from([([9; 32], encoded(SqlValue::Null))]));
+        assert!(ordinals.pack(&unknown).is_err());
+    }
+
+    fn encoded(value: SqlValue) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        value.encode(&mut bytes);
+        bytes
     }
 }

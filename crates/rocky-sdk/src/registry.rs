@@ -394,8 +394,15 @@ pub async fn write(
                         SqlValue::Text(change.value.clone()),
                         SqlValue::Integer(id.integer()),
                     ]);
+                    // Replay may meet another issuer's concurrent insert of
+                    // the entry: it keeps or replaces it rather than dropping
+                    // the whole record.
+                    let conflict = match change.mode {
+                        Mode::Replace => "DO UPDATE SET value = excluded.value",
+                        _ => "DO NOTHING",
+                    };
                     let insert = format!(
-                        "INSERT INTO {REGISTRY}(node, entry, value, id) VALUES(?, ?, ?, ?)"
+                        "INSERT INTO {REGISTRY}(node, entry, value, id) VALUES(?, ?, ?, ?) ON CONFLICT(node, entry) {conflict}"
                     );
                     sql.run(&insert, values).await?;
                 }

@@ -911,24 +911,23 @@ impl LogicalSchema {
                 ));
             }
             {
-                for name in ["id"] {
-                    let column = table.column(name).ok_or_else(|| {
-                        SchemaError::Invalid(format!(
-                            "{}.{} is required by descriptor format 6",
-                            table.sql_name, name
-                        ))
-                    })?;
-                    if column.sql_name != name
-                        || column.affinity != Affinity::Integer
-                        || !column.not_null
-                        || column.collation != Collation::Binary
-                        || column.class != ColumnClass::Replicated
-                    {
-                        return invalid(format!(
-                            "{}.{} must be a non-null integer identity column",
-                            table.sql_name, name
-                        ));
-                    }
+                let name = "id";
+                let column = table.column(name).ok_or_else(|| {
+                    SchemaError::Invalid(format!(
+                        "{}.{} is required by descriptor format 6",
+                        table.sql_name, name
+                    ))
+                })?;
+                if column.sql_name != name
+                    || column.affinity != Affinity::Integer
+                    || !column.not_null
+                    || column.collation != Collation::Binary
+                    || column.class != ColumnClass::Replicated
+                {
+                    return invalid(format!(
+                        "{}.{} must be a non-null integer identity column",
+                        table.sql_name, name
+                    ));
                 }
                 if !(table.primary_key.len() == table.identity_columns().len()
                     && table

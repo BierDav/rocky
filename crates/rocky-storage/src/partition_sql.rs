@@ -503,6 +503,9 @@ impl Prepared {
         if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut filter) {
             return Err(error.into());
         }
+        if assertion {
+            let _ = VisitMut::visit(&mut statement, &mut crate::exact::Checked);
+        }
         if filter.params.len() > params.len() && used != params.len() {
             return Err(format!(
                 "the statement uses {used} parameters, {} were given",

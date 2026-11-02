@@ -61,6 +61,25 @@ impl IntoSqlValue for TransactionToken {
         SqlValue::Blob(self.0.to_vec())
     }
 }
+/// A fixed-size BLOB, such as a UUID's 16 bytes in RFC 9562 order
+/// (`Uuid::as_bytes` of the `uuid` crate).
+impl<const N: usize> IntoSqlValue for [u8; N] {
+    fn into_sql_value(self) -> SqlValue {
+        SqlValue::Blob(self.to_vec())
+    }
+}
+/// JSON binds as the compact TEXT `serde_json` writes. Rocky never
+/// rewrites it: compare documents decoded or through SQLite's `json`, not as text.
+impl IntoSqlValue for serde_json::Value {
+    fn into_sql_value(self) -> SqlValue {
+        SqlValue::Text(self.to_string())
+    }
+}
+impl IntoSqlValue for Timestamp {
+    fn into_sql_value(self) -> SqlValue {
+        SqlValue::Integer(self.0)
+    }
+}
 impl<T: IntoSqlValue> IntoSqlValue for Option<T> {
     fn into_sql_value(self) -> SqlValue {
         self.map_or(SqlValue::Null, IntoSqlValue::into_sql_value)
@@ -137,6 +156,74 @@ impl FromSqlValue for TransactionToken {
         }
     }
 }
+/// Exactly `N` bytes of a BLOB.
+impl<const N: usize> FromSqlValue for [u8; N] {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        match value {
+            SqlValue::Blob(bytes) => bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| DecodeError(format!("expected a {N}-byte BLOB"))),
+            _ => Err(DecodeError("expected BLOB".into())),
+        }
+    }
+}
+impl FromSqlValue for serde_json::Value {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        match value {
+            SqlValue::Text(text) => serde_json::from_str(text)
+                .map_err(|error| DecodeError(format!("invalid JSON: {error}"))),
+            _ => Err(DecodeError("expected JSON TEXT".into())),
+        }
+    }
+}
+impl FromSqlValue for Timestamp {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        i64::from_sql_value(value).map(Self)
+    }
+}
+
+/// An instant as INTEGER microseconds since 1970-01-01T00:00:00 UTC, Unix
+/// time without leap seconds. The range is `i64`, about ±292,000 years.
+/// Bind it like any value: replay never reads a clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp(i64);
+impl Timestamp {
+    pub const fn from_unix_micros(micros: i64) -> Self {
+        Self(micros)
+    }
+    pub const fn unix_micros(self) -> i64 {
+        self.0
+    }
+    /// `None` outside the platform's `SystemTime` range.
+    pub fn system_time(self) -> Option<std::time::SystemTime> {
+        let offset = std::time::Duration::from_micros(self.0.unsigned_abs());
+        if self.0 < 0 {
+            std::time::UNIX_EPOCH.checked_sub(offset)
+        } else {
+            std::time::UNIX_EPOCH.checked_add(offset)
+        }
+    }
+}
+/// Rounds down to the microsecond; refuses instants outside `i64` microseconds.
+impl TryFrom<std::time::SystemTime> for Timestamp {
+    type Error = DecodeError;
+    fn try_from(time: std::time::SystemTime) -> Result<Self, DecodeError> {
+        let out_of_range = || DecodeError("instant outside i64 microseconds".into());
+        let micros = match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_micros()).map_err(|_| out_of_range())?,
+            Err(before) => {
+                let before = before.duration();
+                let whole = i128::try_from(before.as_micros()).map_err(|_| out_of_range())?;
+                // A partial microsecond before the epoch rounds away from it.
+                let partial = i128::from(before.subsec_nanos() % 1_000 != 0);
+                i64::try_from(-whole - partial).map_err(|_| out_of_range())?
+            }
+        };
+        Ok(Self(micros))
+    }
+}
+
 impl<T: FromSqlValue> FromSqlValue for Option<T> {
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
         match value {

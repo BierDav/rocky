@@ -80,7 +80,7 @@ async fn replayed_writes_commit_as_intents() {
     assert!(
         statements[1]
             .0
-            .starts_with("UPDATE salaries SET amount = amount + ?")
+            .starts_with("UPDATE salaries SET amount = checked_add(amount, ?")
     );
     assert_eq!(statements[1].1, vec![SqlValue::Integer(5), text("ann")]);
 

@@ -108,6 +108,10 @@ mod service {
             self.client = Some(client);
             self
         }
+        /// This node's client, whose requests present its certificate.
+        pub(crate) fn client(&self) -> Option<&Arc<NetworkCoordinator>> {
+            self.client.as_ref()
+        }
         /// Presents the node certificate `chain` ends at from now on: the
         /// coordinator admits nodes of the identities a control trusts.
         pub(crate) fn certify(&self, chain: &rocky_credentials::CredentialChain) {

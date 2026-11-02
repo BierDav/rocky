@@ -132,6 +132,18 @@ enum Command {
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
+    #[cfg(feature = "iroh")]
+    Claim(
+        crate::counters::Name,
+        crate::counters::Claim,
+        oneshot::Sender<Result<u64, Failure>>,
+    ),
+    #[cfg(feature = "iroh")]
+    Counter(
+        crate::counters::Name,
+        Option<crate::counters::Claim>,
+        oneshot::Sender<Result<crate::counters::Reading, Failure>>,
+    ),
 }
 /// The scope and the network service a database opened with.
 type Greeting = Result<(String, Option<u64>), Failure>;
@@ -467,6 +479,42 @@ impl Database {
             .request(|reply| Command::Coordinate(log, reply))
             .await?;
         Ok(())
+    }
+    /// The value `claim` takes from the domain's `counter` on the composed
+    /// coordination service: the next one, or the one it already took.
+    /// Values are unique and strictly increasing across every trusted node,
+    /// and a value is consumed once claimed: an abandoned one is a gap.
+    ///
+    /// A claim is a coordinator decision, never part of a transaction. Store
+    /// the [`counters::Claim`](crate::counters::Claim) in the application's
+    /// own pending row before the first attempt, then use the value in an
+    /// ordinary transaction that also settles that row. After an uncertain
+    /// result (`CoordinationError::Unavailable`) or a restart, claim again
+    /// with the stored claim: it answers the same value within
+    /// `counters::CLAIM_WINDOW` of its issue time and the counter's latest
+    /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
+    /// never takes a second value. Only the domain's trusted nodes claim.
+    #[cfg(feature = "iroh")]
+    pub async fn claim(
+        &self,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> Result<u64, Failure> {
+        self.shared
+            .request(|reply| Command::Claim(counter, claim, reply))
+            .await?
+    }
+    /// `counter`'s last claimed value and, for `claim`, what it took: a
+    /// linearizable read for reconciliation after a restart.
+    #[cfg(feature = "iroh")]
+    pub async fn counter(
+        &self,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    ) -> Result<crate::counters::Reading, Failure> {
+        self.shared
+            .request(|reply| Command::Counter(counter, claim, reply))
+            .await?
     }
     /// A SQL connection for a database driver: the writer is a secure SQL
     /// session, a reader steps snapshot cursors. See
@@ -1750,6 +1798,18 @@ async fn run_inner(
                 crate::reactor::spawn_in(&mut tasks, "flush", async move {
                     let flushed = node.replica.flush().await.map(drop).map_err(Failure::from);
                     let _ = reply.send(flushed);
+                });
+            }
+            #[cfg(feature = "iroh")]
+            Command::Claim(counter, claim, reply) => {
+                crate::reactor::spawn_in(&mut tasks, "claim", async move {
+                    let _ = reply.send(node.claim(counter, claim).await);
+                });
+            }
+            #[cfg(feature = "iroh")]
+            Command::Counter(counter, claim, reply) => {
+                crate::reactor::spawn_in(&mut tasks, "counter", async move {
+                    let _ = reply.send(node.counter(counter, claim).await);
                 });
             }
             Command::Outcome(token, reply) => {

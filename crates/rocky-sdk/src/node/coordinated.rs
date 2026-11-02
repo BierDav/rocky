@@ -12,6 +12,36 @@ impl Node {
         self.replica.set_domain_log(log);
     }
 }
+/// Counter claims through the composed coordination service. A claim never
+/// runs inside a database transaction.
+#[cfg(feature = "iroh")]
+impl Node {
+    fn counters(&self) -> Result<&rocky_coordinator::service::NetworkCoordinator, Failure> {
+        self.service
+            .as_ref()
+            .and_then(|service| service.client())
+            .map(|client| &**client)
+            .ok_or_else(|| {
+                refused("claims need a coordination service composed with this database")
+            })
+    }
+    pub(crate) async fn claim(
+        &self,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> Result<u64, Failure> {
+        let scope = self.domain().scope;
+        Ok(self.counters()?.claim(scope, counter, claim).await?)
+    }
+    pub(crate) async fn counter(
+        &self,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    ) -> Result<crate::counters::Reading, Failure> {
+        let scope = self.domain().scope;
+        Ok(self.counters()?.counter(scope, counter, claim).await?)
+    }
+}
 impl Node {
     /// Whether this device is a trusted node with a composed log, and the
     /// log of the tip it follows.

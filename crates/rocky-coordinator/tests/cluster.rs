@@ -1,10 +1,12 @@
+//! Persistent voters: controls, logs, counter claims, crashes and restarts.
 mod support;
 use rocky_coordinator::{
     coordinated::{Action, Result as LogResult},
-    service::{Operation, Outcome},
+    counters::{Claim, Lookup, Name},
+    service::{NetworkCoordinator, Operation, Outcome},
 };
 use rocky_core::*;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -338,5 +340,168 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     println!(
         "crash exercise: 5 append boundaries, 2 snapshot boundaries plus interrupted snapshot transfer; leader disk bytes={} logs={} snapshots={}",
         status.disk_bytes, status.logs, status.snapshots
+    );
+}
+
+fn claim(n: u8) -> Claim {
+    Claim {
+        id: [n; 32],
+        issued: timestamp(),
+    }
+}
+/// Claims until the answer is definite: an uncertain result (a crashed or
+/// replaced leader) is retried with the same claim, as applications do.
+async fn claim_definitely(
+    client: &NetworkCoordinator,
+    scope: Scope,
+    counter: &Name,
+    claim: Claim,
+) -> Result<u64, CoordinationError> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match client.claim(scope, counter.clone(), claim).await {
+                Err(CoordinationError::Unavailable) => continue,
+                result => return result,
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(CoordinationError::Unavailable))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapshots() {
+    let mut cluster = Cluster::start().await;
+    let admin = cluster.client(&cluster.admin);
+    let issuer = cluster.client(&cluster.issuer);
+    let nodes = [
+        Arc::new(cluster.client(&cluster.executor)),
+        Arc::new(cluster.client(&cluster.alternate)),
+    ];
+    issuer
+        .call([1; 32], Operation::Control(cluster.app_control(1)))
+        .await
+        .unwrap();
+    let scope = cluster.scope;
+    let invoices = Name::new("company-1/invoices").unwrap();
+
+    // Concurrent claims from both trusted nodes take distinct values, and
+    // each node's own sequence of answers strictly increases.
+    let claims: Vec<Claim> = (0..24).map(claim).collect();
+    let tasks: Vec<_> = (0..2)
+        .map(|node| {
+            let client = nodes[node].clone();
+            let counter = invoices.clone();
+            let mine: Vec<_> = claims.iter().copied().skip(node).step_by(2).collect();
+            tokio::spawn(async move {
+                let mut values = Vec::new();
+                for claim in mine {
+                    values.push((claim, client.claim(scope, counter.clone(), claim).await));
+                }
+                values
+            })
+        })
+        .collect();
+    let mut taken = Vec::new();
+    for task in tasks {
+        let values: Vec<_> = task.await.unwrap();
+        let ordered: Vec<u64> = values.iter().map(|(_, v)| *v.as_ref().unwrap()).collect();
+        assert!(
+            ordered.windows(2).all(|pair| pair[0] < pair[1]),
+            "{ordered:?}"
+        );
+        taken.extend(values.into_iter().map(|(claim, v)| (claim, v.unwrap())));
+    }
+    let distinct: BTreeSet<u64> = taken.iter().map(|(_, value)| *value).collect();
+    assert_eq!(distinct, (1..=24).collect());
+    // Either node's retry of either node's claim answers the same value.
+    for (n, (claim, value)) in taken.iter().enumerate() {
+        let retried = nodes[n % 2]
+            .claim(scope, invoices.clone(), *claim)
+            .await
+            .unwrap();
+        assert_eq!(retried, *value);
+    }
+
+    // The leader crashes after applying a claim and before replying: the
+    // retry answers the value it took, once.
+    let leader = cluster.wait_leader(&admin).await;
+    let crashed = claim(100);
+    cluster.arm(leader, "reply.before_send");
+    let _ = nodes[0].claim(scope, invoices.clone(), crashed).await;
+    cluster.wait_exit(leader).await;
+    assert_eq!(
+        claim_definitely(&nodes[1], scope, &invoices, crashed).await,
+        Ok(25)
+    );
+    assert_eq!(
+        claim_definitely(&nodes[0], scope, &invoices, claim(101)).await,
+        Ok(26)
+    );
+    cluster.spawn(leader, false, None);
+    cluster.wait_online(leader, &admin).await;
+
+    // A leader change keeps every value: the new leader answers retries.
+    let leader = cluster.wait_leader(&admin).await;
+    cluster.stop(leader);
+    assert_ne!(cluster.wait_leader(&admin).await, leader);
+    for (claim, value) in &taken {
+        assert_eq!(
+            claim_definitely(&nodes[1], scope, &invoices, *claim).await,
+            Ok(*value)
+        );
+    }
+    assert_eq!(
+        claim_definitely(&nodes[1], scope, &invoices, claim(102)).await,
+        Ok(27)
+    );
+    cluster.spawn(leader, false, None);
+    cluster.wait_online(leader, &admin).await;
+
+    // Every voter restarts from its snapshot with the same counter.
+    for id in 1..=3 {
+        admin.snapshot(id).await.unwrap();
+    }
+    for id in 1..=3 {
+        cluster.stop(id);
+        cluster.spawn(id, false, None);
+        cluster.wait_online(id, &admin).await;
+    }
+    cluster.wait_leader(&admin).await;
+    assert_eq!(
+        claim_definitely(&nodes[0], scope, &invoices, crashed).await,
+        Ok(25)
+    );
+    let reading = nodes[0]
+        .counter(scope, invoices.clone(), Some(taken[3].0))
+        .await
+        .unwrap();
+    assert_eq!(reading.value, 27);
+    assert_eq!(reading.claim, Some(Lookup::Claimed(taken[3].1)));
+    assert_eq!(
+        claim_definitely(&nodes[1], scope, &invoices, claim(103)).await,
+        Ok(28)
+    );
+
+    // Only the domain's trusted nodes claim or read; the control authority
+    // and other keys are refused.
+    let stranger = cluster.client(&cluster.user);
+    for client in [&issuer, &stranger] {
+        assert_eq!(
+            client.claim(scope, invoices.clone(), claim(104)).await,
+            Err(CoordinationError::Denied)
+        );
+        assert_eq!(
+            client.counter(scope, invoices.clone(), None).await,
+            Err(CoordinationError::Denied)
+        );
+    }
+    assert_eq!(
+        nodes[0]
+            .counter(scope, invoices.clone(), Some(claim(104)))
+            .await
+            .unwrap()
+            .claim,
+        Some(Lookup::Unclaimed)
     );
 }

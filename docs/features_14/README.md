@@ -104,6 +104,38 @@ commits ordinary writes, joining the two in its own code, including retries
 after an uncertain result. Rocky states each guarantee on its own and never
 presents a seal-final outcome as a coordinator decision or the reverse.
 
+Status (2026-11-03): Rocky offers a generic counter claim as such a decision.
+Numbering policy (series, formats, yearly resets, gap handling) stays with the
+application.
+
+- A domain holds up to 64 named counters (opaque names, 1–64 bytes). A
+  `Claim { id, issued }` takes the counter's next value through the
+  coordinator's Raft log (`Operation::Claim`), so values are unique and
+  strictly increasing across every voter, starting at 1. A claimed value is
+  consumed: an abandoned one is a gap; sequences are not gapless.
+- A claim answers the same value to every retry, from any trusted node,
+  within 7 days of `issued` (`CLAIM_WINDOW`) and the counter's latest 1,024
+  claims (`CLAIM_RECORDS`). Beyond that a retry, or any claim issued no later
+  than an evicted one, is refused with `Expired`; it never takes a second
+  value. An issue time more than 30 s ahead of authority time is `ClockSkew`.
+- Only trusted nodes of the domain (its control's identities) claim or read
+  (`Operation::Counter`, linearizable); a closed domain takes no claim.
+  Counters count against the tenant's byte budget (128 bytes per counter
+  plus its name, 64 per kept claim) and refuse with `Backpressure` without
+  taking a value.
+- SDK: `Database::claim(name, claim)` and `Database::counter(name, claim)`
+  on a database composed with a coordination service, separate from
+  `Database::transaction`. Pattern: store the claim in the application's
+  pending row, claim, use the value in an ordinary transaction that settles
+  the row, and after `Unavailable` or a restart claim again with the same claim.
+- The coordinator store format moved to 11.
+- Evidence: `rocky-coordinator` `machine::counter_tests` (values, retries,
+  snapshot encoding, authorization, window, eviction, budgets) and
+  `tests/cluster.rs`
+  `voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapshots`
+  (three voters: concurrent claims, a crash before reply, a leader change, a
+  restart from snapshots, refused keys); `rocky-sdk` `tests/service.rs`.
+
 ## R4. Durability and atomic application effects
 
 - SDKs must expose the durability boundary and a way to obtain the required
@@ -176,7 +208,8 @@ interactive latency for transitions that have not been qualified.
 ## Outside Rocky
 
 Application schema design and partition choices; accounting/tax/rounding policy;
-business posting and correction commands; invoice numbering policy; files/PDFs,
+business posting and correction commands; invoice numbering policy (Rocky
+supplies only the generic counter claim of R3); files/PDFs,
 OCR, bank/email integrations and provider credentials; migration mappings and
 business reconciliation; application UI and reports. Rocky supplies the generic
 guarantees these use, not their business implementation.

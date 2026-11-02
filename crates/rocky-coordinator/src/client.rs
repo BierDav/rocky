@@ -290,6 +290,54 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// The value `claim` takes from `scope`'s `counter`: the next one, or
+    /// the one it already took. Retry an uncertain result (`Unavailable`)
+    /// with the same claim; it never takes a second value. A value the
+    /// application abandons stays a gap.
+    pub async fn claim(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> Result<u64, CoordinationError> {
+        match self
+            .call(
+                nonce(),
+                Operation::Claim {
+                    scope,
+                    counter,
+                    claim,
+                },
+            )
+            .await?
+        {
+            Outcome::Claimed(value) => Ok(value),
+            _ => Err(CoordinationError::Corrupt),
+        }
+    }
+    /// `counter`'s last value and, for `claim`, what it took: a
+    /// linearizable read for reconciliation after a restart.
+    pub async fn counter(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    ) -> Result<crate::counters::Reading, CoordinationError> {
+        match self
+            .call(
+                nonce(),
+                Operation::Counter {
+                    scope,
+                    counter,
+                    claim,
+                },
+            )
+            .await?
+        {
+            Outcome::Counter(reading) => Ok(reading),
+            _ => Err(CoordinationError::Corrupt),
+        }
+    }
     /// This tenant's use of its budgets.
     pub async fn usage(&self) -> Result<crate::service::Usage, CoordinationError> {
         match self.call(nonce(), Operation::Usage).await? {

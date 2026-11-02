@@ -7,6 +7,7 @@ use rocky_core::*;
 struct Domain {
     scope: Scope,
     coordinated: coordinated::Logs,
+    counters: counters::Counters,
     /// Closed by its owner: the identity never reopens.
     closed: bool,
 }
@@ -15,11 +16,15 @@ impl Domain {
         Self {
             scope,
             coordinated: coordinated::Logs::new(scope, configuration),
+            counters: counters::Counters::default(),
             closed: false,
         }
     }
     fn open(&self) -> bool {
         !self.closed
+    }
+    fn bytes(&self) -> usize {
+        self.coordinated.bytes() + self.counters.bytes()
     }
 }
 /// Retained state of one coordinator, by count and accounted bytes.
@@ -54,7 +59,7 @@ impl State {
         }
     }
     fn bytes(&self) -> usize {
-        self.domains.iter().map(|d| d.coordinated.bytes()).sum()
+        self.domains.iter().map(Domain::bytes).sum()
     }
     fn domain(&mut self, scope: Scope) -> Result<&mut Domain, CoordinationError> {
         self.domains
@@ -91,3 +96,5 @@ mod transport;
 
 /// Ordered metadata for coordinated ordinary writes.
 pub mod coordinated;
+/// Named counters with idempotent claims.
+pub mod counters;

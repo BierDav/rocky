@@ -171,9 +171,16 @@ pub use engine::Engine;
 pub use enrollment::{DeviceKeys, Supplied, route_enrollment};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
+/// Named domain counters whose idempotent claims hand out unique,
+/// increasing values; see [`Database::claim`].
+#[cfg(feature = "iroh")]
+pub use rocky_coordinator::counters;
 /// The client of a coordination service and the bundle that pins it.
 #[cfg(feature = "iroh")]
 pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};
+/// Coordinator refusals, such as `Unavailable` (uncertain: retry the same
+/// claim) and `Expired`, inside a claim's [`Failure`].
+pub use rocky_core::CoordinationError;
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, DeleteAction, ForeignKeyDefinition, IndexColumn,

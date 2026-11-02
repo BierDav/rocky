@@ -38,6 +38,20 @@ pub enum Operation {
     Register(Box<Registration>),
     /// The signing tenant's quota use.
     Usage,
+    /// Takes the next value of `scope`'s counter, or the value `claim`
+    /// already took. By a trusted node of the open domain.
+    Claim {
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    },
+    /// A counter's last value and, for `claim`, what it took. By a trusted
+    /// node of the domain.
+    Counter {
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    },
 }
 /// What a tenant presents to register a domain.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,12 +202,16 @@ impl Request {
             &encode(&self.operation)?,
         ))
     }
-    /// Administrative mutations keep retry outcomes. Reads keep nothing, and
-    /// log actions deduplicate by their own sequences.
+    /// Administrative mutations keep retry outcomes. Reads keep nothing, log
+    /// actions deduplicate by their own sequences and claims by their own
+    /// identities.
     fn retained(&self) -> bool {
         !matches!(
             self.operation,
-            Operation::Coordinated { .. } | Operation::Usage
+            Operation::Coordinated { .. }
+                | Operation::Usage
+                | Operation::Claim { .. }
+                | Operation::Counter { .. }
         ) || matches!(
             self.operation,
             Operation::Coordinated {
@@ -207,6 +225,7 @@ impl Request {
         matches!(
             self.operation,
             Operation::Usage
+                | Operation::Counter { .. }
                 | Operation::Coordinated {
                     action: crate::coordinated::Action::Head
                         | crate::coordinated::Action::Status { .. },
@@ -220,6 +239,8 @@ pub enum Outcome {
     CoordinatedHead(Box<crate::coordinated::Head>),
     CoordinatedStatus(rocky_core::LogStatus),
     Coordinated(crate::coordinated::Result),
+    Claimed(u64),
+    Counter(crate::counters::Reading),
     Controlled(Commitment),
     Membership(BTreeSet<u64>),
     Closed,
@@ -347,6 +368,10 @@ impl Metadata {
                 self.registration_authorized(request, grant, admission.as_ref(), certificate, time)
             }
             Operation::Usage => self.tenant(request.key).map(|_| ()),
+            Operation::Claim { scope, .. } => self.counter_authorized(*scope, true, request, time),
+            Operation::Counter { scope, .. } => {
+                self.counter_authorized(*scope, false, request, time)
+            }
         }
     }
     /// Advances authority time to the leader-proposed `time`, clamping a
@@ -439,8 +464,64 @@ impl Metadata {
                 ))
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
+            Operation::Counter {
+                scope,
+                counter,
+                claim,
+            } => self.counter(*scope, counter, *claim, request),
             _ => Err(CoordinationError::Denied),
         }
+    }
+    /// A trusted node of `scope` under its current control; a claim also
+    /// needs the domain open.
+    fn counter_authorized(
+        &self,
+        scope: Scope,
+        claim: bool,
+        request: &Request,
+        time: u64,
+    ) -> Result<(), CoordinationError> {
+        self.authorized(scope, request, time)?;
+        if claim && !self.state.find(scope)?.open() {
+            return Err(CoordinationError::Denied);
+        }
+        Ok(())
+    }
+    fn counter(
+        &self,
+        scope: Scope,
+        counter: &crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+        request: &Request,
+    ) -> Result<Outcome, CoordinationError> {
+        let time = self.state.time;
+        self.counter_authorized(scope, false, request, time)?;
+        let domain = self.state.find(scope)?;
+        domain
+            .counters
+            .read(counter, claim, time)
+            .map(Outcome::Counter)
+    }
+    fn claim(
+        &mut self,
+        scope: Scope,
+        counter: &crate::counters::Name,
+        claim: crate::counters::Claim,
+        request: &Request,
+    ) -> Result<Outcome, CoordinationError> {
+        let time = self.state.time;
+        self.counter_authorized(scope, true, request, time)?;
+        let available = self.tenant_available(scope)?.min(
+            self.state
+                .limits
+                .total_bytes
+                .saturating_sub(self.total_used()?),
+        );
+        self.state
+            .domain(scope)?
+            .counters
+            .claim(counter, claim, time, available)
+            .map(Outcome::Claimed)
     }
     fn issuer(&self, scope: Scope) -> Option<PublicKey> {
         self.controls
@@ -483,6 +564,7 @@ impl Metadata {
             Operation::Control(certificate) => certificate.control.scope,
             Operation::Close { scope } | Operation::Configure { scope, .. } => *scope,
             Operation::Coordinated { log, .. } => log.scope,
+            Operation::Claim { scope, .. } | Operation::Counter { scope, .. } => *scope,
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
@@ -512,7 +594,7 @@ impl Metadata {
                 .iter()
                 .find(|d| d.scope == certificate.control.scope)
             {
-                used += domain.coordinated.bytes();
+                used += domain.bytes();
             }
         }
         Ok(used)
@@ -1041,6 +1123,16 @@ impl Metadata {
                 certificate.reference().map(Outcome::Controlled)
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
+            Operation::Claim {
+                scope,
+                counter,
+                claim,
+            } => self.claim(*scope, counter, *claim, request),
+            Operation::Counter {
+                scope,
+                counter,
+                claim,
+            } => self.counter(*scope, counter, *claim, request),
             Operation::Close { scope } => {
                 self.closure_authorized(request, *scope)?;
                 self.state.close(*scope).map(|()| Outcome::Closed)
@@ -1084,6 +1176,9 @@ mod retention_tests;
 #[cfg(test)]
 #[path = "machine/coordinated_tests.rs"]
 mod coordinated_tests;
+#[cfg(test)]
+#[path = "machine/counter_tests.rs"]
+mod counter_tests;
 #[cfg(test)]
 #[path = "machine/recovery_tests.rs"]
 mod recovery_tests;

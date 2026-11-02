@@ -7,7 +7,10 @@ use rocky_coordinator::{
 };
 use rocky_core::{MeshId, net::Protocol};
 use rocky_sdk::credentials::PrivateKey;
-use rocky_sdk::{Coordination, Database, Network, Open, transport::TransportOptions};
+use rocky_sdk::{
+    Coordination, CoordinationError, Database, Network, Open, counters, params,
+    transport::TransportOptions,
+};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
@@ -98,6 +101,31 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     )
     .await?;
     assert!(!committed["committed"].is_null());
+    // A claim is a coordinator decision outside any transaction: the
+    // application keeps the claim, uses the value in an ordinary write and
+    // retries with the same claim.
+    let database = &opened.database;
+    let invoices = counters::Name::new("company-1/invoices")?;
+    let pending = counters::Claim::fresh()?;
+    let number = database.claim(invoices.clone(), pending).await?;
+    assert_eq!(number, 1);
+    assert_eq!(database.claim(invoices.clone(), pending).await?, number);
+    let next = counters::Claim::fresh()?;
+    assert_eq!(database.claim(invoices.clone(), next).await?, 2);
+    let reading = database.counter(invoices.clone(), Some(pending)).await?;
+    assert_eq!(
+        (reading.value, reading.claim),
+        (2, Some(counters::Lookup::Claimed(1)))
+    );
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("counts", params![]).await?;
+    transaction
+        .execute(
+            "INSERT INTO counts(id,key,value) VALUES(?,?,?)",
+            params![id, "invoice", i64::try_from(number)?],
+        )
+        .await?;
+    transaction.commit().await?;
     let usage = call(
         &session,
         &scope,
@@ -111,6 +139,15 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
         json!({"type":"coordination_close", "tenant":tenant.to_hex(), "id":vec![3u8;32]}),
     )
     .await?;
+    // A closed domain takes no claim.
+    let refused = database
+        .claim(invoices, counters::Claim::fresh()?)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.downcast_ref::<CoordinationError>(),
+        Some(&CoordinationError::Denied)
+    );
     session.close().await;
     if let Some(network) = opened.network {
         network.close().await;

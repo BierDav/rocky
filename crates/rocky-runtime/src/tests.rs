@@ -9,7 +9,7 @@ pub(super) async fn rows(
 ) -> Result<Vec<Vec<SqlValue>>, Error> {
     storage::collect_rows(conn.query(sql, ()).await?).await
 }
-use todo_app::{Action, StaticPolicy, TodoApp, TodoEntry};
+use runtime_todo_app::{Action, StaticPolicy, TodoApp, TodoEntry};
 
 async fn open(dir: &TempDir) -> Replica<TodoApp> {
     Replica::open_with_config(
@@ -86,7 +86,7 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
             _ => panic!("bytes"),
         })
         .collect();
-    let replay = todo_app::replay(operations, &StaticPolicy::default()).unwrap();
+    let replay = runtime_todo_app::replay(operations, &StaticPolicy::default()).unwrap();
     assert_eq!(replay.state.entry(deleted), Some(&TodoEntry::Tombstone));
     assert_eq!(replay.state.visible_rows(), snapshot.rows);
     assert_eq!(

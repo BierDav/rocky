@@ -3,8 +3,8 @@ use crate::tests::{create, disk, fault, mutation};
 use rocky_core::CompiledSchema;
 use rocky_core::fixtures;
 use rocky_core::{ProtocolError, SqlValue};
+use runtime_todo_app::{Action, StaticPolicy, TodoApp};
 use tempfile::TempDir;
-use todo_app::{Action, StaticPolicy, TodoApp};
 
 async fn open(dir: &TempDir, node: NodeId, policy: StaticPolicy) -> Replica<TodoApp> {
     Replica::open_with_config(
@@ -210,10 +210,10 @@ async fn concurrent_edits_delete_race_and_full_merge_replay_converge() {
             _ => panic!("bytes"),
         })
         .collect();
-    let replay = todo_app::replay(operations, &StaticPolicy::default()).unwrap();
+    let replay = runtime_todo_app::replay(operations, &StaticPolicy::default()).unwrap();
     assert_eq!(
         replay.state.entry(op.id),
-        Some(&todo_app::TodoEntry::Tombstone)
+        Some(&runtime_todo_app::TodoEntry::Tombstone)
     );
     assert_eq!(
         disk(&dir, TodoApp.projection_query()).await,

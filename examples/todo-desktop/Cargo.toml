@@ -1,7 +1,7 @@
 [package]
 name = "todo-desktop"
 default-run = "todo-desktop"
-description = "Dioxus desktop composition and the two-replica development demo"
+description = "Dioxus todo app on rocky-sdk: a two-device demo and a single-device mode"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,8 @@ publish.workspace = true
 [dependencies]
 rocky-runtime.workspace = true
 rocky-secure.workspace = true
-rocky-coordinator.workspace = true
 todo-app.workspace = true
+rocky-sdk = { path = "../../crates/rocky-sdk" }
 employees-app = { path = "../employees-app" }
 rocky-core.workspace = true
 dioxus = { version = "=0.7.3", features = ["desktop"] }
@@ -20,6 +20,3 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tempfile = "3"

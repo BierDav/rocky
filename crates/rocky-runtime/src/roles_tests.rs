@@ -2,8 +2,8 @@
 use super::*;
 use crate::tests::{create, mutation};
 use rocky_core::fixtures;
+use runtime_todo_app::{Action, StaticPolicy, TodoApp};
 use tempfile::TempDir;
-use todo_app::{Action, StaticPolicy, TodoApp};
 
 const SERVER: NodeId = NodeId([0x77; 16]);
 

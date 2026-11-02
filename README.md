@@ -33,6 +33,15 @@ cargo run -p rocky-sdk --example notes -- ./local/notes --create
 cargo run -p rocky-sdk --example notes -- ./local/notes
 ```
 
+The todo app shares ordered lists between trusted, full and partial
+devices. Run several installations in one window, or one per device over
+iroh; start, join and reset them in the window:
+
+```sh
+cargo run -p todo-desktop
+cargo run -p todo-desktop -- --device --data-dir ./local/todo --lan
+```
+
 Rust crates live in `crates/`, applications in `examples/` and performance
 probes in `benchmarks/`.
 

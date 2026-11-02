@@ -3,9 +3,9 @@ use super::*;
 use crate::checkpoint::{Request, Response, Step};
 use crate::tests::{create, fault, mutation};
 use rocky_core::{SqlValue, fixtures};
+use runtime_todo_app::{Action, StaticPolicy, TodoApp};
 use std::os::unix::process::ExitStatusExt;
 use tempfile::TempDir;
-use todo_app::{Action, StaticPolicy, TodoApp};
 
 const CASE: &str = "ROCKY_RETENTION_CASE";
 const DIR: &str = "ROCKY_RETENTION_DIR";

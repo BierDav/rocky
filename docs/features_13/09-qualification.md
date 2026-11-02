@@ -14,8 +14,7 @@ identical drop maps, and features_11's sync results didn't regress.
 
 - **Builds.** One integrated build from the roadmap's final change and
   one from the features_13 start commit, same toolchain and release
-  profile. Record SHA-256 identities for the macOS library, the physical
-  iOS static library, the Android arm64 library and each signed app.
+  profile. Record SHA-256 identities of each todo app build per platform.
 - **Devices.** Two desktops, the physical iPhone 15 and the Pixel from
   features_11, on one LAN, direct paths, relay disabled. Record network
   snapshots.
@@ -30,11 +29,13 @@ identical drop maps, and features_11's sync results didn't regress.
    table, reactor polls and samples overlapping quiet-gate steps.
 2. Sync non-regression rows from the
    [README](README.md#sync-must-not-regress).
-3. Shopping app: three devices editing one list concurrently, including
-   concurrent increments of one quantity and a constraint that drops one
-   of two conflicting edits, while one phone bootstraps the isolated
-   100k load. Check every device converges to the same rows and drop map
-   at the next seal, and that the dropping device shows the notification.
+3. Todo app (`todo-desktop --device --lan`): three devices editing
+   one list concurrently, including concurrent moves into one gap
+   (fractional positions keep both), concurrent priority raises of one
+   todo and a duplicate title that drops one of two conflicting adds,
+   while one phone bootstraps the isolated 100k load. Check every device
+   converges to the same rows and drop map at the next seal, and that the
+   dropping device shows the notification.
    Record each transition or rewind that overlaps an edit; this evaluates
    [phase 10](10-bounded-transitions.md)'s trigger.
 4. Offline: one device edits for a period spanning a routine seal by
@@ -57,8 +58,8 @@ identical drop maps, and features_11's sync results didn't regress.
 - Every convergence check in slices 3, 4 and 6 holds.
 - Misses are listed with their profile and the holder or step
   responsible, and phase 10's trigger is evaluated.
-- `./scripts/check`, the Kotlin check and the shopping app check pass on
-  the integrated build.
+- `./scripts/check` passes on the integrated build, including the todo
+  app's tests.
 
 ## Not in scope
 

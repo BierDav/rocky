@@ -1,8 +1,8 @@
 use super::*;
 use crate::tests::{create, fault, mutation, runtime_config};
 use rocky_core::*;
+use runtime_todo_app::{Action, StaticPolicy, TodoApp};
 use tempfile::TempDir;
-use todo_app::{Action, StaticPolicy, TodoApp};
 #[path = "../examples/support/ledger_app.rs"]
 mod ledger_app;
 use ledger_app::{LedgerApp, payload};
@@ -548,10 +548,10 @@ async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields()
     replica.close().await.unwrap();
     let policy = StaticPolicy {
         version: 2,
-        rows: Some(vec![todo_app::RowGrant {
+        rows: Some(vec![runtime_todo_app::RowGrant {
             entity: first.id,
             read: true,
-            fields: vec![todo_app::TITLE_FIELD_ID],
+            fields: vec![runtime_todo_app::TITLE_FIELD_ID],
             delete: false,
         }]),
         ..Default::default()

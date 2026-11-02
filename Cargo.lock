@@ -6052,10 +6052,10 @@ dependencies = [
  "inventory-app",
  "rocky-core",
  "rocky-storage",
+ "runtime-todo-app",
  "serde",
  "serde_json",
  "tempfile",
- "todo-app",
  "tokio",
 ]
 
@@ -6141,6 +6141,13 @@ dependencies = [
  "rocky-secure",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "runtime-todo-app"
+version = "0.1.0"
+dependencies = [
+ "rocky-core",
 ]
 
 [[package]]
@@ -7317,7 +7324,10 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 name = "todo-app"
 version = "0.1.0"
 dependencies = [
- "rocky-core",
+ "rocky-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -7326,11 +7336,10 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "employees-app",
- "rocky-coordinator",
  "rocky-core",
  "rocky-runtime",
+ "rocky-sdk",
  "rocky-secure",
- "tempfile",
  "todo-app",
  "tokio",
 ]

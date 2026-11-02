@@ -21,14 +21,16 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
         let todos = polled.clone();
         async move {
             let session = todos.database().session();
-            for tick in 0_u32.. {
+            let mut tick: u32 = 0;
+            loop {
+                tick = tick.wrapping_add(1);
                 match session.status().await {
                     Ok(current) => {
                         let online = current.network.networking_enabled;
                         status.set(Some(current));
                         error.set(None);
                         // Peers on the in-process link are only dialed by a pass.
-                        if online && tick % SYNC_EVERY == 0 && !syncing() {
+                        if online && tick.is_multiple_of(SYNC_EVERY) && !syncing() {
                             let _ = session.sync_once().await;
                         }
                     }

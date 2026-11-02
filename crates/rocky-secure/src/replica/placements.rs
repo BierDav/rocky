@@ -328,6 +328,36 @@ impl<A: RowApplication> Inner<A> {
         })?;
         Ok(stored)
     }
+    /// Keeps the signed header of a frame a checkpoint supersedes as its
+    /// placement: the position stays proven to lie in the frame's scope, so
+    /// another scope's gap check never counts it as missing.
+    pub(in crate::replica) async fn place_superseded(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        encoded: &[u8],
+    ) -> Result<(), Error> {
+        let e = &header.extensions;
+        let Some(author) = e.author else {
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO secure_placements VALUES(?,?,?,?,?,?)",
+                bindings(vec![
+                    SqlValue::Blob(encode(&e.scope.domain)?),
+                    SqlValue::Integer(i64::from(author)),
+                    SqlValue::Integer(
+                        i64::try_from(e.author_sequence)
+                            .map_err(|_| denied("author sequence overflow"))?,
+                    ),
+                    SqlValue::Blob(encode(&e.scope)?),
+                    SqlValue::Blob(header.hash().as_bytes().to_vec()),
+                    SqlValue::Blob(encoded.to_vec()),
+                ]),
+            )
+            .await?;
+        positions::insert(&self.conn, header, 2, false, false).await
+    }
     /// Stores one verified placement unless a frame, void or placement
     /// holds its position already; another header there is equivocation.
     async fn place(

@@ -285,6 +285,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
         transaction!(inner, |inner| inner.seal_replayed(id, i64::MAX).await)
     }
+    /// Replaces `scope`'s rows with a base of its own live rows, as a
+    /// checkpoint import at the current tip does, keeping those `keep`
+    /// accepts by row id.
+    pub(crate) async fn rebase_replayed_for_test(
+        &self,
+        scope: ResourceScope,
+        keep: impl Fn(Commitment) -> bool,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock(Class::Background).await;
+        let mut rows = inner.replayed_images(scope).await?;
+        rows.retain(|(row, _)| keep(*row));
+        let tip = inner.workspace.tip;
+        transaction!(inner, |inner| inner
+            .replace_replayed(scope, tip, &rows)
+            .await)
+    }
 }
 
 fn reason_named(name: &str) -> Result<DropReason, Error> {
@@ -718,31 +734,33 @@ impl<A: RowApplication> Inner<A> {
 
     /// Rewrites the undo images of replayed tables whose columns a schema
     /// switch changed into the new column order, so that a rewind across
-    /// the switch restores rows the new tables can hold.
+    /// the switch restores rows the new tables can hold. A column whose
+    /// field some tip on the switch's `path` lacked takes its default, as
+    /// the rows do: a rewind never brings back a value from before a
+    /// removal, though the column has the same name again.
     pub(super) async fn reshape_undo(
         &self,
         before: &rocky_core::LogicalSchema,
         after: &rocky_core::LogicalSchema,
+        path: Option<&super::schemas::PathFields>,
     ) -> Result<(), Error> {
         let mut changed = BTreeMap::new();
+        let on_path = |table: &rocky_core::LogicalTable,
+                       column: Option<&rocky_core::LogicalColumn>| {
+            path.is_none_or(|path| {
+                path.tables.contains(&after.table_id(table))
+                    && column
+                        .is_none_or(|column| path.fields.contains(&after.field_id(table, column)))
+            })
+        };
         for table in after
             .tables
             .iter()
-            .filter(|table| table.class == TableClass::Replayed)
+            .filter(|table| table.class == TableClass::Replayed && on_path(table, None))
         {
             let Some(old) = before.table(&table.sql_name) else {
                 continue;
             };
-            let names = |table: &rocky_core::LogicalTable| -> Vec<String> {
-                table
-                    .columns
-                    .iter()
-                    .map(|column| column.sql_name.to_ascii_lowercase())
-                    .collect()
-            };
-            if names(old) == names(table) {
-                continue;
-            }
             let sources: Vec<Result<usize, SqlValue>> = table
                 .columns
                 .iter()
@@ -750,9 +768,18 @@ impl<A: RowApplication> Inner<A> {
                     old.columns
                         .iter()
                         .position(|o| o.sql_name.eq_ignore_ascii_case(&column.sql_name))
+                        .filter(|_| on_path(table, Some(column)))
                         .ok_or_else(|| rocky_core::default_value(column).unwrap_or(SqlValue::Null))
                 })
                 .collect();
+            let identity = old.columns.len() == sources.len()
+                && sources
+                    .iter()
+                    .enumerate()
+                    .all(|(index, source)| source.as_ref().is_ok_and(|from| *from == index));
+            if identity {
+                continue;
+            }
             changed.insert(table.sql_name.to_ascii_lowercase(), sources);
         }
         // A removed table's rows are gone: a rewind restores none of them.
@@ -760,7 +787,10 @@ impl<A: RowApplication> Inner<A> {
             .tables
             .iter()
             .filter(|table| {
-                table.class == TableClass::Replayed && after.table(&table.sql_name).is_none()
+                table.class == TableClass::Replayed
+                    && after
+                        .table(&table.sql_name)
+                        .is_none_or(|table| !on_path(table, None))
             })
             .map(|table| table.sql_name.to_ascii_lowercase())
             .collect();

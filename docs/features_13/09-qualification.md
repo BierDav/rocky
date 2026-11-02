@@ -1,6 +1,9 @@
 # 9. Qualification
 
-Status: planned. Owner: whoever runs the devices. Code owners of phases
+Status: in-process convergence and desktop rows qualified (2026-11-02),
+with five defects fixed; every physical-device row not verified (no
+device available); see the [evidence](09-qualification-evidence.md).
+Owner: whoever runs the devices. Code owners of phases
 1–8 fix regressions found here. Depends on [phases 1, 2 and 8](README.md#phases).
 Effort: one week. Carried over from features_12 phase 6, with intent
 gates added. Follow the [execution contract](README.md#agent-execution-contract).

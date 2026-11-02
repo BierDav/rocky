@@ -7325,6 +7325,7 @@ name = "todo-app"
 version = "0.1.0"
 dependencies = [
  "rocky-sdk",
+ "rocky-secure",
  "serde_json",
  "tempfile",
  "tokio",
@@ -7340,6 +7341,7 @@ dependencies = [
  "rocky-runtime",
  "rocky-sdk",
  "rocky-secure",
+ "tempfile",
  "todo-app",
  "tokio",
 ]

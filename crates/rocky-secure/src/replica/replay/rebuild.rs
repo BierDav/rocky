@@ -3,6 +3,15 @@
 use super::*;
 use rocky_credentials::SignedSeal;
 
+/// Rows of another replayed table that the delete actions of clearing a
+/// scope reach, as they stood, with the foreign key that reached them.
+struct Reached {
+    table: String,
+    key: rocky_core::LogicalForeignKey,
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
+}
+
 impl<A: RowApplication> Inner<A> {
     /// Forgets replayed scope `scope`'s replay, as its history restarts:
     /// its rows (its partition's, or the whole unpartitioned table) and
@@ -16,6 +25,34 @@ impl<A: RowApplication> Inner<A> {
                 .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
                 .await?;
         }
+        let (table, condition, values) = self.scope_rows(scope)?;
+        self.touch(&table);
+        self.conn
+            .execute(
+                format!("DELETE FROM {} WHERE {condition}", typed::quoted(&table)),
+                bindings(values),
+            )
+            .await?;
+        Ok(())
+    }
+    /// `reset_replayed`, then `rows`, a base at a seal of tip `source`,
+    /// become the scope's rows. Rows of other scopes that clearing reaches
+    /// through delete actions are put back as they stood wherever their
+    /// parent row is back, so one scope's base never takes another scope's
+    /// rows; those whose parent the base lacks stay as the action left them.
+    pub(in crate::replica) async fn replace_replayed(
+        &self,
+        scope: ResourceScope,
+        source: TipId,
+        rows: &[(Commitment, Vec<u8>)],
+    ) -> Result<(), Error> {
+        let reached = self.reached_rows(scope).await?;
+        self.reset_replayed(scope).await?;
+        self.restore_images(scope, source, rows).await?;
+        self.reinstate(reached).await
+    }
+    /// The scope's replayed table and the condition selecting its rows.
+    fn scope_rows(&self, scope: ResourceScope) -> Result<(String, String, Vec<SqlValue>), Error> {
         let corrupt = || Error::Corrupt("replayed scope".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
         let projected = typed.by_scope(scope).ok_or_else(corrupt)?;
@@ -23,27 +60,173 @@ impl<A: RowApplication> Inner<A> {
         let logical = schema
             .table(&projected.table.sql_name)
             .ok_or_else(corrupt)?;
-        let name = typed::quoted(&logical.sql_name);
-        self.touch(&logical.sql_name);
         if logical.partition_by.is_empty() {
-            self.conn.execute(format!("DELETE FROM {name}"), ()).await?;
-            return Ok(());
+            return Ok((logical.sql_name.clone(), "1".into(), Vec::new()));
         }
         let tuple = self.partitions.get(&scope).ok_or_else(corrupt)?;
-        let filter = logical
+        let condition = logical
             .partition_by
             .iter()
             .map(|column| format!("{}=?", typed::quoted(column)))
             .collect::<Vec<_>>()
             .join(" AND ");
-        self.conn
-            .execute(
-                format!("DELETE FROM {name} WHERE {filter}"),
-                bindings(super::super::partition::partition_values(
-                    schema, logical, tuple,
-                )?),
-            )
-            .await?;
+        let values = super::super::partition::partition_values(schema, logical, tuple)?;
+        Ok((logical.sql_name.clone(), condition, values))
+    }
+    /// Rows of other replayed tables that delete actions reach when the
+    /// scope's rows are cleared, transitively, parents before children.
+    async fn reached_rows(&self, scope: ResourceScope) -> Result<Vec<Reached>, Error> {
+        let corrupt = || Error::Corrupt("replayed scope".into());
+        let (table, condition, values) = self.scope_rows(scope)?;
+        let schema = self
+            .workspace
+            .typed
+            .as_ref()
+            .ok_or_else(corrupt)?
+            .rows
+            .schema();
+        let mut seen = BTreeSet::from([table.to_ascii_lowercase()]);
+        let mut work = std::collections::VecDeque::from([(table, condition)]);
+        let mut reached = Vec::new();
+        while let Some((parent, condition)) = work.pop_front() {
+            for child in schema
+                .tables
+                .iter()
+                .filter(|child| child.class == TableClass::Replayed)
+            {
+                for key in child.foreign_keys.iter().filter(|key| {
+                    key.table.eq_ignore_ascii_case(&parent) && key.on_delete != "NO ACTION"
+                }) {
+                    if !seen.insert(child.sql_name.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let list = |names: &[String]| {
+                        names
+                            .iter()
+                            .map(|name| typed::quoted(name))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    let columns: Vec<String> = child
+                        .columns
+                        .iter()
+                        .filter(|column| {
+                            !matches!(column.class, rocky_core::ColumnClass::Derived { .. })
+                        })
+                        .map(|column| column.sql_name.clone())
+                        .collect();
+                    let reaches = format!(
+                        "({}) IN (SELECT {} FROM {} WHERE {condition})",
+                        list(&key.columns),
+                        list(&key.references),
+                        typed::quoted(&parent)
+                    );
+                    let rows = collect_rows(
+                        self.conn
+                            .query(
+                                format!(
+                                    "SELECT {} FROM {} WHERE {reaches}",
+                                    list(&columns),
+                                    typed::quoted(&child.sql_name)
+                                ),
+                                bindings(values.clone()),
+                            )
+                            .await?,
+                    )
+                    .await?;
+                    work.push_back((child.sql_name.clone(), reaches));
+                    reached.push(Reached {
+                        table: child.sql_name.clone(),
+                        key: key.clone(),
+                        columns,
+                        rows,
+                    });
+                }
+            }
+        }
+        Ok(reached)
+    }
+    /// Puts reached rows back as they stood where their parent row exists.
+    async fn reinstate(&self, reached: Vec<Reached>) -> Result<(), Error> {
+        let corrupt = || Error::Corrupt("reached row".into());
+        let schema = self
+            .workspace
+            .typed
+            .as_ref()
+            .ok_or_else(corrupt)?
+            .rows
+            .schema();
+        for Reached {
+            table,
+            key,
+            columns,
+            rows,
+        } in reached
+        {
+            let logical = schema.table(&table).ok_or_else(corrupt)?;
+            let position = |name: &String| {
+                columns
+                    .iter()
+                    .position(|column| column.eq_ignore_ascii_case(name))
+                    .ok_or_else(corrupt)
+            };
+            let referencing = key
+                .columns
+                .iter()
+                .map(position)
+                .collect::<Result<Vec<_>, _>>()?;
+            let primary = logical
+                .primary_key
+                .iter()
+                .map(position)
+                .collect::<Result<Vec<_>, _>>()?;
+            let equal = |names: &[String]| {
+                names
+                    .iter()
+                    .map(|name| format!("{}=?", typed::quoted(name)))
+                    .collect::<Vec<_>>()
+            };
+            let name = typed::quoted(&table);
+            let parent = format!(
+                "SELECT 1 FROM {} WHERE {}",
+                typed::quoted(&key.table),
+                equal(&key.references).join(" AND ")
+            );
+            let update = format!(
+                "UPDATE {name} SET {} WHERE {}",
+                equal(&columns).join(","),
+                equal(&logical.primary_key).join(" AND ")
+            );
+            let insert = format!(
+                "INSERT INTO {name}({}) VALUES({})",
+                columns
+                    .iter()
+                    .map(|column| typed::quoted(column))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                vec!["?"; columns.len()].join(",")
+            );
+            self.touch(&table);
+            for row in rows {
+                let values: Vec<SqlValue> = referencing
+                    .iter()
+                    .map(|index| row[*index].clone())
+                    .collect();
+                // A null key references nothing, so no action reached it.
+                if values.iter().any(|value| matches!(value, SqlValue::Null))
+                    || collect_rows(self.conn.query(&parent, bindings(values)).await?)
+                        .await?
+                        .is_empty()
+                {
+                    continue;
+                }
+                let mut bound = row.clone();
+                bound.extend(primary.iter().map(|index| row[*index].clone()));
+                if self.conn.execute(&update, bindings(bound)).await? == 0 {
+                    self.conn.execute(&insert, bindings(row)).await?;
+                }
+            }
+        }
         Ok(())
     }
 

@@ -142,7 +142,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        self.reshape_undo(&before, &schema).await?;
+        self.reshape_undo(&before, &schema, None).await?;
         self.record_projection_access(&projected).await?;
         self.refresh_history_for(&projected).await?;
         self.conn

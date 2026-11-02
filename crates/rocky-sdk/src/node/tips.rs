@@ -813,11 +813,21 @@ impl Node {
         Ok(())
     }
 
-    /// On a trusted node with a composed log, ends the logs of journaled
-    /// seals, acknowledges the terminal entries of
-    /// its line and publishes the finality records they reach. A failure
-    /// leaves the seals to the next call.
+    /// Finalizes the seals this device holds; then, on a trusted node with
+    /// a composed log, ends the logs of journaled seals, acknowledges the
+    /// terminal entries of its line and publishes the finality records they
+    /// reach. A failure leaves the seals to the next call.
     pub(super) async fn finalize_seals(&self) {
+        if self.replica.followed_bookmark().await.is_some() {
+            match self.replica.finalize_arrived(self.domain().scope).await {
+                Ok(0) => {}
+                Ok(_) => self.observations.touch(),
+                Err(error) => {
+                    self.activity
+                        .record("finalization_failed", json!({"error": error.to_string()}));
+                }
+            }
+        }
         if self.replica.domain_log().is_some() {
             if let Err(error) = self.prepare_terminal_credentials().await {
                 self.activity.record(

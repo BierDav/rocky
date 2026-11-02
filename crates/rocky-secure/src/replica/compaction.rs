@@ -311,7 +311,7 @@ impl<A: RowApplication> Inner<A> {
             .map_or(0, |record| record.position))
     }
     /// The positions `blocking_gaps` checks, over `scopes` (open) of
-    /// `domain`; a placement counts only outside every held scope.
+    /// `domain`; a placement counts unless it lies in a held scope checked.
     #[cfg(test)]
     pub(super) async fn scan_held_positions(
         &self,
@@ -339,7 +339,7 @@ impl<A: RowApplication> Inner<A> {
             let e = self.oracle_header(bytes)?;
             if e.scope.domain != domain
                 || (*pending != 0 && ready.contains(&e.scope) && self.has_scope_key(e.scope))
-                || (*placed != 0 && held_scopes.contains(&e.scope))
+                || (*placed != 0 && held_scopes.contains(&e.scope) && ready.contains(&e.scope))
             {
                 continue;
             }
@@ -1080,6 +1080,7 @@ impl<A: RowApplication> Inner<A> {
                     transaction!(self, |inner| inner
                         .finalize_seal(domain, &seal, &unverified, false)
                         .await)?;
+                    count += 1;
                 }
                 return Ok((count, None));
             };
@@ -2068,6 +2069,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.finalize_ready(domain).await?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
+    }
+    /// Finalizes the followed path's seals whose frames this replica holds
+    /// and publishes a revision only when one finalized: a member's drops
+    /// turn final as seals arrive, not only after its next local write
+    /// queues maintenance. Returns how many finalized.
+    pub async fn finalize_arrived(&self, domain: Scope) -> Result<usize, Error> {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        inner.graph_for(domain)?;
+        let (finalized, _) = inner.finalize_ready(domain).await?;
+        if finalized > 0 {
+            inner = flush_guard(inner, &self.inner).await?;
+            inner.publish_revision().await?;
+        }
+        Ok(finalized)
     }
     /// Whether any held scope still needs a replay base at `seal`.
     pub async fn needs_base_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {

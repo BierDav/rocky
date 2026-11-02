@@ -286,7 +286,9 @@ impl<A: RowApplication> Inner<A> {
                 .rebuild_replayed(&installed, &record.schema, &replayed, path.as_ref())
                 .await?;
             inner.install_delete_triggers(&projected).await?;
-            inner.reshape_undo(&installed, &record.schema).await?;
+            inner
+                .reshape_undo(&installed, &record.schema, path.as_ref())
+                .await?;
             if removed {
                 inner.redo_removed_writes(now()?).await?;
             }

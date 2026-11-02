@@ -421,3 +421,38 @@ async fn restoration_endpoints_merge_as_pairs() {
         Some((7, Some(two)))
     );
 }
+
+/// A base that supersedes a writer's frames keeps their positions placed in
+/// their scope: another scope that writer never wrote is not missing them.
+#[tokio::test]
+async fn superseded_frames_stay_placed_for_scopes_their_writer_never_wrote() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let (items, tags) = (lineage.scope("items"), lineage.scope("tags"));
+    // a writes only items; tags hold b's frames alone.
+    insert(&a, "first", "first").await;
+    insert(&a, "second", "second").await;
+    identity_insert(
+        &session(&b).await,
+        "INSERT INTO tags(key,label) VALUES('t','tag')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    sync(&lineage, &a, &b, &keys[1]).await;
+    sync(&lineage, &b, &a, &keys[0]).await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    list_checkpoints(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    b.finish_seal_rebootstrap(lineage.domain).await.unwrap();
+    let needs = b.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert!(needs.iter().all(|need| need.scope != tags), "{needs:?}");
+}

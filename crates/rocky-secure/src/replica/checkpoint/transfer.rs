@@ -2456,8 +2456,7 @@ impl<A: RowApplication> Inner<A> {
             let rows = self
                 .stored_images("secure_replayed_staged", id, None)
                 .await?;
-            self.reset_replayed(scope).await?;
-            self.restore_images(scope, statement.tip, &rows).await?;
+            self.replace_replayed(scope, statement.tip, &rows).await?;
             self.store_base(id, &rows, None).await?;
         }
         let blob = encode(&scope)?;
@@ -2790,7 +2789,7 @@ impl<A: RowApplication> Inner<A> {
             for record in records {
                 let [
                     SqlValue::Blob(hash),
-                    SqlValue::Blob(header),
+                    SqlValue::Blob(encoded),
                     SqlValue::Text(status),
                     SqlValue::Integer(size),
                     position,
@@ -2799,7 +2798,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("retained operation".into()));
                 };
                 cursor = hash.clone();
-                let header: p2panda_core::Header<Extensions> = decode(header)?;
+                let header: p2panda_core::Header<Extensions> = decode(encoded)?;
                 let covering = statement
                     .frontier
                     .iter()
@@ -2808,6 +2807,7 @@ impl<A: RowApplication> Inner<A> {
                     if header.seq_num == log.sequence && log.hash.as_bytes().as_slice() != hash {
                         return Err(denied("checkpoint frontier forks a retained log"));
                     }
+                    self.place_superseded(&header, encoded).await?;
                     for sql in [
                         "DELETE FROM secure_operations WHERE hash=?",
                         "DELETE FROM secure_outbox WHERE hash=?",

@@ -12,6 +12,7 @@ rocky-sdk = { path = "../../crates/rocky-sdk" }
 serde_json = "1"
 
 [dev-dependencies]
+rocky-secure.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 

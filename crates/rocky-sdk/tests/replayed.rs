@@ -161,3 +161,48 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
     b.close().await;
     Ok(())
 }
+
+/// A member's drop turns final once it holds the owner's seal, without a
+/// write of its own after it.
+#[tokio::test]
+async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::new(Database::create(
+        open(&root.path().join("a"), &hub, "a"),
+        None,
+    )?)?;
+    a.follow_main().await;
+    let invitation = a
+        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
+        .await;
+    let b = Device::new(Database::join(
+        open(&root.path().join("b"), &hub, "b"),
+        &invitation,
+    )?)?;
+    b.sync().await.map_err(|error| error.to_string())?;
+    introduce(&a, &b).await;
+    let sync = || async {
+        for device in [&a, &b, &a, &b] {
+            device.sync().await.map_err(|error| error.to_string())?;
+        }
+        Ok::<_, Failure>(())
+    };
+    create(&a.database, "k", 1).await?;
+    let later = create(&b.database, "k", 2).await?;
+    sync().await?;
+    a.database.session().seal(false).await?;
+    sync().await?;
+    for device in [&a, &b] {
+        assert_eq!(
+            device.database.transaction_outcome(later).await?,
+            Some(TransactionOutcome::Dropped {
+                reason: DropReason::Constraint,
+                sealed: true,
+            })
+        );
+    }
+    a.close().await;
+    b.close().await;
+    Ok(())
+}

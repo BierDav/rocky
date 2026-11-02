@@ -257,7 +257,7 @@ impl<A: RowApplication> Inner<A> {
             let scope: ResourceScope = decode(scope)?;
             if scope.domain != domain
                 || (*pending != 0 && ready.contains(&scope) && self.has_scope_key(scope))
-                || (*kind == 2 && held_scopes.contains(&scope))
+                || (*kind == 2 && held_scopes.contains(&scope) && ready.contains(&scope))
             {
                 continue;
             }

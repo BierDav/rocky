@@ -18,5 +18,8 @@ rocky-core.workspace = true
 dioxus = { version = "=0.7.3", features = ["desktop"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

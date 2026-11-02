@@ -235,10 +235,20 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(|refusal| {
                     Error::Corrupt(format!("assertion {}: {refusal}", assertion.name))
                 })?;
-                let mut rows = self
+                let mut rows = match self
                     .conn
                     .query(&checked.sql, storage::bindings(checked.params))
-                    .await?;
+                    .await
+                {
+                    Err(error) if error.is_overflow() => {
+                        return Ok(Some(format!(
+                            "assertion {} failed: {}",
+                            assertion.name,
+                            rocky_storage::exact::OVERFLOW
+                        )));
+                    }
+                    rows => rows?,
+                };
                 if rows.next().await?.is_some() {
                     return Ok(Some(format!("assertion {} failed", assertion.name)));
                 }

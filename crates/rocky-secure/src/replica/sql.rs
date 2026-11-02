@@ -762,6 +762,13 @@ impl<A: RowApplication> SecureSql<A> {
         single: bool,
         copies: Option<Vec<super::intents::Recorded>>,
     ) -> Result<SecureRows, Error> {
+        // A replayed write runs here with the checked arithmetic its replay runs.
+        let checked = copies
+            .is_some()
+            .then(|| rocky_storage::exact::checked_statement(sql))
+            .transpose()
+            .map_err(|reason| Error::Sql(SqlError::Unsupported(reason)))?;
+        let sql = checked.as_deref().unwrap_or(sql);
         let held = lease.held.take().ok_or(Error::Closed)?;
         let mark = held
             .0

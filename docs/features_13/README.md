@@ -99,7 +99,8 @@ Physical-device rows are checked in phase 9.
 - **A general SQL confluence prover.** The fast path covers only what it
   proves exactly. Everything else replays.
 - **Invariant confluence for free.** Scarce resources (the last item in
-  stock, a single owner) still need coordinated writes. Replay drops a
+  stock, a single owner) still need coordination, which the application
+  combines with its writes (see "Coordination" below). Replay drops a
   losing transaction deterministically; it does not reserve rights.
 - **Retry schedules.** A transaction that fails in canonical order is
   dropped. It is not retried in a later pass. The prototype's
@@ -182,12 +183,13 @@ instead of choosing differently.
   author commit and each replayed transaction that wrote a table they
   read. Application triggers are not supported; assertions replace them.
   Details in [phase 5](05-replayed-constraints.md).
-- **Coordinated tables.** A replayed table is declared coordinated or
-  not. A coordinated table accepts only coordinated writes. They replay
-  in coordinated-log order and are never dropped, because every
-  replica's replay of that log prefix equals the author's. Foreign keys
-  may point from an uncoordinated table to a coordinated one, never the
-  other way. Scarce invariants live in coordinated tables.
+- **Coordination.** Database changes and coordination are independent
+  capabilities. Rocky has no coordinated tables or coordinated writes
+  (removed in [phase 8](08-intent-only-evidence.md)). Every replicated
+  write replays and may drop. An application that needs a scarce
+  invariant obtains a coordinator decision and then commits ordinary
+  writes, combining the two in its own code. Rocky exposes each
+  guarantee separately and never presents one as the other.
 - **Seals.** Seal authority does not change: owner devices seal. Besides
   today's event seals (schema change, revocation, recovery), an owner
   device seals routinely when the open tip holds

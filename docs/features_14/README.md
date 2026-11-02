@@ -53,35 +53,34 @@ implementation. It requires an honest, usable exact-value contract.
 - The SDK contract must distinguish legal tenancy, partition identity,
   partition groups, access grants and coordination. A tenant column is not
   automatically a partition or an authorization rule.
-- The restrictions on cross-partition checks and coordinated-to-uncoordinated
-  references must be exposed consistently to schema authors. Applications need
-  a supported way to model a coordinated relational dependency graph and to
-  reference identity data without requiring inaccessible partitions.
+- The restrictions on cross-partition checks must be exposed consistently to
+  schema authors. Applications need a supported way to reference identity data
+  without requiring inaccessible partitions.
 
 No cross-partition assertion engine, automatic partition selection or
 application trigger support is required. Application authors choose the layout.
 
-## R3. Observable finality and recoverable coordination
+## R3. Observable finality
 
-- Local visibility, durable storage, coordinated acceptance, provisional replay
-  outcome and seal-final outcome must be distinguishable. A successful local
-  commit must not imply that it can never be dropped.
+- Local visibility, durable storage, provisional replay outcome and seal-final
+  outcome must be distinguishable. A successful local commit must not imply
+  that it can never be dropped.
 - Stable transaction identities must let an application observe and query an
   outcome after restart or reconnect, including a named drop reason and whether
   that decision is final. Notifications alone are insufficient for recovery.
-- Applications must have a supported way to determine when a transaction has
-  the acceptance/finality guarantee required before an irreversible action.
-  Coordinated acceptance and ordinary seal finality must state their respective
-  guarantees; they must not be presented as interchangeable states.
-- Coordinated writes must resolve concurrent attempts without accepting both
-  when a declared invariant permits only one. Retry after an uncertain result
-  must recover the original decision without duplicating its accepted effects.
-- Offline, unavailable-authority, revoked-access and unresolved-decision cases
-  must have explicit outcomes and recovery behavior. No owner online must not
-  silently turn a provisional write into a final one.
+- Applications must have a supported way to determine when a transaction is
+  seal-final before an irreversible action.
+- Offline, revoked-access and unsealed cases must have explicit outcomes and
+  recovery behavior. No owner online must not silently turn a provisional write
+  into a final one.
 
-This does not require every write to coordinate, immediate offline finality or
-a new sealing protocol. Applications choose which commands require coordination.
+Database changes and coordination are independent Rocky capabilities.
+Rocky does not combine them: it has no coordinated tables or coordinated
+writes. An application that must not accept two competing attempts (the last
+unit of capacity, a unique invoice number) obtains a coordinator decision and
+commits ordinary writes, joining the two in its own code, including retries
+after an uncertain result. Rocky states each guarantee on its own and never
+presents a seal-final outcome as a coordinator decision or the reverse.
 
 ## R4. Durability and atomic application effects
 
@@ -125,11 +124,12 @@ service, and do not change features_13's unsupported-trigger boundary.
 The guarantees above need evidence beyond single-row or shopping-list workloads:
 
 - Multi-table transactions with composite references, deferred checks, aggregate
-  assertions and competing attempts to consume one remaining capacity.
-- Coordinated dependency graphs, uncertain outcomes, idempotent retries and
-  rejection of unauthorized mutation/deletion of immutable records.
+  assertions and competing uncoordinated attempts to consume one remaining
+  capacity (one is dropped deterministically).
+- Outcome queries after restart, idempotent application retries and rejection
+  of unauthorized mutation/deletion of immutable records.
 - Exact-value round trips and arithmetic boundaries through supported SDKs.
-- Crashes around commit, flush, coordination, replay and sealing; recovery of
+- Crashes around commit, flush, replay and sealing; recovery of
   outcomes and application outbox eligibility without duplicate accepted writes.
 - Partial partition access, offline reconnect, late arrivals and revocations;
   replicas at the same seal agree on rows and drop outcomes.

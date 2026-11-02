@@ -1474,11 +1474,16 @@ impl<A: RowApplication> Inner<A> {
         through: i64,
     ) -> Result<bool, Error> {
         let base = previous.filter(|(_, signed)| signed.statement.seal.is_some());
-        // A base nothing applied after stays, signed as it is.
+        // A base nothing applied after stays, signed as it is. An empty
+        // partition's base follows the seal: a newly granted reader may never
+        // have held the other scopes' frames.
         if let Some((position, signed)) = base
             && *position == through
             && signed.statement.key_epoch() == Some(self.scope_key(scope)?.0)
             && signed.statement.revocations == self.revocation_digest()?
+            && !(signed.statement.partition.is_some()
+                && signed.statement.frontier.is_empty()
+                && signed.statement.seal != Some(target.seal))
         {
             self.conn
                 .execute(

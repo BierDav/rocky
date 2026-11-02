@@ -397,18 +397,16 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         m.call(json!({"type":"held_changes"})).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
-    assert!(
-        held["changes"]
-            .as_array()
-            .ok_or("held changes")?
-            .iter()
-            .any(|change| change["rows"]
-                .as_array()
-                .is_some_and(|rows| rows.iter().any(|row| row["fields"]
-                    .as_array()
-                    .is_some_and(|fields| fields.iter().any(|field| field["name"] == "key"
-                        && field["value"]["value"] == "after latest seal")))))
-    );
+    // The write past the rolled-back seal is an intent of the abandoned
+    // line: held whole for relay, with no rows for the application to
+    // re-author.
+    assert_eq!(held["count"], 0, "{held}");
+    let intents: i64 = inspect_file(&m_dir)?.query_row(
+        "SELECT count(*) FROM secure_held_frames WHERE intent=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(intents > 0);
     step!(
         "restored.original",
         evidence::restored(&m_dir, &guarded),

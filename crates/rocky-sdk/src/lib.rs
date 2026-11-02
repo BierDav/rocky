@@ -40,6 +40,31 @@
 //! They never retry application work automatically. Cancellation during commit
 //! can leave its outcome uncertain; reconcile before repeating the write.
 //!
+//! # Replication
+//!
+//! A typed table is [`Table::replayed`] or local-only. A transaction on
+//! replayed tables replicates as its intent: the statements it ran with
+//! their bound values. Every replica holding a partition replays its
+//! transactions in one canonical order, so replicas at one seal hold the
+//! same rows.
+//!
+//! - **Read-modify-write.** Values computed in application code are bound
+//!   as they were: `SET count = ?` after reading `count` overwrites a
+//!   concurrent increment, `SET count = count + ?` keeps both.
+//! - **Determinism.** Statements may use only deterministic functions;
+//!   clock, random and unknown functions, `rowid` keys and schema
+//!   statements are refused at commit. Bind timestamps as parameters and
+//!   take keys from [`Transaction::next_id`] or bound values.
+//! - **Constraints.** Unique indexes, foreign keys, [`Table::check`] and
+//!   [`SchemaBuilder::assertion`] hold on every replay. A transaction whose
+//!   replay fails a constraint, its author's grants or the current schema
+//!   is dropped whole, in every partition.
+//! - **Drops.** A commit stays visible until replay drops it.
+//!   [`TableChange::dropped`] names dropped transactions after the commit
+//!   that recorded the drop, and [`Database::transaction_outcome`] gives
+//!   the [`DropReason`]. A drop is provisional until a seal covers it:
+//!   [`TransactionOutcome::Dropped`] with `sealed` set is final.
+//!
 //! Call [`Database::close`] at shutdown to await cleanup. See the `notes` example
 //! for a complete executable application.
 mod activity;

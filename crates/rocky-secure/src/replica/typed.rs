@@ -212,12 +212,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.install_tables(schema, domain, readers).await
     }
     /// Installs typed tables for `schema` in `domain`; `readers` names the
-    /// encryption scope of every mergeable table. The schema's manifest must
+    /// encryption scope of every replayed table. The schema's manifest must
     /// be the replica's signed manifest. Existing rows project at once;
     /// reopening keeps the installation. Another schema of the same signed
     /// definition, such as new indexes, replaces it through a projection
-    /// plan: shadow tables fill in bounded steps and switch in one verified
-    /// transaction. Changes the definition does not allow are refused.
+    /// plan that switches in one transaction. Changes the definition does not allow are refused.
     pub async fn install_tables(
         &self,
         schema: LogicalSchema,

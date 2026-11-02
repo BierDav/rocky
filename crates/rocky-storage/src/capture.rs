@@ -75,12 +75,7 @@ impl Table {
                 .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                 .ok_or_else(|| Error::Incompatible(format!("missing row {name}")))
         };
-        Self::with_identity(
-            table,
-            names,
-            owner,
-            Some(position("id")?),
-        )
+        Self::with_identity(table, names, owner, Some(position("id")?))
     }
     fn with_identity(
         table: &rocky_core::LogicalTable,
@@ -808,9 +803,7 @@ impl Sink {
 mod tests {
     use super::*;
     use crate::sqlite::{Connection, Run};
-    use rocky_core::{
-        Collation, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalTable, SchemaSource,
-    };
+    use rocky_core::{Collation, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalTable, SchemaSource};
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
         LogicalColumn {
@@ -835,7 +828,6 @@ mod tests {
             partition_group: None,
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
-
         }
     }
     const PLAIN: &str = "CREATE TABLE plain(a INTEGER PRIMARY KEY NOT NULL,b TEXT,c REAL)";

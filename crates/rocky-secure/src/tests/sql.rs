@@ -38,10 +38,7 @@ fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
 }
 fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
     columns.push(column("id", Affinity::Integer, true));
-    let sql = format!(
-        "{},id INTEGER NOT NULL)",
-        sql.trim_end_matches(')')
-    );
+    let sql = format!("{},id INTEGER NOT NULL)", sql.trim_end_matches(')'));
     LogicalTable {
         sql_name: name.into(),
         granted_like: None,
@@ -1513,10 +1510,7 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
             .unwrap();
         for name in ["items", "salaries", "drafts"] {
             let result = sql
-                .run(
-                    &format!("SELECT id FROM {name}"),
-                    vec![],
-                )
+                .run(&format!("SELECT id FROM {name}"), vec![])
                 .await
                 .unwrap();
             assert_eq!(result.columns, ["id"]);
@@ -1720,12 +1714,10 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
             .rows,
         vec![vec![SqlValue::Integer(salary.integer())]]
     );
-    for (statement, values) in [
-        (
-            "UPDATE items SET id=? WHERE key='z'",
-            vec![SqlValue::Integer(item.integer() + 10)],
-        ),
-    ] {
+    for (statement, values) in [(
+        "UPDATE items SET id=? WHERE key='z'",
+        vec![SqlValue::Integer(item.integer() + 10)],
+    )] {
         assert!(writer.run(statement, values).await.is_err());
     }
     assert_eq!(

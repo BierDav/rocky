@@ -158,9 +158,7 @@ async fn checkpoint_writer(
     issuer.call(json!({"type":"partition_share","group":"list","values":values(&base),"recipients":[writer_node]})).await?;
     writer.call(json!({"type":"sync"})).await?;
     assert_eq!(
-        writer
-            .column("SELECT title FROM lists")
-            .await?,
+        writer.column("SELECT title FROM lists").await?,
         [json!("Base list")]
     );
     writer

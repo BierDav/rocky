@@ -184,7 +184,6 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     sync(&b).await;
     // The owner's close wins: the issuer's migration tip stays a branch and
     // its migration is never merged, so no row is there twice.
-    eprintln!("DBG a={} b={}", generation(&a).await, generation(&b).await);
     for device in [&a, &b] {
         assert_eq!(
             rows(device, POSITIONS).await,
@@ -280,19 +279,11 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         .ok_or("a query on the new field answered")?;
     assert!(query.to_string().contains("no such column"), "{query}");
 
-    // Issuers pass each other their group keys: once `a` holds it, it
-    // signs and migrates.
-    sync(&b).await;
-    sync(&a).await;
-    eprintln!("DBG a lists {}", rows(&a, "SELECT title FROM lists").await);
-    for d in [&a_dir, &b_dir] {
-        let file = rusqlite::Connection::open_with_flags(d.join("rocky.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        for sql in ["SELECT hex(substr(hash,1,4)),status,scope FROM secure_operations", "SELECT id,hex(substr(scope,1,8)) FROM secure_scope_state", "SELECT hex(substr(hash,1,4)),scope,dropped FROM secure_replayed", "SELECT count(*) FROM secure_partitions", "SELECT count(*) FROM secure_keys", "SELECT name FROM sqlite_master WHERE name LIKE 'secure_hold%' OR name LIKE 'secure_sub%'", "SELECT * FROM secure_subscriptions", "SELECT * FROM secure_holdings"] {
-            let Ok(mut st) = file.prepare(sql) else { eprintln!("DBG no {sql}"); continue };
-            let n = st.column_count();
-            let rows: Vec<Vec<String>> = st.query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get_ref(i).unwrap())).map(|s| s.chars().take(40).collect()).collect())).unwrap().map(|r| r.unwrap()).collect();
-            eprintln!("DBG {d:?} {sql}: {rows:?}");
-        }
+    // Issuers pass each other their group keys: once `a` holds it, the
+    // next round pulls the list, and `a` signs and migrates.
+    for _ in 0..2 {
+        sync(&b).await;
+        sync(&a).await;
     }
     a.close().await;
     let a = Device::new(Database::open(open(
@@ -302,11 +293,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     ))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
-        rows(
-            &a,
-            "SELECT title, position FROM lists ORDER BY title"
-        )
-        .await,
+        rows(&a, "SELECT title, position FROM lists ORDER BY title").await,
         json!([
             [text("From a"), text("From a")],
             [text("From b"), text("From b")]
@@ -322,11 +309,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     sync(&b).await;
     sync(&b).await;
     assert_eq!(
-        rows(
-            &b,
-            "SELECT title, position FROM lists ORDER BY title"
-        )
-        .await,
+        rows(&b, "SELECT title, position FROM lists ORDER BY title").await,
         json!([
             [text("From a"), text("From a")],
             [text("From b"), text("From b")]
@@ -360,9 +343,9 @@ async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure>
     converges_on_every_member(8, 0).await
 }
 
-/// A returning member skips the covered history at the newest listed base.
+/// A returning member reaches the issuer's newest listed base.
 #[tokio::test(flavor = "multi_thread")]
-async fn returning_member_uses_the_newest_checkpoint_after_a_migration() -> Result<(), Failure> {
+async fn returning_member_reaches_the_newest_base_after_a_migration() -> Result<(), Failure> {
     // An unpartitioned seed intent must fit one pulled frame, about 1,100
     // rows of this shape; `replayed.rs` seeds larger tables by partition.
     converges_on_every_member(512, 2).await
@@ -418,7 +401,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
         |directory: &Path| std::fs::metadata(directory.join("rocky.sqlite")).map(|m| m.len());
     b.close().await;
     // One publication peer durably acknowledges the migration bundles before
-    // the measured returning member takes the issuer's closing base.
+    // the measured returning member pulls.
     let c_dir = root.path().join("publication-peer");
     let before = size(&a_dir)?;
     let clock = std::time::Instant::now();
@@ -564,7 +547,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
         )
     };
     let network_bytes = hub.written();
-    // The returning member takes the listed closing checkpoint and the tail.
+    // The returning member pulls what it lacks.
     let member_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
     let b = Device::new(Database::open(open(&b_dir, &fill, network("b")))?)?;
@@ -572,7 +555,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
     let mut syncs = 0;
-    let mut transfers = Vec::new();
     // A table whose frames are still arriving reads as unavailable.
     while b
         .call(json!({"type": "read", "query": {"sql": ready_query, "values": [], "max_rows": 1}}))
@@ -583,14 +565,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     {
         syncs += 1;
         assert!(syncs <= 64, "the member did not converge");
-        let report = b.sync().await.map_err(|error| error.to_string())?;
-        transfers.extend(
-            report["peers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|peer| peer["transfers"].as_array().into_iter().flatten().cloned()),
-        );
+        b.sync().await.map_err(|error| error.to_string())?;
     }
     let pulled = clock.elapsed();
     eprintln!("STAGE rows={large} member_pull={pulled:?}");
@@ -602,7 +577,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     let fingerprint = "SELECT count(*), min(title), max(title), sum(length(title)) FROM items";
     assert_eq!(rows(&a, fingerprint).await, rows(&b, fingerprint).await);
     // Every key/value is checked, including the seed range, rather than relying
-    // on extrema alone. Both files must hold the closing seal's base.
+    // on extrema alone.
     let filled_fields = if multi_step {
         " OR position != title OR tag IS NOT NULL"
     } else {
@@ -617,7 +592,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
             json!([[{"type":"integer","value":"0"}]])
         );
     }
-    let mut closing = None;
     for directory in [&a_dir, &b_dir] {
         let db = rusqlite::Connection::open_with_flags(
             directory.join("rocky.sqlite"),
@@ -628,41 +602,19 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
             .checked_sub(migration)
             .ok_or("invalid migration accounting")?;
         assert!((0..=67_108_864).contains(&ordinary));
-        if !multi_step {
+        // The migration's intent is still retained, so the member replays
+        // it rather than importing the issuer's closing base.
+        if !multi_step && directory == &a_dir {
             let mut query = db.prepare("SELECT signed FROM secure_checkpoints c WHERE sequence=(SELECT max(sequence) FROM secure_checkpoints WHERE scope=c.scope)")?;
             let mut items_base = None;
             for record in query.query_map([], |row| row.get::<_, Vec<u8>>(0))? {
                 let signed = rocky_secure::SignedCheckpoint::from_bytes(&record?)?;
                 if signed.statement.rows.count == large as u64 {
-                    assert!(signed.statement.seal.is_some());
-                    items_base = Some((signed.statement.seal, signed.id()?));
+                    items_base = Some(signed.statement.seal);
                 }
             }
-            let (seal, checkpoint) = items_base.ok_or("missing closing items base")?;
-            let seal = seal.ok_or("closing items base has no seal")?;
-            let checkpoint = data_encoding::HEXLOWER.encode(&checkpoint);
-            assert!(
-            transfers
-                .iter()
-                .any(|transfer| transfer["checkpoint"] == checkpoint && transfer["pulled"] == 0),
-            "member transfer does not name {checkpoint}: {transfers:?}"
-        );
-            if directory == &a_dir {
-                closing = Some(seal);
-            } else {
-                assert_eq!(Some(seal), closing);
-            }
-            eprintln!(
-                "BASE rows={large} directory={} seal={} checkpoint={checkpoint}",
-                directory.display(),
-                data_encoding::HEXLOWER.encode(&seal)
-            );
-        } else {
-            assert!(
-                transfers
-                    .iter()
-                    .all(|transfer| transfer["checkpoint"].is_null())
-            );
+            let seal = items_base.ok_or("missing closing items base")?;
+            assert!(seal.is_some(), "closing items base has no seal");
         }
         eprintln!(
             "ACCOUNT rows={large} directory={} total={total} migration={migration} ordinary={ordinary}",

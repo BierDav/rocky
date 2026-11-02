@@ -550,13 +550,23 @@ impl<A: RowApplication> Inner<A> {
             return Ok(self.importing.contains(&scope));
         };
         if self.importing.contains(&scope) {
-            let mut held = self
-                .conn
-                .query(
-                    "SELECT 1 FROM secure_row_records WHERE scope=? LIMIT 1",
-                    [encode(&scope)?],
-                )
-                .await?;
+            // A replayed scope keeps no row records: its applied frames are
+            // what it holds.
+            let mut held = match self.replayed_scope(scope) {
+                true => {
+                    self.conn
+                        .query("SELECT 1 FROM secure_applied WHERE scope=? LIMIT 1", [id])
+                        .await?
+                }
+                false => {
+                    self.conn
+                        .query(
+                            "SELECT 1 FROM secure_row_records WHERE scope=? LIMIT 1",
+                            [encode(&scope)?],
+                        )
+                        .await?
+                }
+            };
             if held.next().await?.is_none() {
                 return Ok(true);
             }

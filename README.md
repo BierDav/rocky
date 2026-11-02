@@ -33,8 +33,8 @@ cargo run -p rocky-sdk --example notes -- ./local/notes --create
 cargo run -p rocky-sdk --example notes -- ./local/notes
 ```
 
-Rust crates live in `crates/`, language bindings in `sdks/`, applications
-in `examples/` and performance probes in `benchmarks/`.
+Rust crates live in `crates/`, applications in `examples/` and performance
+probes in `benchmarks/`.
 
 Source-available under the [PolyForm Noncommercial License
 1.0.0](LICENSE): read, run, modify and share Rocky for any noncommercial

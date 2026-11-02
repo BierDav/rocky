@@ -604,8 +604,8 @@ pub(super) fn exact(writes: &[RowWrite]) -> Vec<RowChange> {
     writes.iter().map(|write| write.change.clone()).collect()
 }
 
-/// Merges one write into the stored row: every published field whose
-/// register this operation's stamp wins takes the after value.
+/// Merges one row-frame write into the stored row: every published field
+/// whose stored stamp this operation's stamp exceeds takes the after value.
 pub(super) fn merge_row(
     write: &RowWrite,
     current: Option<Materialized>,

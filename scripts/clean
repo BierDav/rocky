@@ -1,7 +1,7 @@
 #!/bin/sh
 # Reclaim regenerable build output; see docs/development.md#disk-use.
 #
-#   scripts/clean             this checkout's Cargo and Kotlin/Gradle output
+#   scripts/clean             this checkout's Cargo output
 #   scripts/clean --evidence  also this checkout's generated benchmark databases
 set -eu
 
@@ -17,12 +17,7 @@ case "${1:-}" in
 *) usage ;;
 esac
 
-# The root workspace and the standalone native bindings workspace have their
-# own target directories.
 cargo clean
-
-# Kotlin/Uniffi/shopping support is legacy; this script only cleans the Rust
-# workspace build output.
 
 if $evidence; then
     find benchmarks/runtime-scaling/evidence -type f \

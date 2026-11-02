@@ -352,7 +352,10 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
     );
     // Intents have no rows to re-author: the unsent write goes with its
     // line.
-    assert!(alice.held_changes().await.unwrap().is_empty(), "{rebuild:?}");
+    assert!(
+        alice.held_changes().await.unwrap().is_empty(),
+        "{rebuild:?}"
+    );
     alice.audit(lineage.scope("items")).await.unwrap();
 }
 

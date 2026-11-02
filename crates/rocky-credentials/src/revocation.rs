@@ -1,5 +1,4 @@
-//! Revocation statements and the grow-only set a device holds of them. See
-//! `docs/decisions/0049-mergeable-revocation-set.md`.
+//! Revocation statements and the grow-only set a device holds of them.
 use crate::{
     CredentialChain, Error, IdentityProvider, PublicKey, Purpose, SignedCapability, decode_bounded,
     denied, encode, signing_bytes,

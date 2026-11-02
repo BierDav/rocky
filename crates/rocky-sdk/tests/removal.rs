@@ -560,8 +560,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_impact_report_counts_the_live_rows_of_all_local_partitions()
--> Result<(), Failure> {
+async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let a_dir = root.path().join("unique");
     let hub = Arc::new(Hub::default());

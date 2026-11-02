@@ -132,7 +132,6 @@ jobs:
           version="$(git tag --list 'v*' | scripts/release/version "${CHANNEL}")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           registry=ghcr.io
-          maven="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
           if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/notes"
           {
@@ -143,8 +142,6 @@ jobs:
             echo "- Rust: \`rocky-sdk = \"=${version}\"\` ([crates.io](https://crates.io/crates/rocky-sdk/${version}))"
             echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
             echo "- \`${registry}/bierdav/rocky-db-peer:${version}\`"
-            echo "- Maven \`${maven}\`: \`rocky:rocky-core\`, \`rocky:rocky-sqlite\` and"
-            echo "  \`rocky:rocky-room\` for the JVM, Android and iOS, version \`${version}\`"
           } > "$RUNNER_TEMP/notes/notes.md"
           { echo "## v${version}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -405,9 +402,6 @@ jobs:
         run: |
           test -n "${CARGO_REGISTRY_TOKEN}" || { echo "::error::Set the CARGO_REGISTRY_TOKEN secret to publish new crates."; exit 1; }
           scripts/release/rust-publish "${VERSION}"
-
-      - name: Publish the Maven artifacts
-        run: echo "Maven artifacts are no longer published (only Rust native API is supported)."
 
       - name: Create the GitHub release
         run: |

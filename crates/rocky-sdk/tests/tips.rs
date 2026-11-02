@@ -324,7 +324,8 @@ async fn a_branch_writes_under_its_own_node_and_keeps_it_across_reopen() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn moving_main_back_closes_its_tip_and_withdraws_the_abandoned_writes() -> Result<(), Failure> {
+async fn moving_main_back_closes_its_tip_and_withdraws_the_abandoned_writes() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
     let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();

@@ -282,15 +282,15 @@ impl<A: RowApplication> Inner<A> {
             ),
         };
         collect_rows(self.conn.query(sql, bindings(params)).await?)
-        .await?
-        .into_iter()
-        .map(|record| match record.as_slice() {
-            [SqlValue::Blob(row), SqlValue::Blob(image)] => {
-                Ok((super::super::checkpoint::row_of(row)?, image.clone()))
-            }
-            _ => Err(Error::Corrupt("replayed base row".into())),
-        })
-        .collect()
+            .await?
+            .into_iter()
+            .map(|record| match record.as_slice() {
+                [SqlValue::Blob(row), SqlValue::Blob(image)] => {
+                    Ok((super::super::checkpoint::row_of(row)?, image.clone()))
+                }
+                _ => Err(Error::Corrupt("replayed base row".into())),
+            })
+            .collect()
     }
     /// Makes `rows` the scope's replay base and forgets the seal rows of
     /// seals not finalized after `depth`.

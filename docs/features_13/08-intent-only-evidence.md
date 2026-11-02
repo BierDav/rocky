@@ -318,3 +318,119 @@ Remaining rocky-secure failures (21):
 Remaining work, in order: the failures above (kept seals first), rocky-sdk
 (78 failing before slice 3), dead register code, late frames of a closed
 line (Session 3), slices 4–6.
+
+## Session 5 (2026-11-02): phase complete
+
+The user removed the Kotlin SDK, the UniFFI bindings and the shopping app
+on purpose (`tqlxnwtq`, 2026-11-01); they are not restored. The brief's
+Kotlin DSL, Kotlin check, shopping app check and shopping drop
+notification therefore no longer apply. Rocky ships the Rust SDK only.
+
+`cargo nextest run -p rocky-secure -p rocky-sdk`: 855 run, 843 pass, 30
+skipped. The two failures of that run are fixed below (the held-transfer
+one) or pre-existing (`engine::devices_converge_over_iroh`, see Limits).
+Ten tests time out at 60 s only under the full run's load and pass alone:
+the replayed convergence schedules, `roles::*`,
+`composite_many_to_many_graph_converges_in_all_720_orders`,
+`registry::a_full_registry_refuses_the_257th_device_…`,
+`group_secrets::an_interrupted_rotation_…`,
+`migrations::replayed::an_interrupted_fill_…` (19–26 s alone) and
+`service::rollback::a_compacted_member_waits_…` (49 s alone).
+
+Decisions:
+
+- **Late transactions of a closed line replay in the successor** (Session
+  3's open item). `frame_reach` follows a closed seal into the line opened
+  after it on the followed path, so a late intent replays there in stamp
+  order, and a migration intent replays like any other. A late write
+  stamped before the migration is filled by it; one stamped after keeps
+  the column default. Nothing is held for re-authoring:
+  `coordinated::an_offline_migration_…` and
+  `service::migration::real_voters_…` now expect `held: 0` and those rows.
+  A held transfer accepts a late frame a seal here already covers
+  (`Sealed`): receiving it changes nothing.
+- **Rolled-back lines.** A write past a rolled-back seal is an intent of
+  the abandoned line: held whole for relay (`secure_held_frames.intent`),
+  with no held change (`service::rollback::a_compacted_member_waits_…`).
+- **Outcome records need no migration descriptor.** An outcome record that
+  a replica wrote on its own migration tip, which then lost, is never a
+  migration frame; a receiver that does not follow that tip no longer
+  refuses it as "migration descriptor missing"
+  (`migrations::issuers_that_cannot_reach_each_other_…`).
+- **An intent's base heads covered by the installed base's seal are
+  satisfied.** An intent names the heads it read; once a checkpoint at a
+  seal covering them is installed, those frames may be pruned with no
+  stub. `dependencies_ready` counts the intent's base marks the seal's
+  frontier covers and accepts that many unresolvable dependencies (never
+  the author's own backlink). This closes Session 4's "intent naming an
+  older head behind a base" limit
+  (`bootstrap::behind_pruned_sync_restores_the_base_…`).
+- **A replayed scope is held once it has applied frames.** `importing`
+  looked for row records, which replayed scopes never have, so a member
+  that restarted its bootstrap after learning a revocation refused
+  pushes forever (`admission::a_member_admits_a_peer_…`).
+- **An empty partition's replayed base follows the seal**, as the
+  row-record path already did, so a newly granted reader is covered at
+  the new seal (`simulation::regressions::an_empty_partition_base_…`).
+- **Tests rewritten for intents:** `migrations::returning_member_reaches_the_newest_base_after_a_migration`
+  (renamed): the migration is one retained intent, so the member replays
+  it instead of importing the base, and only the issuer's file holds the
+  closing base. `bootstrap::join_progress_only_grows_to_its_total`
+  (renamed): replayed pages import in milliseconds, so how many snapshots
+  an observer sees depends on timing; it keeps the monotonic and stable
+  total checks. `bootstrap::post_revocation_join_…` counts
+  `secure_replayed_base` rows. `migrations::an_issuer_without_a_partitions_key_…`
+  syncs one more round: the key arrives in one, the list's frames in the
+  next.
+- **Cleanup.** Debug prints left in `rocky-sdk` are gone; the SDK's
+  `insert_rows` batches every typed table; stale "mergeable" and
+  "register" wording, links to deleted decision docs, Maven publication
+  in the release workflow, `scripts/release/maven-deploy` and the Kotlin
+  paths of `scripts/clean` and `scripts/lint.d/shell` are removed.
+- **SDK docs** (slice 4): the `rocky-sdk` crate docs gain a Replication
+  section: intents, the read-modify-write rule, determinism and bound
+  timestamps, constraints (`CHECK`s, assertions), drops and outcomes.
+
+### Completion gate
+
+- **Line count: not met.** `rocky-secure` non-test lines: 60,532 against
+  62,627 at the features_13 start (2,095 fewer; the gate asks
+  2,500, ≤ 60,127) and 70,561 at the phase start (10,029 fewer).
+  Phase 8 removed about 11,000 lines (existence logs, the
+  constraint resolver, coordinated entries, `shapes.rs`, register
+  merging, shadow tables); slice 3's replayed checkpoints and record-free
+  rebuilds (`replica/replay/base.rs`, `replica/replay/rebuild.rs` and
+  their transfer, audit and compaction paths) added about 1,000 back.
+  What remains on the record path (row records, creation proofs, held
+  changes and their re-authoring, moves, row-record checkpoints) serves
+  the generic `RowApplication` row-frame contract, which the user chose
+  to keep (2026-10-31). Retiring that contract is the next lever and a
+  separate decision.
+- **Files removed** from `rocky-secure/src` (non-test):
+  `network/{entries,existence}.rs`,
+  `replica/{constraints,existence}.rs`, `replica/existence/{archive,base,seal}.rs`,
+  `replica/coordinated/{abandoned,recovery}.rs`,
+  `replica/checkpoint/replay_test_support.rs`, `shapes.rs`. Added:
+  `replica/replay/{base,rebuild}.rs`. Outside it: rocky-runtime's trusted
+  SQL write path and `rocky_bindings`, the SDK's trusted-profile suites,
+  and (by the user) `sdks/{kotlin,uniffi}` and `examples/shoppinglist-app`.
+- **No code refers to registers, conflict policies, support rows or the
+  fan-out exception.** Remaining hits: `rocky-core` tests asserting that
+  `mergeable`, `on_conflict` and existence logs are refused, and the
+  todo example's own application-level `Register` CRDT in its reducer.
+- **Statement budgets hold** (`tests::sql::intents`, debug build, this
+  change): single-row author 79 / 43 (≤ 43), single-row receive 86 / 32
+  (≤ 45), 32-row receive 4.65625 / 3.6875 statements per row (≤ 6.5).
+- **Sync non-regression rows:** see Measurements.
+- `./scripts/lint` passes; `./scripts/check`: see Verification. The
+  Kotlin and shopping app checks no longer exist.
+
+### Limits
+
+- `rocky-sdk` `engine::devices_converge_over_iroh` fails about 4 in 10
+  runs, at the session's starting commit too (`ce3ca1fd`, measured 4/10):
+  right after both endpoints restart, the member's contact resolution over
+  iroh fails with "connection lost" and that sync reaches no peer. A
+  transport race, not replication; not fixed here.
+- Replayed writes' L2 latency regression (phase 4) is unchanged and
+  unprofiled; phase 9 qualifies devices.

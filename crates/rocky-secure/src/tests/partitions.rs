@@ -412,10 +412,7 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
         sql.run("SELECT 42", vec![]).await.unwrap().rows[0][0],
         SqlValue::Integer(42)
     );
-    for query in [
-        "SELECT * FROM items",
-        "SELECT * FROM nested_items",
-    ] {
+    for query in ["SELECT * FROM items", "SELECT * FROM nested_items"] {
         assert!(sql.run(query, vec![]).await.is_err(), "{query}");
     }
 }

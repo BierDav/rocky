@@ -99,7 +99,7 @@ const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":6,"ta
 /// offline. Its stage stays private until a trusted node that follows the
 /// source tip ends that tip's log with exactly the close and acknowledges
 /// it; the owner then releases. The source tip's writes past the close
-/// are held on the device that made them.
+/// replay in the successor.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
@@ -195,26 +195,35 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
         data_encoding::HEXLOWER.encode(&head.terminal.expect("ended").digest),
         close["id"]
     );
-    // The trusted node follows `main` to the migration's tip. Its invoice
-    // made after the close is held; the migration's rows are everyone's.
+    // The trusted node follows `main` to the migration's tip. Its writes
+    // past the close are late: they replay there in stamp order, so the
+    // replayed migration fills invoice 2 and later rows keep the default.
     let status = c.ok(json!({"type": "generation"})).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
-    assert_eq!(status["held"], 3, "{status}");
+    assert_eq!(status["held"], 0, "{status}");
+    let text = |value: &str| json!({"type": "text", "value": value});
     for device in [&a, &c] {
-        assert_eq!(keys(device).await, ["0001"]);
         let rows = device
-            .ok(json!({"type": "read", "query": {"sql": "SELECT title, position FROM items", "values": [], "max_rows": 8}}))
+            .ok(json!({"type": "read", "query": {"sql": "SELECT title, position FROM items ORDER BY title", "values": [], "max_rows": 8}}))
             .await["rows"]
             .clone();
         assert_eq!(
             rows,
-            json!([[{"type":"text","value":"invoice 1"}, {"type":"text","value":"invoice 1"}]])
+            json!([
+                [text("invoice 1"), text("invoice 1")],
+                [text("invoice 2"), text("invoice 2")],
+                [text("invoice 3"), text("")],
+                [text("ordinary meanwhile"), text("")]
+            ])
         );
     }
-    // Those durably held post-frontier frames do not block the successor.
     invoice(&c, 5).await;
     a.sync().await.expect("the successor invoice");
-    assert_eq!(keys(&a).await, ["0001", "0002"]);
+    let keys = keys(&a).await;
+    assert!(
+        keys.len() == 5 && keys.contains(&"0005".to_owned()),
+        "{keys:?}"
+    );
     c.close().await;
     a.close().await;
     Ok(())

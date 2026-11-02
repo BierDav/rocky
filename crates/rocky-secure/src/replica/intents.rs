@@ -304,15 +304,16 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
     ) -> Result<Vec<(Hash, p2panda_core::Header<Extensions>)>, Error> {
         let corrupt = || Error::Corrupt("applied head".into());
-        let decoded = |row: &[SqlValue]| -> Result<(Hash, p2panda_core::Header<Extensions>), Error> {
-            let [SqlValue::Blob(hash), SqlValue::Blob(header)] = row else {
-                return Err(corrupt());
+        let decoded =
+            |row: &[SqlValue]| -> Result<(Hash, p2panda_core::Header<Extensions>), Error> {
+                let [SqlValue::Blob(hash), SqlValue::Blob(header)] = row else {
+                    return Err(corrupt());
+                };
+                Ok((
+                    Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?,
+                    decode(header)?,
+                ))
             };
-            Ok((
-                Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?,
-                decode(header)?,
-            ))
-        };
         let graph = self.graph_for(scope.domain)?;
         let visible = |header: &p2panda_core::Header<Extensions>| -> Result<bool, Error> {
             let extension = &header.extensions;

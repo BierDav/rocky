@@ -691,6 +691,9 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        // An intent names the heads it read; those its base's seal covers
+        // may be pruned with no stub, and are then satisfied by the base.
+        let mut covered_heads = self.covered_heads(&operation.header, payload).await?;
         for id in operation
             .header
             .previous
@@ -710,6 +713,12 @@ impl<A: RowApplication> Inner<A> {
                     }
                     None => match self.voided_dependency(&operation.header, *id).await? {
                         Some(true) => continue,
+                        Some(false) | None
+                            if operation.header.backlink != Some(*id) && covered_heads > 0 =>
+                        {
+                            covered_heads -= 1;
+                            continue;
+                        }
                         Some(false) | None => return Ok(false),
                     },
                 }
@@ -733,6 +742,41 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(true)
+    }
+    /// How many of an intent's base heads the seal of its scope's installed
+    /// base covers.
+    async fn covered_heads(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        payload: Option<&RowPayload>,
+    ) -> Result<usize, Error> {
+        let Some(intent) = payload.and_then(RowPayload::intent) else {
+            return Ok(0);
+        };
+        let Some(scope) = self.find_scope_id(header.extensions.scope).await? else {
+            return Ok(0);
+        };
+        let Some(seal) = self
+            .checkpoint_record(scope, true)
+            .await?
+            .and_then(|record| record.signed)
+            .and_then(|signed| signed.statement.seal)
+        else {
+            return Ok(0);
+        };
+        let graph = self.graph_for(header.extensions.scope.domain)?;
+        let Ok(seal) = graph.seal_by_id(seal) else {
+            return Ok(0);
+        };
+        Ok(intent
+            .base
+            .iter()
+            .filter(|mark| {
+                seal.statement.frontier.iter().any(|covered| {
+                    covered.author == mark.author && mark.sequence <= covered.sequence
+                })
+            })
+            .count())
     }
     /// The clock of an applied dependency whose frame is no longer retained,
     /// or `None` when the dependency is simply unknown.

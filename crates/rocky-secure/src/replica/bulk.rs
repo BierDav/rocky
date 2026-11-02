@@ -127,7 +127,13 @@ impl<A: RowApplication> Inner<A> {
                 {
                     return Err(denied("migration inclusion proof missing"));
                 }
-            } else {
+            } else if !self
+                .row_payload(frame)
+                .is_ok_and(|payload| payload.outcome().is_some())
+            {
+                // An outcome record is never a migration frame: one written on
+                // a migration tip this replica does not follow needs no
+                // descriptor.
                 let graph = self.graph_for(op.header.extensions.scope.domain)?;
                 if let Some(opening) = graph.openings.iter().find(|o| o.tip().ok() == Some(tip)) {
                     let parent = graph

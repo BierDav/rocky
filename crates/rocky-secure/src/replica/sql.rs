@@ -81,7 +81,7 @@ type Reserved = BTreeMap<ResourceScope, (u32, u32)>;
 
 /// A SQL connection of a `SecureSession`. It may read the typed tables of
 /// the session's readable scopes and every local table, and write the
-/// mergeable tables of its writable scopes. Each statement checks the
+/// replayed tables of its writable scopes. Each statement checks the
 /// session's authority; the commit admits every changed row and field.
 pub struct SecureSql<A: RowApplication> {
     pub(super) session: SecureSession<A>,

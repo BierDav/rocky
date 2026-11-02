@@ -71,7 +71,6 @@ pub(super) const ROWS_INSERT: &str = concat!(
 /// Deletes the stored versions no kept seal needs any more.
 pub(super) const PRUNE_ROWS: &str = "DELETE FROM secure_stored_history WHERE NOT EXISTS(SELECT 1 FROM secure_kept_marks AS k WHERE k.mark<secure_stored_history.version AND k.mark>=COALESCE((SELECT MAX(p.version) FROM secure_stored_history AS p WHERE p.scope=secure_stored_history.scope AND p.row=secure_stored_history.row AND p.version<secure_stored_history.version),-1))";
 
-
 const BEFORE: &str = "secure_stored_history_before";
 
 /// A kept seal stored rows rebuild from.

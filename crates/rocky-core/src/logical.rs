@@ -826,7 +826,11 @@ impl LogicalSchema {
     /// those whose two tables are `installed`.
     pub fn delete_triggers(&self, installed: impl Fn(&str) -> bool) -> Vec<String> {
         let mut triggers = Vec::new();
-        for table in self.tables.iter().filter(|table| installed(&table.sql_name)) {
+        for table in self
+            .tables
+            .iter()
+            .filter(|table| installed(&table.sql_name))
+        {
             for (index, key) in table.foreign_keys.iter().enumerate() {
                 if key.on_delete != DELETE_SET_NULL
                     || table.nulls_whole(key)

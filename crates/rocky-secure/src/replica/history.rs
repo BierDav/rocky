@@ -663,7 +663,9 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         for history in &histories {
-            let sql = match copy(history).and_then(|table| table.frozen.as_ref().map(|name| (table, name))) {
+            let sql = match copy(history)
+                .and_then(|table| table.frozen.as_ref().map(|name| (table, name)))
+            {
                 Some((table, name)) => {
                     let columns: Vec<String> = table
                         .columns

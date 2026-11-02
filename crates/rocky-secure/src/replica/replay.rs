@@ -631,7 +631,11 @@ impl<A: RowApplication> Inner<A> {
                 .collect();
             self.conn
                 .execute(
-                    format!("ALTER TABLE {} RENAME TO {}", typed::quoted(name), old(name)),
+                    format!(
+                        "ALTER TABLE {} RENAME TO {}",
+                        typed::quoted(name),
+                        old(name)
+                    ),
                     (),
                 )
                 .await?;
@@ -815,7 +819,10 @@ impl<A: RowApplication> Inner<A> {
             None => 0,
             Some(record) => {
                 // A base at a seal the path leaves holds another line's rows.
-                if let Some(seal) = record.signed.as_ref().and_then(|signed| signed.statement.seal)
+                if let Some(seal) = record
+                    .signed
+                    .as_ref()
+                    .and_then(|signed| signed.statement.seal)
                     && let Some(typed) = &self.workspace.typed
                     && !self
                         .path_seals(typed.domain)?
@@ -1451,7 +1458,7 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             };
             // A delete action follows from the parent's change, which the
-            // author's grants admitted, as it is derived for mergeable rows.
+            // author's grants admitted.
             let mut named = change.clone();
             if let Some(after) = named.after.as_mut().filter(|_| named.before.is_none()) {
                 after.retain(|field, _| !off_path.iter().any(|(_, id, _)| id == field));

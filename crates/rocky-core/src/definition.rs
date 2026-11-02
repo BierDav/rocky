@@ -687,7 +687,9 @@ mod partition_tests {
         ));
         assert_eq!(
             schema.delete_triggers(|_| true),
-            ["CREATE TRIGGER \"rocky_set_null_items_0\" AFTER DELETE ON \"categories\" FOR EACH ROW BEGIN UPDATE \"items\" SET \"category\"=NULL WHERE \"list\"=OLD.\"list\" AND \"category\"=OLD.\"id\"; END"]
+            [
+                "CREATE TRIGGER \"rocky_set_null_items_0\" AFTER DELETE ON \"categories\" FOR EACH ROW BEGIN UPDATE \"items\" SET \"category\"=NULL WHERE \"list\"=OLD.\"list\" AND \"category\"=OLD.\"id\"; END"
+            ]
         );
         assert!(schema.delete_triggers(|name| name == "items").is_empty());
     }
@@ -787,9 +789,11 @@ mod replayed_tests {
         let schema = definition(serde_json::Value::Null).build().unwrap();
         schema.supported_on(Profile::Secure).unwrap();
         let teams = schema.table("teams").unwrap();
-        assert!(teams.create_sql.contains(
-            "\"id\" INTEGER NOT NULL, CHECK (cap BETWEEN 1 AND 10), PRIMARY KEY"
-        ));
+        assert!(
+            teams
+                .create_sql
+                .contains("\"id\" INTEGER NOT NULL, CHECK (cap BETWEEN 1 AND 10), PRIMARY KEY")
+        );
         let members = schema.table("members").unwrap();
         assert!(members.create_sql.ends_with(
             "FOREIGN KEY(\"org\",\"team\") REFERENCES \"teams\"(\"org\",\"id\") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED)"

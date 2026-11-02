@@ -1,6 +1,5 @@
-//! The frame rule under a learned revocation set
-//! (`docs/decisions/0049-mergeable-revocation-set.md`), and the statements
-//! a handshake exchanges (`docs/decisions/0051-roster-free-admission.md`).
+//! The frame rule under a learned revocation set, and the statements a
+//! handshake exchanges.
 use super::*;
 use crate::network::link::Link;
 

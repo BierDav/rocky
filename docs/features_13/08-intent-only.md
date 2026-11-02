@@ -1,7 +1,9 @@
 # 8. Intent only
 
-Status: planned. Owner: `rocky-core`, `rocky-secure`, `rocky-sdk`,
-`sdks/uniffi`, `sdks/kotlin` and the examples. Depends on
+Status: complete (2026-11-02); line-count gate not met, see the
+[evidence](08-intent-only-evidence.md). The Kotlin SDK, UniFFI bindings
+and shopping app were removed instead of migrated. Owner: `rocky-core`,
+`rocky-secure`, `rocky-sdk` and the examples. Depends on
 [phase 5](05-replayed-constraints.md), [phase 6](06-symbolic-fast-path.md)
 (merged or rejected) and [phase 7](07-intent-migrations.md). Effort: three
 weeks, one of them for replayed checkpoints. Follow the [execution contract](README.md#agent-execution-contract).

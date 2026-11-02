@@ -988,10 +988,14 @@ mod tests {
             "CREATE TABLE items(list TEXT,amount INTEGER); INSERT INTO items VALUES('A',10),('B',20);",
         )
         .unwrap();
-        for read in ["SELECT SUM(amount) FROM items", "SELECT SUM(amount) FROM main.items"] {
+        for read in [
+            "SELECT SUM(amount) FROM items",
+            "SELECT SUM(amount) FROM main.items",
+        ] {
             let sql = check(read, &[], &rules()).unwrap();
             assert_eq!(
-                conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap(),
+                conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
                 10
             );
         }

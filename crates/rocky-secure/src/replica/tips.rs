@@ -381,9 +381,11 @@ impl<A: RowApplication> Inner<A> {
         seal: &SignedSeal,
         opening: &rocky_credentials::SignedTipOpening,
     ) -> Result<bool, Error> {
-        Ok(seal.statement.action == rocky_credentials::SealAction::Close
-            && graph.schema_any(seal.statement.tip).map_err(credential)?
-                != opening.statement.schema)
+        Ok(
+            seal.statement.action == rocky_credentials::SealAction::Close
+                && graph.schema_any(seal.statement.tip).map_err(credential)?
+                    != opening.statement.schema,
+        )
     }
     /// Whether `to` continues `from`'s line: through continuations and
     /// migration successors, which take its late writes.
@@ -1103,8 +1105,19 @@ impl<A: RowApplication> Inner<A> {
         let rewind = self.rewind_seal(domain).await?;
         #[cfg(test)]
         let rewind = rewind.filter(|_| !self.rebuild_switches);
-        // A schema switch compiles every member again.
-        let mut replay = reopened || self.schema_switch_intent().await?.is_some();
+        // A forward schema switch migrates the rows and the open members
+        // itself; any other compiles every member again.
+        let sideways = match self.schema_switch_intent().await? {
+            Some((scope, _, source, target)) => {
+                source != target
+                    && !self
+                        .graph_for(scope)?
+                        .continues(source, target)
+                        .unwrap_or(false)
+            }
+            None => false,
+        };
+        let mut replay = reopened || sideways;
         let mut replayed = Vec::new();
         for (scope, id) in self.domain_scopes(domain).await? {
             if lost && self.base_off_path(scope, id).await? {

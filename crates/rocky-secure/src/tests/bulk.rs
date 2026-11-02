@@ -609,4 +609,3 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
     );
     target.audit(l.scope("items")).await.unwrap();
 }
-

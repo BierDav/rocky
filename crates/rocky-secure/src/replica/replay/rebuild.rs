@@ -284,12 +284,7 @@ impl<A: RowApplication> Inner<A> {
         }))
     }
     /// The newest start at a seal of `path` before index `end`.
-    async fn start_before(
-        &self,
-        id: i64,
-        path: &[SignedSeal],
-        end: usize,
-    ) -> Result<Start, Error> {
+    async fn start_before(&self, id: i64, path: &[SignedSeal], end: usize) -> Result<Start, Error> {
         let base = self
             .path_base(id, path)
             .await?
@@ -321,8 +316,7 @@ impl<A: RowApplication> Inner<A> {
                 seal: None,
                 rows: Some((
                     signed.statement.tip,
-                    self.stored_images("secure_replayed_base", id, None)
-                        .await?,
+                    self.stored_images("secure_replayed_base", id, None).await?,
                 )),
                 based,
                 base: true,

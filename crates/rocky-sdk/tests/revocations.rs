@@ -1,6 +1,5 @@
-//! Concurrent revocations by two issuers merge: the acceptance of
-//! `docs/features_07/06-revocation-set.md` on the in-process hub. See
-//! `docs/decisions/0049-mergeable-revocation-set.md`.
+//! Concurrent revocations by two issuers merge into one grow-only set, on
+//! the in-process hub.
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};

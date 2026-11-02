@@ -19,7 +19,7 @@ pub struct InstalledSchema {
     /// immutable and may only be appended; they do not change reducer identity.
     pub additive_indexes: Vec<Sql>,
     pub projection_query: Sql,
-    /// The tables of `statements` that hold the mergeable projection and
+    /// The tables of `statements` that hold the replicated projection and
     /// nothing else: every row `project` writes, deletion evidence included.
     /// A checkpoint commits to their rows, a checkpoint import replaces them,
     /// and replay must reproduce them.

@@ -1,6 +1,5 @@
-//! Release-only interactive write measurements on a replayed and a
-//! mergeable table side by side: L0 idle, and L2 while a peer authors a
-//! small write every 20 ms that this device keeps receiving. Diagnostic;
+//! Release-only interactive write measurements on two replayed tables: L0
+//! idle, and L2 while a peer authors a small write every 20 ms that this device keeps receiving. Diagnostic;
 //! run with `cargo test --release -p rocky-sdk --test write_latency --
 //! --ignored --nocapture --test-threads=1`.
 use common::{Device, Failure, introduce};

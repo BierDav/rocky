@@ -107,12 +107,9 @@ async fn sync(
 async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], partitions: i64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for name in names {
-        let rows = crate::storage::rows(
-            &inner.conn,
-            &format!("SELECT count(*) FROM {name}"),
-        )
-        .await
-        .unwrap();
+        let rows = crate::storage::rows(&inner.conn, &format!("SELECT count(*) FROM {name}"))
+            .await
+            .unwrap();
         assert_eq!(rows[0][0], SqlValue::Integer(partitions), "{name}");
     }
 }

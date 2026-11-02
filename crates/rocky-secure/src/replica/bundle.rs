@@ -817,7 +817,9 @@ impl<A: RowApplication> Inner<A> {
             for key in self.opening_keys() {
                 let aad = member_aad(&membership.transaction, index, count, key.scope)?;
                 if decrypt(&key.key, &aad, sealed).is_ok() {
-                    if key.scope.domain == typed.domain && typed.rows.table(&key.scope.table).is_none() {
+                    if key.scope.domain == typed.domain
+                        && typed.rows.table(&key.scope.table).is_none()
+                    {
                         return Ok(true);
                     }
                     break;

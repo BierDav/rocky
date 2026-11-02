@@ -378,7 +378,7 @@ impl Simulation {
             GroupBeforeCommit | GroupAfterCommit => {
                 member.write(&format!("w{index}"), index as u64).await
             }
-            // Replay points never fire on the simulation's mergeable tables.
+            // Replay points never fire on the simulation's row-frame tables.
             Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
                 self.sync(node).await.map(drop)
             }

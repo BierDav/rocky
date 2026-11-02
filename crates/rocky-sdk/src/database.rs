@@ -1186,12 +1186,7 @@ pub(crate) async fn insert_rows(
             vec![row.as_str(); count].join(",")
         )
     };
-    // Mergeable tables keep one statement per row.
-    let batch = if logical.class == rocky_core::TableClass::Replayed {
-        REPLAYED_INSERT_ROWS.min(32_766 / width).max(1)
-    } else {
-        1
-    };
+    let batch = REPLAYED_INSERT_ROWS.min(32_766 / width).max(1);
     let mut values = Vec::new();
     let mut pending = 0;
     let total = rows.rows.len();

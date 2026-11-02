@@ -852,7 +852,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Accepts only original frames whose line is closed: held here, or an
     /// intent or outcome frame replaying here in the line opened after the
-    /// close.
+    /// close or covered by a seal here.
     /// Ordinary live frames use `receive`; a relay never replaces their
     /// author's signature.
     pub async fn receive_held_frames(&self, frames: Vec<EncryptedFrame>) -> Result<(), Error> {
@@ -863,14 +863,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let late = || -> Result<bool, Error> {
                     let operation = frame.operation_ref()?;
                     Ok(operation.header.extensions.tip != inner.workspace.tip
-                        && {
-                            let payload = inner.row_payload(frame)?;
+                        && inner.row_payload(frame).is_ok_and(|payload| {
                             payload.intent().is_some() || payload.outcome().is_some()
-                        })
+                        }))
                 };
                 match inner.frame_reach(frame)? {
                     tips::FrameReach::Held => {}
-                    tips::FrameReach::Live if late()? => {}
+                    // A seal here already covers it: receiving it changes nothing.
+                    tips::FrameReach::Live | tips::FrameReach::Sealed if late()? => {}
                     _ => return Err(denied("held transfer names a live or unrelated frame")),
                 }
             }

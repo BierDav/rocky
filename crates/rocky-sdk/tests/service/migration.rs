@@ -74,7 +74,8 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
             && seal(&a_graph, &close["id"])["final"] == true
             && seal(&t_graph, &close["id"])["final"] == true
         {
-            assert_eq!(generation["held"], 2, "{generation}");
+            // T's writes past the close replay in the successor.
+            assert_eq!(generation["held"], 0, "{generation}");
             break;
         }
         assert!(
@@ -102,9 +103,19 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
         let mut complete = true;
         for peer in [&a, &t] {
             assert_eq!(peer.tips("status", json!({})).await?["tip"], target);
-            let rows = peer.call(json!({"type":"read","query":{"sql":"SELECT key,position FROM counts","values":[],"max_rows":10}})).await?;
+            let rows = peer.call(json!({"type":"read","query":{"sql":"SELECT key,position FROM counts ORDER BY key","values":[],"max_rows":10}})).await?;
+            // The replayed migration fills the row written before it; the
+            // later one keeps the default.
+            let text = |value: &str| json!({"type":"text","value":value});
             complete &= rows["rows"]
-                == json!([[{"type":"text","value":"included"},{"type":"text","value":"included"}]]);
+                == json!([
+                    [text("after close"), text("")],
+                    [
+                        text("before close but unknown"),
+                        text("before close but unknown")
+                    ],
+                    [text("included"), text("included")]
+                ]);
         }
         if complete {
             break;

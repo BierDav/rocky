@@ -258,7 +258,9 @@ impl<A: RowApplication> Inner<A> {
                 Some(old) => inner.begin_switch_history(old, &projected).await?,
                 None => None,
             };
-            let removed = removed_replayed(&installed, &record.schema).next().is_some();
+            let removed = removed_replayed(&installed, &record.schema)
+                .next()
+                .is_some();
             for table in removed_replayed(&installed, &record.schema) {
                 inner.touch(&table.sql_name);
                 inner

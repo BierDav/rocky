@@ -182,7 +182,9 @@ impl<A: RowApplication> Inner<A> {
         let Some(rows) = self.kept_images(scope, (seal, mark)).await? else {
             return Ok(None);
         };
-        let (frontier, operations) = self.covered_frontier(id, previous.as_ref(), through).await?;
+        let (frontier, operations) = self
+            .covered_frontier(id, previous.as_ref(), through)
+            .await?;
         let previous_marks = previous
             .as_ref()
             .map_or(&[][..], |(_, signed)| &signed.statement.identities);

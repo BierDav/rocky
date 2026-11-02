@@ -428,11 +428,16 @@ Decisions:
 
 ### Limits
 
-- `rocky-sdk` `engine::devices_converge_over_iroh` fails about 4 in 10
-  runs, at the session's starting commit too (`ce3ca1fd`, measured 4/10):
-  right after both endpoints restart, the member's contact resolution over
-  iroh fails with "connection lost" and that sync reaches no peer. A
-  transport race, not replication; not fixed here.
+- `rocky-sdk` `engine::devices_converge_over_iroh` failed about 4 in 10
+  runs (15/25 on 2026-11-02). Fixed 2026-11-02: after a restart, saved
+  contacts are resolved again; the resolver closes its connection once its
+  signed reply is delivered, and the dialer's own close then failed
+  (`ConnectionLost "link ended"` or `link stream stopped`) after it had
+  verified the reply, so that sync reached no peer. The member's write
+  was committed locally throughout. `NativeSession::resolve_peer` now
+  ignores its close; regression
+  `saved_peer_resolution_survives_the_resolver_closing_first`; 40/40 runs
+  pass.
 - Replayed writes' L2 latency regression (phase 4) is unchanged and
   unprofiled; phase 9 qualifies devices.
 

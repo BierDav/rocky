@@ -350,7 +350,10 @@ impl NativeSession {
         let (request, challenge) = peer_resolution_request()?;
         write_frame(&mut stream, &request).await?;
         let node = resolved_peer(&read_frame(&mut stream).await?, challenge, expected)?;
-        stream.shutdown().await.map_err(Error::Io)?;
+        // The verified reply is the answer. The responder may close its
+        // connection once the reply is delivered, so a failed close of ours
+        // does not undo it.
+        let _ = stream.shutdown().await;
         Ok(node)
     }
     /// Answers a node-reference challenge without opening a session or revealing credentials.

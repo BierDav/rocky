@@ -25,6 +25,8 @@ pub struct TypedRows {
     tables: BTreeMap<Commitment, TypedTable>,
     /// The schema generation of the signed manifest; 1 until a transition.
     generation: u32,
+    /// The engine the signed manifest names; this build's by default.
+    engine: crate::EngineIdentity,
 }
 impl TypedRows {
     /// The schema must be supported on the secure profile.
@@ -69,6 +71,7 @@ impl TypedRows {
             domains,
             tables,
             generation: 1,
+            engine: crate::EngineIdentity::current(),
         })
     }
     /// These tables at schema generation `generation`.
@@ -78,6 +81,11 @@ impl TypedRows {
         }
         self.generation = generation;
         Ok(self)
+    }
+    /// These tables as a tip replayed on `engine` commits them.
+    pub fn on_engine(mut self, engine: crate::EngineIdentity) -> Self {
+        self.engine = engine;
+        self
     }
     pub fn generation(&self) -> u32 {
         self.generation
@@ -257,7 +265,8 @@ impl TypedRows {
 }
 impl RowApplication for TypedRows {
     fn manifest(&self) -> ApplicationManifest {
-        self.schema.manifest_at(&self.domains, self.generation)
+        self.schema
+            .manifest_at(&self.domains, self.generation, self.engine)
     }
     fn permission_fields(&self) -> BTreeSet<Commitment> {
         BTreeSet::new()

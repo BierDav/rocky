@@ -458,6 +458,14 @@ impl Connection {
         Self::configure(rusqlite::Connection::open_in_memory()?)
     }
     fn configure(raw: rusqlite::Connection) -> Result<Self> {
+        // Tips commit the engine identity, which names the bundled SQLite.
+        if rusqlite::version() != rocky_core::BUNDLED_SQLITE_VERSION {
+            return Err(Error::Unsupported(format!(
+                "SQLite {} is linked, but the engine identity names {}",
+                rusqlite::version(),
+                rocky_core::BUNDLED_SQLITE_VERSION
+            )));
+        }
         raw.set_prepared_statement_cache_capacity(512);
         // Busy files are retried by whole transactions with bounded backoff.
         raw.busy_timeout(std::time::Duration::ZERO)?;

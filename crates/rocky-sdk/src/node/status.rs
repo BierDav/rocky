@@ -279,6 +279,7 @@ impl Node {
                     migration: self.migration(&settings).await?,
                     waiting_for_issuer: !settings.issuer()
                         && self.application(&settings).await? == crate::DeclaredSchema::Ahead,
+                    engine: generation.engine.into(),
                     rebuilding: generation.plan.map(|plan| RebuildProgress {
                         schema: HEXLOWER.encode(&plan.schema),
                         tables: plan.tables as u64,

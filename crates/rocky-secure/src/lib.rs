@@ -16,9 +16,9 @@ pub use replica::CrashPoint;
 pub use replica::{
     AuditReport, Buffered, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
     CiphertextPage, CompactReport, CompactionStatus, Companion, CoveredMark, CurrentValue,
-    CustodySummary, Describe, EarlierEpochWrites, EncryptedReplica, EvictReport, FrameReplay,
-    FrontierLog, GenerationStatus, HeldChange, HeldField, HeldKind, HeldRow, HeldSeal, Holding,
-    InstalledTipSchema, KeptSeals, KeyMaterial, LineNode, LogPosition, MAX_BUNDLE_BYTES,
+    CustodySummary, Describe, EarlierEpochWrites, EncryptedReplica, EngineStatus, EvictReport,
+    FrameReplay, FrontierLog, GenerationStatus, HeldChange, HeldField, HeldKind, HeldRow, HeldSeal,
+    Holding, InstalledTipSchema, KeptSeals, KeyMaterial, LineNode, LogPosition, MAX_BUNDLE_BYTES,
     MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CHECKPOINT_LOGS, MAX_PLACEMENTS, MAX_SEALED_OUTCOMES,
     MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, MigrationMembership,
     MigrationStorage, OutcomeDivergence, PUBLICATION_CHUNK_BUNDLES, PeerLag, PeerScopeFrontier,

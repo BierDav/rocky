@@ -2,7 +2,7 @@
 use super::*;
 use rocky_core::{ApplicationManifest, Generation};
 
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v45";
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v46";
 pub(super) fn identity(tip: TipId, node: PublicKey) -> Result<Vec<u8>, Error> {
     encode(&(FILE_IDENTITY, tip, node))
 }
@@ -11,6 +11,20 @@ pub struct GenerationStatus {
     pub manifest: Commitment,
     pub current: Generation,
     pub plan: Option<super::migrate::ProjectionPlan>,
+    pub engine: EngineStatus,
+}
+/// How this build's replay engine stands to the tips it follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineStatus {
+    /// The followed tip names this build's engine.
+    Current,
+    /// The owner moved the bookmark to a tip on another engine: this build
+    /// stays read-only at the old tip until Rocky is upgraded.
+    UpgradeRequired,
+    /// The followed tip names another engine: this build is read-only until
+    /// the owner opens a tip with its engine. Identities are not ordered,
+    /// so an older build that enrolled at a newer tip reports this too.
+    AwaitingOwner,
 }
 pub(super) struct Definition<A> {
     pub(super) app: Arc<A>,
@@ -53,7 +67,43 @@ impl<A> Definition<A> {
     }
 }
 
+/// Why a build whose engine differs from the followed tip's writes nothing.
+pub(super) const ENGINE_AWAITS_OWNER: &str = "this build's replay engine differs from the followed tip's; replayed tables are read-only until the owner opens a tip with this engine";
+/// Why a build does not follow a tip whose schema names another engine.
+pub(super) const ENGINE_UPGRADE_REQUIRED: &str =
+    "the tip's schema names another replay engine; upgrade Rocky to follow it";
+
 impl<A: RowApplication> Inner<A> {
+    /// Whether this build may replay the followed tip's intents: the
+    /// installed schema names its engine. Otherwise the workspace follows
+    /// read-only, and incoming frames wait as for a missing schema.
+    pub(super) fn engine_matches(&self) -> bool {
+        self.definition.engine == self.engine
+    }
+    async fn engine_status(&self) -> Result<EngineStatus, Error> {
+        let pending = match rows(
+            &self.conn,
+            "SELECT manifest FROM secure_pending_schema WHERE id=1",
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Blob(manifest)]) => Some(checkpoint::row_of(manifest)?),
+            None => None,
+            _ => return Err(Error::Corrupt("pending schema switch".into())),
+        };
+        let pending = pending.and_then(|manifest| self.catalog.get(&manifest));
+        Ok(
+            if pending.is_some_and(|pending| pending.engine != self.engine) {
+                EngineStatus::UpgradeRequired
+            } else if !self.engine_matches() {
+                EngineStatus::AwaitingOwner
+            } else {
+                EngineStatus::Current
+            },
+        )
+    }
     pub(crate) fn generation(&self) -> Generation {
         Generation {
             schema: self.definition.schema,
@@ -132,6 +182,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             manifest: inner.manifest,
             current: inner.generation(),
             plan: inner.plan_status().await?,
+            engine: inner.engine_status().await?,
         })
+    }
+    /// Stands `engine` in for this build's replay engine.
+    #[cfg(test)]
+    pub(crate) async fn replay_on(&self, engine: rocky_core::EngineIdentity) {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        inner.engine = engine;
+        inner.invalidate_context();
     }
 }

@@ -836,6 +836,42 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
 }
 
 #[test]
+fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure> {
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let mut installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
+    let schema = installed.schema.clone();
+    assert_eq!(
+        installed.application(&schema)?,
+        crate::DeclaredSchema::Current
+    );
+    // The installed tip names an older engine: an owner on this build opens
+    // a tip with the same tables on its own.
+    installed.engine = rocky_core::EngineIdentity::of("3.0.0", rocky_core::REPLAY_SEMANTICS);
+    assert_ne!(
+        installed.domain()?.manifest().hash(),
+        crate::domain::Domain::new(
+            &schema,
+            *installed.publisher.as_bytes(),
+            installed.mesh,
+            installed.domain
+        )?
+        .manifest()
+        .hash()
+    );
+    assert_eq!(
+        installed.application(&schema)?,
+        crate::DeclaredSchema::Ahead
+    );
+    let mut older = schema;
+    older.version = 0;
+    assert_eq!(
+        installed.application(&older)?,
+        crate::DeclaredSchema::Behind
+    );
+    Ok(())
+}
+
+#[test]
 fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> Result<(), Failure>
 {
     use crate::tip_schemas::Record;
@@ -843,13 +879,14 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
     let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let mut schema = installed.schema.clone();
     schema.version = 2;
-    let record = Record::new(&schema, 2);
+    let record = Record::new(&schema, 2, rocky_core::EngineIdentity::current());
     let domain = Domain::at(
         &schema,
         *installed.publisher.as_bytes(),
         installed.mesh,
         installed.domain,
         2,
+        rocky_core::EngineIdentity::current(),
     )?;
     let manifest = domain.manifest().hash();
     let bytes = record.bytes()?;
@@ -865,6 +902,12 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
         {
             let mut value = value.clone();
             value["generation"] = json!(3);
+            value
+        },
+        {
+            // A record names the engine the tip's manifest commits.
+            let mut value = value.clone();
+            value["engine"] = json!([7u8; 32].to_vec());
             value
         },
         {

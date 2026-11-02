@@ -20,7 +20,11 @@ impl Node {
         let mut missing = BTreeMap::new();
         for (tip, manifest) in required {
             if self.replica.tip_schema(manifest).await?.is_none() {
-                let record = Record::new(&self.declared, self.declared.version);
+                let record = Record::new(
+                    &self.declared,
+                    self.declared.version,
+                    rocky_core::EngineIdentity::current(),
+                );
                 let settings = self.settings.lock().await.clone();
                 if let Ok(domain) = record.domain(&settings, manifest) {
                     self.replica
@@ -305,6 +309,10 @@ impl Node {
             return Ok(false);
         };
         let record = Record::parse(&bytes)?;
+        // A tip on another engine waits for an upgrade; the status says so.
+        if record.engine != rocky_core::EngineIdentity::current() {
+            return Ok(false);
+        }
         let mut settings = self.settings.lock().await;
         let domain = record.domain(&settings, pending.manifest)?;
         let mut intent = (**settings).clone();
@@ -317,6 +325,7 @@ impl Node {
         let mut draft = intent;
         draft.schema = record.schema;
         draft.generation = record.generation;
+        draft.engine = record.engine;
         draft.prepare_schema(&self.vault, &domain)?;
         self.replica
             .switch_schema(

@@ -6,6 +6,7 @@ fn manifest() -> ApplicationManifest {
         app: ApplicationManifest::app_id([1; 32], "example"),
         schema: 1,
         projection: 2,
+        engine: rocky_core::EngineIdentity::current(),
         entities: Vec::new(),
         fields: Vec::new(),
         operations: Vec::new(),
@@ -99,7 +100,7 @@ fn wide_definitions_round_trip_with_fields_and_domains_without_changing_encoding
     wide.fields.reverse();
     wide.domains.reverse();
     assert_eq!(wide.hash(), hash);
-    let offset = b"rocky.manifest.v2".len() + 32 + 4 + wide.name.len() + 16 + 8;
+    let offset = b"rocky.manifest.v3".len() + 32 + 4 + wide.name.len() + 16 + 8 + 32;
     let mut oversized = bytes.clone();
     oversized[offset..offset + 4].copy_from_slice(&((MAX_MANIFEST_ITEMS + 1) as u32).to_le_bytes());
     assert!(ApplicationManifest::from_body(&oversized).is_err());

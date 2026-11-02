@@ -1,4 +1,6 @@
-use crate::{AppId, Commitment, DomainId, Envelope, OperationId, Scope, Versions, commitment};
+use crate::{
+    AppId, Commitment, DomainId, EngineIdentity, Envelope, OperationId, Scope, Versions, commitment,
+};
 
 /// Maximum encoded definition size, independent of operation payload limits.
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
@@ -7,7 +9,7 @@ pub const MAX_MANIFEST_ITEMS: usize = 32_768;
 /// Maximum declared domains in one manifest.
 pub const MAX_MANIFEST_DOMAINS: usize = 4096;
 /// The one manifest body format; other bodies are refused.
-const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v2";
+const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v3";
 
 /// Unsigned definition data. Installing this body never installs executable code.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +19,8 @@ pub struct ApplicationManifest {
     pub app: AppId,
     pub schema: u32,
     pub projection: u32,
+    /// The engine every replica replaying this schema's tip runs.
+    pub engine: EngineIdentity,
     pub entities: Vec<DefinitionItem>,
     pub fields: Vec<DefinitionItem>,
     pub operations: Vec<DefinitionItem>,
@@ -124,6 +128,7 @@ impl ApplicationManifest {
         for version in [self.schema, self.projection] {
             bytes.extend(version.to_le_bytes());
         }
+        bytes.extend(self.engine.0);
         for items in [&self.entities, &self.fields, &self.operations] {
             let mut items: Vec<_> = items.iter().collect();
             items.sort_by_key(|item| item.id);
@@ -159,6 +164,7 @@ impl ApplicationManifest {
         let app = AppId(body.array()?);
         let schema = body.number()?;
         let projection = body.number()?;
+        let engine = EngineIdentity(body.array()?);
         let mut groups = Vec::new();
         for _ in 0..3 {
             let count = body.number()?;
@@ -198,6 +204,7 @@ impl ApplicationManifest {
             app,
             schema,
             projection,
+            engine,
             entities: groups.next().ok_or_else(invalid)?,
             fields: groups.next().ok_or_else(invalid)?,
             operations: groups.next().ok_or_else(invalid)?,

@@ -35,7 +35,6 @@ const RANDOM_FUNCTIONS: &[&str] = &["random", "randomblob"];
 /// Connection state; every `sqlite_` function reads the engine build.
 const ENVIRONMENT_FUNCTIONS: &[&str] = &["changes", "last_insert_rowid", "total_changes"];
 const TABLE_FUNCTIONS: &[&str] = &["json_each", "json_tree"];
-const COLLATIONS: &[&str] = &["binary", "nocase", "rtrim"];
 /// Names SQLite may resolve to the rowid, a key each replica assigns itself.
 const ROWID: &[&str] = &["rowid", "_rowid_", "oid"];
 
@@ -611,7 +610,7 @@ impl Visitor for Determinism<'_> {
             }
             Expr::Collate { collation, .. } => match collation.0.as_slice() {
                 [ObjectNamePart::Identifier(name)]
-                    if COLLATIONS
+                    if rocky_core::DETERMINISTIC_COLLATIONS
                         .iter()
                         .any(|known| name.value.eq_ignore_ascii_case(known)) =>
                 {

@@ -67,6 +67,7 @@ mod tests {
             app: ApplicationManifest::app_id(publisher, "ordinal-test"),
             schema: 1,
             projection: 1,
+            engine: crate::EngineIdentity::current(),
             entities: Vec::new(),
             fields: Vec::new(),
             operations: Vec::new(),

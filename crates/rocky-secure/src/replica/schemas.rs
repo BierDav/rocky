@@ -204,6 +204,11 @@ impl PathFields {
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn frame_schema_ready(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
+        // Replaying under another engine than the tip names could diverge;
+        // the frame waits, stored, until this build follows a tip of its own.
+        if !self.engine_matches() {
+            return Ok(false);
+        }
         let header = frame.operation()?.header;
         let e = &header.extensions;
         let source = self
@@ -686,6 +691,11 @@ impl<A: RowApplication> Inner<A> {
         IN_PLACE_SWITCH_CHANGES.store(-1, std::sync::atomic::Ordering::SeqCst);
         let inner = self;
         let manifest = app.manifest();
+        if withdraw.is_none() && manifest.engine != inner.engine {
+            return Err(Error::Incompatible(
+                super::generation::ENGINE_UPGRADE_REQUIRED.into(),
+            ));
+        }
         let (scope, name) = inner
             .workspace
             .followed
@@ -822,6 +832,7 @@ impl<A: RowApplication> Inner<A> {
                         .map(|rule| rule.domain)
                         .collect::<Vec<_>>(),
                     inner.definition.schema,
+                    inner.definition.engine,
                 );
                 if expected.hash() != inner.manifest {
                     return Err(denied("projection differs from tip schema"));
@@ -1237,11 +1248,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         app: A,
         config: SchemaConfig,
     ) -> Result<bool, Error> {
-        self.inner
+        let switched = self
+            .inner
             .lock(crate::replica::Class::Background)
             .await
             .switch_schema_now(tip, app, config, None)
-            .await
+            .await?;
+        // Frames that waited for this build's engine apply now.
+        self.settle().await?;
+        Ok(switched)
     }
     /// Withdraws a staged schema publication whose migration has not
     /// committed, and so never left this device, and switches the

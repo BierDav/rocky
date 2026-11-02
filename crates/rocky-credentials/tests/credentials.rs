@@ -26,6 +26,7 @@ impl Domain {
             app: ApplicationManifest::app_id(key, "example"),
             schema: 1,
             projection: 1,
+            engine: rocky_core::EngineIdentity::current(),
             entities: Vec::new(),
             fields: Vec::new(),
             operations: Vec::new(),

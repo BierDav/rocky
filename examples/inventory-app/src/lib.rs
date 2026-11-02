@@ -31,6 +31,7 @@ pub fn manifest() -> ApplicationManifest {
         app: app_id(),
         schema: 1,
         projection: 1,
+        engine: rocky_core::EngineIdentity::current(),
         entities: Vec::new(),
         fields: Vec::new(),
         operations: Vec::new(),

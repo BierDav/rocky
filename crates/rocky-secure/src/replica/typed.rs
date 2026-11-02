@@ -302,7 +302,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // The generation is the installed application's; the tables must be
         // exactly the signed ones.
-        let expected = schema.manifest_at(&domains, self.definition.schema);
+        let expected = schema.manifest_at(&domains, self.definition.schema, self.definition.engine);
         if expected.hash() != self.manifest {
             return Err(Error::Incompatible(
                 "the schema's definition differs from the signed manifest".into(),

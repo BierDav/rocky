@@ -4,13 +4,15 @@ use rocky_core::{Commitment, TipId};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const PROTOCOL: &[u8] = b"rocky.sdk.tip-schema.v1\n";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub format: u32,
     pub generation: u32,
+    /// The replay engine the tip's manifest names.
+    pub engine: rocky_core::EngineIdentity,
     pub schema: Schema,
 }
 impl<'de> Deserialize<'de> for Record {
@@ -20,6 +22,7 @@ impl<'de> Deserialize<'de> for Record {
         struct Raw {
             format: u32,
             generation: u32,
+            engine: rocky_core::EngineIdentity,
             schema: serde_json::Value,
         }
         let raw = Raw::deserialize(deserializer)?;
@@ -36,6 +39,7 @@ impl<'de> Deserialize<'de> for Record {
         Ok(Self {
             format: raw.format,
             generation: raw.generation,
+            engine: raw.engine,
             schema,
         })
     }
@@ -52,12 +56,13 @@ pub(crate) struct Request {
     pub manifest: Commitment,
 }
 impl Record {
-    pub fn new(schema: &Schema, generation: u32) -> Self {
+    pub fn new(schema: &Schema, generation: u32, engine: rocky_core::EngineIdentity) -> Self {
         let mut schema = schema.clone();
         schema.migrations.clear();
         Self {
             format: FORMAT,
             generation,
+            engine,
             schema,
         }
     }
@@ -97,6 +102,7 @@ impl Record {
             settings.mesh,
             settings.domain,
             self.generation,
+            self.engine,
         )?;
         if domain.manifest().hash() != expected {
             return Err("tip schema commitment mismatch".into());

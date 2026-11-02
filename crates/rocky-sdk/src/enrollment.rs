@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -121,6 +121,8 @@ pub struct Settings {
     pub(crate) provider: Option<Arc<dyn IdentityProvider>>,
     pub genesis: String,
     pub generation: u32,
+    /// The replay engine the installed generation's tip names.
+    pub engine: rocky_core::EngineIdentity,
     pub pending: Option<crate::tip_schemas::Pending>,
     pub pending_follow: Option<String>,
     pub(crate) bootstrap: Option<crate::tip_schemas::Bootstrap>,
@@ -824,6 +826,7 @@ impl Settings {
             self.mesh,
             self.domain,
             self.generation,
+            self.engine,
         )
     }
 
@@ -1227,6 +1230,7 @@ impl Settings {
             provider,
             genesis: HEXLOWER.encode(&manifest.to_bytes()?),
             generation: schema.version,
+            engine: rocky_core::EngineIdentity::current(),
             pending: None,
             pending_follow: None,
             bootstrap: None,
@@ -1278,6 +1282,7 @@ impl Settings {
             stored_identity,
             provider: Some(provider),
             generation: schema.version,
+            engine: rocky_core::EngineIdentity::current(),
             genesis: manifest,
             pending: None,
             pending_follow: None,
@@ -1853,7 +1858,7 @@ impl Settings {
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
             mesh: self.mesh,
             domain: self.domain,
-            record: crate::tip_schemas::Record::new(&self.schema, self.generation),
+            record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
             genesis: self.genesis.clone(),
             bootstrap: self.schema_bootstrap()?,
             revocations: self.revocations.clone(),
@@ -2410,6 +2415,7 @@ impl Settings {
             provider,
             genesis: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
             generation: schema.version,
+            engine: rocky_core::EngineIdentity::current(),
             pending: None,
             pending_follow: None,
             bootstrap: None,
@@ -2578,6 +2584,7 @@ impl Joining {
             installation: intent.installation.clone(),
             schema: enrollment.record.schema.clone(),
             generation: enrollment.record.generation,
+            engine: enrollment.record.engine,
             pending: None,
             pending_follow: None,
             bootstrap: Some(enrollment.bootstrap),
@@ -4022,6 +4029,7 @@ impl Settings {
             provider: _,
             genesis,
             generation,
+            engine,
             pending,
             pending_follow,
             bootstrap,
@@ -4055,6 +4063,7 @@ impl Settings {
             && *stored_identity == other.stored_identity
             && *genesis == other.genesis
             && *generation == other.generation
+            && *engine == other.engine
             && *pending == other.pending
             && *pending_follow == other.pending_follow
             && *bootstrap == other.bootstrap

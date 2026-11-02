@@ -1597,6 +1597,7 @@ impl Node {
             "rebuilding": status.plan.map(|plan| json!({"tables": plan.tables})),
             "application": application,
             "waiting_for_issuer": waiting_for_issuer,
+            "engine": crate::EngineStatus::from(status.engine),
             "held": self.replica.held_changes().await?.len(),
             "migration": migration,
         }))

@@ -172,6 +172,33 @@ pub struct GenerationStatus {
     pub migration: Option<MigrationStatus>,
     /// An ahead member needs an issuer's signed generation, possibly offline.
     pub waiting_for_issuer: bool,
+    /// Whether this Rocky build may replay the followed tip.
+    pub engine: EngineStatus,
+}
+/// How this Rocky build's replay engine (its SQLite and replay semantics)
+/// stands to the tips this device follows. Replicas on different engines
+/// could replay the same transaction differently, so a tip names one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineStatus {
+    Current,
+    /// The owner moved on to a tip on another engine: this device stays
+    /// read-only at the old tip until the application ships a Rocky upgrade.
+    UpgradeRequired,
+    /// The followed tip names another engine: this device reads but does
+    /// not write or replay until an owner device on this build opens a tip.
+    /// Engines are not ordered, so an older build that enrolled at a newer
+    /// tip reports this too; upgrading also clears it.
+    AwaitingOwner,
+}
+impl From<rocky_secure::EngineStatus> for EngineStatus {
+    fn from(status: rocky_secure::EngineStatus) -> Self {
+        match status {
+            rocky_secure::EngineStatus::Current => Self::Current,
+            rocky_secure::EngineStatus::UpgradeRequired => Self::UpgradeRequired,
+            rocky_secure::EngineStatus::AwaitingOwner => Self::AwaitingOwner,
+        }
+    }
 }
 /// A schema migration as this device sees it. See
 /// `docs/runtime/generations.md#migrations`.

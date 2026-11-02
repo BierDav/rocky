@@ -314,7 +314,11 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             } else if !self.holds(scope).await? {
                 Unavailable::NotHeld
-            } else if self.has_pending(scope).await? || self.restoring(scope).await? {
+            } else if self.restoring(scope).await?
+                // Frames another engine must replay leave this build reading
+                // what it replayed, as if they had not arrived yet.
+                || (self.engine_matches() && self.has_pending(scope).await?)
+            {
                 Unavailable::Incomplete
             } else {
                 continue;

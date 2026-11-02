@@ -97,7 +97,7 @@ pub use checkpoint::{
 };
 pub use coordinated::{Refusal, StagedCloseStatus};
 pub use evict::EvictReport;
-pub use generation::GenerationStatus;
+pub use generation::{EngineStatus, GenerationStatus};
 pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};
 pub use migrate::ProjectionPlan;
 pub use offload::RemotePage;
@@ -353,6 +353,8 @@ pub(super) struct Inner<A> {
     pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
     pub(super) definition: rocky_core::ApplicationManifest,
+    /// The engine this build replays with; a test stands in another.
+    pub(super) engine: rocky_core::EngineIdentity,
     pub(super) tables: HashSet<Commitment>,
     pub(super) fields: HashSet<Commitment>,
     permission_fields: HashSet<Commitment>,
@@ -1024,6 +1026,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             authority_events: watch::channel(1).0,
             recovery_events: watch::channel(0).0,
             rebuilding_tip: false,
+            engine: rocky_core::EngineIdentity::current(),
             opening_revocations: None,
             tip_base: false,
             publishing: false,

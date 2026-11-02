@@ -1305,11 +1305,16 @@ impl LogicalSchema {
     /// The replicated definition as an unsigned manifest for `domains`. Its
     /// hash does not change with SQL spelling, indexes or local tables.
     pub fn manifest(&self, domains: &[DomainId]) -> ApplicationManifest {
-        self.manifest_at(domains, 1)
+        self.manifest_at(domains, 1, crate::EngineIdentity::current())
     }
-    /// The manifest of schema generation `schema`: the first is 1, and a
-    /// signed transition makes each next one.
-    pub fn manifest_at(&self, domains: &[DomainId], schema: u32) -> ApplicationManifest {
+    /// The manifest of schema generation `schema` replayed on `engine`: the
+    /// first generation is 1, and a signed transition makes each next one.
+    pub fn manifest_at(
+        &self,
+        domains: &[DomainId],
+        schema: u32,
+        engine: crate::EngineIdentity,
+    ) -> ApplicationManifest {
         let (publisher, app) = (self.publisher, self.app_id());
         let item = |kind: &str, name: String, shape: String| DefinitionItem {
             id: definition_item_id(publisher, app, kind, &name),
@@ -1332,6 +1337,7 @@ impl LogicalSchema {
             app,
             schema,
             projection: 1,
+            engine,
             entities,
             fields,
             operations: ["insert", "update", "delete"]

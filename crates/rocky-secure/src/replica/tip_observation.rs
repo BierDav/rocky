@@ -53,10 +53,22 @@ impl<A: RowApplication> Inner<A> {
     /// Every locally held operation and void header of the domain. A scan
     /// of headers, never of rows; explicit developer calls only.
     pub(super) async fn domain_headers(&self, scope: Scope) -> Result<Vec<Extensions>, Error> {
+        self.domain_headers_from(scope, true).await
+    }
+    /// `domain_headers`, without operations still pending unless `pending`.
+    async fn domain_headers_from(
+        &self,
+        scope: Scope,
+        pending: bool,
+    ) -> Result<Vec<Extensions>, Error> {
         let mut headers = Vec::new();
         for row in rows(
             &self.conn,
-            "SELECT header FROM secure_operations UNION ALL SELECT header FROM secure_voids",
+            if pending {
+                "SELECT header FROM secure_operations UNION ALL SELECT header FROM secure_voids"
+            } else {
+                "SELECT header FROM secure_operations WHERE status<>'pending' UNION ALL SELECT header FROM secure_voids"
+            },
         )
         .await?
         {
@@ -93,7 +105,12 @@ impl<A: RowApplication> Inner<A> {
         }
         let graph = self.scope_graph(scope)?;
         let mut marks = self.inherited_marks(&graph)?;
-        self.fold_marks(&graph, &mut marks, self.domain_headers(scope).await?)?;
+        // A build on another engine than the tip's covers only what it
+        // replayed; what waits continues in the successor tip.
+        let headers = self
+            .domain_headers_from(scope, self.engine_matches())
+            .await?;
+        self.fold_marks(&graph, &mut marks, headers)?;
         Ok(into_marks(marks))
     }
     /// A close seal needs retained history: pruned logs have no author frontier.
@@ -232,6 +249,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// they walk a `continue` seal as late frames. A `close` would hold
     /// them where others applied them, so it refuses pruned history.
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
+        {
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            if !inner.engine_matches() {
+                return inner.seal_frontier(scope, close).await;
+            }
+        }
         self.fold_headers(
             scope,
             |inner| {

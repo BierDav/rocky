@@ -157,7 +157,8 @@ instead of choosing differently.
   are committed in the tip's schema manifest. A build with a different
   engine identity follows the tip read-only until the owner opens a new
   tip with it, exactly like a schema change. Rocky bundles SQLite, so
-  this changes only on a Rocky upgrade.
+  this changes only on a Rocky upgrade. Anything else that changes a
+  replay result bumps `REPLAY_SEMANTICS` (`rocky-core` `engine.rs`).
 - **Partitions.** An intent touches one partition. A statement that
   reaches several held partitions is split by the author into one
   statement per partition, each with the partition filter appended,

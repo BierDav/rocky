@@ -17,16 +17,25 @@ pub(crate) fn migrates(schema: &Schema, from: u32) -> bool {
 impl Settings {
     pub(crate) fn application(&self, declared: &Schema) -> Result<crate::DeclaredSchema, Failure> {
         let version = declared.version;
-        let declared = Domain::at(
-            declared,
-            *self.publisher.as_bytes(),
-            self.mesh,
-            self.domain,
-            self.generation,
-        )?;
-        if declared.manifest().hash() == self.domain()?.manifest().hash() {
+        let installed = self.domain()?.manifest().hash();
+        let at = |engine| {
+            Domain::at(
+                declared,
+                *self.publisher.as_bytes(),
+                self.mesh,
+                self.domain,
+                self.generation,
+                engine,
+            )
+            .map(|domain| domain.manifest().hash())
+        };
+        let engine = rocky_core::EngineIdentity::current();
+        if at(engine)? == installed {
             Ok(crate::DeclaredSchema::Current)
-        } else if version > self.generation {
+        } else if version > self.generation
+            // The same tables on this build's engine: an owner opens a tip with it.
+            || (version == self.generation && self.engine != engine && at(self.engine)? == installed)
+        {
             Ok(crate::DeclaredSchema::Ahead)
         } else {
             Ok(crate::DeclaredSchema::Behind)

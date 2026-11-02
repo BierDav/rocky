@@ -78,7 +78,7 @@ impl Settings {
             format: 2,
             mesh: self.mesh,
             domain: self.domain,
-            record: crate::tip_schemas::Record::new(&self.schema, self.generation),
+            record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
             genesis: self.genesis.clone(),
             bootstrap: self.schema_bootstrap()?,
             revocations: self.revocations.clone(),

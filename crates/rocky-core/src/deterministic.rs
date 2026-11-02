@@ -103,6 +103,9 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "jsonb_set",
 ];
 
+/// Collations replayed statements may name; part of the engine identity.
+pub const DETERMINISTIC_COLLATIONS: &[&str] = &["binary", "nocase", "rtrim"];
+
 /// Keywords SQLite accepts directly before `(` that are not calls.
 const KEYWORDS: &[&str] = &[
     "all",

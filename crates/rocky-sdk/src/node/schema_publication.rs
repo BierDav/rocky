@@ -46,6 +46,7 @@ impl Node {
             settings.mesh,
             settings.domain,
             self.declared.version,
+            rocky_core::EngineIdentity::current(),
         )?;
         let seal = SignedSeal::endorse(
             SealStatement {
@@ -112,7 +113,12 @@ impl Node {
                 .install_tip_schema(
                     target,
                     domain.manifest(),
-                    Record::new(&self.declared, self.declared.version).bytes()?,
+                    Record::new(
+                        &self.declared,
+                        self.declared.version,
+                        rocky_core::EngineIdentity::current(),
+                    )
+                    .bytes()?,
                 )
                 .await?;
             self.follow_schema().await?;
@@ -159,7 +165,12 @@ impl Node {
             .install_tip_schema(
                 target,
                 domain.manifest(),
-                Record::new(&self.declared, self.declared.version).bytes()?,
+                Record::new(
+                    &self.declared,
+                    self.declared.version,
+                    rocky_core::EngineIdentity::current(),
+                )
+                .bytes()?,
             )
             .await?;
         self.follow_schema().await?;
@@ -370,6 +381,7 @@ impl Node {
         draft.save(&self.path)?;
         draft.schema = record.schema;
         draft.generation = record.generation;
+        draft.engine = record.engine;
         draft.prepare_schema(&self.vault, &domain)?;
         self.replica
             .withdraw_staged_schema(

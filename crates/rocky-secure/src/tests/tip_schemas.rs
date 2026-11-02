@@ -5,6 +5,7 @@ use super::*;
 use rocky_credentials::{SealAction, SignedSeal};
 
 mod employees;
+mod engine;
 mod source_availability;
 pub(in crate::tests) mod source_validation;
 mod staging;

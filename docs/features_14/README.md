@@ -57,9 +57,18 @@ the contract is in the `rocky-sdk` crate docs ("Exact values").
 - Evidence: `rocky-sdk` `tests/exact.rs` (author commit, two-replica drops
   for a statement, a `CHECK` and an assertion, round trips), `rocky-storage`
   `exact::tests`, `rocky-core` `deterministic::tests`.
-- Not done: the tip's schema manifest does not yet record the engine
-  identity (SQLite version and allowlist); replicas of different Rocky
-  builds can still replay the same intent differently.
+- Engine identity (2026-11-03): each tip's schema manifest commits
+  `EngineIdentity`, a digest of the bundled SQLite version, the function
+  allowlist, the collations and `REPLAY_SEMANTICS` (`rocky-core`
+  `engine.rs`). A build on another engine reads the followed tip but neither
+  writes nor replays it (its frames wait as for a missing schema, and a seal
+  it signs covers only what it replayed); an owner on the new build opens a
+  tip with its engine at open, as for a schema change, and older builds stay
+  read-only at the old tip. Status: `GenerationStatus::engine`
+  (`upgrade_required`, `awaiting_owner`). Evidence: `rocky-secure`
+  `tests::tip_schemas::engine`, `rocky-sdk`
+  `a_tip_on_another_engine_leaves_the_same_schema_ahead`. Formats: manifest
+  v3, replica v44, settings 21, tip schema record 2.
 
 ## R2. Relational invariants with an explicit scope
 

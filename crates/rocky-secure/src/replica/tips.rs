@@ -505,6 +505,9 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     pub(super) fn ensure_tip_writable(&self, scope: Scope) -> Result<(), Error> {
+        if !self.engine_matches() {
+            return Err(denied(super::generation::ENGINE_AWAITS_OWNER));
+        }
         let mut cached = self
             .graph_cache
             .lock()

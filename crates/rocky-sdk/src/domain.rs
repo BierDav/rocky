@@ -25,15 +25,23 @@ impl Domain {
         mesh: MeshId,
         domain: DomainId,
     ) -> Result<Self, Failure> {
-        Self::at(schema, publisher, mesh, domain, schema.version)
+        Self::at(
+            schema,
+            publisher,
+            mesh,
+            domain,
+            schema.version,
+            rocky_core::EngineIdentity::current(),
+        )
     }
-    /// The domain at schema generation `generation`.
+    /// The domain at schema generation `generation`, replayed on `engine`.
     pub fn at(
         schema: &Schema,
         publisher: [u8; 32],
         mesh: MeshId,
         domain: DomainId,
         generation: u32,
+        engine: rocky_core::EngineIdentity,
     ) -> Result<Self, Failure> {
         let logical = logical(schema, publisher)?;
         let scope = Scope {
@@ -94,7 +102,9 @@ impl Domain {
             })
             .collect();
         Ok(Self {
-            app: TypedRows::new(logical, vec![domain])?.at_generation(generation)?,
+            app: TypedRows::new(logical, vec![domain])?
+                .at_generation(generation)?
+                .on_engine(engine),
             scope,
             tables,
             granted_like: schema.granted_like(),

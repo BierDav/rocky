@@ -321,6 +321,7 @@ impl DirectoryApp {
             app: ApplicationManifest::app_id(self.publisher, "directory"),
             schema: 1,
             projection: 1,
+            engine: rocky_core::EngineIdentity::current(),
             entities: vec![],
             fields: vec![],
             operations: vec![],

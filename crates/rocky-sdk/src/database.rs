@@ -1432,6 +1432,7 @@ async fn run_inner(
             let domain = record.domain(&settings, manifest)?;
             settings.schema = record.schema;
             settings.generation = record.generation;
+            settings.engine = record.engine;
             settings.prepare_schema(&vault, &domain)?;
             settings.pending = None;
             settings.save(&path)?;
@@ -1471,7 +1472,12 @@ async fn run_inner(
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
         replica
             .record_current_schema(
-                crate::tip_schemas::Record::new(&settings.schema, settings.generation).bytes()?,
+                crate::tip_schemas::Record::new(
+                    &settings.schema,
+                    settings.generation,
+                    settings.engine,
+                )
+                .bytes()?,
             )
             .await?;
         settings.bootstrap = None;

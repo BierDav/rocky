@@ -19,6 +19,7 @@ impl Employees {
             app: ApplicationManifest::app_id(self.publisher, "employees"),
             schema: 1,
             projection: 1,
+            engine: rocky_core::EngineIdentity::current(),
             entities: vec![],
             fields: vec![],
             operations: vec![],

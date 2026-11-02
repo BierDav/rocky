@@ -20,7 +20,7 @@ inputs:
     description: "`true` to download `nextest-sdk`, the SDK test archive without default features."
     default: "false"
   peer:
-    description: "`true` to download `rocky-peer`, the custody peer binary."
+    description: "Deprecated: peer artifact download removed."
     default: "false"
   nextest:
     description: "`false` for a job that runs no nextest archives."
@@ -119,22 +119,12 @@ runs:
         name: nextest-sdk
         path: ${{ runner.temp }}/build
 
-    - name: Download the custody peer
-      id: peer
-      if: >-
-        steps.passed.outputs.cache-hit != 'true' && inputs.peer == 'true'
-      uses: actions/download-artifact@v4
-      continue-on-error: true
-      with:
-        name: rocky-peer
-        path: ${{ runner.temp }}/build
-
     - uses: Swatinem/rust-cache@v2
       if: >-
         steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
         || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
-        || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
+        )
       with:
         workspaces: source -> target
         shared-key: check
@@ -146,7 +136,7 @@ runs:
         steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
         || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
-        || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
+        )
       shell: sh
       working-directory: source
       run: ./scripts/ci/source-times

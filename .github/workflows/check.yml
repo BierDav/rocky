@@ -116,9 +116,9 @@ jobs:
 
   build:
     # Compiles once: clippy and the test binaries as nextest archives, plus the
-    # custody peer. `check`, `e2e` and `shopping` run those artifacts instead of
-    # building again, each downloading only what it runs. All consumers use
-    # the x64 baseline, including shopping's Android prerequisite.
+    # test binaries as nextest archives. `check`, `e2e` and `shopping` run those
+    # artifacts instead of building again, each downloading only what it runs.
+    # All consumers use the x64 baseline, including shopping's Android prerequisite.
     runs-on: ubuntu-latest
     # A cold four-core build can exceed an hour, including artifact/cache saves.
     timeout-minutes: 90
@@ -229,16 +229,6 @@ jobs:
         with:
           name: nextest-sdk
           path: ${{ runner.temp }}/build/sdk-without-defaults.tar.zst
-          retention-days: 1
-          compression-level: 0
-
-      - name: Upload the custody peer
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: rocky-peer
-          path: ${{ runner.temp }}/build/rocky-peer
           retention-days: 1
           compression-level: 0
 

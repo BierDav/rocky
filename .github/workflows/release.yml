@@ -141,7 +141,6 @@ jobs:
             echo
             echo "- Rust: \`rocky-sdk = \"=${version}\"\` ([crates.io](https://crates.io/crates/rocky-sdk/${version}))"
             echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
-            echo "- \`${registry}/bierdav/rocky-db-peer:${version}\`"
           } > "$RUNNER_TEMP/notes/notes.md"
           { echo "## v${version}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -196,22 +195,6 @@ jobs:
             dockerfile: crates/rocky-coordinator/Dockerfile
             title: rocky-voter
             description: Rocky DB public coordination voter
-          - image: peer
-            arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            package: rocky-db-peer
-            dockerfile: crates/rocky-sdk/Dockerfile
-            title: rocky-peer
-            description: Rocky DB keyless custody replica
-          - image: peer
-            arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            package: rocky-db-peer
-            dockerfile: crates/rocky-sdk/Dockerfile
-            title: rocky-peer
-            description: Rocky DB keyless custody replica
     steps:
       - name: Download the exact source revision
         env:
@@ -279,9 +262,6 @@ jobs:
           - image: coordinator
             package: rocky-db-coordinator
             heading: Coordinator image
-          - image: peer
-            package: rocky-db-peer
-            heading: Custody peer image
     steps:
       # GHCR hosts the container images.
       - name: Select the registry

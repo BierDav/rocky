@@ -13,6 +13,8 @@ pub struct Schema {
     pub views: Vec<rocky_core::LogicalView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<rocky_core::LogicalAssertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions: Vec<rocky_core::LogicalRestriction>,
     /// SQL the first issuer to sign the schema's generation runs once, after
     /// signing it; see `docs/runtime/generations.md#migrations`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -175,6 +177,7 @@ impl Schema {
             application: self.application.clone(),
             views: self.views.clone(),
             assertions: self.assertions.clone(),
+            restrictions: self.restrictions.clone(),
             tables: self.tables.clone(),
         })
     }
@@ -197,6 +200,7 @@ impl Schema {
             tables: Vec::new(),
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
             migrations: Vec::new(),
         })
     }
@@ -217,6 +221,14 @@ impl SchemaBuilder {
     #[must_use]
     pub fn assertion(mut self, assertion: rocky_core::LogicalAssertion) -> Self {
         self.0.assertions.push(assertion);
+        self
+    }
+    /// A transition check: rows of a replayed table that match its
+    /// predicate before a transaction may not be updated or deleted by it,
+    /// at commit and on every replay. Assertions judge only final state.
+    #[must_use]
+    pub fn restriction(mut self, restriction: rocky_core::LogicalRestriction) -> Self {
+        self.0.restrictions.push(restriction);
         self
     }
     pub fn build(self) -> Result<Schema, Failure> {

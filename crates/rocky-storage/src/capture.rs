@@ -885,6 +885,7 @@ mod tests {
             ],
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         };
         let statements = [PLAIN, KEYED, CHILD, LOCAL];
         for sql in statements.iter().chain(&[

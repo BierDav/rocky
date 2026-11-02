@@ -4,14 +4,14 @@
 use super::*;
 
 /// What every schedule delivers; phase 6's equivalence runs over the same.
-struct History {
-    c: Constrained,
-    setup: Vec<EncryptedFrame>,
-    units: Vec<Vec<EncryptedFrame>>,
+pub(super) struct History {
+    pub(super) c: Constrained,
+    pub(super) setup: Vec<EncryptedFrame>,
+    pub(super) units: Vec<Vec<EncryptedFrame>>,
 }
 
 impl History {
-    fn frames(&self) -> Vec<EncryptedFrame> {
+    pub(super) fn frames(&self) -> Vec<EncryptedFrame> {
         let units = self.units.iter().flatten();
         self.setup.iter().chain(units).cloned().collect()
     }
@@ -56,7 +56,7 @@ fn schedules(units: &[Vec<EncryptedFrame>], splits: bool) -> Vec<Vec<Vec<Encrypt
 }
 
 /// Runs every schedule on a fresh receiver, spread over threads.
-fn deliver_all(history: &History, splits: bool, expected: &Canonical) {
+pub(super) fn deliver_all(history: &History, splits: bool, expected: &Canonical) {
     let schedules = schedules(&history.units, splits);
     let root = tempfile::tempdir().unwrap();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
@@ -85,7 +85,7 @@ fn deliver_all(history: &History, splits: bool, expected: &Canonical) {
     });
 }
 
-fn runtime() -> tokio::runtime::Runtime {
+pub(super) fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -169,7 +169,11 @@ fn graph() -> Constrained {
 }
 
 /// Commits `statements` on `device`, returning the frames as one unit.
-async fn unit(c: &Constrained, device: &mut Device, statements: &[&str]) -> Vec<EncryptedFrame> {
+pub(super) async fn unit(
+    c: &Constrained,
+    device: &mut Device,
+    statements: &[&str],
+) -> Vec<EncryptedFrame> {
     device.commit(c, statements).await.unwrap();
     device.fresh().await
 }

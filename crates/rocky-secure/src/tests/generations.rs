@@ -305,6 +305,7 @@ impl Lineage {
             tables,
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         }
     }
     /// Generation 1 with a local `drafts` table indexed on `body`: a local

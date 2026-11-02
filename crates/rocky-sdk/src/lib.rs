@@ -63,6 +63,20 @@
 //!   [`SchemaBuilder::assertion`] hold on every replay. A transaction whose
 //!   replay fails a constraint, its author's grants or the current schema
 //!   is dropped whole, in every partition.
+//! - **Restrictions.** An assertion judges only the state a transaction
+//!   leaves; it cannot tell that an accepted row was edited and restored.
+//!   [`SchemaBuilder::restriction`] declares a transition check instead:
+//!   [`LogicalRestriction::immutable`] refuses updating or deleting rows
+//!   whose state before the transaction matches a predicate (`status =
+//!   'posted'`), [`LogicalRestriction::append_only`] every update and
+//!   delete. The predicate uses the derived-rule grammar over the row's
+//!   replicated columns. Delete actions count: deleting a parent whose
+//!   cascade reaches a restricted child is refused. A change that keeps
+//!   every value is no update. A violation fails the commit; on replay it
+//!   drops the transaction with [`DropReason::Restricted`]. Rows Rocky
+//!   restores itself, from a checkpoint or a rebuild, are not checked.
+//!   Corrections are new rows, such as reversals, that the application
+//!   defines.
 //! - **Drops.** A commit stays visible until replay drops it.
 //!   [`TableChange::dropped`] names dropped transactions after the commit
 //!   that recorded the drop, and [`Database::transaction_outcome`] gives
@@ -129,7 +143,8 @@ pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator}
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, DeleteAction, ForeignKeyDefinition, IndexColumn,
-    IndexDefinition, LogicalView, TableClass, TableDefinition,
+    IndexDefinition, LogicalAssertion, LogicalRestriction, LogicalView, TableClass,
+    TableDefinition,
 };
 pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
 /// Signed credentials, grant profiles and the key provider contract.

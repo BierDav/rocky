@@ -95,6 +95,9 @@ pub enum DropReason {
     Constraint,
     /// The replayed effects are outside the author's grants.
     Admission,
+    /// The transaction updated or deleted a row a schema restriction
+    /// protects as it stood before the transaction.
+    Restricted,
     /// A statement no longer compiles against the tip's schema.
     Schema,
     /// The engine refused a statement for another reason.

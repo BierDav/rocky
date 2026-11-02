@@ -386,6 +386,7 @@ mod tests {
             }],
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         };
         TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap()
     }

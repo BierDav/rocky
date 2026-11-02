@@ -109,6 +109,7 @@ impl Typed {
             ],
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         };
         Self::with_schema(publisher, schema)
     }

@@ -202,6 +202,7 @@ mod tests {
             tables,
             views: Vec::new(),
             assertions: Vec::new(),
+            restrictions: Vec::new(),
         }
     }
     fn items(columns: &[(&str, bool)]) -> LogicalTable {

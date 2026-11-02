@@ -154,7 +154,8 @@ pub fn written_table(sql: &str, views: &[rocky_core::LogicalView]) -> Option<Str
 
 /// Checks an assertion: one deterministic `SELECT` reading only `tables`,
 /// each filtered to its held partitions whether or not the `SELECT` names
-/// them, so that it sees exactly the transaction's partition.
+/// them, so that it sees exactly the transaction's partition. Its
+/// arithmetic is checked.
 pub fn check_assertion(
     sql: &str,
     views: &[rocky_core::LogicalView],
@@ -210,8 +211,8 @@ pub fn check_replayed_table(create_sql: &str) -> Result<(), IntentRefusal> {
 }
 
 /// Checks a write to a replayed table and splits it into one copy per held
-/// partition it reaches, in `held` order; no copy means it changes nothing
-/// held here. `evaluate` runs a read of other partitions on the snapshot
+/// partition it reaches, in `held` order, with its arithmetic checked; no
+/// copy means it changes nothing held here. `evaluate` runs a read of other partitions on the snapshot
 /// the statement executed on and returns its rows. Each distinct read runs
 /// once and its result is bound into every copy.
 pub fn split_intent<E>(
@@ -374,6 +375,7 @@ pub fn split_intent_within<E>(
         if let ControlFlow::Break(error) = VisitMut::visit(&mut copy, &mut filter) {
             return Err(IntentRefusal::Unsupported(error).into());
         }
+        let _ = VisitMut::visit(&mut copy, &mut crate::exact::Checked);
         let params = compact(&mut copy, &filter.params)?;
         copies.push(PartitionStatement {
             partition,
@@ -939,6 +941,8 @@ impl<E> Split<'_, E> {
             return Ok(rows.clone());
         }
         let mut read = parse(&sql).map_err(IntentRefusal::Unsupported)?;
+        // Its values are bound into the intent, so they must be exact too.
+        let _ = VisitMut::visit(&mut read, &mut crate::exact::Checked);
         let params = compact(&mut read, &self.values)?;
         let checked = prepare(&read.to_string(), &[])?.check(&params, self.tables)?;
         let rows = (self.evaluate)(&checked).map_err(SplitError::Evaluate)?;

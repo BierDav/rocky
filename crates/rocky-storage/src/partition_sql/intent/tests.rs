@@ -54,6 +54,7 @@ fn refused(sql: &str) -> IntentRefusal {
 
 fn db(lists: &[&str]) -> Connection {
     let conn = Connection::open_in_memory().unwrap();
+    crate::exact::register(&conn).unwrap();
     conn.execute_batch(
         "CREATE TABLE items(id INTEGER PRIMARY KEY, list TEXT NOT NULL COLLATE NOCASE,
              pos INTEGER NOT NULL, amount INTEGER NOT NULL);
@@ -438,7 +439,7 @@ fn a_filter_that_pins_one_partition_yields_one_copy() {
     assert_eq!(partitions(&copies), [Vec::<SqlValue>::new()]);
     assert_eq!(
         copies[0].statement.sql,
-        "UPDATE totals SET value = value + ?1"
+        "UPDATE totals SET value = checked_add(value, ?1)"
     );
 }
 

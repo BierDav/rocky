@@ -39,6 +39,28 @@ qualified adapters without requiring a Rust project.
 This does not prescribe a native decimal type or a particular arithmetic
 implementation. It requires an honest, usable exact-value contract.
 
+Status (2026-11-02): satisfied for single-replica and two-replica replay;
+the contract is in the `rocky-sdk` crate docs ("Exact values").
+
+- Exact values are `i64` scaled integers whose scale the application fixes.
+- Rocky registers `checked_add`, `checked_sub`, `checked_mul` and `checked_div`
+  (`rocky-storage` `exact.rs`) on every connection. They match SQLite except
+  that an INTEGER result outside `i64` fails with `integer overflow`.
+  Replayed statements, author-evaluated reads they bind and assertions are
+  rewritten to use them. Replayed `CHECK`s, generated columns and index
+  expressions must call them; installation refuses `+ - * /` there
+  (`Incompatibility::Arithmetic`). Overflow is a commit error at the author
+  and a `Constraint` drop in replay.
+- `avg`, `total`, `round` and `mod` left the deterministic allowlist.
+- UUIDs bind as 16-byte BLOBs (`[u8; 16]`), `Timestamp` as INTEGER Unix
+  microseconds, JSON as the TEXT bound (`serde_json::Value`, not canonicalized).
+- Evidence: `rocky-sdk` `tests/exact.rs` (author commit, two-replica drops
+  for a statement, a `CHECK` and an assertion, round trips), `rocky-storage`
+  `exact::tests`, `rocky-core` `deterministic::tests`.
+- Not done: the tip's schema manifest does not yet record the engine
+  identity (SQLite version and allowlist); replicas of different Rocky
+  builds can still replay the same intent differently.
+
 ## R2. Relational invariants with an explicit scope
 
 - Schema declarations must support composite tenant-scoped keys and references,

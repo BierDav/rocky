@@ -520,6 +520,7 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
         }
     }
     let db = rusqlite::Connection::open_in_memory().unwrap();
+    rocky_storage::exact::register(&db).unwrap();
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     for table in &c.schema.tables {
         db.execute_batch(&table.create_sql).unwrap();

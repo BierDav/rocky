@@ -71,6 +71,38 @@
 //!   [`Configuration::create`] follows a bookmark so the owner seals
 //!   routinely; an installation from `Database::create` must follow one.
 //!
+//! # Exact values
+//!
+//! Exact numbers are `i64` INTEGERs and never pass through binary floating
+//! point. Store an amount, quantity or rate as a scaled integer whose scale
+//! the application fixes per column (cents: scale 2). The range is that of
+//! `i64` in minor units: about ±9.22 × 10^16 at scale 2, ±9.22 × 10^12 at
+//! scale 6. Rocky carries no decimal type and no scale; applications own
+//! rounding and convert at their boundaries.
+//!
+//! - **Checked arithmetic.** `+`, `-`, `*` and `/` in replayed statements
+//!   and assertions run as `checked_add`, `checked_sub`, `checked_mul` and
+//!   `checked_div`. They follow SQLite (NULL in, NULL out; `/` truncates
+//!   toward zero; division by zero is NULL; REAL operands compute in REAL)
+//!   except that an INTEGER result outside `i64`, which SQLite would turn
+//!   into a REAL, fails with `integer overflow`. TEXT and BLOB operands
+//!   fail too. A [`Table::check`], generated column or index expression
+//!   must call the functions itself. `sum` and `abs` already fail on
+//!   overflow. Functions that return REAL for INTEGER input (`avg`,
+//!   `total`, `round`, `mod`) are refused in replayed SQL.
+//! - **Overflow.** A failure at the author is a statement or commit error;
+//!   in replay it drops the transaction with [`DropReason::Constraint`].
+//! - **In the database.** Sums, differences, products, truncating division
+//!   and comparisons of INTEGERs are exact and can be enforced by checks
+//!   and assertions, such as a header total equal to the `sum` of its lines.
+//!   Rounding, allocation of remainders, currency and tax rules happen in
+//!   the application, which binds the results.
+//! - **Representations.** A UUID is a 16-byte BLOB in RFC 9562 byte order
+//!   (`[u8; 16]`); a [`Timestamp`] is INTEGER microseconds of Unix time
+//!   (UTC); JSON is TEXT as bound (`serde_json::Value` binds compact text).
+//!   Rocky does not canonicalize JSON: compare documents decoded or with
+//!   SQLite's `json`. JSON numbers outside `i64` are not exact.
+//!
 //! Call [`Database::close`] at shutdown to await cleanup. See the `notes` example
 //! for a complete executable application.
 mod activity;
@@ -139,7 +171,7 @@ pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table}
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::Invitation;
-pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Transaction};
+pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use tips::*;
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;

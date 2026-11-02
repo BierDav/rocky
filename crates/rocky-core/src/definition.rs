@@ -852,7 +852,7 @@ mod replayed_tests {
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true},
                                 {"name": "cap", "type": "integer", "not_null": true},
-                                {"name": "double", "type": "integer", "derived": "cap * 2"}],
+                                {"name": "double", "type": "integer", "derived": "checked_mul(cap, 2)"}],
                     "checks": ["double < 10"],
                     "indexes": [{"name": "by_name", "unique": true, "columns": [],
                                  "expressions": ["lower(name)"], "where": "cap > 0"}]}]
@@ -866,7 +866,7 @@ mod replayed_tests {
         assert!(
             items
                 .create_sql
-                .contains("GENERATED ALWAYS AS (cap * 2) STORED")
+                .contains("GENERATED ALWAYS AS (checked_mul(cap, 2)) STORED")
         );
         assert!(
             items.indexes[0]
@@ -889,6 +889,18 @@ mod replayed_tests {
         }
         let refused = parsed(&|json| json["tables"][0]["class"] = "local_only".into());
         assert!(matches!(refused, Err(SchemaError::Invalid(_))));
+        // SQLite would turn an overflowing product into a REAL.
+        let promoting =
+            parsed(&|json| json["tables"][0]["columns"][2]["derived"] = "cap * 2".into())
+                .unwrap()
+                .supported_on(Profile::Secure);
+        assert_eq!(
+            promoting,
+            Err(SchemaError::Incompatible {
+                table: "items".into(),
+                reason: Incompatibility::Arithmetic('*'),
+            })
+        );
     }
 
     #[test]
@@ -897,7 +909,7 @@ mod replayed_tests {
         table(&mut complex, "teams").checks = vec![
             "CASE WHEN cap > 5 THEN length(name) > 3 ELSE name <> '' END".into(),
             "name NOT IN ('admin', 'root') AND name NOT LIKE '%!%' AND name GLOB '[a-z]*'".into(),
-            "coalesce(nullif(trim(name), ''), 'x') <> 'x' OR cap * 2 + 1 BETWEEN 3 AND 21".into(),
+            "coalesce(nullif(trim(name), ''), 'x') <> 'x' OR checked_add(checked_mul(cap, 2), 1) BETWEEN 3 AND 21".into(),
             "json_valid(json_object('n', name)) AND substr(upper(name), 1, 1) <> 'Z'".into(),
         ];
         assert_eq!(refusal(&complex), None);
@@ -908,6 +920,15 @@ mod replayed_tests {
                 refusal(&refused),
                 Some(("teams".into(), Incompatibility::Function(function.into()))),
                 "{function}"
+            );
+        }
+        for (check, operator) in [("cap + 1 < 10", '+'), ("cap < -cap", '-')] {
+            let mut refused = definition(serde_json::Value::Null);
+            table(&mut refused, "teams").checks = vec![check.into()];
+            assert_eq!(
+                refusal(&refused),
+                Some(("teams".into(), Incompatibility::Arithmetic(operator))),
+                "{check}"
             );
         }
     }

@@ -184,6 +184,10 @@ pub enum Incompatibility {
     /// A replayed table's expression or an assertion calls a function
     /// outside the deterministic allowlist, named.
     Function(String),
+    /// A replayed table's expression applies this operator, which SQLite
+    /// turns into REAL on `i64` overflow; it must call `checked_add`,
+    /// `checked_sub`, `checked_mul` or `checked_div`.
+    Arithmetic(char),
     /// A foreign key Rocky cannot resolve, named by its first column.
     Reference(String),
     /// Parent and child of a foreign key lie in different reader scopes.
@@ -468,6 +472,10 @@ pub fn declared_collations(create_sql: &str) -> Vec<(String, String)> {
 /// Deterministic scalar functions a derived rule may call.
 const RULE_FUNCTIONS: &[&str] = &[
     "abs",
+    "checked_add",
+    "checked_div",
+    "checked_mul",
+    "checked_sub",
     "coalesce",
     "hex",
     "ifnull",
@@ -706,6 +714,12 @@ impl LogicalTable {
             .find_map(|sql| crate::deterministic::refused_function(sql))
         {
             return Err(Incompatibility::Function(function));
+        }
+        if let Some(operator) = std::iter::once(&self.create_sql)
+            .chain(self.indexes.iter().map(|index| &index.create_sql))
+            .find_map(|sql| crate::deterministic::refused_operator(sql))
+        {
+            return Err(Incompatibility::Arithmetic(operator));
         }
         Ok(())
     }

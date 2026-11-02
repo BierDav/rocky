@@ -27,9 +27,16 @@ pub fn engine() -> String {
 
 impl Error {
     /// The engine refused a statement for violating a constraint.
+    /// An integer overflow counts: exact values may not leave `i64`.
     pub fn is_constraint(&self) -> bool {
         matches!(self, Self::Sqlite(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+            || self.is_overflow()
+    }
+    /// A `checked_*` function, `sum` or `abs` left `i64`.
+    pub fn is_overflow(&self) -> bool {
+        matches!(self, Self::Sqlite(rusqlite::Error::SqliteFailure(failure, Some(message)))
+            if failure.code == rusqlite::ErrorCode::Unknown && message == crate::exact::OVERFLOW)
     }
 }
 impl std::fmt::Display for Error {
@@ -454,6 +461,7 @@ impl Connection {
         raw.set_prepared_statement_cache_capacity(512);
         // Busy files are retried by whole transactions with bounded backoff.
         raw.busy_timeout(std::time::Duration::ZERO)?;
+        crate::exact::register(&raw)?;
         Ok(Self(
             Mutex::new(raw),
             std::sync::OnceLock::new(),

@@ -5,7 +5,9 @@
 use crate::logical::{Token, keyword, tokenize};
 
 /// SQLite functions whose result depends only on their arguments and the
-/// engine build. Part of the engine identity a tip records.
+/// engine build. Part of the engine identity a tip records. Functions that
+/// turn INTEGER values into REAL ones (`avg`, `total`, `round`, `mod`) are
+/// left out, so exact columns never pass through binary floating point.
 pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     // Scalar.
     "abs",
@@ -32,7 +34,6 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "printf",
     "quote",
     "replace",
-    "round",
     "rtrim",
     "sign",
     "substr",
@@ -48,15 +49,17 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "ceil",
     "ceiling",
     "floor",
-    "mod",
     "trunc",
+    // Arithmetic that fails on `i64` overflow; Rocky registers these.
+    "checked_add",
+    "checked_div",
+    "checked_mul",
+    "checked_sub",
     // Aggregate.
-    "avg",
     "count",
     "group_concat",
     "string_agg",
     "sum",
-    "total",
     // Window.
     "cume_dist",
     "dense_rank",
@@ -182,31 +185,80 @@ fn body(tokens: &[Token], open: usize) -> &[Token] {
     &tokens[open + 1..]
 }
 
-/// The first function outside the allowlist that a `CREATE TABLE`'s
-/// `CHECK`s, generated columns or expression defaults call, or that a
-/// `CREATE INDEX`'s terms and `WHERE` call: SQLite evaluates them on every
-/// replica.
+/// The expressions of a `CREATE TABLE`'s `CHECK`s, generated columns and
+/// expression defaults, or of a `CREATE INDEX`'s terms and `WHERE`: SQLite
+/// evaluates them on every replica.
+fn expressions(tokens: &[Token]) -> Vec<&[Token]> {
+    if tokens.iter().any(|token| keyword(token, "INDEX")) {
+        // Everything after the indexed table's name.
+        return tokens
+            .iter()
+            .position(|token| *token == Token::Symbol('('))
+            .map(|open| vec![&tokens[open..]])
+            .unwrap_or_default();
+    }
+    tokens
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| {
+            ["CHECK", "AS", "DEFAULT"]
+                .iter()
+                .any(|word| keyword(&pair[0], word))
+                && pair[1] == Token::Symbol('(')
+        })
+        .map(|(index, _)| body(tokens, index + 1))
+        .collect()
+}
+
+/// The first function outside the allowlist that a table's or index's
+/// expressions call, or a bare `DEFAULT CURRENT_TIMESTAMP`.
 pub(crate) fn refused_function(statement: &str) -> Option<String> {
     let Some(tokens) = tokenize(statement) else {
         return Some("unterminated quote".into());
     };
-    if tokens.iter().any(|token| keyword(token, "INDEX")) {
-        // Everything after the indexed table's name.
-        let open = tokens
-            .iter()
-            .position(|token| *token == Token::Symbol('('))?;
-        return refused_call(&tokens[open..]);
-    }
-    tokens.windows(2).enumerate().find_map(|(index, pair)| {
-        let opens = ["CHECK", "AS", "DEFAULT"]
-            .iter()
-            .any(|word| keyword(&pair[0], word));
-        if opens && pair[1] == Token::Symbol('(') {
-            return refused_call(body(&tokens, index + 1));
-        }
-        // A bare `DEFAULT CURRENT_TIMESTAMP`.
-        refused_call(std::slice::from_ref(&pair[1]))
-            .filter(|name| CLOCK_KEYWORDS.contains(&name.as_str()))
+    expressions(&tokens)
+        .into_iter()
+        .find_map(refused_call)
+        .or_else(|| {
+            tokens.iter().find_map(|token| {
+                refused_call(std::slice::from_ref(token))
+                    .filter(|name| CLOCK_KEYWORDS.contains(&name.as_str()))
+            })
+        })
+}
+
+/// Keywords after which `-` or `+` signs a number.
+const SIGN_KEYWORDS: &[&str] = &[
+    "AND", "BETWEEN", "CASE", "ELSE", "ESCAPE", "GLOB", "IN", "IS", "LIKE", "NOT", "OR", "THEN",
+    "WHEN", "WHERE",
+];
+
+/// The first `+`, `-`, `*` or `/` a table's or index's expressions apply.
+/// SQLite evaluates them as written and turns an INTEGER result outside
+/// `i64` into a REAL, so they must call the `checked_*` functions instead.
+/// A signed number, `count(*)` and the `->` JSON operators are not refused.
+pub(crate) fn refused_operator(statement: &str) -> Option<char> {
+    let tokens = tokenize(statement)?;
+    expressions(&tokens).into_iter().find_map(|tokens| {
+        tokens.iter().enumerate().find_map(|(index, token)| {
+            let Token::Symbol(operator @ ('+' | '-' | '*' | '/')) = *token else {
+                return None;
+            };
+            let before = index.checked_sub(1).map(|before| &tokens[before]);
+            let next = tokens.get(index + 1);
+            let operand = before.is_some_and(|before| match before {
+                Token::Literal | Token::Quoted(_) | Token::Symbol(')') => true,
+                Token::Word(word) => !SIGN_KEYWORDS.contains(&word.to_ascii_uppercase().as_str()),
+                Token::Symbol(_) => false,
+            });
+            let allowed = match operator {
+                '-' if next == Some(&Token::Symbol('>')) => true,
+                '+' | '-' => !operand && next == Some(&Token::Literal),
+                '*' => before == Some(&Token::Symbol('(')) && next == Some(&Token::Symbol(')')),
+                _ => false,
+            };
+            (!allowed).then_some(operator)
+        })
     })
 }
 
@@ -366,6 +418,38 @@ mod tests {
     }
 
     #[test]
+    fn table_expressions_apply_only_checked_arithmetic() {
+        for accepted in [
+            "CREATE TABLE t (a INTEGER CHECK (a BETWEEN -5 AND +5), b TEXT DEFAULT (-1), \
+             CHECK (a IN (-1, 1) OR a > -2 OR a % 2 = 0 OR CASE WHEN a THEN -1 ELSE -2 END < 0), \
+             CHECK (checked_add(a, checked_mul(a, -3)) <= checked_div(a, 2)), \
+             CHECK (b->>'$.k' IS NOT NULL OR b->'$' IS NULL), CHECK (b || '-' <> 'x-'))",
+            "CREATE INDEX i ON t (checked_sub(0, a)) WHERE a > -1",
+            "CREATE TABLE t (a INTEGER, b INTEGER DEFAULT -1, c INTEGER)",
+        ] {
+            assert_eq!(refused_operator(accepted), None, "{accepted}");
+        }
+        for (refused, operator) in [
+            (
+                "CREATE TABLE t (a INTEGER, b INTEGER, CHECK (a + b > 0))",
+                '+',
+            ),
+            (
+                "CREATE TABLE t (a INTEGER, b INTEGER, CHECK (a - 1 > b))",
+                '-',
+            ),
+            ("CREATE TABLE t (a INTEGER, CHECK (a > -a))", '-'),
+            ("CREATE TABLE t (a INTEGER, CHECK ((a) * 2 > 0))", '*'),
+            ("CREATE TABLE t (a INTEGER, b INTEGER AS (a / 2))", '/'),
+            ("CREATE TABLE t (a INTEGER, b INTEGER DEFAULT (1 + 1))", '+'),
+            ("CREATE INDEX i ON t (a * 2)", '*'),
+            ("CREATE INDEX i ON t (a) WHERE a - 1 > 0", '-'),
+        ] {
+            assert_eq!(refused_operator(refused), Some(operator), "{refused}");
+        }
+    }
+
+    #[test]
     fn table_expressions_call_only_allowlisted_functions() {
         for accepted in [
             "CREATE TABLE t (a INTEGER CHECK (a BETWEEN 0 AND 10), b TEXT, PRIMARY KEY(a), \
@@ -375,7 +459,7 @@ mod tests {
              CHECK (CAST(a AS DECIMAL(10, 2)) >= 0 AND NOT (a < 0)), \
              CHECK (json_valid(b) OR json_extract(b, '$.k') IS NOT NULL), \
              FOREIGN KEY(a) REFERENCES p(id))",
-            "CREATE TABLE t (a INTEGER, b INTEGER AS (a * 2), c TEXT DEFAULT ('x'))",
+            "CREATE TABLE t (a INTEGER, b INTEGER AS (checked_mul(a, 2)), c TEXT DEFAULT ('x'))",
             "CREATE UNIQUE INDEX i ON t (lower(b)) WHERE a IS NOT NULL",
         ] {
             assert_eq!(refused_function(accepted), None, "{accepted}");
@@ -397,6 +481,8 @@ mod tests {
                 "CREATE TABLE t (a INTEGER, b INTEGER AS (a + changes()))",
                 "changes",
             ),
+            ("CREATE TABLE t (a INTEGER, CHECK (round(a) > 0))", "round"),
+            ("CREATE TABLE t (a INTEGER, CHECK (mod(a, 2) = 0))", "mod"),
             ("CREATE INDEX i ON t (a) WHERE a > unixepoch()", "unixepoch"),
         ] {
             assert_eq!(

@@ -270,7 +270,10 @@ impl Table {
     /// A `CHECK` of a replayed table, using deterministic functions only.
     /// SQLite's semantics apply: it holds after each statement, so assign
     /// columns that must change together in one `UPDATE`, and a NULL result
-    /// passes, so add `IS NOT NULL` where absence is invalid.
+    /// passes, so add `IS NOT NULL` where absence is invalid. Arithmetic
+    /// calls `checked_add`, `checked_sub`, `checked_mul` or `checked_div`;
+    /// `+`, `-`, `*` and `/` are refused, as SQLite would turn an overflow
+    /// into a REAL.
     #[must_use]
     pub fn check(mut self, expression: impl Into<String>) -> Self {
         self.0.checks.push(expression.into());

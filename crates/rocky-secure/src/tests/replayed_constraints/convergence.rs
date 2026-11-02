@@ -299,7 +299,7 @@ fn checked_orders() -> Constrained {
                     integer("quantity"),
                     integer("price"),
                     integer("discount"),
-                    {"name": "net", "type": "integer", "derived": "quantity * (price - discount)"},
+                    {"name": "net", "type": "integer", "derived": "checked_mul(quantity, checked_sub(price, discount))"},
                     {"name": "reference", "type": "text"},
                     {"name": "optional_amount", "type": "integer"}
                 ]),

@@ -76,6 +76,9 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     )?;
     b.sync().await.expect("initial sync");
     c.sync().await.expect("initial sync");
+    // c learns b by mesh handover, and b keeps the history a prunes: c could
+    // catch up from b without the base. Only the pruned a may serve c.
+    hub.set_down("b", "c", true);
     c.add(99, "unsent").await;
     for handle in 2..=12 {
         a.add(handle, &format!("row {handle}")).await;

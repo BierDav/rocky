@@ -9,7 +9,10 @@ use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
-use rocky_credentials::{SignedCapability, SignedCoordinationGrant, SignedTenantAdmission};
+use rocky_credentials::{
+    CredentialChain, RevocationSet, SignedCapability, SignedCoordinationGrant,
+    SignedTenantAdmission,
+};
 use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
 /// A client of the coordination service. Natively it also reaches voters
@@ -21,6 +24,9 @@ pub struct NetworkCoordinator {
     /// The node certificate requests present, which a trusted identity
     /// signed; replaced when it is renewed.
     certificate: Mutex<Option<SignedCapability>>,
+    /// The claim chain counter requests present, from the domain's
+    /// publisher to this node; replaced when it is renewed.
+    claims: Mutex<Option<CredentialChain>>,
     /// The client lane of a public service; voter TCP when absent.
     route: Option<Arc<dyn Transport>>,
     preferred: Mutex<(Option<u64>, Option<u64>)>,
@@ -49,6 +55,7 @@ impl NetworkCoordinator {
             genesis,
             key,
             certificate: Mutex::new(None),
+            claims: Mutex::new(None),
             route,
             preferred: Mutex::new((None, None)),
         })
@@ -60,6 +67,11 @@ impl NetworkCoordinator {
             .certificate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
+    }
+    /// Presents `claims`, this node's claim chain, with every later counter
+    /// claim and read; `None` presents none.
+    pub fn present_claims(&self, claims: Option<CredentialChain>) {
+        *self.claims.lock().unwrap_or_else(PoisonError::into_inner) = claims;
     }
     /// A client of the public service `bundle` pins, reached through
     /// `transport` at the certified client endpoints of its kind. Requests
@@ -173,13 +185,24 @@ impl NetworkCoordinator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let request = Request::certified(
+        let claims = match operation {
+            Operation::Claim { .. } | Operation::Counter { .. } => self
+                .claims
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            _ => None,
+        };
+        let mut request = Request::certified(
             self.genesis.id()?,
             id,
             operation,
             (&self.key, certificate),
             now()?,
         )?;
+        if let Some(claims) = claims {
+            request = request.with_claims(claims, &self.key)?;
+        }
         timeout(Duration::from_secs(12), async {
             for _ in 0..3 {
                 for response in self.attempt(&request).await {
@@ -353,6 +376,22 @@ impl NetworkCoordinator {
             .await?
         {
             Outcome::Counter(reading) => Ok(reading),
+            _ => Err(CoordinationError::Corrupt),
+        }
+    }
+    /// Pushes `revocations` of `scope`'s publisher: claim rights they end
+    /// are refused from the commit on. Returns the digest of the live
+    /// statements the coordinator holds for the domain.
+    pub async fn revoke(
+        &self,
+        scope: Scope,
+        revocations: RevocationSet,
+    ) -> Result<Commitment, CoordinationError> {
+        match self
+            .call(nonce(), Operation::Revoke { scope, revocations })
+            .await?
+        {
+            Outcome::Revoked(digest) => Ok(digest),
             _ => Err(CoordinationError::Corrupt),
         }
     }

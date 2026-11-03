@@ -130,11 +130,12 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
 }
 
 /// A public service, the tenant that registered a domain on
-/// it and the domain's trusted node.
+/// it, the domain's publisher and its trusted node.
 struct Service {
     bundle: TrustBundle,
     voter: Arc<Memory>,
     scope: Scope,
+    publisher: PrivateKey,
     node: PrivateKey,
 }
 impl Service {
@@ -181,6 +182,7 @@ impl Service {
                 configuration: genesis.genesis.configuration,
                 revision: 1,
                 trusted: vec![node.public_key()],
+                publisher: Some(Box::new(publisher.public_key())),
                 not_before: time - 60,
                 expires: time + 3600,
             },
@@ -204,6 +206,7 @@ impl Service {
             bundle,
             voter: memory,
             scope,
+            publisher,
             node,
         }
     }
@@ -302,6 +305,94 @@ async fn only_trusted_nodes_claim() {
         .await
         .unwrap();
     assert_eq!(reading.value, 0);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
+    use rocky_credentials::{
+        Authority, CLAIM_LIFETIME, ClaimRight, CredentialChain, Revocation, RevocationSet,
+        SignedRevocation,
+    };
+    let service = Service::start().await;
+    let (identity, node) = (PrivateKey::new(), PrivateKey::new());
+    let time = now().unwrap();
+    let link = Authority::owner(&service.publisher)
+        .issue_claims(
+            identity.public_key(),
+            ClaimRight {
+                scope: service.scope,
+                counters: Some([b"invoices".to_vec()].into()),
+            },
+            1,
+            (time, CLAIM_LIFETIME),
+        )
+        .unwrap();
+    let chain = CredentialChain(vec![link])
+        .certify_claims(&identity, node.public_key(), 1)
+        .unwrap();
+    let holder = service.client(&node);
+    let invoices = Name::new("invoices").unwrap();
+    let first = Claim::fresh().unwrap();
+    assert_eq!(
+        holder.claim(service.scope, invoices.clone(), first).await,
+        Err(CoordinationError::Denied)
+    );
+    holder.present_claims(Some(chain));
+    assert_eq!(
+        holder.claim(service.scope, invoices.clone(), first).await,
+        Ok(1)
+    );
+    assert_eq!(
+        holder.claim(service.scope, invoices.clone(), first).await,
+        Ok(1)
+    );
+    assert_eq!(
+        holder
+            .claim(
+                service.scope,
+                Name::new("credits").unwrap(),
+                Claim::fresh().unwrap()
+            )
+            .await,
+        Err(CoordinationError::Denied)
+    );
+    let trusted = service.client(&service.node);
+    assert_eq!(
+        trusted
+            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+            .await,
+        Ok(2)
+    );
+
+    let statement = SignedRevocation::sign(
+        Revocation {
+            app: service.scope.app,
+            issuer: service.publisher.public_key(),
+            time,
+            nodes: Default::default(),
+            identities: [identity.public_key()].into(),
+            capabilities: Default::default(),
+        },
+        &service.publisher,
+        &CredentialChain::default(),
+    )
+    .unwrap();
+    // The revoked holder itself may push it; it holds from then on.
+    holder
+        .revoke(
+            service.scope,
+            RevocationSet::try_from(vec![statement]).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        holder.claim(service.scope, invoices.clone(), first).await,
+        Err(CoordinationError::Denied)
+    );
+    assert_eq!(
+        holder.counter(service.scope, invoices, None).await,
+        Err(CoordinationError::Denied)
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -21,6 +21,7 @@ fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
             configuration: [4; 16],
             revision: 1,
             trusted: vec![executor.public_key()],
+            publisher: None,
             not_before: time - 1,
             expires: time + 7200,
         },

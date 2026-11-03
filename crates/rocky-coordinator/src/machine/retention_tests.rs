@@ -125,6 +125,7 @@ fn control(
             configuration: [5; 16],
             revision,
             trusted: vec![trusted.public_key()],
+            publisher: None,
             not_before: time - DAY,
             expires: time + 300 * DAY,
         },

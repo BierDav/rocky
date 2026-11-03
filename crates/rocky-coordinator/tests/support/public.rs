@@ -329,6 +329,7 @@ impl Tenant {
                 configuration: genesis.genesis.configuration,
                 revision,
                 trusted: trusted.iter().map(|k| k.public_key()).collect(),
+                publisher: None,
                 not_before: timestamp() - 60,
                 expires: timestamp() + DAY,
             },

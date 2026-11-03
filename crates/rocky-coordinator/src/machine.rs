@@ -1,6 +1,8 @@
 use crate::{certified::*, retention::DAY, *};
 use p2panda_core::{PublicKey, Signature};
-use rocky_credentials::{SignedCoordinationGrant, SignedTenantAdmission};
+use rocky_credentials::{
+    CredentialChain, RevocationSet, SignedCoordinationGrant, SignedTenantAdmission,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -16,6 +18,10 @@ struct Domain {
     scope: Scope,
     coordinated: coordinated::Logs,
     counters: counters::Counters,
+    /// Statements of the domain's publisher that end claim rights,
+    /// as nodes pushed them, and their encoded size.
+    revocations: RevocationSet,
+    revocation_bytes: usize,
     /// Closed by its owner: the identity never reopens.
     closed: bool,
 }
@@ -25,6 +31,8 @@ impl Domain {
             scope,
             coordinated: coordinated::Logs::new(scope, configuration),
             counters: counters::Counters::default(),
+            revocations: RevocationSet::new(),
+            revocation_bytes: 0,
             closed: false,
         }
     }
@@ -32,7 +40,7 @@ impl Domain {
         !self.closed
     }
     fn bytes(&self) -> usize {
-        self.coordinated.bytes() + self.counters.bytes()
+        self.coordinated.bytes() + self.counters.bytes() + self.revocation_bytes
     }
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -115,18 +123,25 @@ pub enum Operation {
     /// The signing tenant's quota use.
     Usage,
     /// Takes the next value of `scope`'s counter, or the value `claim`
-    /// already took. By a trusted node of the open domain.
+    /// already took. By a trusted node of the open domain, or a node whose
+    /// claim right covers the counter.
     Claim {
         scope: Scope,
         counter: crate::counters::Name,
         claim: crate::counters::Claim,
     },
     /// A counter's last value and, for `claim`, what it took. By a trusted
-    /// node of the domain.
+    /// node of the domain, or a holder of a claim right that covers it.
     Counter {
         scope: Scope,
         counter: crate::counters::Name,
         claim: Option<crate::counters::Claim>,
+    },
+    /// Revocations of the domain's publisher, which end claim rights from
+    /// now on. Statements verify themselves, so any node may push them.
+    Revoke {
+        scope: Scope,
+        revocations: RevocationSet,
     },
 }
 /// What a tenant presents to register a domain.
@@ -143,6 +158,9 @@ pub struct Request {
     /// The signing node's certificate, by which a trusted identity
     /// vouches for it.
     pub certificate: Option<rocky_credentials::SignedCapability>,
+    /// The node's claim chain from the domain's publisher, on a counter
+    /// claim or read by a node that is not trusted.
+    pub claims: Option<CredentialChain>,
     pub id: Commitment,
     pub time: u64,
     pub operation: Operation,
@@ -234,6 +252,7 @@ impl Request {
             genesis,
             key: key.public_key(),
             certificate,
+            claims: None,
             id,
             time,
             operation,
@@ -242,13 +261,27 @@ impl Request {
         request.signature = key.sign(&request.signing_bytes()?);
         Ok(request)
     }
+    /// This request presenting the claim chain `claims`, signed again by `key`.
+    pub fn with_claims(
+        mut self,
+        claims: CredentialChain,
+        key: &p2panda_core::PrivateKey,
+    ) -> Result<Self, CoordinationError> {
+        if key.public_key() != self.key {
+            return Err(CoordinationError::Denied);
+        }
+        self.claims = Some(claims);
+        self.signature = key.sign(&self.signing_bytes()?);
+        Ok(self)
+    }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-request.v6",
+            "rocky.coordination-request.v7",
             &(
                 self.genesis,
                 self.key,
                 &self.certificate,
+                &self.claims,
                 self.id,
                 self.time,
                 &self.operation,
@@ -279,8 +312,8 @@ impl Request {
         ))
     }
     /// Administrative mutations keep retry outcomes. Reads keep nothing, log
-    /// actions deduplicate by their own sequences and claims by their own
-    /// identities.
+    /// actions deduplicate by their own sequences, claims by their own
+    /// identities and revocations by their statements.
     fn retained(&self) -> bool {
         !matches!(
             self.operation,
@@ -288,6 +321,7 @@ impl Request {
                 | Operation::Usage
                 | Operation::Claim { .. }
                 | Operation::Counter { .. }
+                | Operation::Revoke { .. }
         ) || matches!(
             self.operation,
             Operation::Coordinated {
@@ -317,6 +351,8 @@ pub enum Outcome {
     Coordinated(crate::coordinated::Result),
     Claimed(u64),
     Counter(crate::counters::Reading),
+    /// The digest of the domain's live revocations after a push.
+    Revoked(Commitment),
     Controlled(Commitment),
     Membership(BTreeSet<u64>),
     Closed,
@@ -444,10 +480,15 @@ impl Metadata {
                 self.registration_authorized(request, grant, admission.as_ref(), certificate, time)
             }
             Operation::Usage => self.tenant(request.key).map(|_| ()),
-            Operation::Claim { scope, .. } => self.counter_authorized(*scope, true, request, time),
-            Operation::Counter { scope, .. } => {
-                self.counter_authorized(*scope, false, request, time)
+            Operation::Claim { scope, counter, .. } => {
+                self.counter_authorized(*scope, counter, true, request, time)
             }
+            Operation::Counter { scope, counter, .. } => {
+                self.counter_authorized(*scope, counter, false, request, time)
+            }
+            Operation::Revoke { scope, revocations } => self
+                .merged_revocations(*scope, revocations, time)
+                .map(|_| ()),
         }
     }
     /// Advances authority time to the leader-proposed `time`, clamping a
@@ -548,20 +589,109 @@ impl Metadata {
             _ => Err(CoordinationError::Denied),
         }
     }
-    /// A trusted node of `scope` under its current control; a claim also
-    /// needs the domain open.
+    /// A trusted node of `scope` under its current control, or a node
+    /// whose claim right covers `counter`; a claim also needs the domain
+    /// open. A claim right never reaches beyond counters.
     fn counter_authorized(
         &self,
         scope: Scope,
+        counter: &crate::counters::Name,
         claim: bool,
         request: &Request,
         time: u64,
     ) -> Result<(), CoordinationError> {
-        self.authorized(scope, request, time)?;
+        let control = self.current_control(scope, time)?;
+        if !Self::trusts(control, request, time)
+            && !self.holds_claim(control, counter, request, time)
+        {
+            return Err(CoordinationError::Denied);
+        }
         if claim && !self.state.find(scope)?.open() {
             return Err(CoordinationError::Denied);
         }
         Ok(())
+    }
+    /// Whether the request's claim chain, rooted in the publisher `control`
+    /// names, lets its node claim `counter` at `time` under the
+    /// revocations the domain holds.
+    fn holds_claim(
+        &self,
+        control: &DomainControl,
+        counter: &crate::counters::Name,
+        request: &Request,
+        time: u64,
+    ) -> bool {
+        let (Some(publisher), Some(chain), Ok(domain)) = (
+            control.publisher.as_deref().copied(),
+            request.claims.as_ref(),
+            self.state.find(control.scope),
+        ) else {
+            return false;
+        };
+        chain
+            .claimant(
+                publisher,
+                request.key,
+                (control.scope, counter.as_bytes()),
+                &domain.revocations,
+                time,
+            )
+            .is_ok()
+    }
+    /// The domain's revocations with `pushed` merged: statements its
+    /// control's publisher, or an issuer under it, signed for its application.
+    fn merged_revocations(
+        &self,
+        scope: Scope,
+        pushed: &RevocationSet,
+        time: u64,
+    ) -> Result<RevocationSet, CoordinationError> {
+        let publisher = self
+            .controls
+            .iter()
+            .find(|c| c.control.scope == scope)
+            .ok_or(CoordinationError::UnknownDomain)?
+            .control
+            .publisher
+            .as_deref()
+            .copied()
+            .ok_or(CoordinationError::Denied)?;
+        let domain = self.state.find(scope)?;
+        if !domain.open() {
+            return Err(CoordinationError::Denied);
+        }
+        let mut merged = domain.revocations.clone();
+        merged
+            .merge(pushed, publisher, scope.app, time)
+            .map_err(|_| CoordinationError::Denied)?;
+        Ok(merged)
+    }
+    fn revoke(
+        &mut self,
+        scope: Scope,
+        pushed: &RevocationSet,
+    ) -> Result<Outcome, CoordinationError> {
+        let time = self.state.time;
+        let merged = self.merged_revocations(scope, pushed, time)?;
+        let bytes = encode(&merged)?.len();
+        let growth = bytes.saturating_sub(self.state.find(scope)?.revocation_bytes);
+        if growth > self.tenant_available(scope)?
+            || growth
+                > self
+                    .state
+                    .limits
+                    .total_bytes
+                    .saturating_sub(self.total_used()?)
+        {
+            return Err(CoordinationError::Backpressure);
+        }
+        let digest = merged
+            .digest(time)
+            .map_err(|_| CoordinationError::Corrupt)?;
+        let domain = self.state.domain(scope)?;
+        domain.revocations = merged;
+        domain.revocation_bytes = bytes;
+        Ok(Outcome::Revoked(digest))
     }
     fn counter(
         &self,
@@ -571,7 +701,7 @@ impl Metadata {
         request: &Request,
     ) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
-        self.counter_authorized(scope, false, request, time)?;
+        self.counter_authorized(scope, counter, false, request, time)?;
         let domain = self.state.find(scope)?;
         domain
             .counters
@@ -586,7 +716,7 @@ impl Metadata {
         request: &Request,
     ) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
-        self.counter_authorized(scope, true, request, time)?;
+        self.counter_authorized(scope, counter, true, request, time)?;
         let available = self.tenant_available(scope)?.min(
             self.state
                 .limits
@@ -634,19 +764,24 @@ impl Metadata {
     /// The request's scope owns its budget, even when tenants share a device key.
     pub(crate) fn retry_tenant(&self, request: &Request) -> Option<PublicKey> {
         self.genesis.genesis.public.as_ref()?;
-        let scope = match &request.operation {
+        let (scope, counter) = match &request.operation {
             Operation::Register(_) | Operation::Usage => return Some(request.key),
             Operation::Membership { .. } => return None,
-            Operation::Control(certificate) => certificate.control.scope,
-            Operation::Close { scope } | Operation::Configure { scope, .. } => *scope,
-            Operation::Coordinated { log, .. } => log.scope,
-            Operation::Claim { scope, .. } | Operation::Counter { scope, .. } => *scope,
+            Operation::Control(certificate) => (certificate.control.scope, None),
+            Operation::Close { scope }
+            | Operation::Configure { scope, .. }
+            | Operation::Revoke { scope, .. } => (*scope, None),
+            Operation::Coordinated { log, .. } => (log.scope, None),
+            Operation::Claim { scope, counter, .. } | Operation::Counter { scope, counter, .. } => {
+                (*scope, Some(counter))
+            }
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
-            && !request
-                .identity(request.time)
-                .is_some_and(|identity| certificate.control.trusted.contains(&identity))
+            && !Self::trusts(&certificate.control, request, request.time)
+            && !counter.is_some_and(|counter| {
+                self.holds_claim(&certificate.control, counter, request, request.time)
+            })
         {
             return None;
         }
@@ -785,7 +920,7 @@ impl Metadata {
                 return Err(CoordinationError::Configuration);
             }
             // Authority changes are a migration, not a control revision.
-            if old.issuer != certificate.issuer {
+            if old.issuer != certificate.issuer || old.control.publisher != control.publisher {
                 return Err(CoordinationError::Denied);
             }
             let logs = &self.state.find(control.scope)?.coordinated;
@@ -917,6 +1052,11 @@ impl Metadata {
             || certificate.issuer != request.key
             || grant.grant.tenant.0 != request.key
             || scope.app != app
+            || certificate
+                .control
+                .publisher
+                .as_deref()
+                .is_some_and(|publisher| *publisher != grant.grant.publisher.0)
             || certificate.control.revision != 1
             || self.genesis_bound(scope)
         {
@@ -925,11 +1065,10 @@ impl Metadata {
         self.trusted_budget(certificate, None)?;
         certificate.check(&self.genesis.genesis, time)
     }
-    /// A trusted node of `scope` under its current control.
-    fn authorized(
+    /// `scope`'s control, valid at `time`.
+    fn current_control(
         &self,
         scope: Scope,
-        request: &Request,
         time: u64,
     ) -> Result<&DomainControl, CoordinationError> {
         let certificate = self
@@ -942,14 +1081,26 @@ impl Metadata {
         } else {
             certificate.check(&self.genesis.genesis, time)?;
         }
-        let c = &certificate.control;
-        if !request
+        Ok(&certificate.control)
+    }
+    /// Whether the request's node certificate is a trusted identity's.
+    fn trusts(control: &DomainControl, request: &Request, time: u64) -> bool {
+        request
             .identity(time)
-            .is_some_and(|identity| c.trusted.contains(&identity))
-        {
+            .is_some_and(|identity| control.trusted.contains(&identity))
+    }
+    /// A trusted node of `scope` under its current control.
+    fn authorized(
+        &self,
+        scope: Scope,
+        request: &Request,
+        time: u64,
+    ) -> Result<&DomainControl, CoordinationError> {
+        let control = self.current_control(scope, time)?;
+        if !Self::trusts(control, request, time) {
             return Err(CoordinationError::Denied);
         }
-        Ok(c)
+        Ok(control)
     }
     fn closure_authorized(&self, request: &Request, scope: Scope) -> Result<(), CoordinationError> {
         if !self.authority(scope, request.key) || self.issuer(scope) != Some(request.key) {
@@ -1209,6 +1360,7 @@ impl Metadata {
                 counter,
                 claim,
             } => self.counter(*scope, counter, *claim, request),
+            Operation::Revoke { scope, revocations } => self.revoke(*scope, revocations),
             Operation::Close { scope } => {
                 self.closure_authorized(request, *scope)?;
                 self.state.close(*scope).map(|()| Outcome::Closed)
@@ -1249,6 +1401,9 @@ mod public_tests;
 #[path = "machine/retention_tests.rs"]
 mod retention_tests;
 
+#[cfg(test)]
+#[path = "machine/claim_tests.rs"]
+mod claim_tests;
 #[cfg(test)]
 #[path = "machine/coordinated_tests.rs"]
 mod coordinated_tests;

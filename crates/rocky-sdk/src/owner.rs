@@ -161,6 +161,8 @@ mod service {
                     configuration: self.bundle.genesis()?.genesis.configuration,
                     revision,
                     trusted: devices(request)?,
+                    // Claim rights the domain's issuers grant root here.
+                    publisher: Some(Box::new(domain.anchor)),
                     not_before: time.saturating_sub(60),
                     expires: time.saturating_add(lifetime),
                 })

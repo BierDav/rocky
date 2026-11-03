@@ -8,7 +8,7 @@ pub const MAX_FRAME: usize = 256 * 1024;
 pub const MAX_RECORDS: usize = 4096;
 pub const MAX_STORE: usize = 32 * 1024 * 1024;
 /// The one domain control format; a control signed under another is refused.
-const CONTROL_LABEL: &str = "rocky.control.v3";
+const CONTROL_LABEL: &str = "rocky.control.v4";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Voter {
@@ -29,6 +29,10 @@ pub struct DomainControl {
     /// The trusted identities whose nodes may join the domain's
     /// coordinated log; a node presents its certificate.
     pub trusted: Vec<PublicKey>,
+    /// The domain's publisher: the root of the claim rights
+    /// (`rocky_credentials::ClaimRight`) that let other nodes claim its
+    /// counters. Without one only trusted nodes claim. Fixed for the domain.
+    pub publisher: Option<Box<PublicKey>>,
     pub not_before: u64,
     pub expires: u64,
 }

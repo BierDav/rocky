@@ -65,6 +65,7 @@ impl Tenant {
                 configuration: [5; 16],
                 revision,
                 trusted: trusted.iter().map(|k| k.public_key()).collect(),
+                publisher: None,
                 not_before: T - DAY,
                 expires: T + 300 * DAY,
             },
@@ -610,4 +611,35 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
         assert_eq!(m.retry_tenant(&request), Some(tenant.key.public_key()));
         assert_eq!(m.tenant_lane(&request), Some(tenant.key.public_key()));
     }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_registered_control_names_the_publisher_of_its_coordination_grant() {
+    let service = Service::new(false);
+    let mut metadata = service.open();
+    let tenant = Tenant::new();
+    let scope = tenant.scope(1);
+    let named = |publisher: PublicKey| {
+        let mut control = tenant.control(scope, 1, &[&tenant.executor]).control;
+        control.publisher = Some(Box::new(publisher));
+        ControlCertificate::sign(control, &tenant.key).unwrap()
+    };
+    assert_eq!(
+        service.register(
+            &mut metadata,
+            &tenant,
+            named(PrivateKey::new().public_key()),
+            T
+        ),
+        Err(CoordinationError::Denied)
+    );
+    assert!(matches!(
+        service.register(
+            &mut metadata,
+            &tenant,
+            named(tenant.publisher.public_key()),
+            T
+        ),
+        Ok(Outcome::Controlled(_))
+    ));
 }

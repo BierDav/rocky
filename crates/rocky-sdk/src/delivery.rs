@@ -248,6 +248,7 @@ impl Settings {
                     record.address,
                     epoch.generation,
                     secret,
+                    record.name,
                     **node,
                     statements.clone(),
                 )?;
@@ -304,7 +305,7 @@ fn reads_group(
                 .is_some_and(|profile| profile.reads(&member.table))
                 || recorded.iter().any(|grant| {
                     grant
-                        .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                        .resolve(member.scope, &member.tuple)
                         .ok()
                         .flatten()
                         .is_some_and(|grant| whole(&grant))

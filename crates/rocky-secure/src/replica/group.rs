@@ -348,7 +348,7 @@ fn step<A: RowApplication>(
         let indivisible = if let Work::Receive(frame) = &request.work {
             inner
                 .open_payload(frame)
-                .and_then(|bytes| inner.decode_row_payload(frame, &bytes))
+                .and_then(|opened| inner.decode_row_payload(frame, &opened.payload))
                 .map_or(true, |payload| {
                     payload.membership().is_some()
                         || payload.writes().len() as u64 > APPLICATION_ROWS
@@ -723,12 +723,15 @@ impl<A: RowApplication> Inner<A> {
         self.refuse_no_frames_contradiction(&operation.header)
             .await?;
         let extension = &operation.header.extensions;
-        if self
-            .opening_key(extension.scope, extension.generation)
-            .is_some()
-            && let Ok(plaintext) = self.open_payload(frame)
+        if let Some(key) = self.opening_key(extension.scope, extension.generation)
+            && let Ok(opened) = self.crypto.open(frame, key)
         {
-            RowPayload::check_formats(&plaintext)?;
+            if opened.partition.as_ref() != self.partitions.get(&extension.scope) {
+                return Err(denied(
+                    "sealed partition tuple differs from its keyed scope",
+                ));
+            }
+            RowPayload::check_formats(&opened.payload)?;
         }
         let local = self.local_grants(time)?;
         if !roles::holds_whole(&local, operation.header.extensions.scope) {

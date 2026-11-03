@@ -39,13 +39,11 @@ pub(crate) struct Extensions {
     pub author_sequence: u64,
     pub row_format: u8,
     pub births: Vec<serde_bytes::ByteArray<32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub partition: Option<rocky_core::PartitionTuple>,
 }
 
 /// Source-schema ordinals and frame-bound birth statements, without
-/// existence counts.
-pub(crate) const ROW_FORMAT: u8 = 15;
+/// existence counts; a partition's tuple only inside the sealed body.
+pub(crate) const ROW_FORMAT: u8 = 16;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
@@ -270,14 +268,8 @@ fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
         if extension
             .author
             .is_some_and(|author| !(1..=0x7fff_ffff).contains(&author))
-            || extension.partition.as_ref().is_some_and(|tuple| {
-                tuple
-                    .scope(extension.scope.domain, extension.scope.table)
-                    .ok()
-                    != Some(extension.scope)
-            })
         {
-            return Err(denied("invalid authenticated partition scope or author"));
+            return Err(denied("invalid authenticated author"));
         }
         if header.extensions.births.len() > 32
             || header.previous.len() > 64
@@ -321,6 +313,27 @@ pub(crate) fn decrypt(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Result<Vec<u8
         )
         .map_err(|_| denied("missing/wrong key or corrupt ciphertext"))
 }
+/// A frame body as sealed: a partition's tuple travels only here, so the
+/// signed header names the partition by its keyed scope alone.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Opened {
+    pub partition: Option<rocky_core::PartitionTuple>,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
+}
+impl Opened {
+    /// Opens a frame body sealed under `key` for `extensions`.
+    pub(crate) fn open(
+        key: &[u8; 32],
+        extensions: &Extensions,
+        bytes: &[u8],
+    ) -> Result<Self, Error> {
+        decode(&decrypt(key, &encode(extensions)?, bytes)?)
+            .map_err(|_| denied("invalid sealed frame body"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn author(
     key: &PrivateKey,
     extensions: Extensions,
@@ -328,12 +341,17 @@ pub(crate) fn author(
     encryption_key: &[u8; 32],
     log: (u64, Option<Hash>, u64),
     previous: Vec<Hash>,
+    partition: Option<&rocky_core::PartitionTuple>,
     plaintext: &[u8],
 ) -> Result<EncryptedFrame, Error> {
     if extensions.chain != chain.digest() {
         return Err(denied(INCOMPLETE_FRAME));
     }
-    let bytes = encrypt(encryption_key, &encode(&extensions)?, plaintext)?;
+    let sealed = encode(&Opened {
+        partition: partition.cloned(),
+        payload: plaintext.to_vec(),
+    })?;
+    let bytes = encrypt(encryption_key, &encode(&extensions)?, &sealed)?;
     let body = Body::new(&bytes);
     let mut header = Header {
         version: 1,

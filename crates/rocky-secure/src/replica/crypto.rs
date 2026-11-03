@@ -1,7 +1,7 @@
 //! Bounded caches of immutable crypto results, never of current admission.
 use super::*;
 
-type PayloadEntries = BTreeMap<Hash, ([u8; 32], Arc<Vec<u8>>)>;
+type PayloadEntries = BTreeMap<Hash, ([u8; 32], Arc<crate::wire::Opened>)>;
 const OPENED_FRAMES: usize = 256;
 const OPENED_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Default)]
@@ -11,15 +11,21 @@ struct OpenedPayloads {
     bytes: usize,
 }
 impl OpenedPayloads {
-    fn remember(&mut self, hash: Hash, key: [u8; 32], bytes: Arc<Vec<u8>>) -> Result<(), Error> {
-        if bytes.len() > OPENED_BYTES {
+    fn remember(
+        &mut self,
+        hash: Hash,
+        key: [u8; 32],
+        bytes: Arc<crate::wire::Opened>,
+    ) -> Result<(), Error> {
+        if bytes.payload.len() > OPENED_BYTES {
             return Ok(());
         }
         if let Some((_, old)) = self.entries.remove(&hash) {
-            self.bytes -= old.len();
+            self.bytes -= old.payload.len();
             self.order.retain(|known| *known != hash);
         }
-        while self.entries.len() >= OPENED_FRAMES || self.bytes + bytes.len() > OPENED_BYTES {
+        while self.entries.len() >= OPENED_FRAMES || self.bytes + bytes.payload.len() > OPENED_BYTES
+        {
             let old = self
                 .order
                 .pop_front()
@@ -28,9 +34,9 @@ impl OpenedPayloads {
                 .entries
                 .remove(&old)
                 .ok_or_else(|| Error::Corrupt("opened payload cache entry".into()))?;
-            self.bytes -= bytes.len();
+            self.bytes -= bytes.payload.len();
         }
-        self.bytes += bytes.len();
+        self.bytes += bytes.payload.len();
         self.order.push_back(hash);
         self.entries.insert(hash, (key, bytes));
         Ok(())
@@ -150,7 +156,7 @@ impl Cache {
         &self,
         frame: &EncryptedFrame,
         key: &KeyMaterial,
-    ) -> Result<Arc<Vec<u8>>, Error> {
+    ) -> Result<Arc<crate::wire::Opened>, Error> {
         let operation = frame.operation_ref()?;
         let mut cache = self
             .opened
@@ -161,9 +167,9 @@ impl Cache {
         {
             return Ok(bytes.clone());
         }
-        let bytes = Arc::new(decrypt(
+        let bytes = Arc::new(crate::wire::Opened::open(
             &key.key,
-            &encode(&operation.header.extensions)?,
+            &operation.header.extensions,
             frame.body_bytes(),
         )?);
         #[cfg(test)]
@@ -174,12 +180,24 @@ impl Cache {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    pub(super) fn open_payload(&self, frame: &EncryptedFrame) -> Result<Arc<Vec<u8>>, Error> {
+    /// The opened body of `frame`. Its sealed tuple must be the one this
+    /// replica registered under the frame's keyed scope: an author that
+    /// signs one partition's scope over another's tuple is refused.
+    pub(super) fn open_payload(
+        &self,
+        frame: &EncryptedFrame,
+    ) -> Result<Arc<crate::wire::Opened>, Error> {
         let extension = &frame.operation_ref()?.header.extensions;
         let key = self
             .opening_key(extension.scope, extension.generation)
             .ok_or_else(|| denied("row payload key unavailable"))?;
-        self.crypto.open(frame, key)
+        let opened = self.crypto.open(frame, key)?;
+        if opened.partition.as_ref() != self.partitions.get(&extension.scope) {
+            return Err(denied(
+                "sealed partition tuple differs from its keyed scope",
+            ));
+        }
+        Ok(opened)
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -268,7 +286,6 @@ mod tests {
                 author_sequence: 1,
                 row_format: crate::wire::ROW_FORMAT,
                 births: vec![],
-                partition: None,
             },
         };
         header.sign(&key);
@@ -294,7 +311,14 @@ mod tests {
             .collect();
         for hash in &hashes {
             cache
-                .remember(*hash, [1; 32], Arc::new(Vec::new()))
+                .remember(
+                    *hash,
+                    [1; 32],
+                    Arc::new(crate::wire::Opened {
+                        partition: None,
+                        payload: Vec::new(),
+                    }),
+                )
                 .unwrap();
         }
         assert_eq!(cache.entries.len(), OPENED_FRAMES);

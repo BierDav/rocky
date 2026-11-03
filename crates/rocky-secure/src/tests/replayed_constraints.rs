@@ -147,7 +147,10 @@ impl Constrained {
     fn scope(&self, name: &str) -> ResourceScope {
         if let Some(tenant) = self.tenant {
             let table = self.schema.table_id(self.schema.table(name).unwrap());
-            return self.tuple(name, tenant).scope(self.domain, table).unwrap();
+            return self
+                .tuple(name, tenant)
+                .scope(self.domain, table, &crate::tests::PARTITION_NAME)
+                .unwrap();
         }
         ResourceScope {
             domain: self.domain,
@@ -303,7 +306,11 @@ impl Constrained {
             for name in self.names() {
                 let scope = self.scope(name);
                 replica
-                    .register_partition(scope, self.tuple(name, tenant))
+                    .register_partition(
+                        scope,
+                        self.tuple(name, tenant),
+                        crate::tests::PARTITION_NAME,
+                    )
                     .await
                     .unwrap();
                 replica
@@ -319,12 +326,13 @@ impl Constrained {
         }
     }
     fn payload(&self, frame: &EncryptedFrame) -> crate::wire::RowPayload {
-        let plaintext = crate::wire::decrypt(
+        let plaintext = crate::wire::Opened::open(
             &self.key(frame.scope().unwrap()),
-            &encode(&frame.operation_ref().unwrap().header.extensions).unwrap(),
+            &frame.operation_ref().unwrap().header.extensions,
             frame.body_bytes(),
         )
-        .unwrap();
+        .unwrap()
+        .payload;
         crate::wire::RowPayload::decode_test(&plaintext, frame, &self.app()).unwrap()
     }
     /// The transaction a frame of a commit belongs to.

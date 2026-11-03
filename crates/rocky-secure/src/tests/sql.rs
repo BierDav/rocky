@@ -1777,12 +1777,13 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
         .frames
         .remove(0);
     let operation = frame.operation().unwrap();
-    let plaintext = crate::wire::decrypt(
+    let plaintext = crate::wire::Opened::open(
         &fixture.key(fixture.items).key,
-        &encode(&operation.header.extensions).unwrap(),
+        &operation.header.extensions,
         frame.body_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .payload;
     let mut extensions = operation.header.extensions;
     extensions.author = Some(32);
     let forged = crate::wire::author(
@@ -1796,6 +1797,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
             operation.header.timestamp,
         ),
         operation.header.previous,
+        None,
         &plaintext,
     )
     .unwrap();

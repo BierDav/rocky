@@ -150,7 +150,7 @@ impl<A: RowApplication> Inner<A> {
         payload: impl FnOnce(u64, Vec<BaseMark>) -> Result<Vec<u8>, Error>,
     ) -> Result<EncryptedFrame, Error> {
         self.ensure_tip_writable(scope.domain)?;
-        let partition = self.partitions.get(&scope).cloned();
+        let partition = self.authenticated_partition(scope)?.cloned();
         let signer = self
             .node_author
             .as_ref()
@@ -235,7 +235,6 @@ impl<A: RowApplication> Inner<A> {
                 author_sequence,
                 row_format: ROW_FORMAT,
                 births: Vec::new(),
-                partition,
                 tip: self.workspace.tip,
                 scope,
                 generation: key.generation,
@@ -245,6 +244,7 @@ impl<A: RowApplication> Inner<A> {
             &key.key,
             (sequence, backlink, clock),
             previous.into_iter().collect(),
+            partition.as_ref(),
             &RowPayload::compact(
                 &RowPayload::witness(payload(sequence, base)?, Vec::new())?,
                 &self.definition,

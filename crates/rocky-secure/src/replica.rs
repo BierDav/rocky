@@ -55,6 +55,8 @@ mod placements;
 pub(super) mod positions;
 mod records;
 mod stamp_authors;
+pub(crate) use partition::PartitionOffer;
+pub use partition::created_name;
 pub use placements::{MAX_PLACEMENTS, Placement, PlacementPage, PlacementRequest};
 pub(crate) mod publication;
 mod quarantine;
@@ -340,6 +342,9 @@ pub(super) struct Inner<A> {
     node_author: Option<identity::NodeAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
+    /// The naming secret of each registered partition, for offers to peers
+    /// entitled to it.
+    pub(crate) partition_names: BTreeMap<ResourceScope, rocky_core::PartitionName>,
     /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
@@ -347,8 +352,6 @@ pub(super) struct Inner<A> {
     catalog: BTreeMap<Commitment, rocky_core::ApplicationManifest>,
     path_fields: std::sync::Mutex<BTreeMap<(TipId, TipId), schemas::PathFields>>,
     graph_cache: std::sync::Mutex<tips::GraphCache>,
-    /// Positions of a domain's nodes only a partition's custody can place.
-    custody_required: std::sync::Mutex<BTreeSet<(rocky_core::Scope, u32, u64)>>,
     /// The live tables, the tip they hold and their observers.
     pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
@@ -1008,6 +1011,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             config,
             credential_signer: None,
             partitions: BTreeMap::new(),
+            partition_names: BTreeMap::new(),
             history,
             manifest: manifest.hash(),
             workspace: workspace::Workspace::new(rocky_credentials::genesis_tip(manifest.hash())),
@@ -1015,7 +1019,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             catalog: BTreeMap::new(),
             path_fields: Default::default(),
             graph_cache: Default::default(),
-            custody_required: Default::default(),
             line_nodes: BTreeMap::new(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
@@ -1495,10 +1498,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Err(error) => Err(error),
             };
             if let Err(error) = contradicted {
-                results[index] = Some(Err(error));
-                continue;
-            }
-            if let Err(error) = self.discover_partition(&frame).await {
                 results[index] = Some(Err(error));
                 continue;
             }
@@ -2069,14 +2068,30 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.header_authority(header, credentials, &self.config.revocations, time)
     }
-    fn header_authority(
+    /// A placed header's authority. A partition this replica has not
+    /// registered is one it cannot recognize; its header shows only that
+    /// the author may write some partition of the table.
+    pub(super) fn placement_authority(
         &self,
         header: &p2panda_core::Header<Extensions>,
         credentials: &CredentialChain,
-        revocations: &RevocationSet,
         time: u64,
-    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+    ) -> Result<(), Error> {
         let extension = &header.extensions;
+        if !self.partitioned(extension.scope) || self.partitions.contains_key(&extension.scope) {
+            return self
+                .verify_header_authority(header, credentials, time)
+                .map(|_| ());
+        }
+        self.check_header_table(extension)?;
+        let number = extension
+            .author
+            .ok_or_else(|| denied("node author number missing"))?;
+        self.verified_chain(credentials, &self.config.revocations, time)?
+            .unseen_partition_author(header.public_key, number, extension.scope, time)
+            .map_err(credential)
+    }
+    fn check_header_table(&self, extension: &Extensions) -> Result<(), Error> {
         let manifest = &self.definition;
         let source = self.catalog.get(&self.manifest_of_tip(extension.tip)?);
         if extension.scope.domain.app != manifest.app
@@ -2090,12 +2105,23 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("wrong app/domain/table/manifest"));
         }
-        self.check_authenticated_partition(extension.scope, extension.partition.as_ref())?;
+        Ok(())
+    }
+    fn header_authority(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        credentials: &CredentialChain,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let extension = &header.extensions;
+        self.check_header_table(extension)?;
+        let partition = self.authenticated_partition(extension.scope)?;
         let number = extension
             .author
             .ok_or_else(|| denied("node author number missing"))?;
         let verified = self.verified_chain(credentials, revocations, time)?;
-        let grants = match &extension.partition {
+        let grants = match partition {
             Some(tuple) => {
                 verified.partition_author(header.public_key, number, extension.scope, tuple, time)
             }

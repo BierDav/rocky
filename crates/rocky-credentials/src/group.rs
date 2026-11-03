@@ -1,5 +1,6 @@
 //! Group secrets: one random secret per group partition and key epoch, the
-//! table keys derived from it, and its recipient-bound envelope. See
+//! table keys derived from it, and its recipient-bound envelope, which also
+//! seals the partition's naming secret (`rocky_core::PartitionName`). See
 //! `docs/runtime/partition-credentials.md#group-secrets`.
 use crate::{
     Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode, enroll::SEAL_OVERHEAD,
@@ -15,11 +16,11 @@ use std::collections::BTreeSet;
 /// Length of a group secret and of every table key derived from it.
 pub const GROUP_SECRET_LEN: usize = 32;
 pub const MAX_GROUP_ENVELOPE_BYTES: usize = 128 * 1024;
-const SEALED_LEN: usize = GROUP_SECRET_LEN + SEAL_OVERHEAD;
-const ENVELOPE_VERSION: u32 = 3;
-const SIGNED: &str = "rocky.group-secret-envelope.v3";
-const CONTEXT: &str = "rocky.group-secret-envelope.context.v3";
-const WRAPPING: &str = "rocky.group-secret-envelope.key.v3";
+const SEALED_LEN: usize = 2 * GROUP_SECRET_LEN + SEAL_OVERHEAD;
+const ENVELOPE_VERSION: u32 = 4;
+const SIGNED: &str = "rocky.group-secret-envelope.v4";
+const CONTEXT: &str = "rocky.group-secret-envelope.context.v4";
+const WRAPPING: &str = "rocky.group-secret-envelope.key.v4";
 const DERIVATION: &[u8] = b"rocky.group-table-key.v1";
 
 fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
@@ -166,6 +167,7 @@ impl GroupSecretEnvelope {
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
+        name: rocky_core::PartitionName,
         recipients: &BTreeSet<PublicKey>,
     ) -> Result<Vec<Self>, Error> {
         if recipients.is_empty() || recipients.len() > 256 {
@@ -173,7 +175,7 @@ impl GroupSecretEnvelope {
         }
         recipients
             .iter()
-            .map(|recipient| Self::seal(issuer, group, epoch, secret, *recipient))
+            .map(|recipient| Self::seal(issuer, group, epoch, secret, name, *recipient))
             .collect()
     }
     pub fn seal(
@@ -181,15 +183,18 @@ impl GroupSecretEnvelope {
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
+        name: rocky_core::PartitionName,
         recipient: PublicKey,
     ) -> Result<Self, Error> {
-        Self::seal_recorded(issuer, group, epoch, secret, recipient, Vec::new())
+        Self::seal_recorded(issuer, group, epoch, secret, name, recipient, Vec::new())
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn seal_recorded(
         issuer: &PrivateKey,
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
+        name: rocky_core::PartitionName,
         recipient: PublicKey,
         statements: Vec<Commitment>,
     ) -> Result<Self, Error> {
@@ -204,7 +209,11 @@ impl GroupSecretEnvelope {
             ephemeral,
             sealed: Vec::new(),
         };
-        body.sealed = crate::enroll::seal(body.wrapping_key(shared)?, &body.aad()?, &secret)?;
+        body.sealed = crate::enroll::seal(
+            body.wrapping_key(shared)?,
+            &body.aad()?,
+            &[secret, name].concat(),
+        )?;
         body.validate()?;
         let signature = issuer.sign(&signing_bytes(SIGNED, &body)?);
         Ok(Self { body, signature })
@@ -228,29 +237,37 @@ impl GroupSecretEnvelope {
         }
         Ok(())
     }
+    /// The epoch's group secret and the partition's naming secret.
     pub fn open(
         &self,
         recipient: &PrivateKey,
         issuer: PublicKey,
         group: Commitment,
         epoch: rocky_core::KeyEpoch,
-    ) -> Result<[u8; GROUP_SECRET_LEN], Error> {
+    ) -> Result<([u8; GROUP_SECRET_LEN], rocky_core::PartitionName), Error> {
         self.verify(issuer, group, epoch)?;
         if recipient.public_key() != self.body.recipient {
             return Err(denied("group envelope names another recipient"));
         }
         let shared = agreed(recipient, self.body.ephemeral);
-        let secret = crate::enroll::open(
+        let opened = crate::enroll::open(
             self.body.wrapping_key(shared)?,
             &self.body.aad()?,
             &self.body.sealed,
-        )?
-        .try_into()
-        .map_err(|_| denied("invalid group secret length"))?;
+        )?;
+        let (secret, name) = opened
+            .split_at_checked(GROUP_SECRET_LEN)
+            .ok_or_else(|| denied("invalid group secret length"))?;
+        let secret: [u8; GROUP_SECRET_LEN] = secret
+            .try_into()
+            .map_err(|_| denied("invalid group secret length"))?;
+        let name = name
+            .try_into()
+            .map_err(|_| denied("invalid partition name length"))?;
         if rocky_core::KeyEpoch::new(epoch.generation, &secret) != epoch {
             return Err(denied("group secret epoch identity mismatch"));
         }
-        Ok(secret)
+        Ok((secret, name))
     }
     pub fn statements(&self) -> &[Commitment] {
         &self.body.statements

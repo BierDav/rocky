@@ -136,11 +136,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(Error::Corrupt("restoration source binding".into()));
         }
-        // A removed table may have no current descriptor; its registered
-        // concrete address still requires the original authenticated tuple.
-        if header.extensions.partition.is_none() && self.partitions.contains_key(&scope) {
-            return Err(Error::Corrupt("restoration partition tuple missing".into()));
-        }
-        self.check_authenticated_partition(scope, header.extensions.partition.as_ref())
+        self.authenticated_partition(scope).map(|_| ())
     }
 }

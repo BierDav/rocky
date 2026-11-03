@@ -30,7 +30,7 @@ pub use replica::{
     SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
     SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, StagedCloseStatus,
     StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode,
-    installed_tip_schema,
+    created_name, installed_tip_schema,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 /// The credential types live in `rocky-credentials`; these are the same types.

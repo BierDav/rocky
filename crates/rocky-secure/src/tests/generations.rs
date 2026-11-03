@@ -371,7 +371,13 @@ impl Lineage {
         )])
         .unwrap();
         (
-            tuple.scope(self.domain, schema.table_id(tags)).unwrap(),
+            tuple
+                .scope(
+                    self.domain,
+                    schema.table_id(tags),
+                    &crate::tests::PARTITION_NAME,
+                )
+                .unwrap(),
             tuple,
         )
     }

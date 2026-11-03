@@ -39,7 +39,7 @@ async fn keyed(
 }
 
 #[tokio::test]
-async fn a_revoked_authors_unproved_partition_header_is_omitted_without_its_tuple() {
+async fn a_revoked_authors_unheld_partition_header_is_omitted() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new();
     let writer = f
@@ -122,20 +122,17 @@ async fn a_revoked_authors_unproved_partition_header_is_omitted_without_its_tupl
             .unwrap()
     );
     let page = |request| {
-        let (writer, credentials, scopes) =
-            (writer.clone(), credentials.clone(), [f.scope("A")].into());
+        let (writer, credentials) = (writer.clone(), credentials.clone());
         let reader = reader_key.public_key();
         async move {
             writer
-                .placement_page(reader, &credentials, &scopes, request)
+                .placement_page(reader, &credentials, request)
                 .await
                 .unwrap()
         }
     };
-    assert!(matches!(
-        page(*revoked_request).await,
-        crate::PlacementPage::CustodyRequired
-    ));
+    // A domain member sees a partition it does not hold by its keyed scope.
+    assert_eq!(page(*revoked_request).await.headers.len(), 1);
     let grant = other
         .inner
         .lock(crate::replica::Class::Background)
@@ -154,17 +151,14 @@ async fn a_revoked_authors_unproved_partition_header_is_omitted_without_its_tupl
         ))
         .await
         .unwrap();
-    // Revoked candidates alone answer like an empty position: no header,
-    // chain or tuple, and no custody demand that would reveal a partition.
+    // Revoked candidates alone answer like an empty position: no header
+    // or chain.
     let omitted = page(*revoked_request).await;
     assert!(
-        matches!(&omitted, crate::PlacementPage::Headers { headers, chains } if headers.is_empty() && chains.is_empty()),
+        omitted.headers.is_empty() && omitted.chains.is_empty(),
         "{omitted:?}"
     );
-    assert!(matches!(
-        page(*eligible_request).await,
-        crate::PlacementPage::CustodyRequired
-    ));
+    assert_eq!(page(*eligible_request).await.headers.len(), 1);
     assert_eq!(
         reader
             .receive_placements(*revoked_request, omitted)

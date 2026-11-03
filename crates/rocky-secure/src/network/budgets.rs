@@ -224,7 +224,10 @@ fn holdings_proofs_fit_with_maximal_tuples_and_four_epochs() {
             )
         })
         .collect();
-    let partitions: Vec<_> = scopes.iter().map(|scope| (*scope, tuple.clone())).collect();
+    let partitions: Vec<_> = scopes
+        .iter()
+        .map(|scope| (*scope, tuple.clone(), [1; 32]))
+        .collect();
     let pages = holdings::prove_pages(&scopes, &proofs, &partitions).unwrap();
     let mut count = 0;
     for message in pages {

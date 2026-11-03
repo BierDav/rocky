@@ -294,7 +294,9 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .flat_map(|undone| undone.values().flatten().cloned());
         for image in live.into_iter().chain(before) {
-            let Some(rows) = images.get_mut(&typed.row_scope(projected, &image)?) else {
+            let Some(rows) =
+                images.get_mut(&typed.row_scope(projected, &image, &self.partitions)?)
+            else {
                 continue;
             };
             let row = typed
@@ -581,7 +583,7 @@ impl<A: RowApplication> Inner<A> {
                         },
                     )
                     .collect::<Result<Vec<_>, Error>>()?;
-                if typed.row_scope(projected, &image)? != scope
+                if typed.row_scope(projected, &image, &self.partitions)? != scope
                     || typed
                         .rows
                         .row_id(typed.domain.domain, &projected.table, &image)

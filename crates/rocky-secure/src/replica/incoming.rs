@@ -108,7 +108,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(payload)
     }
     pub(super) fn row_payload(&self, frame: &EncryptedFrame) -> Result<RowPayload, Error> {
-        self.decode_row_payload(frame, &self.open_payload(frame)?)
+        self.decode_row_payload(frame, &self.open_payload(frame)?.payload)
     }
 
     /// One bounded transaction of `EncryptedReplica::settle`; true when
@@ -489,10 +489,20 @@ impl<A: RowApplication> Inner<A> {
         }
         // The key its header names is held: a frame that does not open
         // under it is quarantined by the pass, not left waiting.
-        let Ok(plaintext) = self.open_payload(frame) else {
+        let extension = &operation.header.extensions;
+        let Some(Ok(opened)) = self
+            .opening_key(extension.scope, extension.generation)
+            .map(|key| self.crypto.open(frame, key))
+        else {
             return Ok(Outcome::Waiting(WaitReason::Undecryptable));
         };
-        let payload = self.decode_row_payload(frame, &plaintext);
+        if opened.partition.as_ref() != self.partitions.get(&extension.scope) {
+            self.reject(operation.hash).await?;
+            return Ok(Outcome::Rejected(
+                "sealed partition tuple differs from its keyed scope".into(),
+            ));
+        }
+        let payload = self.decode_row_payload(frame, &opened.payload);
         #[cfg(any(test, feature = "qualification"))]
         if let Ok(payload) = &payload {
             self.flusher.measurements.work(

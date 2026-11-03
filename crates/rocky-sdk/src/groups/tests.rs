@@ -18,7 +18,7 @@ fn member(table: &str, number: u8, parents: &[&str]) -> Member {
     };
     Member {
         table: table.into(),
-        scope: tuple.scope(domain, [number; 32]).unwrap(),
+        scope: tuple.scope(domain, [number; 32], &[5; 32]).unwrap(),
         tuple,
         parents: parents.iter().map(|parent| (*parent).into()).collect(),
     }
@@ -29,6 +29,7 @@ fn group() -> GroupPartition {
             group: "list".into(),
             values: Vec::new(),
             address: [4; 32],
+            name: [5; 32],
             epochs: Vec::new(),
         },
         members: vec![

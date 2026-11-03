@@ -77,6 +77,7 @@ impl Fixture {
             .scope(
                 self.domain,
                 self.schema.table_id(self.schema.table(name).unwrap()),
+                &crate::tests::PARTITION_NAME,
             )
             .unwrap()
     }
@@ -227,7 +228,11 @@ impl Fixture {
     ) {
         for name in tables {
             replica
-                .register_partition(self.scope(name, partition), self.tuple(name, partition))
+                .register_partition(
+                    self.scope(name, partition),
+                    self.tuple(name, partition),
+                    crate::tests::PARTITION_NAME,
+                )
                 .await
                 .unwrap();
             replica

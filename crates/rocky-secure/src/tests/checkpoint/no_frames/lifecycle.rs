@@ -956,14 +956,9 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
             .await
             .unwrap();
         let page =
-            x.c.placement_page(
-                key.public_key(),
-                &credentials,
-                &std::collections::BTreeSet::new(),
-                request,
-            )
-            .await
-            .unwrap();
+            x.c.placement_page(key.public_key(), &credentials, request)
+                .await
+                .unwrap();
         let received = d.receive_placements(request, page).await;
         match installed {
             true => {
@@ -1276,12 +1271,10 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     let key = PrivateKey::from_bytes(&[203; 32]);
     let (d, path) = x.pulled("d", &key).await;
     let header = x.covered.operation().unwrap().header;
-    let plaintext = crate::wire::decrypt(
-        &[22; 32],
-        &encode(&header.extensions).unwrap(),
-        x.covered.body_bytes(),
-    )
-    .unwrap();
+    let plaintext =
+        crate::wire::Opened::open(&[22; 32], &header.extensions, x.covered.body_bytes())
+            .unwrap()
+            .payload;
     let mut extension = header.extensions.clone();
     // A different authentic frame occupies the same scope-log position,
     // but its domain sequence is past the candidate's recorded frontier.
@@ -1300,6 +1293,7 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
         &[22; 32],
         (header.seq_num, header.backlink, header.timestamp),
         header.previous,
+        None,
         &plaintext,
     )
     .unwrap();

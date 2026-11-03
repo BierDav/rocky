@@ -101,19 +101,21 @@ impl Typed {
             .table(&table.table.sql_name)
             .is_some_and(|logical| !logical.partition_by.is_empty())
     }
+    /// The scope of a row: its table's, or its registered partition's.
     pub(super) fn row_scope(
         &self,
         table: &Projected,
         values: &[SqlValue],
+        partitions: &BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     ) -> Result<ResourceScope, Error> {
         match self
             .rows
             .partition(&table.table, values)
             .map_err(|error| denied(&error))?
         {
-            Some(tuple) => tuple
-                .scope(self.domain, table.table.id)
-                .map_err(|error| denied(&error.to_string())),
+            Some(tuple) => {
+                super::partition::registered_scope(partitions, self.domain, table.table.id, &tuple)
+            }
             None => Ok(table.scope),
         }
     }

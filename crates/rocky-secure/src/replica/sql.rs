@@ -334,9 +334,13 @@ impl<A: RowApplication> SecureSql<A> {
             None
         };
         let scope = match &tuple {
-            Some(tuple) => tuple
-                .scope(typed.domain, table.table.id)
-                .map_err(|error| denied(&error.to_string()))?,
+            Some(tuple) => super::partition::registered_scope(
+                &inner.partitions,
+                typed.domain,
+                table.table.id,
+                tuple,
+            )
+            .map_err(|_| denied("identity allocation requires a writable table"))?,
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {
@@ -1073,7 +1077,7 @@ impl<A: RowApplication> SecureSql<A> {
             #[cfg(not(test))]
             let unchecked = false;
             let Some((change, image)) =
-                super::replay::replayed_change(conn, &typed, table, &touched)?
+                super::replay::replayed_change(conn, &typed, &inner.partitions, table, &touched)?
             else {
                 continue;
             };

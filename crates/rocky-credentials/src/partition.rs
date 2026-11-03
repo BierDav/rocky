@@ -41,27 +41,27 @@ impl PartitionGrant {
             && other.rights.is_subset(&self.rights)
             && self.fields.includes(&other.fields)
     }
-    /// A concrete grant only when the selector matches the authenticated tuple.
+    /// A concrete grant only when the selector matches the authenticated
+    /// tuple. `scope` is the tuple's keyed scope: only a holder of the
+    /// partition's naming secret can bind them, so the caller does.
     pub fn resolve(
         &self,
-        domain: Scope,
-        table: Commitment,
+        scope: ResourceScope,
         tuple: &PartitionTuple,
     ) -> Result<Option<ResourceGrant>, Error> {
         self.validate()?;
-        let scope = tuple
-            .scope(domain, table)
+        tuple
+            .validate()
             .map_err(|error| Error::Denied(error.to_string()))?;
-        Ok(
-            (self.domain == domain && self.table == table && self.selector.matches(tuple)).then(
-                || ResourceGrant {
-                    scope,
-                    rows: self.rows.clone(),
-                    rights: self.rights.clone(),
-                    fields: self.fields.clone(),
-                },
-            ),
-        )
+        Ok((self.domain == scope.domain
+            && self.table == scope.table
+            && self.selector.matches(tuple))
+        .then(|| ResourceGrant {
+            scope,
+            rows: self.rows.clone(),
+            rights: self.rights.clone(),
+            fields: self.fields.clone(),
+        }))
     }
 }
 
@@ -198,18 +198,12 @@ impl crate::CredentialChain {
         Ok(chain)
     }
 }
+/// `scope` must be `tuple`'s keyed scope, which the caller bound.
 fn resolve_leaf(
     leaf: &crate::Capability,
     scope: ResourceScope,
     tuple: &PartitionTuple,
 ) -> Result<Vec<ResourceGrant>, Error> {
-    if tuple
-        .scope(scope.domain, scope.table)
-        .map_err(|error| Error::Denied(error.to_string()))?
-        != scope
-    {
-        return Err(denied("partition tuple and encryption scope differ"));
-    }
     let mut grants: Vec<ResourceGrant> = leaf
         .grants
         .iter()
@@ -217,7 +211,7 @@ fn resolve_leaf(
         .cloned()
         .collect();
     for grant in leaf.extended()?.partitions {
-        if let Some(grant) = grant.resolve(scope.domain, scope.table, tuple)? {
+        if let Some(grant) = grant.resolve(scope, tuple)? {
             grants.push(grant);
         }
     }
@@ -270,5 +264,41 @@ impl crate::VerifiedChain {
             ));
         }
         resolve_leaf(&self.leaf, scope, tuple)
+    }
+    /// Whether a node may write some partition of `scope`'s table, for a
+    /// verifier that cannot see which: a covered position's signed header
+    /// proves only where the position lies, never what it wrote.
+    pub fn unseen_partition_author(
+        &self,
+        subject: PublicKey,
+        author: u32,
+        scope: ResourceScope,
+        time: u64,
+    ) -> Result<(), Error> {
+        let (grants, partitions) = self.selectors(subject, time)?;
+        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
+            return Err(denied(
+                "the partition author number does not belong to the signing key",
+            ));
+        }
+        let writes = |rights: &std::collections::BTreeSet<rocky_core::Right>| {
+            [
+                rocky_core::Right::Insert,
+                rocky_core::Right::Update,
+                rocky_core::Right::Delete,
+            ]
+            .iter()
+            .any(|right| rights.contains(right))
+        };
+        if grants
+            .iter()
+            .any(|grant| grant.scope == scope && writes(&grant.rights))
+            || partitions.iter().any(|grant| {
+                grant.domain == scope.domain && grant.table == scope.table && writes(&grant.rights)
+            })
+        {
+            return Ok(());
+        }
+        Err(denied("no write grant for a partition of this table"))
     }
 }

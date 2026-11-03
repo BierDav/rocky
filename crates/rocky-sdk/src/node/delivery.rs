@@ -271,9 +271,17 @@ impl Node {
             .iter()
             .map(|value| value.value())
             .collect::<Result<Vec<_>, _>>()?;
-        let partition =
-            GroupPartition::resolve(&self.domain(), Some(&contents.group), None, values.clone())?;
         let envelope = GroupSecretEnvelope::from_bytes(&contents.envelope)?;
+        let name = self
+            .envelope_name(&envelope, contents.sender.as_ref())
+            .await?;
+        let partition = GroupPartition::resolve(
+            &self.domain(),
+            Some(&contents.group),
+            None,
+            values.clone(),
+            |_| Ok(name),
+        )?;
         if envelope.group() != partition.record.address {
             return Err("the delivery names another partition than its envelope".into());
         }

@@ -1143,7 +1143,7 @@ pub(crate) async fn attach(
         for member in &partition.members {
             if granted.contains(&member.scope) {
                 replica
-                    .register_partition(member.scope, member.tuple.clone())
+                    .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                     .await?;
             }
             // Newest first: earlier epochs then join its history.

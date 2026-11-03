@@ -6,12 +6,13 @@ fn opened(
     frame: &EncryptedFrame,
 ) -> (Vec<RowWrite>, Option<rocky_core::replay::Intent>) {
     let operation = frame.operation_ref().unwrap();
-    let plaintext = crate::wire::decrypt(
+    let plaintext = crate::wire::Opened::open(
         &t.key(frame.scope().unwrap()).key,
-        &encode(&operation.header.extensions).unwrap(),
+        &operation.header.extensions,
         frame.body_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .payload;
     let payload = crate::wire::RowPayload::decode_test(&plaintext, frame, &t.app()).unwrap();
     (payload.writes().to_vec(), payload.intent().cloned())
 }
@@ -429,12 +430,13 @@ async fn a_seal_ends_rewinds_and_makes_drops_final() {
 
 fn transaction(t: &Typed, frame: &EncryptedFrame) -> rocky_core::Commitment {
     crate::wire::RowPayload::decode_test(
-        &crate::wire::decrypt(
+        &crate::wire::Opened::open(
             &t.key(frame.scope().unwrap()).key,
-            &encode(&frame.operation_ref().unwrap().header.extensions).unwrap(),
+            &frame.operation_ref().unwrap().header.extensions,
             frame.body_bytes(),
         )
-        .unwrap(),
+        .unwrap()
+        .payload,
         frame,
         &t.app(),
     )

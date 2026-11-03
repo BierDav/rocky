@@ -160,7 +160,6 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 author_sequence: 0,
                 row_format: crate::wire::ROW_FORMAT,
                 births: Vec::new(),
-                partition: None,
                 tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
                 scope: f.public,
                 generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
@@ -170,6 +169,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             &[11; 32],
             (0, None, 1),
             Vec::new(),
+            None,
             b"rows",
         )
         .unwrap();

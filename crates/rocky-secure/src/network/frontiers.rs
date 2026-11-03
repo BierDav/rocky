@@ -8,7 +8,7 @@ pub(super) enum FrontierMessage {
     FrontiersQuery {
         frontiers: Vec<ScopeFrontier>,
         /// Tuples offered to a keyless custody peer; see decision 0045.
-        partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
+        partitions: Vec<crate::replica::PartitionOffer>,
         proofs: Vec<(ResourceScope, Vec<holdings::HoldingProof>)>,
     },
     Frontiers {
@@ -200,7 +200,7 @@ impl NativeSession {
 
 pub(super) fn frontier_query(
     mut frontiers: Vec<ScopeFrontier>,
-    partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+    partitions: &[crate::replica::PartitionOffer],
     proofs: &[(ResourceScope, Vec<holdings::HoldingProof>)],
 ) -> Result<FrontierMessage, Error> {
     loop {
@@ -209,7 +209,7 @@ pub(super) fn frontier_query(
             frontiers: frontiers.clone(),
             partitions: partitions
                 .iter()
-                .filter(|(scope, _)| scopes.contains(scope))
+                .filter(|(scope, ..)| scopes.contains(scope))
                 .cloned()
                 .collect(),
             proofs: proofs

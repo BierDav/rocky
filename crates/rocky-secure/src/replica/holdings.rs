@@ -54,20 +54,33 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peer: PublicKey,
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
-    ) -> Result<Vec<(ResourceScope, rocky_core::PartitionTuple)>, Error> {
+    ) -> Result<Vec<super::partition::PartitionOffer>, Error> {
         let mut offers = self.custody_offers(peer, credentials, scopes).await?;
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let own = inner.config.node.public_key();
         for scope in scopes {
-            let Some(tuple) = inner.partitions.get(scope) else {
+            let Some(offer) = inner.partition_offer(*scope) else {
                 continue;
             };
-            let grants = inner.partition_grants(&inner.config.credentials, own, *scope, tuple)?;
-            if grants.iter().any(|g| g.rights.contains(&Right::Custody))
+            let grants =
+                inner.partition_grants(&inner.config.credentials, own, *scope, &offer.1)?;
+            // The tuple and its naming secret go only to a peer entitled
+            // to the partition, never to one that merely asks.
+            let entitled = inner
+                .partition_grants(credentials, peer, *scope, &offer.1)
+                .is_ok_and(|grants| {
+                    grants.iter().any(|g| {
+                        g.rows == RowSelection::All
+                            && (g.rights.contains(&Right::Read)
+                                || g.rights.contains(&Right::Custody))
+                    })
+                });
+            if entitled
+                && grants.iter().any(|g| g.rights.contains(&Right::Custody))
                 && !grants.iter().any(|g| g.rights.contains(&Right::Read))
-                && !offers.iter().any(|(offered, _)| offered == scope)
+                && !offers.iter().any(|(offered, ..)| offered == scope)
             {
-                offers.push((*scope, tuple.clone()));
+                offers.push(offer);
             }
         }
         Ok(offers)
@@ -80,18 +93,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         binding: Commitment,
         scope: ResourceScope,
         proofs: &[HoldingProof],
-        tuple: Option<&rocky_core::PartitionTuple>,
+        offer: Option<(&rocky_core::PartitionTuple, &rocky_core::PartitionName)>,
     ) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.partitioned(scope) {
             return Ok(false);
         }
-        let Some(known) = tuple.or_else(|| inner.partitions.get(&scope)) else {
-            return Ok(false);
+        let known = match offer {
+            Some((tuple, name)) => {
+                if inner.check_tuple(scope, tuple, name).is_err() {
+                    return Ok(false);
+                }
+                tuple
+            }
+            None => match inner.partitions.get(&scope) {
+                Some(tuple) => tuple,
+                None => return Ok(false),
+            },
         };
-        if inner.check_tuple(scope, known).is_err() {
-            return Ok(false);
-        }
         let grants = match inner.partition_grants(credentials, peer, scope, known) {
             Ok(grants) => grants,
             Err(Error::Rejected(_)) => return Ok(false),
@@ -117,7 +136,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let keyless = own.iter().any(|g| g.rights.contains(&Right::Custody))
             && !own.iter().any(|g| g.rights.contains(&Right::Read));
-        if tuple.is_some() && (keyless || (whole(Right::Custody) && !whole(Right::Read))) {
+        if offer.is_some() && (keyless || (whole(Right::Custody) && !whole(Right::Read))) {
             return Ok(true);
         }
         for proof in proofs {

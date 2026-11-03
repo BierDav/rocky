@@ -249,12 +249,8 @@ impl TypedRows {
             .ok_or("unknown typed table")?;
         let mut tuple = None;
         for fields in change.before.iter().chain(change.after.iter()) {
+            // The replica binds the tuple to the change's keyed scope.
             let next = self.partition(table, &self.values(table, fields)?)?;
-            if next.as_ref().is_some_and(|tuple| {
-                tuple.scope(change.scope.domain, table.id).ok() != Some(change.scope)
-            }) {
-                return Err("row image differs from its partition scope".into());
-            }
             if tuple.is_some() && tuple != next {
                 return Err("partition columns cannot change".into());
             }
@@ -478,15 +474,17 @@ mod tests {
         };
         let tuple = rows.partition(table, &values).unwrap().unwrap();
         let mut change = RowChange {
-            scope: tuple.scope(domain, table.id).unwrap(),
+            scope: tuple.scope(domain, table.id, &[1; 32]).unwrap(),
             row: rows.row_id(domain.domain, table, &values).unwrap(),
             before: None,
             after: Some(rows.fields(table, &values).unwrap()),
         };
-        assert_eq!(rows.row_partition(&change), Ok(Some(tuple)));
+        assert_eq!(rows.row_partition(&change), Ok(Some(tuple.clone())));
         let mut wrong = values.clone();
         wrong[0] = SqlValue::Text("B".into());
         change.after = Some(rows.fields(table, &wrong).unwrap());
+        assert_ne!(rows.row_partition(&change), Ok(Some(tuple)));
+        change.before = Some(rows.fields(table, &values).unwrap());
         assert!(rows.row_partition(&change).is_err());
     }
 }

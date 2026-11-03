@@ -339,6 +339,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         record.address,
         1,
         secret,
+        record.name,
         PrivateKey::from_bytes(&node.vault.get("node")?).public_key(),
     )?;
     let partition = crate::groups::GroupPartition::of(&node.domain(), record)?;

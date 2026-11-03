@@ -40,6 +40,8 @@ struct Bundle {
     keys: BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     groups: Vec<(GroupRecord, Vec<Vec<u8>>)>,
+    /// The partition naming root, hex, when the identity issues.
+    naming: Option<String>,
     /// Contacts of the issuers the answering node reaches.
     issuers: Vec<String>,
 }
@@ -75,7 +77,7 @@ impl Settings {
             .ok_or("missing node credential")?
             .capability;
         let bundle = Bundle {
-            format: 2,
+            format: 3,
             mesh: self.mesh,
             domain: self.domain,
             record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
@@ -88,6 +90,11 @@ impl Settings {
             keys,
             epoch_statements: self.epoch_statements.clone(),
             groups: self.groups_for(vault, request.node, leaf, true)?,
+            naming: if self.issuer() {
+                crate::enrollment::naming_for(vault, &Profile::Issuer)?
+            } else {
+                None
+            },
             issuers: self.issuer_contacts(&[request.node])?,
         };
         Ok(request.answer(&serde_json::to_vec(&bundle)?)?.to_bytes()?)
@@ -146,7 +153,7 @@ impl Settings {
         .await?;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(&request, &secret)?)?;
-        if bundle.format != 2 {
+        if bundle.format != 3 {
             return Err("unsupported identity enrollment format".into());
         }
         bundle.record.bytes()?;
@@ -198,6 +205,7 @@ impl Settings {
             // Its identity's authority makes this node an issuer too.
             settings.authority = Some(crate::enrollment::Issuing::default());
             settings.learn_revocations(&RevocationSet::new())?;
+            crate::enrollment::hold_naming(&vault, bundle.naming.as_deref())?;
         }
         settings.adopt_groups(&vault, &bundle.groups)?;
         settings.add_peer(&vault, contact)?;

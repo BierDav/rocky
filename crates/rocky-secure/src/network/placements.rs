@@ -22,17 +22,6 @@ impl NativeSession {
         if requests.is_empty() {
             return Ok(stored);
         }
-        // A position in a partition is shown only to a session that proved
-        // its key. Held partitions need their frames, not placements; those
-        // this replica may hold but does not, as after an eviction, are
-        // proved first.
-        let unheld = replica.unheld_partitions().await?;
-        let allowed = replica
-            .peer_holds(self.peer, &self.credentials, &unheld)
-            .await?;
-        if !allowed.is_empty() {
-            self.try_scoped_holding(replica, &allowed, false).await?;
-        }
         for request in requests {
             if self.low(MAX_SECURE_FRAME) {
                 break;
@@ -54,7 +43,7 @@ impl NativeSession {
             return Err(denied("unexpected placement request"));
         };
         let page = replica
-            .placement_page(self.peer, &self.credentials, &self.proved, request)
+            .placement_page(self.peer, &self.credentials, request)
             .await?;
         self.send(PlacementMessage::Page(page)).await
     }

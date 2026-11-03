@@ -84,6 +84,9 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("mixed partition tuples"));
         }
+        if partition.as_ref() != self.authenticated_partition(scope)? {
+            return Err(denied("row image differs from its partition scope"));
+        }
         let identity_aware = writes
             .iter()
             .map(|write| {
@@ -283,7 +286,6 @@ impl<A: RowApplication> Inner<A> {
                     .values()
                     .map(|proof| proof.provenance().map(Into::into))
                     .collect::<Result<_, _>>()?,
-                partition,
                 tip: self.workspace.tip,
                 scope,
                 generation: key.generation,
@@ -293,6 +295,7 @@ impl<A: RowApplication> Inner<A> {
             &key.key,
             (sequence, backlink, clock),
             previous.into_iter().collect(),
+            partition.as_ref(),
             &RowPayload::compact(
                 &RowPayload::witness(
                     RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,

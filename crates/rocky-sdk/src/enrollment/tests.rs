@@ -544,6 +544,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
         Some("list"),
         None,
         vec![rocky_core::SqlValue::Text("L".into())],
+        |_| Ok([21; 32]),
     )?;
     let initial_secret = [19; 32];
     let initial = rocky_core::KeyEpoch::new(1, &initial_secret);
@@ -786,6 +787,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
         Some("list"),
         None,
         vec![rocky_core::SqlValue::Text("L".into())],
+        |_| Ok([21; 32]),
     )?;
     let secret = [19; 32];
     let epoch = rocky_core::KeyEpoch::new(1, &secret);
@@ -952,6 +954,7 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
         Some("list"),
         None,
         vec![rocky_core::SqlValue::Text("L".into())],
+        |_| Ok([21; 32]),
     )?;
     let address = crate::groups::record_key(&partition.record.address);
     issuer

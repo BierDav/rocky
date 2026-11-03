@@ -1,6 +1,9 @@
 //! Signed header placements: where a seal's frontier positions of scopes
 //! this replica cannot hold lie, proved by each frame's author-signed header
-//! without its body. See `docs/runtime/lazy-compaction.md`.
+//! without its body. A header names a partition only by its keyed scope,
+//! so any domain member may see it: one that does not hold the partition
+//! learns only that the position is not its own. See
+//! `docs/runtime/lazy-compaction.md`.
 use super::*;
 use rocky_core::Scope;
 
@@ -30,17 +33,12 @@ pub struct PlacementRequest {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Placement(#[serde(with = "serde_bytes")] pub Vec<u8>);
-/// A placement answer.
+/// A placement answer: the headers and, once each, the credential chains
+/// they name.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum PlacementPage {
-    /// The headers and, once each, the credential chains they name.
-    Headers {
-        headers: Vec<Placement>,
-        chains: Vec<CredentialChain>,
-    },
-    /// A position lies in a partition the requester did not prove: its
-    /// tuple is not shown, and only that partition's custody can settle it.
-    CustodyRequired,
+pub struct PlacementPage {
+    pub headers: Vec<Placement>,
+    pub chains: Vec<CredentialChain>,
 }
 
 struct PlacementPlan {
@@ -111,7 +109,6 @@ impl<A: RowApplication> Inner<A> {
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
-        proved: &BTreeSet<ResourceScope>,
         request: PlacementRequest,
     ) -> Result<PlacementPage, Error> {
         let time = now()?;
@@ -135,7 +132,7 @@ impl<A: RowApplication> Inner<A> {
                 .map(|seal| (*domain, seal.clone()))
         }) else {
             // A peer that has not learned the seal has nothing to place.
-            return Ok(PlacementPage::Headers {
+            return Ok(PlacementPage {
                 headers: Vec::new(),
                 chains: Vec::new(),
             });
@@ -216,9 +213,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
-            if e.partition.is_some() && !proved.contains(&e.scope) {
-                return Ok(PlacementPage::CustodyRequired);
-            }
             if headers.len() == MAX_PLACEMENTS {
                 break;
             }
@@ -245,7 +239,7 @@ impl<A: RowApplication> Inner<A> {
                 .or_insert_with(|| chain.credentials().clone());
             headers.insert(placement);
         }
-        Ok(PlacementPage::Headers {
+        Ok(PlacementPage {
             headers: headers.into_iter().collect(),
             chains: chains.into_values().collect(),
         })
@@ -309,7 +303,7 @@ impl<A: RowApplication> Inner<A> {
             )? {
                 return Err(denied("placement not inside the seal's state"));
             }
-            self.verify_header_authority(&header, chain.credentials(), time)?;
+            self.placement_authority(&header, chain.credentials(), time)?;
             // A scope this node keeps custody of needs the frame itself;
             // one it evicted is placed like one it may not hold.
             if custody.contains(&e.scope) && self.holds(e.scope).await? {
@@ -396,10 +390,6 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         positions::insert(&self.conn, header, 2, false, false).await?;
-        self.custody_required
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(domain, author, e.author_sequence));
         Ok(true)
     }
     /// The retained operation and void headers of `author` in `domain` from
@@ -597,26 +587,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Partitions of the followed domain this replica may hold whole and
-    /// has a key for, but does not hold.
-    pub(crate) async fn unheld_partitions(&self) -> Result<Vec<ResourceScope>, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let Some((domain, _)) = inner.workspace.followed.clone() else {
-            return Ok(Vec::new());
-        };
-        let mut scopes = Vec::new();
-        for scope in inner.custody_scopes(now()?)? {
-            if scope.domain == domain
-                && inner.partitioned(scope)
-                && inner.partitions.contains_key(&scope)
-                && inner.opening_keys().any(|key| key.scope == scope)
-                && !inner.holds(scope).await?
-            {
-                scopes.push(scope);
-            }
-        }
-        Ok(scopes)
-    }
     /// The placement requests this replica wants answered. A receiver
     /// revalidates every request; a moved authority or tip ends the listing
     /// early with what it found, and the next pass asks again.
@@ -686,50 +656,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
-        proved: &BTreeSet<ResourceScope>,
         request: PlacementRequest,
     ) -> Result<PlacementPage, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .placement_page(peer, credentials, proved, request)
+            .placement_page(peer, credentials, request)
             .await
     }
-    /// Stores a peer's answer to `request`; a page the peer could not
-    /// answer without showing a partition marks its positions as needing
-    /// that partition's custody.
+    /// Stores a peer's answer to `request`.
     pub async fn receive_placements(
         &self,
         request: PlacementRequest,
         page: PlacementPage,
     ) -> Result<usize, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        match page {
-            PlacementPage::Headers { headers, chains } => {
-                let stored = inner.receive_placements(request, headers, chains).await?;
-                if stored > 0 {
-                    inner.publish_revision().await?;
-                }
-                Ok(stored)
-            }
-            PlacementPage::CustodyRequired => {
-                let domain = inner
-                    .graphs
-                    .iter()
-                    .find_map(|(domain, graph)| {
-                        graph.seal_by_id(request.seal).ok().map(|_| *domain)
-                    })
-                    .ok_or_else(|| denied("unknown seal"))?;
-                let mut blocked = inner
-                    .custody_required
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for sequence in request.from..=request.to {
-                    blocked.insert((domain, request.author, sequence));
-                }
-                Ok(0)
-            }
+        let stored = inner
+            .receive_placements(request, page.headers, page.chains)
+            .await?;
+        if stored > 0 {
+            inner.publish_revision().await?;
         }
+        Ok(stored)
     }
     /// Pairs of different signed headers seen at one node position.
     pub async fn equivocations(&self) -> Result<usize, Error> {

@@ -163,7 +163,8 @@ impl<A: RowApplication> Inner<A> {
                     || application
                         .row_partition(&write.change)
                         .map_err(|error| denied(&error))?
-                        != operation.header.extensions.partition
+                        .as_ref()
+                        != self.authenticated_partition(scope)?
                 {
                     return Err(denied("held row/field transition denied"));
                 }

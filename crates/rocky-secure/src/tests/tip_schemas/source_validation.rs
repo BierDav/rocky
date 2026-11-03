@@ -60,6 +60,7 @@ pub(in crate::tests) fn reseal(
             operation.header.timestamp,
         ),
         operation.header.previous.clone(),
+        None,
         &plaintext,
     )
     .unwrap()

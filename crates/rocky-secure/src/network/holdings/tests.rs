@@ -44,7 +44,11 @@ async fn an_unshared_partition_does_not_end_held_recovery_of_other_scopes() {
     for value in [1, 2] {
         for replica in [&client, &server] {
             replica
-                .register_partition(f.scope("customers", value), f.tuple("customers", value))
+                .register_partition(
+                    f.scope("customers", value),
+                    f.tuple("customers", value),
+                    crate::tests::PARTITION_NAME,
+                )
                 .await
                 .unwrap();
         }
@@ -74,7 +78,7 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
     let scope = f.scope("customers", 1);
     for replica in [&client, &server] {
         replica
-            .register_partition(scope, f.tuple("customers", 1))
+            .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
             .await
             .unwrap();
         replica.install_key(f.key("customers", 1)).await.unwrap();
@@ -191,7 +195,7 @@ async fn transcript_case(custody: bool) {
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
     let scope = f.scope("customers", 1);
     server
-        .register_partition(scope, f.tuple("customers", 1))
+        .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
         .await
         .unwrap();
     if !custody {
@@ -204,7 +208,7 @@ async fn transcript_case(custody: bool) {
     // open, so there the member must not know it.
     if !custody {
         member
-            .register_partition(scope, f.tuple("customers", 1))
+            .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
             .await
             .unwrap();
     }
@@ -341,7 +345,7 @@ async fn retained_siblings_and_previous_generations_prove_but_fresh_peers_refuse
     let scope = f.scope("customers", 1);
     for replica in [&retained, &fresh, &member] {
         replica
-            .register_partition(scope, f.tuple("customers", 1))
+            .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
             .await
             .unwrap();
     }
@@ -469,7 +473,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
                 scope,
                 logs: vec![],
             }],
-            partitions: vec![(scope, f.tuple("customers", 1))],
+            partitions: vec![(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)],
             proofs: vec![(
                 scope,
                 vec![HoldingProof {
@@ -509,7 +513,11 @@ async fn frontier_acknowledgments_require_proved_custody() {
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
     f.keys(&writer, 1, &["customers"]).await;
     member
-        .register_partition(f.scope("customers", 1), f.tuple("customers", 1))
+        .register_partition(
+            f.scope("customers", 1),
+            f.tuple("customers", 1),
+            crate::tests::PARTITION_NAME,
+        )
         .await
         .unwrap();
     f.insert(&writer, 1, &["customers"], [1; 32]).await;
@@ -631,7 +639,7 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
     let scope = f.scope("customers", 1);
     server
-        .register_partition(scope, f.tuple("customers", 1))
+        .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
         .await
         .unwrap();
     server.install_key(f.key("products", 0)).await.unwrap();
@@ -662,7 +670,7 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     // A custodian that proves the tuple imports it, by either offer.
     let custodian = open(&f, root.path(), "custodian.db", &[Right::Custody]).await;
     custodian
-        .register_partition(scope, f.tuple("customers", 1))
+        .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
         .await
         .unwrap();
     crate::tests::exchange_graphs(&server, &custodian, f.domain).await;

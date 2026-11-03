@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 21;
+pub const VERSION: u32 = 22;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -60,6 +60,31 @@ const MAX_MESSAGE: usize = 3 * rocky_credentials::MAX_REVOCATION_SET_BYTES;
 const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
 pub(crate) const EPOCHS: &[u8] = b"rocky.sdk.epochs.v1\n";
+/// The naming root an enrollment of `profile` carries: an issuer's only.
+pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<String>, Failure> {
+    if !profile.issues() {
+        return Ok(None);
+    }
+    Ok(Some(
+        HEXLOWER.encode(
+            &vault
+                .find(crate::groups::NAMING_ROLE)?
+                .ok_or("this issuer holds no partition naming root")?,
+        ),
+    ))
+}
+/// Stores the naming root an issuer's enrollment carried.
+pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Failure> {
+    let root = hex32(naming.ok_or("an issuer enrollment carries the partition naming root")?)?;
+    if vault
+        .find(crate::groups::NAMING_ROLE)?
+        .is_some_and(|held| held != root)
+    {
+        return Err("a different partition naming root is held".into());
+    }
+    vault.put(crate::groups::NAMING_ROLE, &root)?;
+    Ok(())
+}
 pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
 /// A new node of an identity asks a node of the same identity for it.
 pub(crate) const IDENTITY: &[u8] = b"rocky.sdk.identity.v1\n";
@@ -282,7 +307,7 @@ impl Revoking {
         partition.members.iter().any(|member| {
             self.partitions.iter().any(|grant| {
                 grant
-                    .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                    .resolve(member.scope, &member.tuple)
                     .ok()
                     .flatten()
                     .is_some()
@@ -398,6 +423,8 @@ struct Enrollment {
     keys: Keys,
     groups: Vec<GroupDelivery>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
+    /// The partition naming root, hex, for an issuer only.
+    naming: Option<String>,
     /// The enrolling issuer's node key, which sync sessions pin.
     issuer: PublicKey,
     /// The issuer links `capability` follows; empty when the owner signed.
@@ -853,12 +880,7 @@ impl Settings {
                 extended
                     .partitions
                     .iter()
-                    .filter_map(|grant| {
-                        grant
-                            .resolve(scope.domain, scope.table, tuple)
-                            .ok()
-                            .flatten()
-                    })
+                    .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
                     .collect()
             })
             .unwrap_or_default()
@@ -1202,6 +1224,7 @@ impl Settings {
         vault.create("node")?;
         vault.create("transport")?;
         vault.create("credential")?;
+        vault.create(crate::groups::NAMING_ROLE)?;
         let (mesh, domain) = (MeshId(random()), DomainId(random()));
         let bound = Domain::new(schema, *publisher.as_bytes(), mesh, domain)?;
         crate::mesh::create_root(
@@ -1473,7 +1496,7 @@ impl Settings {
                         });
                     selected
                         && grant
-                            .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                            .resolve(member.scope, &member.tuple)
                             .ok()
                             .flatten()
                             .is_some_and(|grant| {
@@ -1499,6 +1522,7 @@ impl Settings {
                         record.address,
                         epoch.generation,
                         vault.get(&role)?,
+                        record.name,
                         node,
                         self.epoch_statements
                             .get(&role)
@@ -1544,7 +1568,11 @@ impl Settings {
                     return Err("group renewal epoch mismatch".into());
                 }
                 // The enrollment or renewal carrying it is the issuer's.
-                let secret = envelope.open(&node, envelope.issuer(), offered.address, epoch)?;
+                let (secret, name) =
+                    envelope.open(&node, envelope.issuer(), offered.address, epoch)?;
+                if name != offered.name {
+                    return Err("group renewal names the partition differently".into());
+                }
                 record.admit(epoch)?;
                 let role = secret_role(&record.address, epoch);
                 if vault.find(&role)?.is_some_and(|held| held != secret) {
@@ -1576,12 +1604,13 @@ impl Settings {
         retained: &[(
             rocky_core::ResourceScope,
             rocky_core::PartitionTuple,
+            rocky_core::PartitionName,
             Vec<rocky_core::KeyEpoch>,
         )],
     ) -> Result<bool, Failure> {
         let logical = domain.logical();
         let mut recovered = false;
-        for (scope, tuple, epochs) in retained {
+        for (scope, tuple, name, epochs) in retained {
             let Some(table) = logical
                 .partition_groups()?
                 .into_iter()
@@ -1602,7 +1631,10 @@ impl Settings {
                         .value()?)
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
-            let resolved = GroupPartition::resolve(domain, None, Some(&table.sql_name), values)?;
+            let resolved =
+                GroupPartition::resolve(domain, None, Some(&table.sql_name), values, |_| {
+                    Ok(*name)
+                })?;
             if resolved.members.iter().all(|member| member.scope != *scope)
                 || resolved
                     .members
@@ -1853,8 +1885,9 @@ impl Settings {
             registry.get(&request.node),
         )?;
         let enrollment = Enrollment {
-            format: 2,
+            format: 3,
             groups: self.groups_for(vault, request.node, &issued.capability, false)?,
+            naming: naming_for(vault, &profile)?,
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
             mesh: self.mesh,
             domain: self.domain,
@@ -2575,7 +2608,7 @@ impl Joining {
         let sealed = exchange(transport, &addresses, Protocol::Pair, &request.to_bytes()?).await?;
         let enrollment: Enrollment =
             serde_json::from_slice(&open_enrollment(&token, &request, &sealed)?)?;
-        if enrollment.format != 2 {
+        if enrollment.format != 3 {
             return Err("unsupported enrollment format".into());
         }
         enrollment.record.bytes()?;
@@ -2669,6 +2702,7 @@ impl Joining {
         if settings.profile.issues() {
             // Issuer authority is the capability's; no key travels.
             settings.authority = Some(Issuing::default());
+            hold_naming(&vault, enrollment.naming.as_deref())?;
             // Tombstones start with every statement already held.
             settings.learn_revocations(&RevocationSet::new())?;
             if enrollment.capability.capability.authors()? != enrollment.authors {

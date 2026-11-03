@@ -81,7 +81,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[tokio::test]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..46).chain([47]) {
+    for version in (0..47).chain([48]) {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -269,7 +269,6 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         author_sequence: 0,
         row_format: crate::wire::ROW_FORMAT,
         births: Vec::new(),
-        partition: None,
     };
     for (envelope_version, body_version, message) in [
         (0, 5, "unsupported creation witness format"),
@@ -302,6 +301,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
             &[11; 32],
             (0, None, 1),
             vec![],
+            None,
             &plaintext,
         )
         .unwrap();

@@ -403,11 +403,14 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         let c = enrolled_schema(&root.path().join("c"), &hub, "c", Some((&a, reader)), &schema).await?;
         let d = enrolled_schema(&root.path().join("d"), &hub, "d", Some((&a, Profile::Custody { scopes: ["items".into()].into() })), &schema).await?;
         let values = json!([{"type":"text","value":"only-custody"}]);
-        command(&a, json!({"type":"partition_create","table":"items","values":values})).await?;
+        let created = command(&a, json!({"type":"partition_create","table":"items","values":values})).await?;
         let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
         let shared = command(&a, json!({"type":"partition_share","table":"items","values":values,"recipients":[b_key]})).await?;
         command(&b, json!({"type":"partition_install","table":"items","values":values,"envelope":shared["envelopes"][0]["envelope"],"sender":shared["sender"]})).await?;
-        command(&d, json!({"type":"partition_register","table":"items","values":values})).await?;
+        // A keyless custodian cannot name the partition itself; an
+        // entitled device hands it the name.
+        assert!(command(&d, json!({"type":"partition_register","table":"items","values":values})).await.is_err());
+        command(&d, json!({"type":"partition_register","table":"items","values":values,"name":created["name"]})).await?;
         command(&a, json!({"type":"sql","sql":"BEGIN"})).await?;
         let id = command(&a, json!({"type":"next_id","table":"items","partition_values":values})).await?["id"].clone();
         command(&a, json!({"type":"sql","sql":"INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)","values":[{"type":"integer","value":id}]})).await?;

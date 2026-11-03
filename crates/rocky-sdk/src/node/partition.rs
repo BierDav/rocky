@@ -5,9 +5,26 @@ use crate::groups::{GroupPartition, record_key, secret_role};
 use rocky_core::{PartitionTuple, TableClass};
 use rocky_credentials::{GroupSecretEnvelope, PartitionGrant};
 use std::collections::BTreeSet;
+/// How a request names a group partition's scopes.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Naming {
+    /// Only a partition this device knows: its record holds the name.
+    Known,
+    /// One this device creates: `groups::naming_key` names it.
+    Create,
+    /// The name an envelope sealed.
+    Sealed(rocky_core::PartitionName),
+}
 impl Node {
-    fn group_partition(&self, request: &Value) -> Result<GroupPartition, Failure> {
+    async fn group_partition(
+        &self,
+        request: &Value,
+        naming: Naming,
+    ) -> Result<GroupPartition, Failure> {
         let values: Vec<Cell> = serde_json::from_value(request["values"].clone())?;
+        let known = self.settings.lock().await.groups.clone();
+        let naming_key = crate::groups::naming_key(&self.vault)?;
+        let issuer = self.vault.find(crate::groups::NAMING_ROLE)?.is_some();
         GroupPartition::resolve(
             &self.domain(),
             request["group"].as_str(),
@@ -16,9 +33,62 @@ impl Node {
                 .into_iter()
                 .map(Cell::sql)
                 .collect::<Result<_, _>>()?,
+            |address| match known.get(&record_key(address)) {
+                Some(record) => Ok(record.name),
+                None if let Naming::Sealed(name) = naming => Ok(name),
+                // Issuers name every partition an issuer creates alike.
+                None if naming == Naming::Create || issuer => {
+                    Ok(rocky_secure::created_name(&naming_key, address))
+                }
+                None => Err(refused(
+                    "this device does not know the partition: its group secret or a custody offer names it",
+                )),
+            },
         )
     }
-    pub(super) fn partition_address(
+    /// A requested partition this device does not know; its scopes stay
+    /// unnamed and must not be used.
+    async fn unknown_partition(&self, request: &Value) -> Result<Option<GroupPartition>, Failure> {
+        let values: Vec<Cell> = serde_json::from_value(request["values"].clone())?;
+        let unnamed = GroupPartition::resolve(
+            &self.domain(),
+            request["group"].as_str(),
+            request["table"].as_str(),
+            values
+                .into_iter()
+                .map(Cell::sql)
+                .collect::<Result<_, _>>()?,
+            |_| Ok([0; 32]),
+        )?;
+        let known = self
+            .settings
+            .lock()
+            .await
+            .groups
+            .contains_key(&record_key(&unnamed.record.address));
+        Ok((!known).then_some(unnamed))
+    }
+    /// The partition's naming secret an envelope seals, opened as
+    /// `install_envelope` opens it.
+    pub(super) async fn envelope_name(
+        &self,
+        envelope: &GroupSecretEnvelope,
+        sender: Option<&CredentialChain>,
+    ) -> Result<rocky_core::PartitionName, Failure> {
+        let signer = match sender {
+            None => self.settings.lock().await.publisher,
+            Some(_) => envelope.issuer(),
+        };
+        Ok(envelope
+            .open(
+                &PrivateKey::from_bytes(&self.vault.get("node")?),
+                signer,
+                envelope.group(),
+                envelope.epoch(),
+            )?
+            .1)
+    }
+    pub(super) async fn partition_address(
         &self,
         request: &Value,
     ) -> Result<(ResourceScope, PartitionTuple), Failure> {
@@ -30,8 +100,12 @@ impl Node {
             .table(name)
             .filter(|table| table.class == TableClass::Replayed && !table.partition_by.is_empty())
             .ok_or("table is not partitioned")?;
-        let partition =
-            self.group_partition(&json!({"table": name, "values": request["values"]}))?;
+        let partition = self
+            .group_partition(
+                &json!({"table": name, "values": request["values"]}),
+                Naming::Known,
+            )
+            .await?;
         let member = partition.member(name).ok_or("table is not partitioned")?;
         Ok((member.scope, member.tuple.clone()))
     }
@@ -76,7 +150,7 @@ impl Node {
                 continue;
             }
             self.replica
-                .register_partition(member.scope, member.tuple.clone())
+                .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                 .await?;
             for epoch in partition.record.epochs.iter().rev() {
                 self.replica
@@ -209,7 +283,11 @@ impl Node {
         self.hold_keys(&settings, &partition).await?;
         // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
-        Ok(json!({"address": record_key(&record.address), "epoch": epoch}))
+        Ok(json!({
+            "address": record_key(&record.address),
+            "epoch": epoch,
+            "name": data_encoding::HEXLOWER.encode(&record.name),
+        }))
     }
     /// Accepts one group envelope after it opens and the device reads every
     /// member in whole; only then is anything registered or stored. Returns
@@ -246,12 +324,15 @@ impl Node {
                 signer
             }
         };
-        let secret = envelope.open(
+        let (secret, name) = envelope.open(
             &PrivateKey::from_bytes(&self.vault.get("node")?),
             signer,
             partition.record.address,
             epoch,
         )?;
+        if name != partition.record.name {
+            return Err(refused("the envelope names the partition differently"));
+        }
         self.reads_group(&settings, &partition)?;
         let key = record_key(&partition.record.address);
         let mut record = settings
@@ -378,6 +459,7 @@ impl Node {
                 record.address,
                 epoch.generation,
                 secret,
+                record.name,
                 *recipient,
                 statements.clone(),
             )?;
@@ -492,28 +574,45 @@ impl Node {
                 return self.issue_partitions(kind, request).await;
             }
             "partition_address" => {
-                let (scope, tuple) = self.partition_address(request)?;
-                let partition = self.group_partition(request)?;
+                let (scope, tuple) = self.partition_address(request).await?;
+                let partition = self.group_partition(request, Naming::Known).await?;
                 return Ok(json!({
                     "scope": scope,
                     "tuple": tuple,
                     "group": partition.record.group,
                     "address": record_key(&partition.record.address),
+                    "name": data_encoding::HEXLOWER.encode(&partition.record.name),
                 }));
             }
             "partition_complete" => {
-                let (scope, _) = self.partition_address(request)?;
-                return Ok(json!({"complete": self.replica.table_complete(scope.table).await?}));
+                let name = request["table"]
+                    .as_str()
+                    .ok_or("partition table must be a string")?;
+                let logical = self.domain().logical().clone();
+                let table = logical
+                    .table(name)
+                    .filter(|table| !table.partition_by.is_empty())
+                    .ok_or("table is not partitioned")?;
+                let id = logical.table_id(table);
+                return Ok(json!({"complete": self.replica.table_complete(id).await?}));
             }
             "partition_next" => {
                 let table = request["table"]
                     .as_str()
                     .ok_or("partition table must be a string")?;
-                let identity = self.replica.next_partition_identity(table).await?;
-                let partition = self.group_partition(&json!({
-                    "table": table,
-                    "values": [{"type": "integer", "value": identity.to_string()}],
-                }))?;
+                let identity = self
+                    .replica
+                    .next_partition_identity(table, &crate::groups::naming_key(&self.vault)?)
+                    .await?;
+                let partition = self
+                    .group_partition(
+                        &json!({
+                            "table": table,
+                            "values": [{"type": "integer", "value": identity.to_string()}],
+                        }),
+                        Naming::Create,
+                    )
+                    .await?;
                 let (scope, _) = partition
                     .member(table)
                     .map(|member| (member.scope, ()))
@@ -531,7 +630,55 @@ impl Node {
             }
             _ => {}
         }
-        let partition = self.group_partition(request)?;
+        let naming = match kind {
+            "partition_create" => Naming::Create,
+            "partition_install" => {
+                let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
+                let sender: CredentialChain = serde_json::from_value(request["sender"].clone())
+                    .map_err(|_| refused("an envelope installs with its sender's chain"))?;
+                let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
+                Naming::Sealed(self.envelope_name(&envelope, Some(&sender)).await?)
+            }
+            // An entitled device may hand a keyless custodian the name.
+            _ => match request["name"].as_str() {
+                Some(name) => Naming::Sealed(
+                    data_encoding::HEXLOWER
+                        .decode(name.as_bytes())?
+                        .try_into()
+                        .map_err(|_| refused("a partition name is 32 bytes"))?,
+                ),
+                None => Naming::Known,
+            },
+        };
+        if matches!(
+            kind,
+            "partition_status" | "partition_evict" | "partition_unsubscribe"
+        ) && let Some(unknown) = self.unknown_partition(request).await?
+        {
+            // Nothing of a partition this device cannot name is held here.
+            return Ok(match kind {
+                "partition_status" => json!({
+                    "group": unknown.record.group,
+                    "address": record_key(&unknown.record.address),
+                    "current": null,
+                    "epochs": [],
+                    "tables": unknown
+                        .members
+                        .iter()
+                        .map(|member| json!({
+                            "table": member.table,
+                            "epochs": [],
+                            "current": null,
+                            "holding": null,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "recipients": [],
+                }),
+                "partition_evict" => json!({"rows": 0, "operations": 0}),
+                _ => json!({}),
+            });
+        }
+        let partition = self.group_partition(request, naming).await?;
         let named = json!({"group": request["group"], "values": request["values"]});
         let omit: BTreeSet<String> = match &request["omit"] {
             Value::Null => BTreeSet::new(),
@@ -568,7 +715,11 @@ impl Node {
             "partition_register" => {
                 for member in partition.covered(&omit).map_err(refused)? {
                     self.replica
-                        .register_partition(member.scope, member.tuple.clone())
+                        .register_partition(
+                            member.scope,
+                            member.tuple.clone(),
+                            partition.record.name,
+                        )
                         .await?;
                 }
                 self.know(&partition).await?;
@@ -622,7 +773,7 @@ impl Node {
         let covered = partition.covered(omit).map_err(refused)?;
         for member in &covered {
             self.replica
-                .register_partition(member.scope, member.tuple.clone())
+                .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                 .await?;
         }
         self.know(partition).await?;

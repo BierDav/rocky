@@ -100,8 +100,8 @@ mod partition_groups;
 pub use partition_groups::{GroupAddress, PartitionGroup};
 mod partition;
 pub use partition::{
-    MAX_PARTITION_BYTES, PartitionError, PartitionSelection, PartitionSelector, PartitionTuple,
-    PartitionValue,
+    MAX_PARTITION_BYTES, PartitionError, PartitionName, PartitionSelection, PartitionSelector,
+    PartitionTuple, PartitionValue, keyed_commitment,
 };
 mod permissions;
 pub use permissions::*;

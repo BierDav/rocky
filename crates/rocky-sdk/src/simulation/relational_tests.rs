@@ -161,6 +161,20 @@ mod regressions {
         assert!(failure(&report).is_none(), "{}", report.dump());
         Ok(())
     }
+    /// Every member reaches quiescence: nothing stays waiting.
+    async fn finalizes(seed: u64, steps: Vec<Action>) -> Result<(), Failure> {
+        let report = simulate(seed, INTEGRATION, steps).await?;
+        assert!(report.liveness.is_none(), "{}", report.dump());
+        assert!(
+            report
+                .safety
+                .as_ref()
+                .is_none_or(|safety| safety.starts_with("at quiescence")),
+            "{}",
+            report.dump()
+        );
+        Ok(())
+    }
 
     /// Seed 2: b's board collides with a's code, so it drops where it
     /// replays after a's seal, and b's card on it drops with it.
@@ -374,13 +388,14 @@ mod regressions {
     }
 
     /// Seed 20000: c joins holding only `l1` after the owner wrote in `l0`.
-    /// Open: c never finalizes the final seal, waiting for "missing frames
-    /// of author 1 through the seal's frontier", the owner's `l0` frames
-    /// c holds no key for.
+    /// c places the owner's `l0` positions by their signed headers, which
+    /// name `l0` only by its keyed scope, and finalizes the final seal.
+    /// Reaching quiescence then shows b's outcome of the step missing after
+    /// a base, the separately triaged base class, so only finalization is
+    /// asserted here.
     #[tokio::test(start_paused = true)]
-    #[ignore = "open defect: a member holding one list waits for another's positions"]
     async fn a_member_holding_one_list_finalizes_seals_over_another() -> Result<(), Failure> {
-        holds(
+        finalizes(
             20000,
             vec![
                 Change(

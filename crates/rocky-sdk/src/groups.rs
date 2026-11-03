@@ -22,6 +22,9 @@ pub struct GroupRecord {
     /// Canonical slot values in declaration order.
     pub values: Vec<PartitionValue>,
     pub address: Commitment,
+    /// The partition's naming secret: it keys every member's scope, so
+    /// only holders and custodians can compute or recognize those scopes.
+    pub name: rocky_core::PartitionName,
     /// Secret epochs held, ascending; empty for an address registered
     /// without a key.
     pub epochs: Vec<rocky_core::KeyEpoch>,
@@ -47,6 +50,18 @@ impl GroupRecord {
             self.epochs.sort_unstable();
         }
         Ok(())
+    }
+}
+/// The vault role of the domain's partition naming root. Only issuers,
+/// the domain's partition authorities, hold it: independent issuers
+/// creating one partition name it alike.
+pub(crate) const NAMING_ROLE: &str = "partition-naming";
+/// The key this device names partitions it creates with: the naming root
+/// on an issuer, so every issuer names them alike, else its node key.
+pub(crate) fn naming_key(vault: &Vault) -> Result<[u8; 32], Failure> {
+    match vault.find(NAMING_ROLE)? {
+        Some(root) => Ok(root),
+        None => Ok(vault.get("node")?),
     }
 }
 pub(crate) fn record_key(address: &Commitment) -> String {
@@ -79,12 +94,14 @@ pub(crate) struct GroupPartition {
     pub members: Vec<Member>,
 }
 impl GroupPartition {
-    /// Resolves a group, or the group of `table`, at positional values.
+    /// Resolves a group, or the group of `table`, at positional values;
+    /// `name` gives the naming secret of the group address.
     pub fn resolve(
         domain: &Domain,
         group: Option<&str>,
         table: Option<&str>,
         values: Vec<SqlValue>,
+        name: impl FnOnce(&Commitment) -> Result<rocky_core::PartitionName, Failure>,
     ) -> Result<Self, Failure> {
         let logical = domain.logical();
         let groups = logical.partition_groups()?;
@@ -102,6 +119,7 @@ impl GroupPartition {
         let first = found.tables.first().ok_or("empty partition group")?;
         let address = logical.group_address(domain.scope, &first.sql_name, &values)?;
         let record = GroupRecord {
+            name: name(&address.commitment)?,
             group: address.group,
             values: address.values,
             address: address.commitment,
@@ -148,7 +166,7 @@ impl GroupPartition {
                 )?;
                 Ok(Member {
                     table: table.sql_name.clone(),
-                    scope: tuple.scope(domain.scope, logical.table_id(table))?,
+                    scope: tuple.scope(domain.scope, logical.table_id(table), &record.name)?,
                     tuple,
                     parents: table
                         .foreign_keys

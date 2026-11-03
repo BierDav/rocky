@@ -624,11 +624,7 @@ impl<A: RowApplication> Inner<A> {
                 let source: MoveSource = decode(&bytes)?;
                 if source.scope != key.scope
                     || source.generation != key.generation
-                    || source
-                        .tuple
-                        .scope(source.scope.domain, source.scope.table)
-                        .ok()
-                        != Some(source.scope)
+                    || self.partitions.get(&source.scope) != Some(&source.tuple)
                     || source.scope.table != destination.table
                 {
                     return Err(denied("move source differs from authenticated key"));

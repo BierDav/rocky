@@ -417,12 +417,7 @@ impl SignedCheckpoint {
         if statement.format != CHECKPOINT_FORMAT {
             return Err(denied("unsupported checkpoint format"));
         }
-        if statement.partition.as_ref().is_some_and(|tuple| {
-            tuple
-                .scope(statement.scope.domain, statement.scope.table)
-                .ok()
-                != Some(statement.scope)
-        }) || statement.identities.len() > MAX_CHECKPOINT_LOGS
+        if statement.identities.len() > MAX_CHECKPOINT_LOGS
             || statement
                 .identities
                 .windows(2)
@@ -456,10 +451,11 @@ impl SignedCheckpoint {
     ) -> Result<(), Error> {
         self.verify_signature()?;
         inner.admits(inner.manifest_of_tip(self.statement.tip)?)?;
-        inner.check_authenticated_partition(
-            self.statement.scope,
-            self.statement.partition.as_ref(),
-        )?;
+        // Only the registry binds a tuple to its keyed scope.
+        if inner.authenticated_partition(self.statement.scope)? != self.statement.partition.as_ref()
+        {
+            return Err(denied("checkpoint partition differs from its keyed scope"));
+        }
         let grants = self.checkpoint_grants(
             inner.config.publisher,
             inner.revocations_for(
@@ -1623,13 +1619,7 @@ impl<A: RowApplication> Inner<A> {
                 };
                 if restoration.is_some() {
                     let checked = async {
-                        self.check_write(
-                            &write,
-                            scope,
-                            &mut changed,
-                            operation.header.extensions.partition.clone(),
-                        )
-                        .await?;
+                        self.check_write(&write, scope, &mut changed).await?;
                         self.app
                             .validate_changes(std::slice::from_ref(&write.change))
                             .map_err(|message| denied(&message))?;
@@ -1667,7 +1657,8 @@ impl<A: RowApplication> Inner<A> {
                         .app
                         .row_partition(&live.change)
                         .map_err(|error| denied(&error))?
-                        != operation.header.extensions.partition
+                        .as_ref()
+                        != self.authenticated_partition(scope)?
                 {
                     return Err(denied("replayed row differs from its partition"));
                 }

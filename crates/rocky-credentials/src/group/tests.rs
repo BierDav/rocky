@@ -68,7 +68,7 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
     let next = rocky_core::KeyEpoch::new(2, &[7; 32]);
     let recipients = [alice.public_key(), bob.public_key()].into();
     let envelopes =
-        GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], &recipients).unwrap();
+        GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], [8; 32], &recipients).unwrap();
     assert_eq!(envelopes.len(), 2);
     for recipient in [&alice, &bob] {
         let envelope = envelopes
@@ -81,7 +81,7 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
             |key: &PrivateKey, by: PublicKey, group, epoch| decoded.open(key, by, group, epoch);
         assert_eq!(
             open(recipient, issuer.public_key(), group, epoch).unwrap(),
-            [7; 32]
+            ([7; 32], [8; 32])
         );
         assert!(open(&outsider, issuer.public_key(), group, epoch).is_err());
         assert!(open(recipient, outsider.public_key(), group, epoch).is_err());
@@ -114,12 +114,17 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
         truncated.signature = issuer.sign(&signing_bytes(SIGNED, &truncated.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&truncated.to_bytes().unwrap()).is_err());
         let mut versioned = decoded.clone();
-        versioned.body.version = 2;
+        versioned.body.version = 3;
         versioned.signature = issuer.sign(&signing_bytes(SIGNED, &versioned.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&versioned.to_bytes().unwrap()).is_err());
     }
     assert_ne!(envelopes[0].body.ephemeral, envelopes[1].body.ephemeral);
-    assert!(GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], &BTreeSet::new()).is_err());
-    assert!(GroupSecretEnvelope::seal(&issuer, group, 0, [7; 32], alice.public_key()).is_err());
+    assert!(
+        GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], [8; 32], &BTreeSet::new())
+            .is_err()
+    );
+    assert!(
+        GroupSecretEnvelope::seal(&issuer, group, 0, [7; 32], [8; 32], alice.public_key()).is_err()
+    );
     assert!(GroupSecretEnvelope::from_bytes(&[0; 5000]).is_err());
 }

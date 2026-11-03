@@ -1,4 +1,6 @@
 use super::*;
+/// The naming secret test partitions share; scopes still key over the tuple.
+pub(crate) const PARTITION_NAME: rocky_core::PartitionName = [0x5a; 32];
 use employees_app::Employees;
 use rocky_core::{
     Commitment, FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right,

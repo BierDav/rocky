@@ -302,6 +302,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Vec<(
             ResourceScope,
             rocky_core::PartitionTuple,
+            rocky_core::PartitionName,
             Vec<rocky_core::KeyEpoch>,
         )>,
         Error,
@@ -323,7 +324,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             epochs.sort_unstable();
             epochs.dedup();
-            retained.push((*scope, tuple.clone(), epochs));
+            let name = *inner
+                .partition_names
+                .get(scope)
+                .ok_or_else(|| Error::Corrupt("partition name".into()))?;
+            retained.push((*scope, tuple.clone(), name, epochs));
         }
         Ok(retained)
     }

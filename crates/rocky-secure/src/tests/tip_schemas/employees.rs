@@ -52,12 +52,13 @@ async fn employees_held_originals_keep_callbacks_and_the_current_acl_guard() {
         .await
         .unwrap();
     let operation = original.operation_ref().unwrap();
-    let bytes = crate::wire::decrypt(
+    let bytes = crate::wire::Opened::open(
         &[11; 32],
-        &encode(&operation.header.extensions).unwrap(),
+        &operation.header.extensions,
         original.body_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .payload;
     let payload = crate::wire::RowPayload::decode_test(&bytes, &original, &f.app()).unwrap();
     let mut writes = payload.writes().to_vec();
     writes[0]

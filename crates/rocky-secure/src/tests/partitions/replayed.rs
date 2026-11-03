@@ -70,12 +70,13 @@ async fn records(
 }
 
 fn payload(frame: &EncryptedFrame, key: [u8; 32], f: &Fixture) -> crate::wire::RowPayload {
-    let plaintext = crate::wire::decrypt(
+    let plaintext = crate::wire::Opened::open(
         &key,
-        &encode(&frame.operation_ref().unwrap().header.extensions).unwrap(),
+        &frame.operation_ref().unwrap().header.extensions,
         frame.body_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .payload;
     crate::wire::RowPayload::decode_test(&plaintext, frame, &f.app()).unwrap()
 }
 

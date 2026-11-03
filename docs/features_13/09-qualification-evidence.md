@@ -518,7 +518,8 @@ points, and the `board_cap` assertion bounds a board's points.
     partitions the node has a whole grant and key for but does not hold,
     so the peer shows their headers instead of `CustodyRequired`.
     `an_eviction_before_the_list_arrives_finalizes` (fails without either
-    part).
+    part). The proving step and `CustodyRequired` are gone since blinded
+    scopes (below).
   - **Evicting a partition whose tuple never arrived** (seed 20033, the
     old seed 1 class). `clear_replayed` refused it as corrupt ("replayed
     scope") after the eviction had started. Such a partition holds no
@@ -547,24 +548,49 @@ points, and the `board_cap` assertion bounds a board's points.
     The refused frames still change nothing.
   - Formats: no wire or checkpoint change; replica format stays
     `rocky.encrypted-replica.v43`.
+- **Blinded partition scopes** (seed 20000, `rocky-core`,
+  `rocky-credentials`, `rocky-secure`, `rocky-sdk`). c holds only `l1`;
+  the owner's seal frontier covers `l0` positions, and a placement page
+  answered `CustodyRequired` because a frame header carried the plaintext
+  partition tuple. Option (a) alone would not hide it: the scope id
+  (`commitment(domain‖table‖tuple)`) was unkeyed, so anyone could confirm
+  a guessed tuple. The scope id is now keyed:
+  `PartitionTuple::scope` is HMAC-SHA256 (`rocky.partition-scope.v2`)
+  under a per-partition naming secret.
+  - The header no longer carries the tuple; the sealed body carries it
+    (`Opened { partition, payload }`) and a holder refuses a frame whose
+    opened tuple differs from the one its registry binds to the header's
+    scope ("sealed partition tuple differs from its keyed scope").
+  - Placements go to every domain member. A non-holder sees an opaque
+    scope id and checks the header only against the author's right to
+    write some partition of the table. `CustodyRequired` and the proving
+    step are gone.
+  - The naming secret is fixed for the partition's life and does not
+    rotate with key epochs, so logs and stored scopes are unchanged by a
+    rotation. It travels with the group secret (envelope v4 seals
+    secret‖name) and in custody offers (to entitled peers only).
+    Issuers derive created partitions' names from a domain naming root
+    (vault role `partition-naming`, held by the owner and issuers through
+    enrollment), so concurrent issuers creating one partition agree.
+    Non-issuers name their own-id partitions with their node key.
+  - Privacy: a non-holder can no longer learn or confirm a frame's
+    partition. Not hidden: positions of one partition share a scope id
+    (and an epoch's key hash), so they stay linkable; a revoked holder
+    keeps the name and still recognises the scope, but cannot read later
+    epochs; any issuer can name any issuer-created partition; creation
+    provenance (births) stays in the header.
+  - Tests: `a_member_holding_one_list_finalizes_seals_over_another`
+    (un-ignored; asserts finalization: it now reaches quiescence and
+    shows the base class below),
+    `an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope`
+    (replaces the custody test),
+    `a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused`,
+    `keyed_commitments_are_standard_hmac_sha256`.
+  - Formats: row format 16, `rocky.encrypted-replica.v47`, group secret
+    envelope v4, identity file version 22, enrollment and self-enrollment
+    bundle format 3, `secure_partitions(scope, tuple, name)`. Checkpoint
+    format and vectors unchanged.
 - **Open:**
-  - Seed 20000 (`#[ignore]`d,
-    `a_member_holding_one_list_finalizes_seals_over_another`): needs a
-    design decision. c holds only `l1`; the owner's seal frontier covers
-    its `l0` positions. A placement page shows a frame's signed header,
-    and the header carries the plaintext partition tuple
-    (`Extensions::partition`), so a peer answers `CustodyRequired` to a
-    requester that has not proved the partition (traced: every request
-    from c, author 1 positions 0..2). c can never place them. Options:
-    (a) move the tuple out of the signed header into the encrypted body
-    and sign a keyed commitment to it, so a placement shows "not your
-    scope" without the tuple (wire and frame format bump); (b) the seal
-    statement carries, per frontier position, a tag keyed by each scope's
-    key, so a holder recognises its own positions (seal format bump,
-    larger seals); (c) trust a peer's `CustodyRequired` as proof that the
-    position lies outside the requester's scopes (no format change, but a
-    member could make another finalize over a missing frame: weakens the
-    signed-evidence rule). Not decided here.
   - Missing or `Covered` outcomes after a base (67 seeds): left to the
     change making checkpoints carry the seal's drop list. Shown by seed
     20033 with a board written after the eviction: b holds `l8` again,
@@ -579,9 +605,10 @@ points, and the `board_cap` assertion bounds a board's points.
     audit seeds): `Evict(1,l0)`, `Change(0, Board{l0,1,6})`, `Invite(0,2)`,
     `Revoke(2)`; b's identity ledger differs from its rebuild. Not
     triaged further.
-  - `FinalizationWaiting` "missing frames of author N" (31 seeds): the
-    seed 20000 message; not traced per seed. 5 more seeds wait for a
-    seal rebootstrap or pending dependencies.
+  - `FinalizationWaiting` "missing frames of author N" (3 seeds after
+    blinded scopes: 20074, 20126, 20276; was 31): not traced. 20074
+    follows an invite refused with "unexpected end of file". 20151 waits
+    for a seal rebootstrap, 20083 on pending dependencies.
 - Soak (`ROCKY_SIM_SEEDS=300`, release, seeds 20000–20299, 3–4 nodes,
   40 steps; Apple M5 Pro, shared host). Before (main `dd4fc05f`, after
   the driver's era-only position comparison): 112 passed, 188 failed.
@@ -594,3 +621,10 @@ points, and the `board_cap` assertion bounds a board's points.
   - Era disagreements: 5.
   - Gone: `RestorationGuard` and refused `SyncRequest` (baseline 66
     seeds), the eviction "replayed scope" refusal.
+- Soak after blinded scopes (same seeds, chunks and host): 217 passed,
+  83 failed.
+  - Outcomes: `None` 60 seeds (b 37, c 23), `Some(Applied …)` 2: the base
+    class. Seeds that stopped short of quiescence before now reach it
+    and run the outcome checks, so this class grew; seed 20000 is one.
+  - Liveness: 5 seeds; 3 "missing frames of author N" (was 31).
+  - Audits: 10 (b 6, c 4). Era disagreements: 6.

@@ -14,7 +14,7 @@ pub(super) enum HoldingMessage {
     Prove {
         scopes: Vec<ResourceScope>,
         proofs: Vec<(ResourceScope, Vec<HoldingProof>)>,
-        partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
+        partitions: Vec<crate::replica::PartitionOffer>,
     },
     Proved {
         scopes: Vec<ResourceScope>,
@@ -52,7 +52,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
         proofs: &[(ResourceScope, Vec<HoldingProof>)],
-        partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+        partitions: &[crate::replica::PartitionOffer],
     ) -> Result<(), Error> {
         self.accept_proofs_for(replica, scopes, proofs, partitions, false)
             .await
@@ -62,7 +62,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
         proofs: &[(ResourceScope, Vec<HoldingProof>)],
-        partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+        partitions: &[crate::replica::PartitionOffer],
     ) -> Result<(), Error> {
         self.accept_proofs_for(replica, scopes, proofs, partitions, true)
             .await
@@ -72,7 +72,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
         proofs: &[(ResourceScope, Vec<HoldingProof>)],
-        partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+        partitions: &[crate::replica::PartitionOffer],
         link: bool,
     ) -> Result<(), Error> {
         let distinct: BTreeSet<_> = scopes.iter().copied().collect();
@@ -85,7 +85,7 @@ impl NativeSession {
             || scopes.len() > 64
             || distinct.len() != scopes.len()
             || !valid(proofs.iter().map(|(scope, _)| *scope).collect())
-            || !valid(partitions.iter().map(|(scope, _)| *scope).collect())
+            || !valid(partitions.iter().map(|(scope, ..)| *scope).collect())
             || proofs.iter().any(|(_, values)| values.len() > 4)
         {
             return Err(denied(HOLDING_DENIED));
@@ -96,7 +96,10 @@ impl NativeSession {
                 .iter()
                 .find(|(s, _)| s == scope)
                 .map_or(&[][..], |(_, p)| p.as_slice());
-            let tuple = partitions.iter().find(|(s, _)| s == scope).map(|(_, t)| t);
+            let tuple = partitions
+                .iter()
+                .find(|(s, ..)| s == scope)
+                .map(|(_, tuple, name)| (tuple, name));
             if replica
                 .verify_holding(
                     self.peer,
@@ -114,7 +117,7 @@ impl NativeSession {
         // Registration is only for tuples whose proof and grants verified.
         let offers: Vec<_> = partitions
             .iter()
-            .filter(|(scope, _)| accepted.contains(scope))
+            .filter(|(scope, ..)| accepted.contains(scope))
             .cloned()
             .collect();
         if link {
@@ -306,7 +309,7 @@ impl NativeSession {
 pub(super) fn prove_pages(
     scopes: &[ResourceScope],
     proofs: &[(ResourceScope, Vec<HoldingProof>)],
-    partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+    partitions: &[crate::replica::PartitionOffer],
 ) -> Result<Vec<HoldingMessage>, Error> {
     let mut result = Vec::new();
     let mut remaining = scopes;
@@ -323,7 +326,7 @@ pub(super) fn prove_pages(
                     .collect(),
                 partitions: partitions
                     .iter()
-                    .filter(|(scope, _)| batch.contains(scope))
+                    .filter(|(scope, ..)| batch.contains(scope))
                     .cloned()
                     .collect(),
             };

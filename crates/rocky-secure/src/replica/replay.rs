@@ -1513,7 +1513,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("an intent names a table that is not replayed"))?;
         // Each statement is checked and confined to the frame's own
         // partition again: a receiver runs only what its own split yields.
-        let held = match &header.extensions.partition {
+        let held = match self.authenticated_partition(scope)? {
             Some(tuple) => vec![super::partition::partition_values(schema, logical, tuple)?],
             None => Vec::new(),
         };
@@ -1634,7 +1634,9 @@ impl<A: RowApplication> Inner<A> {
             if own && !off_path.is_empty() {
                 keep_off_path(conn, captured, &touched, &off_path)?;
             }
-            let Some((change, image)) = replayed_change(conn, typed, captured, &touched)? else {
+            let Some((change, image)) =
+                replayed_change(conn, typed, &self.partitions, captured, &touched)?
+            else {
                 continue;
             };
             // A delete action follows from the parent's change, which the
@@ -1799,6 +1801,7 @@ fn keep_off_path(
 pub(super) fn replayed_change(
     conn: &sqlite::Connection,
     typed: &typed::Typed,
+    partitions: &BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     captured: &rocky_storage::capture::Table,
     touched: &rocky_storage::capture::Touched,
 ) -> Result<Option<(RowChange, Vec<SqlValue>)>, Error> {
@@ -1823,7 +1826,7 @@ pub(super) fn replayed_change(
             .map_err(|_| corrupt("fields"))
     };
     let change = RowChange {
-        scope: typed.row_scope(projected, anchor)?,
+        scope: typed.row_scope(projected, anchor, partitions)?,
         row: typed
             .rows
             .row_id(typed.domain.domain, &projected.table, anchor)

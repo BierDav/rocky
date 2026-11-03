@@ -1,10 +1,39 @@
 //! Concrete partition addresses and selector resolution (`docs/runtime/partitioned-scopes.md`).
+//! A partition's scope identity is keyed by its naming secret, so only its
+//! holders and custodians can compute or recognize it: this registry is
+//! the only way from a tuple to its scope.
 use super::*;
-use rocky_core::{PartitionSelection, PartitionTuple};
+use rocky_core::{PartitionName, PartitionSelection, PartitionTuple};
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_partitions(scope BLOB PRIMARY KEY,tuple BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_partitions(scope BLOB PRIMARY KEY,tuple BLOB NOT NULL,name BLOB NOT NULL) WITHOUT ROWID",
 ];
+
+/// A partition as one entitled peer reveals it to another: its keyed
+/// scope, tuple and naming secret.
+pub(crate) type PartitionOffer = (ResourceScope, PartitionTuple, PartitionName);
+
+pub(super) const UNREGISTERED_PARTITION: &str = "the partition is not registered here";
+/// The registered keyed scope of `tuple` in `table`: routing never derives
+/// one, since that takes the partition's naming secret.
+pub(super) fn registered_scope(
+    partitions: &BTreeMap<ResourceScope, PartitionTuple>,
+    domain: rocky_core::Scope,
+    table: Commitment,
+    tuple: &PartitionTuple,
+) -> Result<ResourceScope, Error> {
+    partitions
+        .iter()
+        .find(|(scope, known)| scope.domain == domain && scope.table == table && *known == tuple)
+        .map(|(scope, _)| *scope)
+        .ok_or_else(|| denied(UNREGISTERED_PARTITION))
+}
+
+/// The naming secret a creator keyed by `naming` gives the partition at
+/// `address`; a repeated preparation names the same scopes.
+pub fn created_name(naming: &[u8; 32], address: &Commitment) -> PartitionName {
+    rocky_core::keyed_commitment(naming, "rocky.partition-name.v1", address)
+}
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn resolve_chain_at(
@@ -20,10 +49,7 @@ impl<A: RowApplication> Inner<A> {
             .map_err(credential)?;
         for (scope, tuple) in &self.partitions {
             for selector in &selectors {
-                if let Some(grant) = selector
-                    .resolve(scope.domain, scope.table, tuple)
-                    .map_err(credential)?
-                {
+                if let Some(grant) = selector.resolve(*scope, tuple).map_err(credential)? {
                     grants.push(grant);
                 }
             }
@@ -46,10 +72,7 @@ impl<A: RowApplication> Inner<A> {
         for scope in scopes {
             if let Some(tuple) = self.partitions.get(scope) {
                 for selector in &selectors {
-                    if let Some(grant) = selector
-                        .resolve(scope.domain, scope.table, tuple)
-                        .map_err(credential)?
-                    {
+                    if let Some(grant) = selector.resolve(*scope, tuple).map_err(credential)? {
                         grants.push(grant);
                     }
                 }
@@ -66,20 +89,17 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain_at(chain, key, policy, time)
     }
-    pub(super) fn check_authenticated_partition(
+    /// The registered tuple of a partition scope, which the registry bound
+    /// to the scope with its naming secret; `None` for a table scope.
+    pub(super) fn authenticated_partition(
         &self,
         scope: ResourceScope,
-        tuple: Option<&PartitionTuple>,
-    ) -> Result<(), Error> {
-        if let Some(tuple) = tuple {
-            return self.check_retained_tuple(scope, tuple);
+    ) -> Result<Option<&PartitionTuple>, Error> {
+        match self.partitions.get(&scope) {
+            Some(tuple) => Ok(Some(tuple)),
+            None if self.partitioned(scope) => Err(denied(UNREGISTERED_PARTITION)),
+            None => Ok(None),
         }
-        if self.partitioned(scope) {
-            return Err(denied(
-                "partitioned table requires an authenticated partition tuple",
-            ));
-        }
-        Ok(())
     }
     /// Whether `scope` names a partitioned table; its rows live only in
     /// the scopes of its partitions, never in the table's own scope.
@@ -98,9 +118,10 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
         tuple: &PartitionTuple,
+        name: &PartitionName,
     ) -> Result<(), Error> {
         if tuple
-            .scope(scope.domain, scope.table)
+            .scope(scope.domain, scope.table, name)
             .map_err(|error| denied(&error.to_string()))?
             != scope
             || !self.tables.contains(&scope.table)
@@ -157,12 +178,13 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
         tuple: &PartitionTuple,
+        name: &PartitionName,
     ) -> Result<(), Error> {
         if self.tables.contains(&scope.table) {
-            return self.check_tuple(scope, tuple);
+            return self.check_tuple(scope, tuple, name);
         }
         if tuple
-            .scope(scope.domain, scope.table)
+            .scope(scope.domain, scope.table, name)
             .map_err(|error| denied(&error.to_string()))?
             != scope
             || !self.domains.contains(&scope.domain.domain)
@@ -173,33 +195,64 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn load_partitions(&mut self) -> Result<(), Error> {
-        for row in rows(&self.conn, "SELECT scope,tuple FROM secure_partitions").await? {
-            let [SqlValue::Blob(scope), SqlValue::Blob(tuple)] = row.as_slice() else {
+        for row in rows(&self.conn, "SELECT scope,tuple,name FROM secure_partitions").await? {
+            let [
+                SqlValue::Blob(scope),
+                SqlValue::Blob(tuple),
+                SqlValue::Blob(name),
+            ] = row.as_slice()
+            else {
                 return Err(Error::Corrupt("partition address".into()));
             };
             let scope = decode(scope)?;
             let tuple = decode(tuple)?;
-            self.check_retained_tuple(scope, &tuple)?;
+            let name: PartitionName = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Corrupt("partition name".into()))?;
+            self.check_retained_tuple(scope, &tuple, &name)
+                .map_err(|_| Error::Corrupt("partition address".into()))?;
             self.partitions.insert(scope, tuple);
+            self.partition_names.insert(scope, name);
         }
         Ok(())
     }
+    /// What this replica reveals of a registered partition to an entitled peer.
+    pub(super) fn partition_offer(&self, scope: ResourceScope) -> Option<PartitionOffer> {
+        Some((
+            scope,
+            self.partitions.get(&scope)?.clone(),
+            *self.partition_names.get(&scope)?,
+        ))
+    }
+    /// Persists registrations inside the caller's transaction.
+    async fn store_partitions(&self, accepted: &[PartitionOffer]) -> Result<(), Error> {
+        for (scope, tuple, name) in accepted {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_partitions VALUES(?,?,?)",
+                    [encode(scope)?, encode(tuple)?, name.to_vec()],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    fn remember_partitions(&mut self, accepted: Vec<PartitionOffer>) {
+        for (scope, tuple, name) in accepted {
+            self.partitions.insert(scope, tuple);
+            self.partition_names.insert(scope, name);
+        }
+        self.bump_authority();
+    }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
-    pub(super) async fn discover_partition(&self, frame: &EncryptedFrame) -> Result<(), Error> {
-        let operation = frame.operation()?;
-        let Some(tuple) = operation.header.extensions.partition else {
-            return Ok(());
-        };
-        let scope = operation.header.extensions.scope;
-        self.register_partition_address(scope, tuple, Some(frame))
-            .await
-    }
-    /// Prepares the next own-id partition before its key can leave this node.
-    /// The write transaction still allocates and verifies the identity.
+    /// Prepares the next own-id partition before its key can leave this node,
+    /// naming it with `naming` (see `created_name`). The write transaction
+    /// still allocates and verifies the identity.
     pub async fn next_partition_identity(
         &self,
         name: &str,
+        naming: &[u8; 32],
     ) -> Result<rocky_core::RowIdentity, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let typed = inner
@@ -235,8 +288,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .partition(&table.table, &values)
             .map_err(|error| denied(&error))?
             .ok_or_else(|| denied("missing partition tuple"))?;
+        let address = typed
+            .rows
+            .schema()
+            .group_address(typed.domain, name, &[SqlValue::Integer(identity.integer())])
+            .map_err(|error| denied(&error.to_string()))?;
+        // This node creates the partition, so it names it.
+        let naming = created_name(naming, &address.commitment);
         let scope = tuple
-            .scope(typed.domain, table.table.id)
+            .scope(typed.domain, table.table.id, &naming)
             .map_err(|error| denied(&error.to_string()))?;
         let grants = author
             .credentials
@@ -261,9 +321,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             // those a later checkpoint will summarize before the first seal.
             let frontier = encode(&inner.seal_frontier(scope.domain, false).await?)?;
             let logical = typed.rows.schema();
-            let address = logical
-                .group_address(typed.domain, name, &[SqlValue::Integer(identity.integer())])
-                .map_err(|error| denied(&error.to_string()))?;
             let group = logical
                 .partition_groups()
                 .map_err(|error| denied(&error.to_string()))?
@@ -312,7 +369,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .map_err(|error| denied(&error.to_string()))?;
                     tuple
-                        .scope(typed.domain, logical.table_id(table))
+                        .scope(typed.domain, logical.table_id(table), &naming)
                         .map_err(|error| denied(&error.to_string()))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -347,29 +404,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(identity)
     }
-    /// Registers an authorized concrete scope before subscribing or installing its key.
+    /// Registers an authorized concrete scope before subscribing or
+    /// installing its key; `name` keys the scope's identity.
     pub async fn register_partition(
         &self,
         scope: ResourceScope,
         tuple: PartitionTuple,
-    ) -> Result<(), Error> {
-        self.register_partition_address(scope, tuple, None).await
-    }
-    async fn register_partition_address(
-        &self,
-        scope: ResourceScope,
-        tuple: PartitionTuple,
-        frame: Option<&EncryptedFrame>,
+        name: PartitionName,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        if let Some(frame) = frame {
-            if inner.partitions.get(&scope) == Some(&tuple) {
-                return Ok(());
-            }
-            inner.verify_frame(frame, now()?)?;
-            inner.check_retained_tuple(scope, &tuple)?;
-        } else {
-            inner.check_tuple(scope, &tuple)?;
+        inner.check_tuple(scope, &tuple, &name)?;
+        if inner
+            .partition_names
+            .get(&scope)
+            .is_some_and(|known| *known != name)
+        {
+            return Err(denied("the partition is registered under another name"));
         }
         inner
             .config
@@ -389,18 +439,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.partitions.len() >= 4096 {
             return Err(Error::Backpressure);
         }
-        transaction!(inner, |inner| {
-            inner
-                .conn
-                .execute(
-                    "INSERT INTO secure_partitions VALUES(?,?)",
-                    [encode(&scope)?, encode(&tuple)?],
-                )
-                .await?;
-            Ok(())
-        })?;
-        inner.partitions.insert(scope, tuple);
-        inner.bump_authority();
+        let accepted = vec![(scope, tuple, name)];
+        transaction!(inner, |inner| inner.store_partitions(&accepted).await)?;
+        inner.remember_partitions(accepted);
         Ok(())
     }
     pub async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
@@ -670,7 +711,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peer: PublicKey,
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
-    ) -> Result<Vec<(ResourceScope, PartitionTuple)>, Error> {
+    ) -> Result<Vec<PartitionOffer>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         // One chain verification per batch. A peer without custody gets no
         // offer.
@@ -695,12 +736,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             let mut grants = Vec::new();
             for selector in &selectors {
-                if let Ok(Some(grant)) = selector.resolve(scope.domain, scope.table, tuple) {
+                if let Ok(Some(grant)) = selector.resolve(*scope, tuple) {
                     grants.push(grant);
                 }
             }
-            if custody_only(&grants) {
-                offers.push((*scope, tuple.clone()));
+            if custody_only(&grants)
+                && let Some(offer) = inner.partition_offer(*scope)
+            {
+                offers.push(offer);
             }
         }
         Ok(offers)
@@ -711,17 +754,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peer: PublicKey,
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
-        offers: &[(ResourceScope, PartitionTuple)],
+        offers: &[PartitionOffer],
     ) -> Result<(), Error> {
         let offered = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             let own = inner.config.node.public_key();
             let mut offered = Vec::new();
-            for (scope, tuple) in offers {
-                inner.check_tuple(*scope, tuple)?;
+            for (scope, tuple, name) in offers {
+                inner.check_tuple(*scope, tuple, name)?;
                 let held = inner.partition_grants(&inner.config.credentials, own, *scope, tuple)?;
                 if inner.partitions.contains_key(scope) || custody_only(&held) {
-                    offered.push((*scope, tuple.clone()));
+                    offered.push((*scope, tuple.clone(), *name));
                 }
             }
             offered
@@ -737,18 +780,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peer: PublicKey,
         credentials: &CredentialChain,
         scopes: &[ResourceScope],
-        offers: &[(ResourceScope, PartitionTuple)],
+        offers: &[PartitionOffer],
     ) -> Result<(), Error> {
         if offers.len() > scopes.len() {
             return Err(denied("partition offers outside the frontier batch"));
         }
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut accepted = Vec::new();
-        for (scope, tuple) in offers {
+        for (scope, tuple, name) in offers {
             if !scopes.contains(scope) {
                 return Err(denied("partition offers outside the frontier batch"));
             }
-            inner.check_tuple(*scope, tuple)?;
+            inner.check_tuple(*scope, tuple, name)?;
             let sender = inner.partition_grants(credentials, peer, *scope, tuple)?;
             if !sender.iter().any(|grant| {
                 grant.rows == RowSelection::All
@@ -769,7 +812,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     "only a keyless custody node registers offered partitions",
                 ));
             }
-            accepted.push((*scope, tuple.clone()));
+            accepted.push((*scope, tuple.clone(), *name));
         }
         if accepted.is_empty() {
             return Ok(());
@@ -777,20 +820,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.partitions.len() + accepted.len() > 4096 {
             return Err(Error::Backpressure);
         }
-        transaction!(inner, |inner| {
-            for (scope, tuple) in &accepted {
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_partitions VALUES(?,?)",
-                        [encode(scope)?, encode(tuple)?],
-                    )
-                    .await?;
-            }
-            Ok(())
-        })?;
-        inner.partitions.extend(accepted);
-        inner.bump_authority();
+        transaction!(inner, |inner| inner.store_partitions(&accepted).await)?;
+        inner.remember_partitions(accepted);
         Ok(())
     }
 }

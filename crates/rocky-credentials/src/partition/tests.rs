@@ -125,7 +125,7 @@ fn selector_fixture() -> SelectorFixture {
         .complete(&delegate, node.public_key(), 1)
         .unwrap();
     let t = tuple("customer-x", "warehouse-y");
-    let scope = t.scope(domain(), [3; 32]).unwrap();
+    let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     SelectorFixture {
         publisher,
         user,
@@ -193,7 +193,7 @@ fn selector_chain_binds_each_slot_to_its_concrete_scope() {
                 .verify_partition(
                     publisher.public_key(),
                     node.public_key(),
-                    t.scope(domain(), [3; 32]).unwrap(),
+                    t.scope(domain(), [3; 32], &[4; 32]).unwrap(),
                     &t,
                     &policy(),
                     NOW
@@ -404,7 +404,7 @@ fn node_fixture() -> NodeFixture {
         .complete(&holder, node_signer.public_key(), 11)
         .unwrap();
     let t = tuple("x", "w");
-    let scope = t.scope(domain(), [3; 32]).unwrap();
+    let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     NodeFixture {
         publisher,
         holder,
@@ -542,7 +542,7 @@ fn partition_nodes_cannot_discard_their_selector() {
                 publisher.public_key(),
                 node_signer.public_key(),
                 11,
-                other.scope(domain(), [3; 32]).unwrap(),
+                other.scope(domain(), [3; 32], &[4; 32]).unwrap(),
                 &other,
                 &policy(),
                 NOW
@@ -625,7 +625,7 @@ fn partition_selectors_cannot_be_dropped() {
         SignedCapability::sign(leaf, &user).unwrap(),
     ]);
     let t = tuple("x", "w");
-    let scope = t.scope(domain(), [3; 32]).unwrap();
+    let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     assert!(
         dropped
             .verify_partition(

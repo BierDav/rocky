@@ -56,12 +56,7 @@ async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
     while let Some(request) = bob.wanted_placements().await.unwrap().first().copied() {
         assert!(pages < 64, "placement pagination stopped making progress");
         let page = alice
-            .placement_page(
-                bob_key.public_key(),
-                &credentials,
-                &BTreeSet::new(),
-                request,
-            )
+            .placement_page(bob_key.public_key(), &credentials, request)
             .await
             .unwrap();
         assert!(crate::encode(&page).unwrap().len() < MAX_SECURE_FRAME - 512);
@@ -105,12 +100,7 @@ async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
     let mut stored = 0;
     for request in target.1.wanted_placements().await.unwrap() {
         let page = source
-            .placement_page(
-                target.0.public_key(),
-                &credentials,
-                &BTreeSet::new(),
-                request,
-            )
+            .placement_page(target.0.public_key(), &credentials, request)
             .await
             .unwrap();
         stored += target.1.receive_placements(request, page).await.unwrap();
@@ -234,7 +224,7 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     };
     let credentials = chain(&bob).await;
     let page = alice
-        .placement_page(key.public_key(), &credentials, &BTreeSet::new(), request)
+        .placement_page(key.public_key(), &credentials, request)
         .await
         .unwrap();
     assert_eq!(bob.receive_placements(request, page).await.unwrap(), 0);
@@ -321,12 +311,10 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     let credentials = &credentials;
     let answer = |request: PlacementRequest| async move {
         alice
-            .placement_page(bob.0.public_key(), credentials, &BTreeSet::new(), request)
+            .placement_page(bob.0.public_key(), credentials, request)
             .await
     };
-    let PlacementPage::Headers { headers, chains } = answer(*request).await.unwrap() else {
-        panic!("custody")
-    };
+    let PlacementPage { headers, chains } = answer(*request).await.unwrap();
     assert_eq!(headers.len(), 2);
     // A forged signature.
     let mut forged = headers.clone();
@@ -336,7 +324,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
         bob.1
             .receive_placements(
                 *request,
-                PlacementPage::Headers {
+                PlacementPage {
                     headers: forged,
                     chains: chains.clone(),
                 },
@@ -353,7 +341,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
         bob.1
             .receive_placements(
                 narrow,
-                PlacementPage::Headers {
+                PlacementPage {
                     headers: headers.clone(),
                     chains: chains.clone(),
                 },
@@ -371,7 +359,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
         bob.1
             .receive_placements(
                 *request,
-                PlacementPage::Headers {
+                PlacementPage {
                     headers: headers.clone(),
                     chains: Vec::new(),
                 },
@@ -401,7 +389,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
             bob.1
                 .receive_placements(
                     *request,
-                    PlacementPage::Headers {
+                    PlacementPage {
                         headers: vec![crate::Placement(altered.to_bytes())],
                         chains: chains.clone(),
                     }
@@ -442,7 +430,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     );
     assert_eq!(
         bob.1
-            .receive_placements(*request, PlacementPage::Headers { headers, chains })
+            .receive_placements(*request, PlacementPage { headers, chains })
             .await
             .unwrap(),
         2
@@ -456,12 +444,7 @@ async fn a_placement_from_a_revoked_author_is_refused() {
     let credentials = chain(&pair.bob.1).await;
     let page = pair
         .alice
-        .placement_page(
-            pair.bob.0.public_key(),
-            &credentials,
-            &BTreeSet::new(),
-            request,
-        )
+        .placement_page(pair.bob.0.public_key(), &credentials, request)
         .await
         .unwrap();
     let node = pair
@@ -720,15 +703,12 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         let (relay, credentials) = (&relay, &credentials);
         async move {
             relay
-                .placement_page(peer, credentials, &BTreeSet::new(), request)
+                .placement_page(peer, credentials, request)
                 .await
                 .unwrap()
         }
     };
-    let headers_of = |page: &PlacementPage| match page {
-        PlacementPage::Headers { headers, chains } => (headers.len(), chains.len()),
-        PlacementPage::CustodyRequired => panic!("custody"),
-    };
+    let headers_of = |page: &PlacementPage| (page.headers.len(), page.chains.len());
     // Before the revocation the relay places Alice's two tags and her void,
     // and her `items` position bob holds.
     let alice_page = answer(alice_request).await;
@@ -805,7 +785,7 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
     relay.audit(lineage.scope("items")).await.unwrap();
     relay.audit(lineage.scope("tags")).await.unwrap();
     let page = relay
-        .placement_page(peer, &credentials, &BTreeSet::new(), alice_request)
+        .placement_page(peer, &credentials, alice_request)
         .await
         .unwrap();
     assert_eq!(headers_of(&page), (0, 0));

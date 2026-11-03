@@ -190,7 +190,10 @@ async fn hold_tags(
     let mut scopes = Vec::new();
     for label in 0..labels {
         let (scope, tuple) = l.tag_partition(&format!("t{label}"));
-        replica.register_partition(scope, tuple).await.unwrap();
+        replica
+            .register_partition(scope, tuple, crate::tests::PARTITION_NAME)
+            .await
+            .unwrap();
         replica
             .install_key(KeyMaterial::new(scope, 1, [60 + label as u8; 32]))
             .await

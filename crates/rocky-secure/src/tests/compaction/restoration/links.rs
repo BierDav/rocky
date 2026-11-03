@@ -35,20 +35,8 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
     let mut bad_signature = original.clone();
     bad_signature.sign(&current_line);
     let mut partition = original.clone();
-    partition.extensions.partition = Some(
-        rocky_core::PartitionTuple::new([(
-            [1; 32],
-            rocky_core::PartitionValue::new(
-                rocky_core::KeyColumn {
-                    affinity: rocky_core::Affinity::Text,
-                    collation: rocky_core::Collation::Binary,
-                },
-                text("another partition"),
-            )
-            .unwrap(),
-        )])
-        .unwrap(),
-    );
+    // Another partition's keyed scope.
+    partition.extensions.scope.encryption = [3; 32];
     partition.sign(&f.key);
     // These are privileged signed mutations, not admissible receive examples.
     for (header, error) in [

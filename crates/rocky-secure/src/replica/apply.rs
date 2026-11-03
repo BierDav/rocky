@@ -252,9 +252,7 @@ impl<A: RowApplication> Inner<A> {
                 let restoring = matches!(class, Class::Restore(..));
                 // A restored birth that fails a creation check stays withheld;
                 // its frame was admitted already.
-                let checked = self
-                    .check_write(write, scope, &mut changed, extension.partition.clone())
-                    .await;
+                let checked = self.check_write(write, scope, &mut changed).await;
                 match checked {
                     Ok(()) => {}
                     Err(error) if restoring && receipts::semantic_refusal(&error) => continue,
@@ -434,13 +432,13 @@ impl<A: RowApplication> Inner<A> {
         write: &RowWrite,
         scope: ResourceScope,
         changed: &mut BTreeSet<Commitment>,
-        partition: Option<rocky_core::PartitionTuple>,
     ) -> Result<(), Error> {
         if self
             .app
             .row_partition(&write.change)
             .map_err(|error| denied(&error))?
-            != partition
+            .as_ref()
+            != self.authenticated_partition(scope)?
         {
             return Err(denied("row image differs from authenticated partition"));
         }

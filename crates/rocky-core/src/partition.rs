@@ -1,13 +1,35 @@
 //! Canonical partition addresses, independent of credentials and storage.
 use crate::{
-    Affinity, Collation, Commitment, KeyColumn, ResourceScope, Scope, SqlValue, commitment,
-    key_components, key_values,
+    Affinity, Collation, Commitment, KeyColumn, ResourceScope, Scope, SqlValue, key_components,
+    key_values,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum encoded tuple size, including column identities.
 pub const MAX_PARTITION_BYTES: usize = 1024;
+
+/// A partition's naming secret. Every holder and custodian of the
+/// partition shares it and nobody else does; it keys the partition's scope
+/// identity, so only they can compute or recognize it. It never rotates:
+/// the scope identity names the partition's logs for its whole life.
+pub type PartitionName = [u8; 32];
+
+/// HMAC-SHA256 of `payload` under `key`, domain-separated by `prefix`.
+pub fn keyed_commitment(key: &[u8; 32], prefix: &str, payload: &[u8]) -> Commitment {
+    let mut block = [0u8; 64];
+    block[..32].copy_from_slice(key);
+    let mut inner = Sha256::new();
+    inner.update(block.map(|byte| byte ^ 0x36));
+    inner.update((prefix.len() as u32).to_le_bytes());
+    inner.update(prefix.as_bytes());
+    inner.update(payload);
+    let mut outer = Sha256::new();
+    outer.update(block.map(|byte| byte ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartitionError(pub &'static str);
@@ -76,7 +98,7 @@ impl PartitionValue {
 }
 
 /// Stable column identities paired with their canonical values.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PartitionTuple(#[serde(with = "components")] BTreeMap<Commitment, PartitionValue>);
 impl PartitionTuple {
@@ -110,8 +132,14 @@ impl PartitionTuple {
         }
         Ok(())
     }
-    /// The encryption/log boundary of this tuple in one table and domain.
-    pub fn scope(&self, domain: Scope, table: Commitment) -> Result<ResourceScope, PartitionError> {
+    /// The encryption/log boundary of this tuple in one table and domain,
+    /// keyed by the partition's naming secret.
+    pub fn scope(
+        &self,
+        domain: Scope,
+        table: Commitment,
+        name: &PartitionName,
+    ) -> Result<ResourceScope, PartitionError> {
         self.validate()?;
         let mut bytes = Vec::new();
         bytes.extend(domain.mesh.0);
@@ -127,7 +155,7 @@ impl PartitionTuple {
         Ok(ResourceScope {
             domain,
             table,
-            encryption: commitment("rocky.partition-scope.v1", &bytes),
+            encryption: keyed_commitment(name, "rocky.partition-scope.v2", &bytes),
         })
     }
 }
@@ -243,6 +271,10 @@ mod tests {
         )
         .unwrap()
     }
+    const EXPECTED_SCOPE: Commitment = [
+        22, 187, 145, 102, 63, 19, 210, 210, 42, 18, 71, 105, 53, 126, 164, 229, 181, 84, 111, 37,
+        76, 225, 158, 106, 90, 17, 78, 4, 162, 74, 177, 237,
+    ];
     #[test]
     fn sql_equal_values_share_scope_but_domains_tables_and_columns_do_not() {
         let domain = Scope {
@@ -252,28 +284,52 @@ mod tests {
         };
         let a = PartitionTuple::new([([4; 32], text("CUSTOMER"))]).unwrap();
         let b = PartitionTuple::new([([4; 32], text("customer"))]).unwrap();
-        assert_eq!(a.scope(domain, [5; 32]), b.scope(domain, [5; 32]));
+        let name = [9; 32];
         assert_eq!(
-            a.scope(domain, [5; 32]).unwrap().encryption,
-            [
-                207, 220, 251, 171, 155, 35, 80, 204, 168, 76, 114, 152, 197, 234, 75, 109, 188,
-                89, 233, 81, 144, 216, 93, 81, 160, 126, 121, 176, 104, 150, 38, 227
-            ]
+            a.scope(domain, [5; 32], &name),
+            b.scope(domain, [5; 32], &name)
         );
-        assert_ne!(a.scope(domain, [5; 32]), a.scope(domain, [6; 32]));
+        assert_eq!(
+            a.scope(domain, [5; 32], &name).unwrap().encryption,
+            EXPECTED_SCOPE
+        );
         assert_ne!(
-            a.scope(domain, [5; 32]),
+            a.scope(domain, [5; 32], &name),
+            a.scope(domain, [6; 32], &name)
+        );
+        assert_ne!(
+            a.scope(domain, [5; 32], &name),
             a.scope(
                 Scope {
                     domain: DomainId([7; 16]),
                     ..domain
                 },
-                [5; 32]
+                [5; 32],
+                &name
             )
         );
         let c = PartitionTuple::new([([8; 32], text("customer"))]).unwrap();
-        assert_ne!(a.scope(domain, [5; 32]), c.scope(domain, [5; 32]));
+        assert_ne!(
+            a.scope(domain, [5; 32], &name),
+            c.scope(domain, [5; 32], &name)
+        );
+        // Another naming secret gives the same tuple an unrelated identity.
+        assert_ne!(
+            a.scope(domain, [5; 32], &name),
+            a.scope(domain, [5; 32], &[10; 32])
+        );
         assert!(PartitionTuple::new([([4; 32], text("a")), ([4; 32], text("b"))]).is_err());
+    }
+    #[test]
+    fn keyed_commitments_are_standard_hmac_sha256() {
+        // Python: hmac.new(bytes([9] * 32), b"\x01\0\0\0px", sha256).
+        assert_eq!(
+            keyed_commitment(&[9; 32], "p", b"x"),
+            [
+                5, 44, 102, 36, 219, 207, 151, 172, 191, 113, 162, 41, 17, 194, 167, 215, 66, 224,
+                161, 72, 209, 239, 137, 33, 60, 254, 132, 182, 163, 242, 88, 14
+            ]
+        );
     }
     #[test]
     fn selectors_narrow_without_losing_columns() {

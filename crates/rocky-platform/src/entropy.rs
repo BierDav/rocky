@@ -37,6 +37,8 @@ pub mod simulation {
         started: Instant,
         /// Wall time the simulation let pass besides the task clock.
         passed: Duration,
+        /// A wall clock that stands still at the epoch.
+        frozen: bool,
     }
     thread_local! {
         static SOURCE: RefCell<Option<Source>> = const { RefCell::new(None) };
@@ -59,6 +61,7 @@ pub mod simulation {
                 state: seed,
                 started: Instant::now(),
                 passed: Duration::ZERO,
+                frozen: false,
             })
         });
         Seeded(())
@@ -73,6 +76,15 @@ pub mod simulation {
         SOURCE.with(|source| {
             if let Some(source) = source.borrow_mut().as_mut() {
                 source.passed += by;
+            }
+        })
+    }
+    /// Stops this thread's wall clock at the epoch for good, as a clock
+    /// that stands still: hybrid stamps then advance by observation only.
+    pub fn freeze() {
+        SOURCE.with(|source| {
+            if let Some(source) = source.borrow_mut().as_mut() {
+                source.frozen = true;
             }
         })
     }
@@ -96,10 +108,10 @@ pub mod simulation {
     }
     pub(crate) fn since_epoch() -> Option<Duration> {
         SOURCE.with(|source| {
-            source
-                .borrow()
-                .as_ref()
-                .map(|source| EPOCH + source.passed + source.started.elapsed())
+            source.borrow().as_ref().map(|source| match source.frozen {
+                true => EPOCH,
+                false => EPOCH + source.passed + source.started.elapsed(),
+            })
         })
     }
 }

@@ -199,7 +199,8 @@ async fn a_single_row_intent_authors_within_its_statement_budget() {
     };
     let replayed = count("UPDATE salaries SET amount=amount+1 WHERE key='ann'").await;
     println!("P4 author_statements total/transaction replayed={replayed:?}");
-    assert!(replayed.1 <= 43, "{replayed:?} statements");
+    // One of them finds the newest replayed clock the stamp passes.
+    assert!(replayed.1 <= 44, "{replayed:?} statements");
 }
 
 /// One update of `ann`'s amount, committed alone.

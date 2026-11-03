@@ -3,7 +3,7 @@
 use super::{
     cluster::Member,
     relational::{self, Authored, Position},
-    schedule::{Action, Change, Fixture, LISTS, Scenario, node_name, plan},
+    schedule::{Action, Change, Fixture, LISTS, Scenario, Wall, node_name, plan},
 };
 use crate::{Failure, TransactionToken, transport::memory::Hub};
 use rocky_core::{Blocker, BlockerKind, WaitReason, replay::TransactionOutcome};
@@ -123,6 +123,9 @@ pub(super) async fn run_steps(
     // Keys, nonces, lineages and the wall clock follow the seed on this
     // thread, so one seed replays the same hashes and orders.
     let _seeded = rocky_platform::entropy::simulation::seed(seed);
+    if scenario.wall == Wall::Frozen {
+        rocky_platform::entropy::simulation::freeze();
+    }
     let root = tempfile::tempdir()?;
     let fixture = scenario.fixture;
     let mut simulation = Simulation {

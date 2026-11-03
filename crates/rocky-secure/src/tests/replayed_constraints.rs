@@ -989,6 +989,59 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
     assert!(matches!(error, Error::Rejected(_)), "{error:?}");
 }
 
+/// A write passes the clock of every row it references, not only of those
+/// it changes: a member added to a team stamped by a clock a minute ahead
+/// replays after the team, so the projection and a rebuild from frames
+/// both keep it.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_child_replays_after_a_parent_stamped_ahead_of_its_wall_clock() {
+    let c = Constrained::new();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, ids, mut history) = devices(
+        &c,
+        root.path(),
+        3,
+        &["INSERT INTO teams(name,cap,id) VALUES('red',1,#id)"],
+    )
+    .await;
+    let receiver = devices.pop().unwrap();
+    let red = ids[0];
+    crate::CLOCK_SKEW.with(|skew| skew.set(60));
+    let ahead = devices[0]
+        .commit(&c, &[&format!("UPDATE teams SET cap=2 WHERE id={red}")])
+        .await;
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+    ahead.unwrap();
+    history.extend(devices[0].fresh().await);
+    devices[1].receive(&history).await;
+    devices[1]
+        .commit(
+            &c,
+            &[&format!(
+                "INSERT INTO members(team,email,id) VALUES({red},'m@example',#id)"
+            )],
+        )
+        .await
+        .unwrap();
+    let clock = |frame: &EncryptedFrame| frame.operation_ref().unwrap().header.timestamp;
+    let team = history.iter().map(clock).max().unwrap();
+    let member = devices[1].fresh().await;
+    assert!(team > crate::micros().unwrap(), "the team is stamped ahead");
+    assert!(member.iter().all(|frame| clock(frame) > team));
+    history.extend(member);
+    let expected = exchange(&c, &mut devices, &receiver, &mut history).await;
+    assert_eq!(expected.dropped(), 0, "{expected:?}");
+    assert_eq!(expected.rows["members"].len(), 1);
+    for device in devices.iter().chain([&receiver]) {
+        device
+            .replica
+            .rebuild_projection(c.scope("members"))
+            .await
+            .unwrap();
+        assert_eq!(device.state(&c, &expected).await, expected);
+    }
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_releases_them() {
     let c = Constrained::new();

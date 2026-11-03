@@ -97,6 +97,10 @@ under partitions. Coordination is R3's. The other bullets, including
 cross-partition checks and references to identity data, are not assessed
 here.
 
+Status (2026-11-04): a reference replays after its parent whatever the
+wall clocks: an intent's stamp passes every transaction its author
+replayed (features_13 evidence, "a reference advances the hybrid clock").
+
 - **Tenant = domain.** `Database::create` makes a domain with a random
   `MeshId` and `DomainId`; its `AppId` derives from the owner's identity
   key (the publisher) and the application name (`rocky_core::Scope`). The

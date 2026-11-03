@@ -11,6 +11,16 @@ pub(super) struct Scenario {
     pub(super) steps: usize,
     pub(super) rounds: usize,
     pub(super) fixture: Fixture,
+    pub(super) wall: Wall,
+}
+
+/// The members' shared wall clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Wall {
+    /// Moves with the task clock and between steps.
+    Moving,
+    /// Stands still, as a coarse or lagging clock at its worst.
+    Frozen,
 }
 
 /// The schema a run uses and the writes its schedules draw.

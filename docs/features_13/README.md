@@ -132,7 +132,9 @@ instead of choosing differently.
 - **Canonical order.** Within a tip, a partition's transactions replay in
   `SecureStamp` order `(clock, author, sequence)`, the order the register
   path already uses for fields. Causal readiness governs completeness,
-  separately from order. The hybrid clock is still decided at authoring.
+  separately from order. The hybrid clock is still decided at authoring;
+  it passes every transaction the author replayed, so a referenced row
+  replays before its child whatever the wall clocks.
 - **Drops.** A transaction whose replay fails (a constraint, an admission
   refusal, a statement that no longer compiles against the schema) is
   dropped entirely: every statement in every partition of its bundle.

@@ -825,11 +825,30 @@ points, and the `board_cap` assertion bounds a board's points.
   digests are byte-identical. 20048, 20090, 20154, 20279 and 20295
   passed both times with different digests, from the `select!` seed
   above.
-- **Open: a reference does not advance the hybrid clock.** With a wall
-  clock that stands still (the first seam), seed 20135's regression
-  failed its audit: a's card pinned to b's board got the board's clock,
-  as the stamp only passes the rows a write changes. A full rebuild then
-  replays the card before its board and drops it while the projection
-  kept it. Real clocks behind the writer's by more than the delay, or
-  coarse ones (a browser's millisecond clock), give the same tie or
-  inversion. Not fixed here; the simulated clock moves between steps.
+- **Closed: a reference advances the hybrid clock** (2026-11-04). With a
+  wall clock that stands still, seed 20135's regression failed its
+  audit: a's card pinned to b's board got the board's clock, as an
+  intent's stamp passed only the heads of the scope it writes. A full
+  rebuild then replayed the card before its board and dropped it while
+  the projection kept it. Lagging clocks, or coarse ones (a browser's
+  millisecond clock), gave the same tie or inversion.
+  - Fix (`author_log_frame`, shared by native and wasm): an intent's
+    clock also passes `MAX(clock)` of `secure_replayed`, every member
+    replayed here in any scope. A row it references or reads is replayed
+    here (its member's record) or restored from a base of an earlier
+    era, so canonical `(era, stamp)` order puts it first. Indexed by
+    `secure_replayed_clock`. Authoring one single-row intent takes one
+    statement more: 80 / 44, the budget now ≤ 44.
+  - Seam: `entropy::simulation::freeze` keeps the simulated wall clock at
+    its epoch; a scenario chooses it with `Wall::Frozen`.
+  - Tests: `relational_tests::regressions::a_card_on_a_remote_board_replays_after_it_under_a_frozen_clock`
+    (20135 frozen; failed before at step 2: "projection differs from
+    full rebuild: cards") and
+    `tests::replayed_constraints::a_child_replays_after_a_parent_stamped_ahead_of_its_wall_clock`
+    (a team stamped by a clock 60 s ahead; the member's stamp passes it,
+    and every replica and a rebuild keep the member; fails without the
+    fix).
+  - Formats: `rocky.encrypted-replica.v50` (the index). Frames, wire and
+    checkpoints unchanged.
+  - Release soak (seeds 20000..20299, moving clock, this Mac): 300/300
+    (chunks 368/362/351 s).

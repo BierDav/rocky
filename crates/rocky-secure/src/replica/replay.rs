@@ -28,6 +28,8 @@ pub(super) const SCHEMA: &[&str] = &[
     // `births` the identities an applied member created, for checkpoints.
     "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
+    // The newest replayed clock, which a new intent passes.
+    "CREATE INDEX IF NOT EXISTS secure_replayed_clock ON secure_replayed(clock)",
     // Outcomes of members this node authored whose record a scope reset
     // removed, so a transaction's outcome outlives an import or a replay
     // from frames. `sealed` is the finality its record had; `based` that an

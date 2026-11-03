@@ -220,8 +220,25 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         base.sort();
-        // Canonical order puts the transaction after everything it read.
+        // Canonical order puts the transaction after everything it read:
+        // past every transaction replayed here, of any scope, so a row it
+        // references replays before it even when that row's clock is ahead
+        // of this wall clock.
+        let replayed = match collect_rows(
+            self.conn
+                .query("SELECT COALESCE(MAX(clock),0) FROM secure_replayed", ())
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Integer(clock)]) => u64::try_from(*clock).ok(),
+            _ => None,
+        }
+        .ok_or_else(|| Error::Corrupt("replayed clock".into()))?;
         let clock = clock
+            .max(replayed)
             .checked_add(1)
             .ok_or_else(|| denied("logical clock exhausted"))?
             .max(micros()?);

@@ -112,7 +112,7 @@ projection come in phase 5; deletion of the old path comes in phase 8.
    split, cross-partition subquery binding, incomplete partitions and the
    64-partition cap.
 3. Authoring intent frames through the bundle path; local result equals
-   the captured rows. Author statement-count test (≤ 43).
+   the captured rows. Author statement-count test (≤ 44).
 4. In-order receive and replay in savepoints with drops and outcomes.
    Receive statement-count test (≤ 45). Concurrent `x = x + 1` from two
    authors yields both increments.

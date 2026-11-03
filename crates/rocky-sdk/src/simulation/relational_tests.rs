@@ -10,7 +10,7 @@
 //! `ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture`
 use super::{
     driver::{self, Report},
-    schedule::{Action, Fixture, Scenario, plan},
+    schedule::{Action, Fixture, Scenario, Wall, plan},
 };
 use crate::Failure;
 use std::collections::BTreeMap;
@@ -21,6 +21,7 @@ const INTEGRATION: Scenario = Scenario {
     steps: 24,
     rounds: 4,
     fixture: Fixture::Relational,
+    wall: Wall::Moving,
 };
 /// The size `replay` and `shrink` use: the integration tier's with
 /// `ROCKY_SIM_INTEGRATION` set, the soak's otherwise.
@@ -37,6 +38,7 @@ fn soak_size(seed: u64) -> Scenario {
         steps: 40,
         rounds: 5,
         fixture: Fixture::Relational,
+        wall: Wall::Moving,
     }
 }
 
@@ -560,37 +562,50 @@ mod regressions {
     /// import and never derived again.
     #[tokio::test(start_paused = true)]
     async fn a_base_at_an_earlier_seal_verifies_the_next_seal() -> Result<(), Failure> {
-        holds_at(
-            20135,
-            soak_size(20135),
-            vec![
-                Change(
-                    1,
-                    Change::Board {
-                        list: "l1".into(),
-                        code: 3,
-                        cap: 12,
-                    },
-                ),
-                Crash(1, Some(rocky_secure::CrashPoint::Apply)),
-                Change(
-                    0,
-                    Change::Card {
-                        list: "l1".into(),
-                        board: 7,
-                        pinned: Some(7),
-                        name: 2,
-                        points: 3,
-                    },
-                ),
-                Seal(0),
-                Evict(1, "l1".into()),
-                Compact(0),
-                Seal(0),
-                Share("l1".into(), 1),
-            ],
-        )
-        .await
+        holds_at(20135, soak_size(20135), steps_20135()).await
+    }
+    fn steps_20135() -> Vec<Action> {
+        vec![
+            Change(
+                1,
+                Change::Board {
+                    list: "l1".into(),
+                    code: 3,
+                    cap: 12,
+                },
+            ),
+            Crash(1, Some(rocky_secure::CrashPoint::Apply)),
+            Change(
+                0,
+                Change::Card {
+                    list: "l1".into(),
+                    board: 7,
+                    pinned: Some(7),
+                    name: 2,
+                    points: 3,
+                },
+            ),
+            Seal(0),
+            Evict(1, "l1".into()),
+            Compact(0),
+            Seal(0),
+            Share("l1".into(), 1),
+        ]
+    }
+
+    /// Seed 20135 with a wall clock that stands still: a's card on b's
+    /// board got no later clock than the board, whose stamp is ahead of a's
+    /// wall clock, as the stamp passed only the rows a write changes. A
+    /// rebuild replayed the card first and dropped it; the projection kept
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn a_card_on_a_remote_board_replays_after_it_under_a_frozen_clock() -> Result<(), Failure>
+    {
+        let frozen = Scenario {
+            wall: Wall::Frozen,
+            ..soak_size(20135)
+        };
+        holds_at(20135, frozen, steps_20135()).await
     }
 
     /// Seed 20000: c joins holding only `l1` after the owner wrote in `l0`.

@@ -88,7 +88,14 @@ impl Node {
                 )?;
                 // Recorded before the grant leaves, so every issuer renews it.
                 if !changes.is_empty() {
+                    let replaced = self.registry().await?.claims.get(&identity).cloned();
                     self.commit(changes).await?;
+                    // The new row replaced the previous right, whose live
+                    // links would otherwise still claim until they expire.
+                    if let Some(record) = replaced {
+                        self.revoke(crate::enrollment::Revoke::Claims(record.right.grant))
+                            .await?;
+                    }
                 }
                 self.activity.record(
                     "claims_granted",

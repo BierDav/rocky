@@ -256,7 +256,9 @@ acknowledge seals.
   server, renews for everyone. The holder asks the issuer that last
   renewed it first, then every other issuer it knows. No issuer renews a
   revoked identity, a right whose grant a held statement revokes, or a
-  right whose row was removed. The coordinator sees only the link and
+  right whose row was removed. Granting an identity again replaces its row
+  and revokes the previous grant, so a narrowed right takes effect at the
+  revocation's commit, not at the old link's expiry. The coordinator sees only the link and
   revocations, never the registry, partitions or payloads.
 - **Revocation.** Revoking a right revokes its grant ID: one statement ends
   every live link of it, whichever issuer signed it. Any node pushes

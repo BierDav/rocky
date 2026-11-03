@@ -973,7 +973,10 @@ impl Session {
     /// delegates within its own. The right reaches only counters: never
     /// the coordinated log, seals or the control. It lives on a link of at
     /// most `credentials::CLAIM_LIFETIME`, which the holder's node renews
-    /// with any reachable issuer as it claims.
+    /// with any reachable issuer as it claims. An issuer granting an
+    /// identity again replaces its right and revokes the previous grant's
+    /// links. A delegated right is not recorded: only its delegator renews
+    /// it, by granting it again.
     pub async fn grant_claims(
         &self,
         identity: &str,

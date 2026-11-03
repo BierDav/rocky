@@ -112,6 +112,68 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     a.close().await
 }
 
+/// Granting an identity a narrower right replaces its previous one: the
+/// links of the previous grant, still unexpired, are refused at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let (bundle, _admin) = service(root.path()).await?;
+    let a = owner(root.path(), &bundle).await?;
+    let m = Peer::start(
+        &root.path().join("m"),
+        SCHEMA,
+        Some(&bundle),
+        Some(a.invite("writer").await?),
+        false,
+    )
+    .await?;
+    introduce(&a, &m).await?;
+    let member = principal(&m).await?;
+    let (invoices, credits) = (
+        counters::Name::new("invoices")?,
+        counters::Name::new("credits")?,
+    );
+    let wide = a.session.grant_claims(&member, None, 1).await?;
+    m.session.install_claims(&wide).await?;
+    assert_eq!(
+        m.opened
+            .database
+            .claim(credits.clone(), counters::Claim::fresh()?)
+            .await?,
+        1
+    );
+
+    let narrow = a
+        .session
+        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .await?;
+    // The member still presents the wide link; its grant was revoked.
+    assert!(denied(
+        &m.opened
+            .database
+            .claim(credits.clone(), counters::Claim::fresh()?)
+            .await
+            .unwrap_err()
+    ));
+    m.session.install_claims(&narrow).await?;
+    assert_eq!(
+        m.opened
+            .database
+            .claim(invoices, counters::Claim::fresh()?)
+            .await?,
+        1
+    );
+    assert!(denied(
+        &m.opened
+            .database
+            .claim(credits, counters::Claim::fresh()?)
+            .await
+            .unwrap_err()
+    ));
+    m.close().await?;
+    a.close().await
+}
+
 /// The issuer that granted a right goes away for good; another issuer
 /// renews the holder's link from the replicated registry and it claims on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

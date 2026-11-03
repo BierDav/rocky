@@ -10,8 +10,8 @@
 #   scripts/check --integration     only the integration tier
 #   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
 #   scripts/check --doc             also the doc tests
-#   scripts/check --wasm            only wasm32: clippy, then the tests in headless Firefox;
-#                                   the full check includes it
+#   scripts/check --wasm            only wasm32: clippy, then the tests in headless Firefox
+#                                   and scripts/browser-sync; the full check includes it
 #   scripts/check --build DIR       clippy, then archive the test binaries in DIR
 #   scripts/check [TIER] --from DIR the same checks with DIR's test binaries,
 #                                   without clippy, which --build ran
@@ -86,6 +86,8 @@ run_wasm() {
     # One run of a package's binary holds all its tests; the longest takes minutes.
     WASM_BINDGEN_TEST_TIMEOUT=1800 cargo test --locked --no-fail-fast \
         --target wasm32-unknown-unknown --tests "$@"
+    # A browser node syncs with a native node over a local relay.
+    "$repo_root/scripts/browser-sync"
 }
 if $wasm_only && [ -z "$tiers" ]; then
     run_wasm

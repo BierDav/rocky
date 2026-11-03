@@ -1,0 +1,43 @@
+#!/bin/sh
+# A browser node syncs with a native node over a local iroh relay.
+#
+#   scripts/browser-sync    start the native side (rocky-sdk example browser_peer),
+#                           run rocky-sdk's browser_sync test in headless Firefox
+#                           with its relay and invitation, then let the native
+#                           side check that the browser's write arrived
+#
+# scripts/check --wasm runs it after the wasm32 tests.
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
+
+cargo build --locked -p rocky-sdk --example browser_peer
+work=$(mktemp -d)
+peer_pid=
+cleanup() {
+    [ -n "$peer_pid" ] && kill "$peer_pid" 2>/dev/null || true
+    rm -rf "$work"
+}
+trap cleanup EXIT INT TERM
+mkfifo "$work/input"
+target/debug/examples/browser_peer <"$work/input" >"$work/peer" &
+peer_pid=$!
+# Holds the native side's stdin open until the browser is done.
+exec 3>"$work/input"
+
+waited=0
+until [ -s "$work/peer" ]; do
+    kill -0 "$peer_pid" 2>/dev/null || { echo "browser-sync: the native side ended" >&2; exit 1; }
+    waited=$((waited + 1))
+    [ "$waited" -le 600 ] || { echo "browser-sync: the native side never started" >&2; exit 1; }
+    sleep 0.1
+done
+
+ROCKY_BROWSER_PEER=$(head -n 1 "$work/peer") cargo test --locked \
+    --target wasm32-unknown-unknown -p rocky-sdk --test browser_sync
+echo finished >&3
+exec 3>&-
+wait "$peer_pid"
+peer_pid=

@@ -55,9 +55,17 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 # Local relay and in-process iroh networks.
 rocky-iroh = { path = "../rocky-iroh", features = ["test-utils"] }
+# A plain-HTTP relay a browser reaches (examples/browser_peer.rs).
+iroh-relay = { version = "1.3", features = ["server"] }
 rocky-coordinator = { path = "../rocky-coordinator" }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+
+# Needs the native side that scripts/browser-sync starts, so `cargo test`
+# runs it only when named.
+[[test]]
+name = "browser_sync"
+test = false
 
 [lints]
 workspace = true

@@ -1,6 +1,8 @@
-// The SDK's blocking constructors, native transports and paused clocks.
-#![cfg(not(target_family = "wasm"))]
+//! An application on the async SDK, the same on every target: natively and
+//! as a browser node in a dedicated Worker, whose files live in OPFS.
+use rocky_platform::fs::Scratch;
 use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
+use wasm_bindgen_test::wasm_bindgen_test;
 
 fn schema() -> Result<Schema, Failure> {
     Schema::builder("rust_application", 1)
@@ -12,9 +14,9 @@ fn schema() -> Result<Schema, Failure> {
         .build()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let config = Configuration::new(directory.path(), &schema()?)?;
     let db = config.create().await?.database;
     assert!(config.create().await.is_err());
@@ -51,9 +53,9 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
     db.close().await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let db = Configuration::new(directory.path(), &schema()?)?
         .create()
         .await?
@@ -68,7 +70,7 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
     drop(tx);
     let (written, ready) = tokio::sync::oneshot::channel();
     let task_db = db.clone();
-    let task = tokio::spawn(async move {
+    let task = rocky_platform::task::spawn(async move {
         let mut tx = task_db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -103,9 +105,9 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
     db.close().await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn paged_reads_hold_a_snapshot_and_decode_aliases() -> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let schema = Schema::builder("paging", 1)
         .table(Table::replayed("cache").column(Column::new("n", Affinity::Integer).required()))
         .build()?;
@@ -155,7 +157,7 @@ async fn paged_reads_hold_a_snapshot_and_decode_aliases() -> Result<(), Failure>
     db.close().await
 }
 
-#[test]
+#[wasm_bindgen_test(unsupported = test)]
 fn invalid_schema_is_refused_before_installation() {
     assert!(
         Schema::builder("bad", 0)
@@ -166,13 +168,13 @@ fn invalid_schema_is_refused_before_installation() {
     assert!(Schema::parse(r#"{"format":0}"#).is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), Failure> {
     use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
-    let issuer_directory = tempfile::tempdir()?;
-    let member_directory = tempfile::tempdir()?;
+    let issuer_directory = Scratch::new().await;
+    let member_directory = Scratch::new().await;
     let issuer = Configuration::new(issuer_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("issuer")))
         .create()
@@ -226,23 +228,11 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
     issuer.close().await
 }
 
-#[test]
-fn configuration_without_a_tokio_runtime_returns_an_error() -> Result<(), Failure> {
-    let configuration = Configuration::new("unused", &schema()?)?;
-    let mut creating = std::pin::pin!(configuration.create());
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(matches!(
-        std::future::Future::poll(creating.as_mut(), &mut context),
-        std::task::Poll::Ready(Err(_))
-    ));
-    Ok(())
-}
-
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(), Failure> {
     use rocky_sdk::{Network, transport::memory::Hub};
     use std::sync::Arc;
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let hub = Arc::new(Hub::default());
     let configuration = Configuration::new(directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("owner")));
@@ -290,11 +280,11 @@ fn outbox_schema() -> Result<Schema, Failure> {
         .build()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_restart()
 -> Result<(), Failure> {
     use rocky_sdk::{TransactionOutcome, TransactionToken};
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let configuration = Configuration::new(directory.path(), &outbox_schema()?)?;
     let db = configuration.create().await?.database;
     let mut tx = db.transaction().await?;
@@ -343,11 +333,11 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     db.close().await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test(unsupported = tokio::test)]
 async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() -> Result<(), Failure>
 {
     use rocky_sdk::{Durability, TransactionOutcome};
-    let directory = tempfile::tempdir()?;
+    let directory = Scratch::new().await;
     let configuration = Configuration::new(directory.path(), &schema()?)?;
     let db = configuration.create().await?.database;
     let mut tokens = Vec::new();

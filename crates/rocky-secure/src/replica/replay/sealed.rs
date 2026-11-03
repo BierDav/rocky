@@ -3,7 +3,8 @@
 //! still knows how its own covered transactions ended.
 use super::*;
 use crate::replica::checkpoint::{
-    MAX_SEALED_OUTCOMES, MAX_SEALED_VIOLATION, SealedOutcome, SealedOutcomes, SealedTransaction,
+    CheckpointStatement, MAX_SEALED_OUTCOMES, MAX_SEALED_VIOLATION, SealedOutcome, SealedOutcomes,
+    SealedTransaction,
 };
 
 #[cfg(test)]
@@ -196,7 +197,104 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("checkpoint outcomes contradict a sealed outcome"));
             }
         }
-        let (dropped, sealed, violated) = match listed {
+        let (dropped, sealed, violated) = self.based_outcome(listed, transaction);
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO secure_kept_outcomes VALUES(?,?,?,?,?,?,?,?,1)",
+                bindings(vec![
+                    SqlValue::Blob(hash.to_vec()),
+                    SqlValue::Blob(transaction.to_vec()),
+                    SqlValue::Integer(id),
+                    SqlValue::Integer(*clock),
+                    SqlValue::Integer(*sequence),
+                    dropped,
+                    SqlValue::Integer(sealed),
+                    violated,
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Decides this node's provisional kept members of scope `id` that the
+    /// seal of an installed base covers, as `keep_covered` does for held
+    /// frames: their frames are gone, as after an eviction, so no record
+    /// would make them final.
+    pub(in crate::replica) async fn cover_kept(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        statement: &CheckpointStatement,
+    ) -> Result<(), Error> {
+        let corrupt = || Error::Corrupt("kept outcome".into());
+        let (Some(author), Some(seal)) = (
+            self.node_author.as_ref().map(|author| author.number),
+            statement.seal,
+        ) else {
+            return Ok(());
+        };
+        let Ok(seal) = self.graph_for(scope.domain)?.seal_by_id(seal) else {
+            return Ok(());
+        };
+        let Some(through) = seal
+            .statement
+            .frontier
+            .iter()
+            .find(|mark| mark.author == author)
+            .map(|mark| mark.sequence)
+        else {
+            return Ok(());
+        };
+        for row in collect_rows(
+            self.conn
+                .query(
+                    "SELECT hash,txn,clock,sequence FROM secure_kept_outcomes WHERE scope=? AND based=0 AND sealed=0 AND sequence<=?",
+                    [id, i64::try_from(through).map_err(|_| corrupt())?],
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [
+                SqlValue::Blob(hash),
+                SqlValue::Blob(txn),
+                SqlValue::Integer(clock),
+                SqlValue::Integer(sequence),
+            ] = row.as_slice()
+            else {
+                return Err(corrupt());
+            };
+            let transaction: Commitment = txn.as_slice().try_into().map_err(|_| corrupt())?;
+            let stamp = Stamp {
+                clock: *clock as u64,
+                author,
+                sequence: *sequence as u64,
+            };
+            let listed = statement.outcomes.of(&stamp, &transaction);
+            let (dropped, sealed, violated) = self.based_outcome(listed, transaction);
+            self.conn
+                .execute(
+                    "UPDATE secure_kept_outcomes SET dropped=?,sealed=?,violated=?,based=1 WHERE hash=?",
+                    bindings(vec![
+                        dropped,
+                        SqlValue::Integer(sealed),
+                        violated,
+                        SqlValue::Blob(hash.clone()),
+                    ]),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// A base's decision as kept columns `dropped`, `sealed`, `violated`;
+    /// a final one notifies the author.
+    fn based_outcome(
+        &self,
+        listed: Option<Option<&SealedOutcome>>,
+        transaction: Commitment,
+    ) -> (SqlValue, i64, SqlValue) {
+        let decided = match listed {
             Some(Some(SealedOutcome::Dropped { reason, violation })) => (
                 SqlValue::Text(reason_name(*reason).into()),
                 1,
@@ -205,24 +303,10 @@ impl<A: RowApplication> Inner<A> {
             Some(None) => (SqlValue::Null, 1, SqlValue::Null),
             None => (SqlValue::Null, 0, SqlValue::Null),
         };
-        if sealed == 1 {
+        if decided.1 == 1 {
             self.touch_sealed(transaction);
         }
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO secure_kept_outcomes VALUES(?,?,?,?,?,?,?,1)",
-                bindings(vec![
-                    SqlValue::Blob(hash.to_vec()),
-                    SqlValue::Blob(transaction.to_vec()),
-                    SqlValue::Integer(id),
-                    SqlValue::Integer(*clock),
-                    dropped,
-                    SqlValue::Integer(sealed),
-                    violated,
-                ]),
-            )
-            .await?;
-        Ok(())
+        decided
     }
 }
 

@@ -822,7 +822,7 @@ async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
         inner
             .conn
             .execute(
-                "INSERT INTO secure_kept_outcomes VALUES(?,?,1,?,NULL,1,NULL,0)",
+                "INSERT INTO secure_kept_outcomes VALUES(?,?,1,?,0,NULL,1,NULL,0)",
                 crate::storage::bindings(vec![
                     SqlValue::Blob(vec![clock as u8; 32]),
                     SqlValue::Blob(vec![9; 32]),

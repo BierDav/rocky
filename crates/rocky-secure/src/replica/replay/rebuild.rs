@@ -130,7 +130,7 @@ impl<A: RowApplication> Inner<A> {
         };
         self.conn
             .execute(
-                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.based=0",
+                "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,sequence,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.based=0",
                 [id, i64::from(author)],
             )
             .await?;

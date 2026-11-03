@@ -941,6 +941,7 @@ impl<A: RowApplication> Inner<A> {
             .collect();
         let seal_id = seal.id().map_err(credential)?;
         self.order_behind_seal(
+            domain,
             &cuts,
             depth,
             now()?,

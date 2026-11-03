@@ -2457,6 +2457,7 @@ impl<A: RowApplication> Inner<A> {
                 .stored_images("secure_replayed_staged", id, None)
                 .await?;
             self.replace_replayed(scope, statement.tip, &rows).await?;
+            self.cover_kept(scope, id, &statement).await?;
             self.store_base(id, &rows, None).await?;
         }
         let blob = encode(&scope)?;

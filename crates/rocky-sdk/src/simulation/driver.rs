@@ -838,6 +838,41 @@ impl Simulation {
         }
         Ok(held)
     }
+    /// Whether `node`'s installed bases cover every member scope of
+    /// `authored`, at the canonical position replicas reported for it.
+    async fn under_base(&self, node: usize, authored: &Authored) -> Result<bool, Failure> {
+        let Some(((_, stamp), _)) = self.positions.get(&authored.token) else {
+            return Ok(false);
+        };
+        let member = self.running(node)?;
+        let replica = member
+            .running
+            .as_ref()
+            .and_then(|running| running.node.upgrade())
+            .ok_or("not running")?
+            .replica
+            .clone();
+        for (table, list) in &authored.scopes {
+            let status = member
+                .call(json!({"type": "partition_status", "group": "list",
+                    "values": [{"type": "text", "value": list}]}))
+                .await?;
+            let Some(scope) = status["tables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|entry| entry["table"] == *table)
+                .filter(|entry| !entry["scope"].is_null())
+            else {
+                return Ok(false);
+            };
+            let scope: rocky_core::ResourceScope = serde_json::from_value(scope["scope"].clone())?;
+            if !replica.base_covers(scope, stamp).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     /// Rows of every list `node` holds.
     async fn snapshot(
         &self,
@@ -1057,6 +1092,16 @@ impl Simulation {
                         "{name} lost the outcome of its step {} after restarting",
                         authored.step
                     ));
+                }
+                // Another author's transaction a base covers is in the rows
+                // only: a replica keeps outcomes only of its own members.
+                if outcome.is_none()
+                    && authored.node != *node
+                    && authored.lists.is_subset(&held)
+                    && self.under_base(*node, authored).await.map_err(text)?
+                {
+                    self.count("outcome under a base");
+                    continue;
                 }
                 if authored.lists.is_subset(&held)
                     && outcome.as_ref() != reference.outcomes.get(&authored.token)

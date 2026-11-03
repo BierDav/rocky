@@ -176,7 +176,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         let listed = self.listed_at(graph, scope, path.iter().rev())?;
-        if unknown && !missing && !pruned && base.is_none_or(|seal| path.contains(&seal)) {
+        // A base at a seal of the path stands in for the frames it pruned.
+        if unknown && !missing && base.map_or(!pruned, |seal| path.contains(&seal)) {
             return Ok(None);
         }
         let replay = match pruned || missing {

@@ -590,25 +590,82 @@ points, and the `board_cap` assertion bounds a board's points.
     envelope v4, identity file version 22, enrollment and self-enrollment
     bundle format 3, `secure_partitions(scope, tuple, name)`. Checkpoint
     format and vectors unchanged.
+- **Fixes from the soak after blinded scopes** (`rocky-secure` unless
+  named). Each regression in `relational_tests::regressions` fails
+  without its fix (checked by reverting each part on this base).
+  - **A listed checkpoint replaced history placements would finalize**
+    (seed 20013, most of the `None` class). After catching up, sync
+    imports a checkpoint the graph lists at the next seal when the scope
+    "misses" positions through its frontier. Positions of the author in
+    other scopes arrive only as placements, pulled after every scope
+    synced, so a member holding every frame imported the base, and the
+    clear dropped its records of other authors' transactions.
+    `replace_with_listed` pulls placements first and decides again.
+    `a_listed_checkpoint_waits_for_placements`; seed 20000's regression
+    also needs it.
+  - **The same for seal rebootstraps** (seed 20033): a newly shared list
+    left the domain's scopes unverified and `rebootstrap_scopes_at_seals`
+    imported every scope. It also pulls placements before acting on its
+    needs. `a_seal_rebootstrap_waits_for_placements`.
+  - **Era of a member covered by an earlier seal** (seed 20027, the era
+    class). A scope held again first verifies at the last finalized
+    seal, while a member an earlier seal covers had already replayed into
+    the open era. `order_behind_seal` moves the covered members of a
+    scope without seal bounds into the era of the earliest finalized seal
+    whose frontier covers their stamp.
+    `a_list_held_again_after_two_seals_keeps_the_first_seals_era`.
+  - **An evicted own outcome stayed provisional** (seed 20207, author
+    side, R3). Eviction kept the author's record (`sealed=0`); a base
+    later installed at a seal covering it found no frame to decide, so
+    `Applied { sealed: false }` stayed for good. `cover_kept` decides
+    the scope's provisional kept members that the base's seal frontier
+    covers from its sealed outcomes, as `keep_covered` does for held
+    frames. Kept outcomes now store the member's author `sequence`.
+    `an_evicted_own_outcome_turns_final_with_a_covering_base`.
+  - **A base at an earlier seal never verified the next one** (seed
+    20135, `cards` audit, the rebootstrap class). A list shared again
+    after a compaction imports the base at an earlier seal with no frames
+    under it. `seal_starts` let only no-frames bases account for
+    positions through their seal, so the scope counted from the start,
+    waited on a seal rebootstrap for good and its rows waited to be
+    derived again (reads refused). Any verified base at a path seal now
+    starts the count, and an unverified scope whose base sits on the path
+    needs no rebootstrap for its pruned prefix.
+    `a_base_at_an_earlier_seal_verifies_the_next_seal` (fails without
+    either part).
+  - **Oracle: other authors' outcomes under a base** (`rocky-sdk`
+    driver). A replica keeps outcomes only of members it authored
+    (above); one that holds a list by a base covering another author's
+    transaction (checkpoint-first share, holding again, the revocation
+    restore) reads `None`. The check now accepts `None` there only: a
+    non-author, holding all of the transaction's lists, whose installed
+    bases are at path seals whose frontiers cover its stamp
+    (qualification `EncryptedReplica::base_covers`). It counts as
+    coverage "outcome under a base"; authors and holders without a
+    covering base are checked as before. The placement regressions also
+    assert that no replica needed it.
+    `another_authors_outcome_may_go_with_a_covering_base`.
+  - Seed 20000's regression asserts outcomes too
+    (`keeps_outcomes`), not only finalization.
+  - Formats: `secure_kept_outcomes.sequence`,
+    `rocky.encrypted-replica.v48`. No wire or checkpoint change.
 - **Open:**
-  - Missing or `Covered` outcomes after a base (67 seeds): left to the
-    change making checkpoints carry the seal's drop list. Shown by seed
-    20033 with a board written after the eviction: b holds `l8` again,
-    installs a one-row base and reports `None`.
-  - Era after two seals across an eviction (seed 20027, 1 of 5 era
-    seeds): b writes a board in `l1`, evicts it, a seals, b crashes, a
-    seals, b holds `l1` again. Steps: `Change(1, Board{l1,0,8})`,
-    `Evict(1,l1)`, `Seal(0)`, `Crash(1, Redo)`, `Seal(0)`, `Hold(1,l1)`.
-    A scope held again verifies only the last finalized seal, so a member
-    an earlier one covers lands in the later era.
-  - Identity ledger after an eviction and a revocation (seed 20080, 6 of 9
-    audit seeds): `Evict(1,l0)`, `Change(0, Board{l0,1,6})`, `Invite(0,2)`,
-    `Revoke(2)`; b's identity ledger differs from its rebuild. Not
-    triaged further.
-  - `FinalizationWaiting` "missing frames of author N" (3 seeds after
-    blinded scopes: 20074, 20126, 20276; was 31): not traced. 20074
-    follows an invite refused with "unexpected end of file". 20151 waits
-    for a seal rebootstrap, 20083 on pending dependencies.
+  - Audits (5 seeds): identity ledger differs from its rebuild or
+    history (20080, 20127, 20159; repro of 20080: `Evict(1,l0)`,
+    `Change(0, Board{l0,1,6})`, `Invite(0,2)`, `Revoke(2)`), and
+    `secure_applied`/scope digests (20245 with `cards`, 20290). Not
+    triaged.
+  - `PendingFrames` on dependencies with `cards` unreadable (20083,
+    20088, 20120) and 20276 ("missing frames of author 1026" with pending
+    dependencies). Not traced.
+  - 20074: "missing frames of author 2" after `invite c by a` is refused
+    with "unexpected end of file"; that refusal predates blinded scopes
+    (also at `ffa4afcb`, with 20053).
+  - 20229 was nondeterministic once (a `cards` audit on one of two
+    identical replays) before the base fix; it passes now.
+  - Readers of a non-author replica lose other authors' outcomes on
+    every checkpoint restore, the revocation restore of every scope
+    included. That is the kept-outcome design, not checked further.
 - Soak (`ROCKY_SIM_SEEDS=300`, release, seeds 20000–20299, 3–4 nodes,
   40 steps; Apple M5 Pro, shared host). Before (main `dd4fc05f`, after
   the driver's era-only position comparison): 112 passed, 188 failed.
@@ -628,3 +685,10 @@ points, and the `board_cap` assertion bounds a board's points.
     and run the outcome checks, so this class grew; seed 20000 is one.
   - Liveness: 5 seeds; 3 "missing frames of author N" (was 31).
   - Audits: 10 (b 6, c 4). Era disagreements: 6.
+- Soak after these fixes (same seeds, chunks and host): 290 passed,
+  10 failed.
+  - Outcomes: 0 (was 62). Era disagreements: 0 (was 6). The oracle
+    exemption ("outcome under a base") applied 66 times over the run.
+  - Audits: 5 (was 10). Liveness: 5 (was 5): 3 pending dependencies
+    (20083, 20088, 20120), 2 missing positions (20074; 20276, with
+    pending dependencies). No seal rebootstrap wait (was 1).

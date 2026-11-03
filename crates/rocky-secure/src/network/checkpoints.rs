@@ -217,12 +217,18 @@ impl NativeSession {
         let Some((domain, _)) = replica.followed_bookmark().await else {
             return Ok(true);
         };
-        let needs: Vec<_> = replica
-            .seal_rebootstraps(domain)
-            .await?
-            .into_iter()
-            .filter(|need| scopes.is_empty() || scopes.contains(&need.scope))
-            .collect();
+        let wanted = |needs: Vec<SealRebootstrap>| -> Vec<SealRebootstrap> {
+            needs
+                .into_iter()
+                .filter(|need| scopes.is_empty() || scopes.contains(&need.scope))
+                .collect()
+        };
+        let mut needs = wanted(replica.seal_rebootstraps(domain).await?);
+        if !needs.is_empty() {
+            // Placements may show the positions a scope seemed to miss.
+            self.pull_placements(replica).await?;
+            needs = wanted(replica.seal_rebootstraps(domain).await?);
+        }
         if needs.is_empty()
             && replica
                 .compaction_status(domain)
@@ -295,7 +301,13 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<bool, Error> {
-        let listed = replica.listed_replacements(scope).await?;
+        let mut listed = replica.listed_replacements(scope).await?;
+        if !listed.is_empty() {
+            // Positions of other scopes come as placements, not frames: an
+            // import would discard records that frames could still finalize.
+            self.pull_placements(replica).await?;
+            listed = replica.listed_replacements(scope).await?;
+        }
         if listed.is_empty() || !self.try_scoped_holding(replica, &[scope], false).await? {
             return Ok(true);
         }

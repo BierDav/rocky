@@ -223,7 +223,8 @@ async fn a_late_empty_partition_gets_a_verified_replay_base() -> Result<(), Fail
 }
 
 /// Seed 10730: completed pages survive a crash at their switch and must
-/// be resumed even when the next frontier exchange reports equality.
+/// be resumed even when the next frontier exchange reports equality. c's
+/// revoked rows come only by checkpoint, so b imports one.
 #[tokio::test(start_paused = true)]
 async fn an_interrupted_checkpoint_switch_resumes_without_another_write() -> Result<(), Failure> {
     use rocky_secure::CrashPoint;
@@ -236,8 +237,11 @@ async fn an_interrupted_checkpoint_switch_resumes_without_another_write() -> Res
                 Write(1),
                 Seal(0),
                 Invite(0, 2),
+                Write(2),
+                Sync(0),
                 Seal(0),
                 Compact(0),
+                Revoke(2),
                 Follow(1, "main".into()),
                 Crash(1, Some(CrashPoint::Switch)),
             ],

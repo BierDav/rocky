@@ -33,8 +33,9 @@ pub(super) const SCHEMA: &[&str] = &[
     // from frames. `sealed` is the finality its record had; `based` that an
     // installed base's sealed outcomes decided it instead, and records no
     // longer change it. A based member neither sealed nor dropped lay past
-    // the base's horizon: its outcome is unknown here.
-    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID",
+    // the base's horizon: its outcome is unknown here. `sequence` is the
+    // member's author sequence, which a later base's seal frontier covers.
+    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,sequence INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_kept_outcomes_txn ON secure_kept_outcomes(txn)",
     // Scopes whose clear changed rows of other scopes: the domain's rows
     // are derived again once none waits.
@@ -366,6 +367,34 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         Ok(positions)
+    }
+    /// Whether `scope`'s installed base sits at a seal of the followed path
+    /// whose frontier covers the member at `stamp`: its rows hold that
+    /// member, which never replayed here after the base.
+    pub async fn base_covers(
+        &self,
+        scope: ResourceScope,
+        stamp: &rocky_core::SecureStamp,
+    ) -> Result<bool, Error> {
+        let inner = self.inner.lock(Class::Background).await;
+        let Some(id) = inner.find_scope_id(scope).await? else {
+            return Ok(false);
+        };
+        let Some(seal) = inner.base_seal(id).await? else {
+            return Ok(false);
+        };
+        let path = inner.path_seals(scope.domain)?;
+        let Some(seal) = path
+            .iter()
+            .find(|known| known.id().is_ok_and(|known| known == seal))
+        else {
+            return Ok(false);
+        };
+        Ok(seal
+            .statement
+            .frontier
+            .iter()
+            .any(|mark| mark.author == stamp.author && mark.sequence >= stamp.sequence))
     }
 }
 
@@ -991,12 +1020,13 @@ impl<A: RowApplication> Inner<A> {
     /// follows them, and redo in the new era, after every transaction the
     /// seal covers. Those it covers that replayed in a later era, as when a
     /// scope held again verifies a seal finalized before its frames came
-    /// back, move into the seal's era. Their identity and stamp stay;
-    /// outcomes may change.
+    /// back, move into the era of the earliest finalized seal covering them.
+    /// Their identity and stamp stay; outcomes may change.
     /// A kept seal is marked once the live tables hold exactly its state,
     /// so its history records what the transactions behind it replace.
     pub(super) async fn order_behind_seal(
         &self,
+        domain: rocky_core::Scope,
         cuts: &[(i64, i64)],
         era: i64,
         time: u64,
@@ -1009,27 +1039,64 @@ impl<A: RowApplication> Inner<A> {
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut starts = Vec::new();
         let mut moved = BTreeSet::new();
-        let mut covered = BTreeSet::new();
+        let mut covered = BTreeMap::new();
+        let mut earlier = None;
         for (scope, through) in cuts {
+            // A scope verified for the first time, as one held again, may
+            // hold members an earlier seal covers in any later era.
+            let first_verified = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_seal_bounds WHERE scope=? LIMIT 1",
+                        [*scope],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty();
             let rows = collect_rows(
                 self.conn
                     .query(
                         "SELECT era,clock,author,sequence,hash FROM secure_replayed WHERE scope=? AND sealed=0 AND era>=? AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position<=?) ORDER BY clock,author,sequence",
-                        [*scope, era, *scope, *through],
+                        [*scope, if first_verified { 0 } else { era }, *scope, *through],
                     )
                     .await?,
             )
             .await?;
-            if let Some(first) = rows.first() {
-                // They rewind from where the seal's era places them.
-                let (_, stamp) = order_of(first)?;
-                starts.push((*scope, (era - 1, stamp)));
-            }
-            for row in rows {
+            let mut start: Option<Order> = None;
+            for row in &rows {
                 let [.., SqlValue::Blob(hash)] = row.as_slice() else {
                     return Err(corrupt());
                 };
-                covered.insert(Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?);
+                let (current, stamp) = order_of(row)?;
+                let mut target = era - 1;
+                if first_verified {
+                    if earlier.is_none() {
+                        earlier = Some(self.finalized_frontiers(domain, era).await?);
+                    }
+                    if let Some((depth, _)) = earlier.iter().flatten().find(|(_, frontier)| {
+                        frontier
+                            .get(&stamp.author)
+                            .is_some_and(|through| *through >= stamp.sequence)
+                    }) {
+                        target = target.min(depth - 1);
+                    }
+                    if current == target {
+                        continue;
+                    }
+                }
+                // They rewind from where their seal's era places them.
+                let order = (target.min(current), stamp);
+                if start.as_ref().is_none_or(|start| order < *start) {
+                    start = Some(order);
+                }
+                covered.insert(
+                    Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?,
+                    target,
+                );
+            }
+            if let Some(start) = start {
+                starts.push((*scope, start));
             }
             let rows = collect_rows(
                 self.conn
@@ -1062,8 +1129,13 @@ impl<A: RowApplication> Inner<A> {
         for redo in &mut redo {
             if redo.members.iter().any(|(hash, _)| moved.contains(hash)) {
                 redo.order.0 = era;
-            } else if redo.members.iter().any(|(hash, _)| covered.contains(hash)) {
-                redo.order.0 = era - 1;
+            } else if let Some(target) = redo
+                .members
+                .iter()
+                .filter_map(|(hash, _)| covered.get(hash))
+                .min()
+            {
+                redo.order.0 = *target;
             }
         }
         redo.sort_by(|a, b| a.order.cmp(&b.order));
@@ -1072,6 +1144,46 @@ impl<A: RowApplication> Inner<A> {
         self.redo(redo, time).await?;
         mark().await?;
         self.redo(later, time).await
+    }
+
+    /// The frontiers of `domain`'s seals finalized through depth `era`, by
+    /// depth, as author numbers and their last covered sequence.
+    async fn finalized_frontiers(
+        &self,
+        domain: rocky_core::Scope,
+        era: i64,
+    ) -> Result<Vec<(i64, BTreeMap<u32, u64>)>, Error> {
+        let graph = self.graph_for(domain)?;
+        let mut frontiers = Vec::new();
+        for row in collect_rows(
+            self.conn
+                .query(
+                    "SELECT depth,seal FROM secure_finalized WHERE domain=? AND depth<=? ORDER BY depth",
+                    bindings(vec![
+                        SqlValue::Blob(encode(&domain)?),
+                        SqlValue::Integer(era),
+                    ]),
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Integer(depth), SqlValue::Blob(seal)] = row.as_slice() else {
+                return Err(Error::Corrupt("finalized seal".into()));
+            };
+            let seal = Commitment::try_from(seal.as_slice())
+                .map_err(|_| Error::Corrupt("finalized seal".into()))?;
+            let statement = &graph.seal_by_id(seal).map_err(credential)?.statement;
+            frontiers.push((
+                *depth,
+                statement
+                    .frontier
+                    .iter()
+                    .map(|mark| (mark.author, mark.sequence))
+                    .collect(),
+            ));
+        }
+        Ok(frontiers)
     }
 
     /// A seal finalized `scope` through `through`: the transactions it

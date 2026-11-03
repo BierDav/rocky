@@ -157,25 +157,14 @@ mod regressions {
     use super::*;
 
     async fn holds(seed: u64, steps: Vec<Action>) -> Result<(), Failure> {
-        let report = simulate(seed, INTEGRATION, steps).await?;
+        holds_at(seed, INTEGRATION, steps).await
+    }
+    async fn holds_at(seed: u64, scenario: Scenario, steps: Vec<Action>) -> Result<(), Failure> {
+        let report = simulate(seed, scenario, steps).await?;
         assert!(failure(&report).is_none(), "{}", report.dump());
         Ok(())
     }
     /// Every member reaches quiescence: nothing stays waiting.
-    async fn finalizes(seed: u64, steps: Vec<Action>) -> Result<(), Failure> {
-        let report = simulate(seed, INTEGRATION, steps).await?;
-        assert!(report.liveness.is_none(), "{}", report.dump());
-        assert!(
-            report
-                .safety
-                .as_ref()
-                .is_none_or(|safety| safety.starts_with("at quiescence")),
-            "{}",
-            report.dump()
-        );
-        Ok(())
-    }
-
     /// Seed 2: b's board collides with a's code, so it drops where it
     /// replays after a's seal, and b's card on it drops with it.
     #[tokio::test(start_paused = true)]
@@ -387,16 +376,214 @@ mod regressions {
         .await
     }
 
+    /// Holds at `scenario`'s size, and every holder kept every outcome it
+    /// replayed: none read `None` under a base that covers it.
+    async fn keeps_outcomes(
+        seed: u64,
+        scenario: Scenario,
+        steps: Vec<Action>,
+    ) -> Result<Report, Failure> {
+        let report = simulate(seed, scenario, steps).await?;
+        assert!(failure(&report).is_none(), "{}", report.dump());
+        assert_eq!(
+            report.coverage.get("outcome under a base"),
+            None,
+            "{}",
+            report.dump()
+        );
+        Ok(report)
+    }
+
+    /// Seed 20013: a writes a board in `l0` and invites c. b, holding `l0`
+    /// with every frame, saw a seal it could not yet place author a's other
+    /// positions for, imported a's listed checkpoint and lost a's outcome.
+    /// Placements now come before a listed replacement.
+    #[tokio::test(start_paused = true)]
+    async fn a_listed_checkpoint_waits_for_placements() -> Result<(), Failure> {
+        keeps_outcomes(
+            20013,
+            soak_size(20013),
+            vec![
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 1,
+                        cap: 8,
+                    },
+                ),
+                Invite(0, 3),
+            ],
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Seed 20033: b holds `l1`, where a wrote a board, and is shared `l8`.
+    /// Its new scope made the domain look unverified, and the seal
+    /// rebootstrap imported every scope before placements showed a's other
+    /// positions.
+    #[tokio::test(start_paused = true)]
+    async fn a_seal_rebootstrap_waits_for_placements() -> Result<(), Failure> {
+        keeps_outcomes(
+            20033,
+            soak_size(20033),
+            vec![
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l1".into(),
+                        code: 3,
+                        cap: 8,
+                    },
+                ),
+                Partition("l8".into()),
+                Share("l8".into(), 1),
+                Invite(0, 2),
+                Seal(0),
+            ],
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Seed 20067: revoking c makes b restore every scope from a checkpoint,
+    /// so b keeps a's board only in its rows: a replica keeps outcomes of
+    /// its own members alone. The oracle accepts exactly that.
+    #[tokio::test(start_paused = true)]
+    async fn another_authors_outcome_may_go_with_a_covering_base() -> Result<(), Failure> {
+        let report = simulate(
+            20067,
+            soak_size(20067),
+            vec![
+                Invite(0, 2),
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 3,
+                        cap: 9,
+                    },
+                ),
+                Revoke(2),
+            ],
+        )
+        .await?;
+        assert!(failure(&report).is_none(), "{}", report.dump());
+        assert_eq!(
+            report.coverage.get("outcome under a base"),
+            Some(&1),
+            "{}",
+            report.dump()
+        );
+        Ok(())
+    }
+
+    /// Seed 20027: b writes a board in `l1` and evicts it; a seals twice and
+    /// b holds `l1` again. Its first verification is at the second seal,
+    /// which placed the board in that seal's era, not the first's.
+    #[tokio::test(start_paused = true)]
+    async fn a_list_held_again_after_two_seals_keeps_the_first_seals_era() -> Result<(), Failure> {
+        keeps_outcomes(
+            20027,
+            soak_size(20027),
+            vec![
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l1".into(),
+                        code: 0,
+                        cap: 8,
+                    },
+                ),
+                Evict(1, "l1".into()),
+                Seal(0),
+                Crash(1, Some(rocky_secure::CrashPoint::Redo)),
+                Seal(0),
+                Hold(1, "l1".into()),
+            ],
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Seed 20207: b writes a board in `l0` and evicts it, keeping its
+    /// outcome as provisional; revoking c makes b restore `l0` from a base
+    /// at a seal covering the board, whose frame b no longer holds. Its own
+    /// outcome stayed provisional for good.
+    #[tokio::test(start_paused = true)]
+    async fn an_evicted_own_outcome_turns_final_with_a_covering_base() -> Result<(), Failure> {
+        holds_at(
+            20207,
+            soak_size(20207),
+            vec![
+                Invite(0, 2),
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 2,
+                        cap: 6,
+                    },
+                ),
+                Evict(1, "l0".into()),
+                Revoke(2),
+                Hold(1, "l0".into()),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20135: b writes a board in `l1`, a pins a card to it and seals;
+    /// b evicts `l1`, a compacts and seals again, and `l1` is shared with b
+    /// again. b imports the base at the first seal, holding no frames under
+    /// it. Verifying the second seal counted positions from the start, so b
+    /// waited on a seal rebootstrap for good, its card cascaded away by the
+    /// import and never derived again.
+    #[tokio::test(start_paused = true)]
+    async fn a_base_at_an_earlier_seal_verifies_the_next_seal() -> Result<(), Failure> {
+        holds_at(
+            20135,
+            soak_size(20135),
+            vec![
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l1".into(),
+                        code: 3,
+                        cap: 12,
+                    },
+                ),
+                Crash(1, Some(rocky_secure::CrashPoint::Apply)),
+                Change(
+                    0,
+                    Change::Card {
+                        list: "l1".into(),
+                        board: 7,
+                        pinned: Some(7),
+                        name: 2,
+                        points: 3,
+                    },
+                ),
+                Seal(0),
+                Evict(1, "l1".into()),
+                Compact(0),
+                Seal(0),
+                Share("l1".into(), 1),
+            ],
+        )
+        .await
+    }
+
     /// Seed 20000: c joins holding only `l1` after the owner wrote in `l0`.
     /// c places the owner's `l0` positions by their signed headers, which
-    /// name `l0` only by its keyed scope, and finalizes the final seal.
-    /// Reaching quiescence then shows b's outcome of the step missing after
-    /// a base, the separately triaged base class, so only finalization is
-    /// asserted here.
+    /// name `l0` only by its keyed scope, and finalizes the final seal; b
+    /// keeps the board's outcome.
     #[tokio::test(start_paused = true)]
     async fn a_member_holding_one_list_finalizes_seals_over_another() -> Result<(), Failure> {
-        finalizes(
+        keeps_outcomes(
             20000,
+            INTEGRATION,
             vec![
                 Change(
                     0,
@@ -411,5 +598,6 @@ mod regressions {
             ],
         )
         .await
+        .map(drop)
     }
 }

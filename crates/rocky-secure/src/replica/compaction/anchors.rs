@@ -140,14 +140,13 @@ impl<A: RowApplication> Inner<A> {
             starts.insert(mark.author, mark.sequence.saturating_add(1));
         }
         if let Some(id) = id {
-            // A verified no-frames base at a seal of the path accounts for
-            // this scope's own positions through that seal.
+            // A verified base at a seal of the path accounts for this
+            // scope's own positions through that seal.
             let mut covered = self.seal_anchor(id).await?;
             if let Some(signed) = self
                 .checkpoint_record(id, true)
                 .await?
                 .and_then(|record| record.signed)
-                .filter(|signed| signed.statement.no_frames())
                 && let Some(sealed) = signed.statement.seal
                 && let domain = signed.statement.scope.domain
                 && self.path_index(domain, sealed)?.is_some()

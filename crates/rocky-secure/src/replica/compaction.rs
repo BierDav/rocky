@@ -1498,11 +1498,18 @@ impl<A: RowApplication> Inner<A> {
         through: i64,
     ) -> Result<bool, Error> {
         let base = previous.filter(|(_, signed)| signed.statement.seal.is_some());
-        // A base nothing applied after stays, signed as it is. An empty
-        // partition's base follows the seal: a newly granted reader may never
-        // have held the other scopes' frames.
+        let taken = self.seal_rows(id, target.seal).await?;
+        // A base nothing applied after stays, signed as it is, while it holds
+        // the seal's rows: a linked scope's delete action can change them
+        // without a member of this scope. Linked scopes' bases must hold rows
+        // at one seal, or a rebuild keeps a child its parent's base deleted.
+        // An empty partition's base follows the seal: a newly granted reader
+        // may never have held the other scopes' frames.
         if let Some((position, signed)) = base
             && *position == through
+            && taken
+                .as_ref()
+                .is_none_or(|rows| replay::base_sets(rows).rows_summary() == signed.statement.rows)
             && signed.statement.key_epoch() == Some(self.scope_key(scope)?.0)
             && signed.statement.revocations == self.revocation_digest()?
             && !(signed.statement.partition.is_some()
@@ -1522,7 +1529,6 @@ impl<A: RowApplication> Inner<A> {
         if self.leaves_open(id, target.depth).await? {
             return Ok(false);
         }
-        let taken = self.seal_rows(id, target.seal).await?;
         let outcomes = match taken {
             Some(_) => self.seal_outcomes(id, target.seal).await?,
             None => None,

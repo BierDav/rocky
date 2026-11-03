@@ -23,7 +23,8 @@ pub struct FrontierExchange {
     pub changed: Vec<ResourceScope>,
     /// Scopes skipped this session: this replica's view of the peer's
     /// credentials, or the peer's view of this replica's, grants no whole-scope
-    /// read or custody. A peer that has not learned a partition refuses it.
+    /// read or custody, or either replica does not hold the scope. A peer that
+    /// has not learned a partition refuses it.
     pub refused: Vec<ResourceScope>,
     /// Scopes the peer imports from a checkpoint: no rows move this round,
     /// so history does not crowd out the import.
@@ -46,9 +47,11 @@ impl NativeSession {
             .frontier_batches(scopes, MAX_FRONTIER_SCOPES)
             .await?
         {
+            // A scope this replica does not hold syncs nothing.
+            let held = replica.held_of(&requested).await?;
             // A frontier is metadata: a peer outside a scope never sees it.
             let batch = replica
-                .peer_holds(self.peer, &self.credentials, &requested)
+                .peer_holds(self.peer, &self.credentials, &held)
                 .await?;
             refused.extend(requested.iter().filter(|scope| !batch.contains(scope)));
             if batch.is_empty() {

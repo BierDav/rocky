@@ -286,7 +286,7 @@ impl<A: RowApplication> Inner<A> {
             .find(|mark| mark.author == request.author)
             .map(|mark| mark.sequence)
             .ok_or_else(|| denied("placement outside the seal's frontier"))?;
-        let held = self.custody_scopes(time)?;
+        let custody = self.custody_scopes(time)?;
         let mut verified = Vec::new();
         for Placement(bytes) in placements {
             let header = crate::wire::verified_header(&bytes)?;
@@ -310,8 +310,9 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("placement not inside the seal's state"));
             }
             self.verify_header_authority(&header, chain.credentials(), time)?;
-            // A scope this node may take custody of needs the frame itself.
-            if held.contains(&e.scope) {
+            // A scope this node keeps custody of needs the frame itself;
+            // one it evicted is placed like one it may not hold.
+            if custody.contains(&e.scope) && self.holds(e.scope).await? {
                 continue;
             }
             verified.push((header, bytes));
@@ -596,6 +597,26 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Partitions of the followed domain this replica may hold whole and
+    /// has a key for, but does not hold.
+    pub(crate) async fn unheld_partitions(&self) -> Result<Vec<ResourceScope>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let Some((domain, _)) = inner.workspace.followed.clone() else {
+            return Ok(Vec::new());
+        };
+        let mut scopes = Vec::new();
+        for scope in inner.custody_scopes(now()?)? {
+            if scope.domain == domain
+                && inner.partitioned(scope)
+                && inner.partitions.contains_key(&scope)
+                && inner.opening_keys().any(|key| key.scope == scope)
+                && !inner.holds(scope).await?
+            {
+                scopes.push(scope);
+            }
+        }
+        Ok(scopes)
+    }
     /// The placement requests this replica wants answered. A receiver
     /// revalidates every request; a moved authority or tip ends the listing
     /// early with what it found, and the next pass asks again.

@@ -1275,7 +1275,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.store_frontiers(peer, &grants, &held).await?;
         let mut replies = Vec::new();
         for frontier in frontiers {
-            if !holds_whole(&grants, frontier.scope) {
+            // A scope this replica does not hold is not its to serve.
+            if !holds_whole(&grants, frontier.scope) || !inner.holds(frontier.scope).await? {
                 replies.push(FrontierReply::Refused(frontier.scope));
                 continue;
             }
@@ -1285,6 +1286,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }));
         }
         Ok(replies)
+    }
+    /// The members of `scopes` this replica holds, in order.
+    pub(crate) async fn held_of(
+        &self,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<ResourceScope>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut held = Vec::new();
+        for scope in scopes {
+            if inner.holds(*scope).await? {
+                held.push(*scope);
+            }
+        }
+        Ok(held)
     }
     /// The members of `scopes` that `peer` may hold whole, in order, so a
     /// client discloses no frontier to a peer outside a scope. A chain this

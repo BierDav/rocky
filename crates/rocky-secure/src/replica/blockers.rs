@@ -465,8 +465,14 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
                 return Err(Error::Corrupt("eviction guard".into()));
             };
+            // An evicted scope waits for nothing; its guard holds back
+            // authoring only once the scope is held again.
+            let scope = decode::<ResourceScope>(scope)?;
+            if !self.holds(scope).await? {
+                continue;
+            }
             blockers.push(blocker(
-                scope_label(&decode::<ResourceScope>(scope)?),
+                scope_label(&scope),
                 BlockerKind::RestorationGuard,
                 ClearsBy::AnyPeer,
             ));

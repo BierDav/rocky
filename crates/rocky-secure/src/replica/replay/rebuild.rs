@@ -70,7 +70,6 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        let (table, condition, values) = self.scope_rows(scope)?;
         let id = self.find_scope_id(scope).await?;
         if let Some(id) = id {
             self.keep_outcomes(id).await?;
@@ -78,6 +77,10 @@ impl<A: RowApplication> Inner<A> {
                 .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
                 .await?;
         }
+        // A partition whose tuple never arrived holds no rows.
+        let Some((table, condition, values)) = self.scope_rows(scope)? else {
+            return Ok(());
+        };
         self.touch(&table);
         let quoted = typed::quoted(&table);
         let held = self
@@ -155,8 +158,12 @@ impl<A: RowApplication> Inner<A> {
         self.clear_replayed(scope).await?;
         self.restore_images(scope, source, rows).await
     }
-    /// The scope's replayed table and the condition selecting its rows.
-    fn scope_rows(&self, scope: ResourceScope) -> Result<(String, String, Vec<SqlValue>), Error> {
+    /// The scope's replayed table and the condition selecting its rows;
+    /// none for a partition whose tuple this replica never learned.
+    fn scope_rows(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<(String, String, Vec<SqlValue>)>, Error> {
         let corrupt = || Error::Corrupt("replayed scope".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
         let projected = typed.by_scope(scope).ok_or_else(corrupt)?;
@@ -165,9 +172,11 @@ impl<A: RowApplication> Inner<A> {
             .table(&projected.table.sql_name)
             .ok_or_else(corrupt)?;
         if logical.partition_by.is_empty() {
-            return Ok((logical.sql_name.clone(), "1".into(), Vec::new()));
+            return Ok(Some((logical.sql_name.clone(), "1".into(), Vec::new())));
         }
-        let tuple = self.partitions.get(&scope).ok_or_else(corrupt)?;
+        let Some(tuple) = self.partitions.get(&scope) else {
+            return Ok(None);
+        };
         let condition = logical
             .partition_by
             .iter()
@@ -175,7 +184,7 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Vec<_>>()
             .join(" AND ");
         let values = super::super::partition::partition_values(schema, logical, tuple)?;
-        Ok((logical.sql_name.clone(), condition, values))
+        Ok(Some((logical.sql_name.clone(), condition, values)))
     }
     /// Inside the caller's transaction, rebuilds the replayed rows of the
     /// followed domain from bases and frames once no scope a clear marked

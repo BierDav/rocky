@@ -199,12 +199,10 @@ mod regressions {
 
     /// Seed 20008: b deletes a board, cascading its card, while a seals
     /// without the delete; the delete replays after the seal, a seals it
-    /// and compacts. Open: the full rebuild restores `cards` from the first
-    /// seal's rows, since the second covers no `cards` member and takes
-    /// none, and `boards` from the second's, so the cascaded card returns
-    /// without its board.
+    /// and compacts. Compaction kept `cards`' base from the first seal,
+    /// since the second covers no `cards` member, and signed `boards` at
+    /// the second, so a rebuild brought the card back without its board.
     #[tokio::test(start_paused = true)]
-    #[ignore = "open defect: linked scopes rebuild from different seals"]
     async fn a_cascade_replayed_after_a_seal_survives_the_next_seal_and_compaction()
     -> Result<(), Failure> {
         holds(
@@ -246,10 +244,9 @@ mod regressions {
     }
 
     /// Seed 20004: a partial member evicts a list right after the owner
-    /// sealed a board in it. Open: its full rebuild replays the evicted
-    /// scope's frames and shows the board the projection evicted.
+    /// sealed a board in it. Its full rebuild restored the evicted scope
+    /// from the rows the seal took, which eviction left behind.
     #[tokio::test(start_paused = true)]
-    #[ignore = "open defect: a rebuild after eviction replays the evicted scope"]
     async fn an_eviction_after_a_seal_audits() -> Result<(), Failure> {
         holds(
             20004,
@@ -264,6 +261,113 @@ mod regressions {
                 ),
                 Seal(0),
                 Evict(1, "l0".into()),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20004, shrunk again once the first fix held: b evicts `l0`
+    /// before a's board reaches it. b still finalizes the owner's seals:
+    /// it places a's `l0` position like one of a scope it never held.
+    #[tokio::test(start_paused = true)]
+    async fn an_eviction_before_the_list_arrives_finalizes() -> Result<(), Failure> {
+        holds(
+            20004,
+            vec![
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 1,
+                        cap: 3,
+                    },
+                ),
+                Evict(1, "l0".into()),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20033: b, offline, is shared `l8` and evicts it before the
+    /// share reaches it. The eviction failed on the partition tuple b never
+    /// learned ("replayed scope") and left the scope evicting; a board a
+    /// wrote there later made b's identity ledger differ from its rebuild.
+    /// A partition whose tuple never arrived holds no rows to clear.
+    #[tokio::test(start_paused = true)]
+    async fn evicting_a_list_whose_share_never_arrived_succeeds() -> Result<(), Failure> {
+        let report = simulate(
+            20033,
+            INTEGRATION,
+            vec![
+                Offline(1),
+                Partition("l8".into()),
+                Share("l8".into(), 1),
+                Evict(1, "l8".into()),
+                Seal(0),
+            ],
+        )
+        .await?;
+        assert!(failure(&report).is_none(), "{}", report.dump());
+        assert_eq!(
+            report.coverage.get("evicted"),
+            Some(&1),
+            "{}",
+            report.dump()
+        );
+        Ok(())
+    }
+
+    /// Seed 20042: a writes a board and a card on it in `l1`, and b evicts
+    /// `l1`.
+    #[tokio::test(start_paused = true)]
+    async fn evicting_a_list_with_a_board_and_its_card_audits() -> Result<(), Failure> {
+        let report = simulate(
+            20042,
+            INTEGRATION,
+            vec![
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 0,
+                        name: 3,
+                        points: 1,
+                    },
+                ),
+                Evict(1, "l1".into()),
+            ],
+        )
+        .await?;
+        assert!(failure(&report).is_none(), "{}", report.dump());
+        assert_eq!(
+            report.coverage.get("evicted"),
+            Some(&1),
+            "{}",
+            report.dump()
+        );
+        Ok(())
+    }
+
+    /// Seed 20064: b evicts `l1` after a sealed a board and its card there,
+    /// then holds it again. Its seal bounds outlived the eviction, so it
+    /// placed the sealed transaction after the seal: era 1, not 0.
+    #[tokio::test(start_paused = true)]
+    async fn a_list_held_again_after_eviction_keeps_sealed_eras() -> Result<(), Failure> {
+        holds(
+            20064,
+            vec![
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 2,
+                        name: 4,
+                        points: 5,
+                    },
+                ),
+                Seal(0),
+                Evict(1, "l1".into()),
+                Hold(1, "l1".into()),
             ],
         )
         .await

@@ -18,7 +18,22 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
     ) -> Result<usize, Error> {
         let mut stored = 0;
-        for request in replica.wanted_placements().await? {
+        let requests = replica.wanted_placements().await?;
+        if requests.is_empty() {
+            return Ok(stored);
+        }
+        // A position in a partition is shown only to a session that proved
+        // its key. Held partitions need their frames, not placements; those
+        // this replica may hold but does not, as after an eviction, are
+        // proved first.
+        let unheld = replica.unheld_partitions().await?;
+        let allowed = replica
+            .peer_holds(self.peer, &self.credentials, &unheld)
+            .await?;
+        if !allowed.is_empty() {
+            self.try_scoped_holding(replica, &allowed, false).await?;
+        }
+        for request in requests {
             if self.low(MAX_SECURE_FRAME) {
                 break;
             }

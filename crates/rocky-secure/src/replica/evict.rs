@@ -220,6 +220,16 @@ impl<A: RowApplication> Inner<A> {
                         "secure_checkpoint_pages",
                         "secure_checkpoint_stubs",
                         "secure_compaction_live_creations",
+                        // Held again, the scope verifies its seals afresh,
+                        // as one never held: its bounds place no members.
+                        "secure_seal_bounds",
+                        "secure_seal_drops",
+                        // A rebuild starts a scope from these: an evicted
+                        // one has no rows to start from.
+                        "secure_replayed_seals",
+                        "secure_replayed_seal_rows",
+                        "secure_replayed_base",
+                        "secure_replayed_staged",
                     ] {
                         inner
                             .conn

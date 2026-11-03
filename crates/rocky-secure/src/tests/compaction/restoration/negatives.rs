@@ -189,6 +189,9 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
     higher.timestamp += 1;
     higher.backlink = Some(f.frames[2].id().unwrap());
     higher.sign(&f.key);
+    // Seals verify the scope held again first, as any receive's pass does,
+    // so what follows compares only what the refused frames could change.
+    f.replica.finalize_arrived(f.lineage.domain).await.unwrap();
     let before = super::super::audit::snapshot(&f.replica).await;
     let error = f
         .replica

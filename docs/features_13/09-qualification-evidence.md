@@ -481,43 +481,116 @@ points, and the `board_cap` assertion bounds a board's points.
     `tests::compaction::cascades::a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild`
     and `relational_tests::regressions::a_card_on_a_board_that_lost_its_code_after_a_seal_audits`,
     which both fail without the fix.
-- **Open** (minimized, kept as `#[ignore]` reproductions in
-  `relational_tests::regressions`):
-  - Seed 20008: linked scopes rebuild from different seals. A board
-    delete cascades its card, replays after seal 1 and is covered by
-    seal 2. Seal 2 covers no `cards` member, so it takes no `cards` rows.
-    After compaction, the full rebuild restores `cards` at seal 1 and
-    `boards` at seal 2, and the card returns without its board. Taking
-    linked scopes' rows at each seal would also need open cross-scope
-    undo, so this is not a local fix.
-  - Seed 20004: a rebuild after an eviction replays the evicted scope.
-    A board, a seal, then a partial member evicts the list, and its
-    audit's rebuild shows the evicted board.
-  - Seed 20000: a member holding only `l1` never finalizes a seal over
-    the owner's `l0` frames ("missing frames of author 1 through the
-    seal's frontier").
-  - Seed 20007 (shrinks poorly): after a cascade delete in `l0`, the
-    full rebuild's identity ledger differs from the projection.
-  - Seed 1: evicting a list the member was never shared. The release is
-    accepted, the eviction fails with "replica consistency check failed:
-    replayed scope", and a `RestorationGuard` blocks the member from then
-    on. The driver now evicts only shared lists.
+- **Fixes from the fuzz** (`rocky-secure` unless named). Each
+  regression in `relational_tests::regressions` fails without its fix
+  (checked by reverting each part).
+  - **Linked scopes compacted to bases at different seals** (seed 20008).
+    `compact_replayed` kept a scope's previous base, signed as it was,
+    when no member of that scope applied after it. A delete action of a
+    linked scope changes its rows without a member of its own: the `cards`
+    base stayed at seal 1 (the card) while `boards` moved to seal 2 (no
+    board), and a rebuild returned the card without its board. Every
+    keyed replayed scope already takes its rows at each finalized seal;
+    now the old base stays only while its rows equal the scope's rows
+    taken at the target seal, else those rows are signed at the target
+    seal. Linked scopes' bases then hold rows at one seal, which a fresh
+    replica holding the same scopes would compute.
+    `a_cascade_replayed_after_a_seal_survives_the_next_seal_and_compaction`.
+  - **Eviction left the rows a rebuild starts from** (seed 20004).
+    Eviction kept the scope's rows taken at seals and its replay base, so
+    the audit's rebuild restored the evicted board. Eviction deletes
+    `secure_replayed_seals`, `secure_replayed_seal_rows`,
+    `secure_replayed_base` and `secure_replayed_staged` of the scope.
+    `an_eviction_after_a_seal_audits`.
+  - **Evicted scopes kept syncing** (the `RestorationGuard` and refused
+    `SyncRequest` class). Sync listed every granted scope: an evicted one
+    pulled frames its own replica refused ("scope is not held"), and a
+    peer answered `Held` for frontiers of scopes it had evicted, then
+    refused the catch-up (`NotPermitted`). `changed_scopes` skips scopes
+    this replica does not hold, `exchange_frontiers` refuses scopes the
+    server does not hold, and a restoration guard is a blocker only once
+    its scope is held again. Same regression; it also fails without these.
+  - **An evicted scope's positions could not be placed** (seed 20004,
+    shrunk again). After an eviction, a frame of the evicted list that
+    never arrived blocked finalization. `receive_placements` dropped
+    headers of every scope the node has a whole grant for; it now drops
+    only scopes it also holds. `pull_placements` first proves the
+    partitions the node has a whole grant and key for but does not hold,
+    so the peer shows their headers instead of `CustodyRequired`.
+    `an_eviction_before_the_list_arrives_finalizes` (fails without either
+    part).
+  - **Evicting a partition whose tuple never arrived** (seed 20033, the
+    old seed 1 class). `clear_replayed` refused it as corrupt ("replayed
+    scope") after the eviction had started. Such a partition holds no
+    rows; the clear forgets only its replay records.
+    `evicting_a_list_whose_share_never_arrived_succeeds` (asserts the
+    eviction succeeds; the run alone healed before).
+  - **Outcome records into an unheld log** (seed 20042, identity-ledger
+    class). Evicting `boards` cascades into `cards`; the rederive at its
+    end published the pair's outcome record into the `cards` log, which
+    the driver had already left, so authoring was refused ("author needs
+    a held scope") and `cards` was never evicted. `publish_outcome` signs
+    only into logs of scopes this replica holds.
+    `evicting_a_list_with_a_board_and_its_card_audits`.
+  - **A scope held again kept its seal bounds** (seed 20064, era class).
+    After eviction and holding again, the scope looked verified through
+    stale bounds, and its returning members replayed in the open era.
+    Eviction deletes the scope's `secure_seal_bounds` and
+    `secure_seal_drops`, so the scope verifies the last finalized seal as
+    a newly held one does. `order_behind_seal` also moves members a seal
+    covers that replayed in a later era back into the seal's era.
+    `a_list_held_again_after_eviction_keeps_sealed_eras` (fails without
+    either part).
+    `restoration_never_admits_unknown_own_frames_without_or_above_its_exact_guard`
+    now runs one finalization pass before its first snapshot: its fixture
+    evicts and holds the scope again, which now verifies at the next pass.
+    The refused frames still change nothing.
+  - Formats: no wire or checkpoint change; replica format stays
+    `rocky.encrypted-replica.v43`.
+- **Open:**
+  - Seed 20000 (`#[ignore]`d,
+    `a_member_holding_one_list_finalizes_seals_over_another`): needs a
+    design decision. c holds only `l1`; the owner's seal frontier covers
+    its `l0` positions. A placement page shows a frame's signed header,
+    and the header carries the plaintext partition tuple
+    (`Extensions::partition`), so a peer answers `CustodyRequired` to a
+    requester that has not proved the partition (traced: every request
+    from c, author 1 positions 0..2). c can never place them. Options:
+    (a) move the tuple out of the signed header into the encrypted body
+    and sign a keyed commitment to it, so a placement shows "not your
+    scope" without the tuple (wire and frame format bump); (b) the seal
+    statement carries, per frontier position, a tag keyed by each scope's
+    key, so a holder recognises its own positions (seal format bump,
+    larger seals); (c) trust a peer's `CustodyRequired` as proof that the
+    position lies outside the requester's scopes (no format change, but a
+    member could make another finalize over a missing frame: weakens the
+    signed-evidence rule). Not decided here.
+  - Missing or `Covered` outcomes after a base (67 seeds): left to the
+    change making checkpoints carry the seal's drop list. Shown by seed
+    20033 with a board written after the eviction: b holds `l8` again,
+    installs a one-row base and reports `None`.
+  - Era after two seals across an eviction (seed 20027, 1 of 5 era
+    seeds): b writes a board in `l1`, evicts it, a seals, b crashes, a
+    seals, b holds `l1` again. Steps: `Change(1, Board{l1,0,8})`,
+    `Evict(1,l1)`, `Seal(0)`, `Crash(1, Redo)`, `Seal(0)`, `Hold(1,l1)`.
+    A scope held again verifies only the last finalized seal, so a member
+    an earlier one covers lands in the later era.
+  - Identity ledger after an eviction and a revocation (seed 20080, 6 of 9
+    audit seeds): `Evict(1,l0)`, `Change(0, Board{l0,1,6})`, `Invite(0,2)`,
+    `Revoke(2)`; b's identity ledger differs from its rebuild. Not
+    triaged further.
+  - `FinalizationWaiting` "missing frames of author N" (31 seeds): the
+    seed 20000 message; not traced per seed. 5 more seeds wait for a
+    seal rebootstrap or pending dependencies.
 - Soak (`ROCKY_SIM_SEEDS=300`, release, seeds 20000–20299, 3–4 nodes,
-  40 steps, before the driver's era-only position comparison): 146
-  passed, 154 failed. Every failure class matches an open item above or
-  below; none is a reference mismatch of rows.
-  - Audits:
-    - after eviction: 26 seeds;
-    - linked-scope rebuild (`cards`, `boards`): 7;
-    - identity ledger: 8.
-  - Outcomes: 11 seeds where a holder reports no outcome for a
-    transaction that applied, though it holds its rows (it received them
-    through a base, not replay).
-  - Liveness, mostly after eviction:
-    - `RestorationGuard`: 27 seeds, plus 32 with a refused `SyncRequest`;
-    - `FinalizationWaiting` alone: 21 seeds (seed 20000's class).
-  - Reached: 566 applied and 19 dropped transactions checked against the
-    reference; 162 evictions; crash points Apply, Compact, Import, Redo,
-    Rewind, Settle, Switch and UndoDeletion fired; 205 rebootstrap and 37
-    import waits observed.
-
+  40 steps; Apple M5 Pro, shared host). Before (main `dd4fc05f`, after
+  the driver's era-only position comparison): 112 passed, 188 failed.
+  After these fixes (run as three 100-seed chunks via `ROCKY_SIM_FIRST`):
+  182 passed, 118 failed.
+  - Outcomes: `None` 47 seeds, `Covered` 20 (the base class above).
+  - `FinalizationWaiting`: 31 missing positions, 5 with a rebootstrap or
+    pending dependencies; 1 `PendingFrames`.
+  - Audits: 9 (6 identity ledger, 3 rows or digests).
+  - Era disagreements: 5.
+  - Gone: `RestorationGuard` and refused `SyncRequest` (baseline 66
+    seeds), the eviction "replayed scope" refusal.

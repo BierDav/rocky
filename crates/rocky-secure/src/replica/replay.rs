@@ -989,7 +989,10 @@ impl<A: RowApplication> Inner<A> {
     /// A seal finalized at depth `era` leaves out the unsealed transactions
     /// applied after each `(scope, through)` cut: they rewind, with what
     /// follows them, and redo in the new era, after every transaction the
-    /// seal covers. Their identity and stamp stay; outcomes may change.
+    /// seal covers. Those it covers that replayed in a later era, as when a
+    /// scope held again verifies a seal finalized before its frames came
+    /// back, move into the seal's era. Their identity and stamp stay;
+    /// outcomes may change.
     /// A kept seal is marked once the live tables hold exactly its state,
     /// so its history records what the transactions behind it replace.
     pub(super) async fn order_behind_seal(
@@ -1006,7 +1009,28 @@ impl<A: RowApplication> Inner<A> {
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut starts = Vec::new();
         let mut moved = BTreeSet::new();
+        let mut covered = BTreeSet::new();
         for (scope, through) in cuts {
+            let rows = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT era,clock,author,sequence,hash FROM secure_replayed WHERE scope=? AND sealed=0 AND era>=? AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position<=?) ORDER BY clock,author,sequence",
+                        [*scope, era, *scope, *through],
+                    )
+                    .await?,
+            )
+            .await?;
+            if let Some(first) = rows.first() {
+                // They rewind from where the seal's era places them.
+                let (_, stamp) = order_of(first)?;
+                starts.push((*scope, (era - 1, stamp)));
+            }
+            for row in rows {
+                let [.., SqlValue::Blob(hash)] = row.as_slice() else {
+                    return Err(corrupt());
+                };
+                covered.insert(Hash::try_from(hash.as_slice()).map_err(|_| corrupt())?);
+            }
             let rows = collect_rows(
                 self.conn
                     .query(
@@ -1017,7 +1041,12 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
             if let Some(first) = rows.first() {
-                starts.push((*scope, order_of(first)?));
+                let order = order_of(first)?;
+                match starts.iter_mut().find(|(known, _)| known == scope) {
+                    Some((_, start)) if order < *start => *start = order,
+                    Some(_) => {}
+                    None => starts.push((*scope, order)),
+                }
             }
             for row in rows {
                 let [.., SqlValue::Blob(hash)] = row.as_slice() else {
@@ -1033,6 +1062,8 @@ impl<A: RowApplication> Inner<A> {
         for redo in &mut redo {
             if redo.members.iter().any(|(hash, _)| moved.contains(hash)) {
                 redo.order.0 = era;
+            } else if redo.members.iter().any(|(hash, _)| covered.contains(hash)) {
+                redo.order.0 = era - 1;
             }
         }
         redo.sort_by(|a, b| a.order.cmp(&b.order));

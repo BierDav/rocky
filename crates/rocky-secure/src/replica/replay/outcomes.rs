@@ -196,7 +196,7 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Signs how this replica replayed its held members of a transaction
-    /// of several members into each of their logs it may write: after
+    /// of several members into each of their logs it holds and may write: after
     /// replaying them, and as their author at commit; again only when the
     /// outcome changes.
     pub(in crate::replica) async fn publish_outcome(
@@ -236,7 +236,8 @@ impl<A: RowApplication> Inner<A> {
                         .iter()
                         .any(|right| grant.rights.contains(right))
             });
-            if writes {
+            // Only a held scope's log takes frames from this node.
+            if writes && self.holds(scope).await? {
                 logs.push((scope, id));
             }
         }

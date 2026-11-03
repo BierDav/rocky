@@ -322,6 +322,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
             ClaimRight {
                 scope: service.scope,
                 counters: Some([b"invoices".to_vec()].into()),
+                grant: [7; 32],
             },
             1,
             (time, CLAIM_LIFETIME),

@@ -28,6 +28,7 @@ impl Fixture {
             scope: self.scope,
             counters: counters
                 .map(|names| names.iter().map(|name| name.as_bytes().to_vec()).collect()),
+            grant: [7; 32],
         }
     }
     /// The owner, the domain's publisher, grants `right` at `T`.

@@ -7,7 +7,7 @@ use crate::{
     RevocationSet, SignedCapability, denied,
 };
 use crate::{Capability, Extension, PeerId};
-use rocky_core::{PrincipalKind, Scope};
+use rocky_core::{Commitment, PrincipalKind, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -30,6 +30,10 @@ pub struct ClaimRight {
     pub scope: Scope,
     /// Exact counter names; every counter of the domain when absent.
     pub counters: Option<BTreeSet<Vec<u8>>>,
+    /// Names the grant across renewals: a revocation naming it ends every
+    /// link that carries it, whichever issuer signed it. A delegation
+    /// carries its own.
+    pub grant: Commitment,
 }
 impl ClaimRight {
     pub fn validate(&self) -> Result<(), Error> {
@@ -54,7 +58,7 @@ impl ClaimRight {
                 .as_ref()
                 .is_none_or(|counters| counters.contains(counter))
     }
-    /// Whether `other` is within this right.
+    /// Whether `other` is within this right, whatever grant it names.
     pub fn includes(&self, other: &Self) -> bool {
         self.scope == other.scope
             && match (&self.counters, &other.counters) {

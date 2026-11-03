@@ -15,12 +15,14 @@ fn only(names: &[&str]) -> ClaimRight {
     ClaimRight {
         scope: scope(3),
         counters: Some(names.iter().map(|name| name.as_bytes().to_vec()).collect()),
+        grant: [7; 32],
     }
 }
 fn every() -> ClaimRight {
     ClaimRight {
         scope: scope(3),
         counters: None,
+        grant: [7; 32],
     }
 }
 /// The owner's claim link for `holder` and the chain to `node`.
@@ -286,4 +288,62 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
     let mut forged = chain.clone();
     forged.0[2] = SignedCapability::sign(leaf, &holder).unwrap();
     assert!(forged.links(owner.public_key(), None).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
+    let (owner, holder, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let issuers = [PrivateKey::new(), PrivateKey::new()];
+    let chain = |issuer: &PrivateKey, right: ClaimRight, time: u64| {
+        let links = CredentialChain(vec![
+            Authority::owner(&owner)
+                .issue_issuer(issuer.public_key(), None, (NOW, 86_400 * 30, 60))
+                .unwrap(),
+        ]);
+        let authority = Authority::issuer(issuer, &links);
+        let link = authority
+            .issue_claims(holder.public_key(), right, 1, (time, CLAIM_LIFETIME))
+            .unwrap();
+        authority
+            .chain_of(link)
+            .certify_claims(&holder, node.public_key(), 11)
+            .unwrap()
+    };
+    // The first issuer signs the right; the second renews it after the
+    // first link's lifetime.
+    let first = chain(&issuers[0], every(), NOW);
+    let later = NOW + CLAIM_LIFETIME + 60;
+    let renewed = chain(&issuers[1], every(), later);
+    let mut regranted = every();
+    regranted.grant = [8; 32];
+    let other = chain(&issuers[1], regranted, later);
+    let claim = |chain: &CredentialChain, revocations: &RevocationSet, time: u64| {
+        chain.claimant(
+            owner.public_key(),
+            node.public_key(),
+            (scope(3), b"invoices"),
+            revocations,
+            time,
+        )
+    };
+    let none = RevocationSet::new();
+    assert!(claim(&first, &none, later).is_err());
+    assert!(claim(&renewed, &none, later).is_ok());
+    let statement = SignedRevocation::sign(
+        Revocation {
+            app: AppId([2; 16]),
+            issuer: owner.public_key(),
+            time: NOW,
+            nodes: Default::default(),
+            identities: Default::default(),
+            capabilities: [every().grant].into(),
+        },
+        &owner,
+        &CredentialChain::default(),
+    )
+    .unwrap();
+    let revoked = RevocationSet::try_from(vec![statement]).unwrap();
+    assert!(claim(&first, &revoked, NOW).is_err());
+    assert!(claim(&renewed, &revoked, later).is_err());
+    assert!(claim(&other, &revoked, later).is_ok());
 }

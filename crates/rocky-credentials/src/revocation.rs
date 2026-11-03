@@ -29,7 +29,8 @@ pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statement
 /// One revocation: the identities, node certificates and capability IDs it
 /// ends, the identity that signed it and when. Its ID is its hash.
 /// Naming an identity ends every chain through it, so all its nodes;
-/// naming a node ends only that node's certificate.
+/// naming a node ends only that node's certificate; naming a claim right's
+/// grant ends every link of that right.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {
     /// The application, under its publisher, the statement belongs to.
@@ -138,13 +139,16 @@ impl SignedRevocation {
     /// Whether this statement ends a chain through `link`.
     pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
         let subject = &link.capability.subject;
+        let extended = link.capability.extended()?;
+        let capabilities = &self.statement.capabilities;
         Ok(self.statement.subjects().any(|key| key == subject)
-            || link
-                .capability
-                .extended()?
+            || extended
                 .node
                 .is_some_and(|node| self.statement.nodes.contains(&node))
-            || self.statement.capabilities.contains(&link.id()?))
+            || capabilities.contains(&link.id()?)
+            || extended
+                .claims
+                .is_some_and(|right| capabilities.contains(&right.grant)))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
@@ -291,15 +295,23 @@ impl RevocationSet {
     pub fn revokes(&self, key: &PublicKey) -> bool {
         self.subjects.contains(key) || self.revokes_reference(&crate::PeerId::of(*key))
     }
-    /// Whether some statement ends a chain through `link`.
+    /// Whether some statement names `id` among the capabilities it ends:
+    /// a link's ID or a claim right's grant.
+    pub fn revokes_capability(&self, id: &Commitment) -> bool {
+        self.capabilities.contains(id)
+    }
+    /// Whether some statement ends a chain through `link`: its subject,
+    /// node, capability ID or, on a claim link, its grant.
     pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
+        let extended = link.capability.extended()?;
         Ok(self.subjects.contains(&link.capability.subject)
-            || link
-                .capability
-                .extended()?
+            || extended
                 .node
                 .is_some_and(|node| self.revokes_reference(&node))
-            || self.capabilities.contains(&link.id()?))
+            || self.capabilities.contains(&link.id()?)
+            || extended
+                .claims
+                .is_some_and(|right| self.capabilities.contains(&right.grant)))
     }
     /// The first statement that revokes the holder of `chain`: its node
     /// certificate or the identity that signed it. A statement ending an

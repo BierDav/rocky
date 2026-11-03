@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
-const EXTENSION_VERSION: u32 = 6;
+const EXTENSION_VERSION: u32 = 7;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -75,7 +75,7 @@ pub struct Extended {
     pub issues: bool,
     /// Owner-granted whole-domain tip and bookmark control; never delegated.
     pub trusted: Option<rocky_core::Scope>,
-    /// Counter claims on the domain's coordinator (extension version 6);
+    /// Counter claims on the domain's coordinator (extension version 7);
     /// only on a short-lived link of its own.
     pub claims: Option<crate::ClaimRight>,
 }
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 7, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,

@@ -29,11 +29,14 @@ pub use discovery::{
     RENDEZVOUS_CONTACTS, RENDEZVOUS_INTERVAL, Topic, rendezvous_key,
 };
 
+#[cfg(not(target_family = "wasm"))]
+use iroh::address_lookup::DnsAddressLookup;
+
 /// The iroh version these handlers attach to; build the endpoint with it.
 pub use iroh;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
-    address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
+    address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{Connection, LocalTransportAddr, PortmapperConfig, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
@@ -270,7 +273,7 @@ struct Shared {
     /// connection's driver runs where it was dialed: dialed on a database's
     /// runtime it would end with the database and leave the endpoint
     /// waiting for it at close.
-    home: Option<tokio::runtime::Handle>,
+    home: Option<rocky_platform::task::Home>,
 }
 
 /// Rocky's protocols on one endpoint. Register `handler` on the router
@@ -314,7 +317,7 @@ impl Attachment {
         let finder = (discover != Discover::default())
             .then(|| discovery::Finder::new(endpoint.subscribe(), discover));
         Self(Arc::new(Shared {
-            home: tokio::runtime::Handle::try_current().ok(),
+            home: rocky_platform::task::Home::current(),
             finder,
             endpoint,
             restart: Mutex::new(None),
@@ -384,6 +387,8 @@ impl Attachment {
             let _ = router.shutdown().await;
         }
         self.0.connections.lock().await.clear();
+        // A browser binds no socket, so there is none to release.
+        #[cfg(not(target_family = "wasm"))]
         if options.bind.is_some() {
             // A closed loopback stand-in releases the watched clone.
             let stand_in = Endpoint::builder(presets::Minimal)
@@ -396,12 +401,12 @@ impl Attachment {
             stand_in.close().await;
             self.0.endpoint.send_replace(stand_in);
         }
-        let started = tokio::time::Instant::now();
+        let started = rocky_platform::time::Instant::now();
         let replacement = loop {
             match options.bind(*secret).await {
                 Ok(endpoint) => break endpoint,
                 Err(_) if started.elapsed() < REBIND => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    rocky_platform::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -449,7 +454,7 @@ impl ProtocolHandler for Handler {
             return Ok(());
         };
         if protocol == Protocol::Link {
-            match tokio::time::timeout(
+            match rocky_platform::time::timeout(
                 TIMEOUT,
                 link_stream(connection.clone(), false, &self.0.link_connections),
             )
@@ -513,7 +518,7 @@ impl Transport for Attachment {
             .endpoint()
             .watch_addr()
             .or(self.endpoint().home_relay_status());
-        tokio::spawn(async move {
+        rocky_platform::task::spawn(async move {
             loop {
                 tokio::select! {
                     _ = events.closed() => break,
@@ -571,7 +576,8 @@ impl Transport for Attachment {
             if self.0.relays {
                 // An address with a home relay is reachable beyond the LAN.
                 let _ =
-                    tokio::time::timeout(Duration::from_secs(5), self.endpoint().online()).await;
+                    rocky_platform::time::timeout(Duration::from_secs(5), self.endpoint().online())
+                        .await;
             }
             Ok(serde_json::to_string(&self.endpoint().addr())?)
         })
@@ -599,14 +605,14 @@ impl Transport for Attachment {
                         && let Some(connection) = cached
                         && connection.close_reason().is_none()
                         && let Ok(Ok(pair)) =
-                            tokio::time::timeout(TIMEOUT, connection.open_bi()).await
+                            rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await
                     {
                         return Ok(stream(connection, pair));
                     }
                     let dial = |address: EndpointAddr| {
                         let endpoint = self.endpoint();
                         async move {
-                            tokio::time::timeout(
+                            rocky_platform::time::timeout(
                                 TIMEOUT,
                                 endpoint.connect(address, protocol.name()),
                             )
@@ -623,13 +629,14 @@ impl Transport for Attachment {
                         None => dial(address).await,
                     }??;
                     if protocol == Protocol::Link {
-                        return tokio::time::timeout(
+                        return rocky_platform::time::timeout(
                             TIMEOUT,
                             link_stream(connection, true, &self.0.link_connections),
                         )
                         .await?;
                     }
-                    let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
+                    let pair =
+                        rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await??;
                     let mut connections = self.0.connections.lock().await;
                     connections.retain(|_, connection| connection.close_reason().is_none());
                     if connections.len() >= CACHED {
@@ -835,8 +842,12 @@ impl Options {
             "default" => {
                 builder = builder
                     .address_lookup(PkarrPublisher::n0_dns())
-                    .address_lookup(PkarrResolver::n0_dns())
-                    .address_lookup(DnsAddressLookup::n0_dns());
+                    .address_lookup(PkarrResolver::n0_dns());
+                // DNS needs sockets; a browser resolves through the pkarr relay.
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    builder = builder.address_lookup(DnsAddressLookup::n0_dns());
+                }
             }
             url => {
                 builder = builder
@@ -845,7 +856,17 @@ impl Options {
             }
         }
         if let Some(bind) = &self.bind {
-            builder = builder.clear_ip_transports().bind_addr(bind.as_str())?;
+            #[cfg(target_family = "wasm")]
+            return Err(
+                format!("a browser binds no socket such as {bind}: it is relay-only").into(),
+            );
+            #[cfg(not(target_family = "wasm"))]
+            {
+                builder = builder.clear_ip_transports().bind_addr(bind.as_str())?;
+            }
+        }
+        if cfg!(target_family = "wasm") && !self.relays() {
+            return Err("a browser reaches peers only through a relay".into());
         }
         Ok(builder.bind().await?)
     }

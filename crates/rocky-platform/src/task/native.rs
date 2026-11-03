@@ -86,3 +86,20 @@ impl Held {
 pub fn backoff_blocking(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
+
+/// The runtime something was made on, which outlives the caller's: work
+/// spawned there keeps running after a short-lived caller's runtime ends.
+#[derive(Clone, Debug)]
+pub struct Home(tokio::runtime::Handle);
+impl Home {
+    pub fn current() -> Option<Self> {
+        tokio::runtime::Handle::try_current().ok().map(Self)
+    }
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.0.spawn(future)
+    }
+}

@@ -16,13 +16,14 @@ use rocky_core::{
     commitment,
     net::{BoxFuture, Discovery, Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH},
 };
+use rocky_platform::time::{SystemTime, UNIX_EPOCH};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -306,6 +307,20 @@ fn absent(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// Natively the endpoint's TLS and DNS; a browser's `fetch` has its own.
+#[cfg(not(target_family = "wasm"))]
+fn relay_client(endpoint: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
+    Ok(PkarrRelayClient::new(
+        relay.parse()?,
+        endpoint.tls_config().clone(),
+        endpoint.dns_resolver()?.clone(),
+    ))
+}
+#[cfg(target_family = "wasm")]
+fn relay_client(_: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
+    Ok(PkarrRelayClient::new(relay.parse()?))
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -315,7 +330,7 @@ fn now() -> u64 {
 struct Announced {
     node: [u8; 32],
     topics: Vec<[u8; 32]>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<rocky_platform::task::JoinHandle<()>>,
 }
 struct Inner {
     endpoint: watch::Receiver<Endpoint>,
@@ -373,12 +388,14 @@ impl Finder {
         };
         let mut tasks = Vec::new();
         if self.local_runs() && !topics.is_empty() {
-            tasks.push(tokio::spawn(self.clone().local(node, topics.clone())));
+            tasks.push(rocky_platform::task::spawn(
+                self.clone().local(node, topics.clone()),
+            ));
         }
         if let Topic::On(relay) = &self.0.asked.topic
             && !topics.is_empty()
         {
-            tasks.push(tokio::spawn(self.clone().rendezvous(
+            tasks.push(rocky_platform::task::spawn(self.clone().rendezvous(
                 node,
                 topics.clone(),
                 relay.clone(),
@@ -420,7 +437,7 @@ impl Finder {
             // Permission or network changes may recover without a new endpoint.
             tokio::select! {
                 changed = endpoints.changed() => if changed.is_err() { return; },
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+                _ = rocky_platform::time::sleep(Duration::from_secs(30)) => {},
             }
         }
     }
@@ -444,7 +461,7 @@ impl Finder {
             let endpoint = endpoints.borrow_and_update().clone();
             let mut failure = None;
             for topic in &topics {
-                let cycle = tokio::time::timeout(
+                let cycle = rocky_platform::time::timeout(
                     REQUEST,
                     self.rendezvous_once(&endpoint, node, topic, &relay),
                 );
@@ -458,7 +475,7 @@ impl Finder {
             // Members spread over the interval instead of writing together.
             let jitter = Duration::from_millis(rand::thread_rng().next_u64() % 30_000);
             tokio::select! {
-                () = tokio::time::sleep(RENDEZVOUS_INTERVAL + jitter) => {}
+                () = rocky_platform::time::sleep(RENDEZVOUS_INTERVAL + jitter) => {}
                 changed = endpoints.changed() => {
                     if changed.is_err() {
                         return;
@@ -474,11 +491,7 @@ impl Finder {
         topic: &[u8; 32],
         relay: &str,
     ) -> Result<(), Failure> {
-        let client = PkarrRelayClient::new(
-            relay.parse()?,
-            endpoint.tls_config().clone(),
-            endpoint.dns_resolver()?.clone(),
-        );
+        let client = relay_client(endpoint, relay)?;
         let held = match client.resolve(rendezvous_key(topic).public()).await {
             Ok(packet) => entries(topic, &packet),
             // No member wrote the record yet.
@@ -592,7 +605,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_record_opens_only_under_its_topic_and_keeps_the_newest_few() -> Result<(), Failure> {
         let topic = [7; 32];
         let held: Vec<Entry> = (1..=9)
@@ -630,7 +643,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_merge_replaces_the_own_contact_and_drops_the_stale() {
         let held = vec![entry(1, 100), entry(2, 5000), entry(3, 4000)];
         let merged = merge(entry(3, 5000), held, 5000);
@@ -643,7 +656,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn the_largest_contacts_still_fit_the_packet() -> Result<(), Failure> {
         let mut large = entry(1, u64::MAX / 2);
         large.address.addrs.clear();

@@ -209,3 +209,20 @@ impl Held {
 /// Only connections in this Worker can hold its files, and none of them
 /// can make progress while this work runs.
 pub fn backoff_blocking(_duration: std::time::Duration) {}
+
+/// A Worker has one event loop, which every task shares, so there is no
+/// other runtime to return to.
+#[derive(Clone, Debug)]
+pub struct Home(());
+impl Home {
+    pub fn current() -> Option<Self> {
+        None
+    }
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        spawn_local(future)
+    }
+}

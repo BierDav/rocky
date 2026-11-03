@@ -1,3 +1,5 @@
+// Loopback endpoints and a local relay bind sockets, which a browser has not.
+#![cfg(not(target_family = "wasm"))]
 //! Who owns the endpoint: Rocky's handlers next to an application's own
 //! protocol on its router, and the starter that owns everything it binds.
 //! Loopback only; see `docs/runtime/sdk-transports.md` for what that proves.

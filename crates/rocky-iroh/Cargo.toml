@@ -26,15 +26,27 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rand = "=0.8.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros", "net"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros"] }
+rocky-platform.workspace = true
+# `std::time` natively; the browser clock on wasm32.
+web-time = "1"
+
+# Sockets: bound addresses and local discovery. A browser is relay-only.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { version = "1", features = ["net"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 async-dnssd = "0.5.1"
 
-[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+[target.'cfg(not(any(target_vendor = "apple", target_family = "wasm")))'.dependencies]
 mdns-sd = { version = "0.21.4", default-features = false, features = ["async"] }
 
 [dev-dependencies]
+# Each pure test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
+wasm-bindgen-test = "0.3"
+
+# A local relay and loopback endpoints, which bind sockets.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 rocky-iroh = { path = ".", features = ["test-utils"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

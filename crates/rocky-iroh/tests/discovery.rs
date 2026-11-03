@@ -1,3 +1,5 @@
+// Loopback endpoints and a local relay bind sockets, which a browser has not.
+#![cfg(not(target_family = "wasm"))]
 //! Discovery between two endpoints of one host: over mDNS, and over the
 //! rendezvous record on a local lookup server. See
 //! `docs/decisions/0057-discovery.md`.

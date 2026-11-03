@@ -76,17 +76,16 @@ fi
 # processes, sockets or a paused clock are native-only. Clippy for wasm32 also
 # refuses calls that panic or fail in a browser (scripts/clippy-wasm).
 wasm_packages="rocky-platform rocky-sqlite-opfs rocky-core rocky-credentials rocky-storage
-    rocky-runtime rocky-secure rocky-sdk"
+    rocky-runtime rocky-secure rocky-iroh rocky-sdk"
 run_wasm() {
     PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
-    # The SDK's iroh transport is not yet relay-only in a browser.
     CLIPPY_CONF_DIR="$repo_root/scripts/clippy-wasm" cargo clippy --locked \
-        --target wasm32-unknown-unknown --tests --no-default-features "$@" -- -D warnings
+        --target wasm32-unknown-unknown --tests "$@" -- -D warnings
     # One run of a package's binary holds all its tests; the longest takes minutes.
     WASM_BINDGEN_TEST_TIMEOUT=1800 cargo test --locked --no-fail-fast \
-        --target wasm32-unknown-unknown --tests --no-default-features "$@"
+        --target wasm32-unknown-unknown --tests "$@"
 }
 if $wasm_only && [ -z "$tiers" ]; then
     run_wasm

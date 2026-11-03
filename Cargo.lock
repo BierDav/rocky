@@ -6066,10 +6066,13 @@ dependencies = [
  "rand 0.8.8",
  "rocky-core",
  "rocky-iroh",
+ "rocky-platform",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "wasm-bindgen-test",
+ "web-time",
 ]
 
 [[package]]

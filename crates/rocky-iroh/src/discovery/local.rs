@@ -1,4 +1,6 @@
 //! One fixed DNS-SD type; topic claims are private, bounded and short lived.
+// A browser has no backend that reads claims; their format stays tested there.
+#![cfg_attr(target_family = "wasm", allow(dead_code))]
 use super::{Failure, Finder, LOCAL_PATH, cipher, now, open, seal};
 use data_encoding::BASE64URL_NOPAD;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr, Watcher};
@@ -9,9 +11,13 @@ use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 mod apple;
 #[cfg(target_vendor = "apple")]
 use apple::Backend;
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_family = "wasm")]
+mod browser;
+#[cfg(target_family = "wasm")]
+use browser::Backend;
+#[cfg(not(any(target_vendor = "apple", target_family = "wasm")))]
 mod multicast;
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(any(target_vendor = "apple", target_family = "wasm")))]
 use multicast::Backend;
 
 /// The fixed Bonjour type applications declare in their Info.plist.
@@ -131,17 +137,17 @@ fn candidate(
 
 /// Bounds candidate resolution/reporting, including unique-name churn and replay.
 struct Budget {
-    since: tokio::time::Instant,
+    since: rocky_platform::time::Instant,
     seen: Vec<String>,
 }
 impl Budget {
     fn new() -> Self {
         Self {
-            since: tokio::time::Instant::now(),
+            since: rocky_platform::time::Instant::now(),
             seen: Vec::new(),
         }
     }
-    fn admit(&mut self, key: &str, at: tokio::time::Instant) -> bool {
+    fn admit(&mut self, key: &str, at: rocky_platform::time::Instant) -> bool {
         if at.duration_since(self.since) >= Duration::from_secs(30) {
             self.since = at;
             self.seen.clear();
@@ -154,6 +160,20 @@ impl Budget {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn port(endpoint: &Endpoint) -> Result<u16, Failure> {
+    Ok(endpoint
+        .bound_sockets()
+        .first()
+        .ok_or("iroh has no bound socket")?
+        .port())
+}
+/// A browser binds no socket to announce.
+#[cfg(target_family = "wasm")]
+fn port(_: &Endpoint) -> Result<u16, Failure> {
+    Err("local network discovery is unavailable in a browser".into())
+}
+
 pub(super) async fn run(
     finder: &Finder,
     endpoint: &Endpoint,
@@ -163,17 +183,13 @@ pub(super) async fn run(
     let mut random = [0; 16];
     rand::thread_rng().fill_bytes(&mut random);
     let name = format!("rk{}", data_encoding::HEXLOWER.encode(&random));
-    let port = endpoint
-        .bound_sockets()
-        .first()
-        .ok_or("iroh has no bound socket")?
-        .port();
+    let port = port(endpoint)?;
     let mut addresses = endpoint.watch_addr();
     let props = properties(&node, endpoint.id(), topics, now(), port)?;
     let mut backend = Backend::new(&name, port, &props, &addresses.get(), topics).await?;
     finder.fail(0, None);
-    let mut refresh = tokio::time::interval(REFRESH);
-    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh = rocky_platform::time::interval(REFRESH);
+    refresh.set_missed_tick_behavior(rocky_platform::time::MissedTickBehavior::Skip);
     refresh.tick().await;
     let mut budget = Budget::new();
     loop {
@@ -185,7 +201,7 @@ pub(super) async fn run(
             }
             found = backend.recv() => {
                 if let Some((peer, address)) = found?
-                    && address.id != endpoint.id() && budget.admit(&address.id.to_string(), tokio::time::Instant::now()) {
+                    && address.id != endpoint.id() && budget.admit(&address.id.to_string(), rocky_platform::time::Instant::now()) {
                     finder.report(peer, &address, LOCAL_PATH, true);
                 }
             }
@@ -198,7 +214,7 @@ mod tests {
     use super::*;
     use iroh::SecretKey;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn claims_require_the_topic_endpoint_and_current_version() -> Result<(), Failure> {
         let endpoint = SecretKey::from_bytes(&[1; 32]).public();
         let topic = [3; 32];
@@ -220,7 +236,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn old_future_and_malformed_claims_are_refused() -> Result<(), Failure> {
         let endpoint = SecretKey::from_bytes(&[1; 32]).public();
         let topics = [[3; 32]];
@@ -236,7 +252,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn previous_topic_works_without_a_public_topic_tag() -> Result<(), Failure> {
         let endpoint = SecretKey::from_bytes(&[1; 32]).public();
         let props = properties(&[9; 32], endpoint, &[[3; 32], [4; 32]], 1000, 4333)?;
@@ -253,7 +269,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn duplicate_candidates_and_unique_name_floods_are_bounded() {
         let mut budget = Budget::new();
         let start = budget.since;

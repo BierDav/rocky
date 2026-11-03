@@ -11,7 +11,7 @@ use crate::{LineNode, SchemaConfig, SchemaStage};
 /// tag in each of `labels` partitions, each its own bundle after the items'.
 pub(super) struct Staged {
     pub(super) l: Lineage,
-    pub(super) dir: TempDir,
+    pub(super) dir: Scratch,
     pub(super) key: PrivateKey,
     pub(super) replica: EncryptedReplica<TypedRows>,
     pub(super) publication: Commitment,
@@ -26,7 +26,7 @@ pub(super) async fn staged(n: usize) -> Staged {
 pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
     let mut l = Lineage::new();
     l.partitioned = labels > 0;
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = l
         .open_certified(
@@ -228,7 +228,7 @@ async fn authored(replica: &EncryptedReplica<TypedRows>, publication: Commitment
     hashes
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_execution_commits_staged_and_authoring_records_it_once() {
     let s = staged(3).await;
     let items =
@@ -353,7 +353,7 @@ async fn link_withholds(
     served.len()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_staged_publication_is_neither_offered_nor_served_before_its_record() {
     let s = staged_tags(3, LABELS).await;
     let member_key = PrivateKey::new();
@@ -438,7 +438,7 @@ async fn a_staged_publication_is_neither_offered_nor_served_before_its_record() 
     let _ = s.key;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing() {
     let s = staged_tags(3, LABELS).await;
     assert!(
@@ -517,7 +517,7 @@ async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing(
     assert!(s.replica.publications().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn each_authoring_transaction_writes_at_most_one_chunk() {
     let s = staged_tags(3, LABELS).await;
     let mut bundles = Vec::new();

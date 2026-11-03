@@ -36,10 +36,10 @@ async fn snapshot(replica: &Replica) -> (Vec<Vec<SqlValue>>, i64) {
     (state, *changes)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn readiness_inspection_never_materializes_an_unknown_scope() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -65,10 +65,10 @@ async fn readiness_inspection_never_materializes_an_unknown_scope() {
     assert_eq!(snapshot(&b).await, before);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_missing_granted_key_does_not_turn_an_unknown_payload_into_empty_state() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -90,10 +90,10 @@ async fn a_missing_granted_key_does_not_turn_an_unknown_payload_into_empty_state
     assert_eq!(b.held_seal(lineage.domain, sealed).await.unwrap(), None);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_joiner_imports_the_signed_empty_scope_after_importing_another_scopes_base() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -155,10 +155,10 @@ async fn a_joiner_imports_the_signed_empty_scope_after_importing_another_scopes_
     assert_eq!(scalar(&b, "SELECT count(*) FROM tags").await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_late_grant_never_signs_an_unchecked_empty_base() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = lineage
@@ -216,10 +216,10 @@ async fn a_late_grant_never_signs_an_unchecked_empty_base() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_kept_empty_scope_stays_empty_before_during_and_after_a_branch_switch() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &a).await;
@@ -293,10 +293,10 @@ async fn a_kept_empty_scope_stays_empty_before_during_and_after_a_branch_switch(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retained_keyless_ciphertext_satisfies_custody_without_marking_rows_applied() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -368,10 +368,10 @@ async fn retained_keyless_ciphertext_satisfies_custody_without_marking_rows_appl
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_late_key_with_pending_payload_cannot_sign_an_empty_base() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -419,10 +419,10 @@ async fn a_late_key_with_pending_payload_cannot_sign_an_empty_base() {
     assert_eq!(scalar(&b, "SELECT count(*) FROM items").await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_schema_switch_does_not_finalize_future_scope_state() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let path = dir.path().join("a.db");
     let a = lineage.open(&path, &key, 3, None).await.unwrap();
@@ -450,7 +450,7 @@ async fn an_interrupted_schema_switch_does_not_finalize_future_scope_state() {
     );
     assert_eq!(snapshot(&a).await, before);
     drop(a);
-    let bytes = std::fs::read(&path).unwrap();
+    let bytes = rocky_platform::fs::read(&path).unwrap();
     let refused = lineage.reopen(&path, &key, 3, 4).await.err().unwrap();
     assert!(
         refused
@@ -458,7 +458,7 @@ async fn an_interrupted_schema_switch_does_not_finalize_future_scope_state() {
             .contains("installed application differs"),
         "{refused}"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(rocky_platform::fs::read(&path).unwrap(), bytes);
     let a = lineage.reopen(&path, &key, 3, 3).await.unwrap();
     for name in ["items", "tags"] {
         a.audit(lineage.scope(name)).await.unwrap();
@@ -475,10 +475,10 @@ async fn an_interrupted_schema_switch_does_not_finalize_future_scope_state() {
     a.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_key_arriving_after_keyless_finalization_verifies_the_scope_at_the_last_seal() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;

@@ -105,7 +105,7 @@ pub struct DomainPlacement {
 pub struct Runtime<A: StoredApplication> {
     domains: std::collections::HashMap<Scope, Replica<A>>,
     /// One file writer per file; each owns the domains of its file.
-    threads: Vec<JoinHandle<()>>,
+    threads: Vec<rocky_platform::task::Dedicated<()>>,
 }
 impl<A> Runtime<A>
 where
@@ -248,8 +248,8 @@ where
                 "rocky.runtime.session",
                 &[
                     binding.as_slice(),
-                    &std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    &web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
                         .map_err(|error| Error::Incompatible(error.to_string()))?
                         .as_nanos()
                         .to_le_bytes(),
@@ -299,61 +299,50 @@ where
             let domains = std::mem::take(&mut assigned[index]);
             let (ready, initialized) = oneshot::channel();
             let metrics = metrics[index].clone();
-            let spawned = std::thread::Builder::new()
-                .name(format!("rocky-writer-{index}"))
-                .spawn(move || {
-                    let runtime = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => runtime,
+            let spawned = rocky_platform::task::dedicated(
+                format!("rocky-writer-{index}"),
+                move || async move {
+                    let pool = crate::read::ReadPool::new();
+                    let setup = async {
+                        let conn = Arc::new(raw);
+                        let mut workers = Vec::new();
+                        let mut reads = Vec::new();
+                        for (domain, (receiver, notifications)) in domains {
+                            let scoped = ScopedConnection::shared(
+                                conn.clone(),
+                                Some(&namespace(domain.identity.scope)),
+                                &domain.app.installed_schema().statements,
+                            );
+                            let scope = domain.identity.scope;
+                            let worker = worker::Worker::open_connection(
+                                scoped,
+                                domain,
+                                options,
+                                notifications,
+                                pool.clone(),
+                                metrics.clone(),
+                            )
+                            .await?;
+                            reads.push((scope, worker.reads()));
+                            workers.push((worker, receiver));
+                        }
+                        let writer = crate::writer::Writer::new(
+                            owner, conn, workers, options, pool, metrics,
+                        )?;
+                        Ok((writer, reads))
+                    }
+                    .await;
+                    match setup {
+                        Ok((writer, reads)) => {
+                            let _ = ready.send(Ok(reads));
+                            writer.run().await;
+                        }
                         Err(error) => {
-                            let _ = ready.send(Err(Error::Io(error)));
-                            return;
+                            let _ = ready.send(Err(error));
                         }
-                    };
-                    runtime.block_on(async move {
-                        let pool = crate::read::ReadPool::new();
-                        let setup = async {
-                            let conn = Arc::new(raw);
-                            let mut workers = Vec::new();
-                            let mut reads = Vec::new();
-                            for (domain, (receiver, notifications)) in domains {
-                                let scoped = ScopedConnection::shared(
-                                    conn.clone(),
-                                    Some(&namespace(domain.identity.scope)),
-                                    &domain.app.installed_schema().statements,
-                                );
-                                let scope = domain.identity.scope;
-                                let worker = worker::Worker::open_connection(
-                                    scoped,
-                                    domain,
-                                    options,
-                                    notifications,
-                                    pool.clone(),
-                                    metrics.clone(),
-                                )
-                                .await?;
-                                reads.push((scope, worker.reads()));
-                                workers.push((worker, receiver));
-                            }
-                            let writer = crate::writer::Writer::new(
-                                owner, conn, workers, options, pool, metrics,
-                            )?;
-                            Ok((writer, reads))
-                        }
-                        .await;
-                        match setup {
-                            Ok((writer, reads)) => {
-                                let _ = ready.send(Ok(reads));
-                                writer.run().await;
-                            }
-                            Err(error) => {
-                                let _ = ready.send(Err(error));
-                            }
-                        }
-                    });
-                });
+                    }
+                },
+            );
             match spawned {
                 Ok(thread) => {
                     threads.push(thread);
@@ -389,7 +378,7 @@ where
             // Dropping the queues stops the writers that did open.
             drop(domains);
             for thread in threads {
-                let _ = thread.join();
+                let _ = thread.join().await;
             }
             return Err(error);
         }
@@ -415,10 +404,7 @@ where
             }
         }
         for thread in std::mem::take(&mut self.threads) {
-            tokio::task::spawn_blocking(move || thread.join())
-                .await
-                .map_err(|_| Error::Closed)?
-                .map_err(|_| Error::Closed)?;
+            thread.join().await.map_err(|_| Error::Closed)?;
         }
         failure.map_or(Ok(()), Err)
     }

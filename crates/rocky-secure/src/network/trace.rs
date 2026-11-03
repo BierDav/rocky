@@ -1,8 +1,8 @@
 //! Spans of the link and its sessions. Fields are short hashes, counts,
 //! durations and error categories; never payloads, keys or credentials.
 use crate::{Error, PublicKey};
-use std::time::Instant;
 use tracing::{Span, field::Empty};
+use web_time::Instant;
 
 /// A peer's key as a short hex prefix.
 pub(crate) fn peer(key: &PublicKey) -> String {
@@ -31,7 +31,7 @@ pub(crate) struct Request {
     span: Span,
     started: Instant,
     bytes: usize,
-    deadline: tokio::time::Instant,
+    deadline: rocky_platform::time::Instant,
 }
 impl Request {
     pub(crate) fn start(session: &Span, channel: u16, family: &'static str) -> Self {
@@ -47,10 +47,10 @@ impl Request {
             ),
             started: Instant::now(),
             bytes: 0,
-            deadline: tokio::time::Instant::now() + super::REQUEST_LIMIT,
+            deadline: rocky_platform::time::Instant::now() + super::REQUEST_LIMIT,
         }
     }
-    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+    pub(crate) fn deadline(&self) -> rocky_platform::time::Instant {
         self.deadline
     }
     pub(crate) fn sent(&mut self, bytes: usize) {

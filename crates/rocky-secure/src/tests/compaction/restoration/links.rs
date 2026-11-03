@@ -3,7 +3,7 @@ use super::negatives::{filled, preserved};
 use super::*;
 use crate::storage::bindings;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() {
     let f = filled().await;
     let scope = f.lineage.scope("items");

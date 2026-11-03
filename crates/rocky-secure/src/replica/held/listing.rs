@@ -58,7 +58,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut after = Vec::new();
         let mut changes = Vec::new();
         loop {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let records = {
                 let inner = self.inner.lock(Class::Background).await;
                 source.check(&inner)?;
@@ -110,7 +110,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
                 let mut rows = Vec::with_capacity(stored.rows.len());
                 for row in stored.rows {
-                    tokio::task::yield_now().await;
+                    rocky_platform::task::yield_now().await;
                     let inner = self.inner.lock(Class::Background).await;
                     source.check(&inner)?;
                     #[cfg(any(test, feature = "qualification"))]

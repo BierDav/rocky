@@ -38,9 +38,9 @@ async fn keyed(
     replica
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_authors_unheld_partition_header_is_omitted() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let writer = f
         .open(

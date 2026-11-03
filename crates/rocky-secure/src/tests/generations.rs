@@ -779,10 +779,10 @@ async fn frames_as(
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_local_plan_finishes_when_the_replica_opens() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let path = dir.path().join("a.db");
     let replica = lineage.open(&path, &node, 1, None).await.unwrap();
@@ -856,10 +856,10 @@ async fn an_interrupted_local_plan_finishes_when_the_replica_opens() {
     assert_eq!(status.current, Generation { schema: 1 });
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = lineage
         .open(&dir.path().join("a.db"), &PrivateKey::new(), 1, None)
         .await
@@ -898,10 +898,10 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
     assert_eq!(replica.projection_plan().await.unwrap(), None);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (old_key, new_key) = (PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open(&dir.path().join("alice.db"), &old_key, 1, None)

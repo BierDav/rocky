@@ -1,25 +1,33 @@
-//! Where database files live. Natively a path names a file, owned through a
-//! `.lock` beside it. In a browser (wasm32) it names a file in Rocky's OPFS
-//! pool: only a dedicated Worker can open the pool, and its sync access
-//! handles exclude every other worker and tab. Everything else is shared.
-#[cfg_attr(not(target_family = "wasm"), path = "files/native.rs")]
-#[cfg_attr(target_family = "wasm", path = "files/browser.rs")]
-mod platform;
+//! How SQLite opens database files: through the filesystem natively, and
+//! through Rocky's OPFS pool in a browser (`rocky_platform::fs`).
+use std::path::Path;
 
-pub(crate) use platform::connect;
-pub use platform::{Owner, has_data, prepare};
-
-/// A fresh directory for tests: a temporary directory natively, a new name
-/// in the pool in a browser, where every test run starts on an empty OPFS.
+/// A raw engine connection to `path` for tests, through the same VFS.
 #[cfg(any(test, feature = "test-support"))]
-pub use platform::Scratch;
+pub fn raw(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    connect(path, rusqlite::OpenFlags::default())
+}
+
+pub(crate) fn connect(
+    path: &Path,
+    flags: rusqlite::OpenFlags,
+) -> rusqlite::Result<rusqlite::Connection> {
+    #[cfg(not(target_family = "wasm"))]
+    return rusqlite::Connection::open_with_flags(path, flags);
+    #[cfg(target_family = "wasm")]
+    return rusqlite::Connection::open_with_flags_and_vfs(
+        path,
+        flags,
+        rocky_platform::fs::SQLITE_VFS,
+    );
+}
 
 // The same SQLite locking and WAL behavior on every target.
 #[cfg(test)]
 mod tests {
-    use super::Scratch;
     use crate::{sqlite::Connection, storage::collect_rows};
     use rocky_core::SqlValue;
+    use rocky_platform::fs::Scratch;
 
     async fn rows(connection: &Connection, sql: &str) -> Vec<Vec<SqlValue>> {
         collect_rows(connection.query(sql, ()).await.unwrap())
@@ -72,6 +80,6 @@ mod tests {
         drop((writer, reader, other));
         let reopened = Connection::open_read_only(&path).unwrap();
         assert_eq!(count(&reopened).await, 3);
-        assert!(super::has_data(&path));
+        assert!(rocky_platform::fs::len(&path).unwrap() > 0);
     }
 }

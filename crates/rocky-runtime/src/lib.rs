@@ -48,7 +48,6 @@ use rocky_core::{
 use std::{
     path::Path,
     sync::{Arc, Mutex, Weak},
-    thread::JoinHandle,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -243,7 +242,7 @@ struct Inner<R> {
     commands: CommandQueue<R>,
     revisions: watch::Receiver<LocalRevision>,
     changes: watch::Receiver<u64>,
-    thread: Mutex<Option<JoinHandle<()>>>,
+    thread: Mutex<Option<rocky_platform::task::Dedicated<()>>>,
     nonce: rocky_core::Commitment,
     submissions: std::sync::atomic::AtomicU64,
     observers: Arc<tokio::sync::Semaphore>,
@@ -331,71 +330,57 @@ where
         };
         let (revisions, revision_receiver) = watch::channel(LocalRevision::default());
         let (changes, change_receiver) = watch::channel(0);
-        let (ready, initialized) = oneshot::channel();
+        let (ready, initialized) = oneshot::channel::<Result<Arc<read::Reads>, Error>>();
         let metrics = Arc::new(writer::Metrics::default());
         let writer_metrics = metrics.clone();
-        let thread = std::thread::Builder::new()
-            .name("rocky-writer".into())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let _ = ready.send(Err(Error::Io(error)));
-                        return;
-                    }
-                };
-                runtime.block_on(async move {
-                    // One domain can use the file writer directly.
-                    let pool = read::ReadPool::new();
-                    let setup = async {
-                        let (owner, raw) = database::DatabaseOwner::open(&path).await?;
-                        let conn = Arc::new(raw);
-                        let scoped = scoped_connection::ScopedConnection::shared(
-                            conn.clone(),
-                            None,
-                            &app.installed_schema().statements,
-                        );
-                        let worker = worker::Worker::open_connection(
-                            scoped,
-                            DomainInstallation {
-                                app,
-                                policy,
-                                identity,
-                                config,
-                            },
-                            options,
-                            worker::Notifications { revisions, changes },
-                            pool.clone(),
-                            writer_metrics.clone(),
-                        )
-                        .await?;
-                        let reads = worker.reads();
-                        let writer = writer::Writer::new(
-                            owner,
-                            conn,
-                            vec![(worker, receiver)],
-                            options,
-                            pool,
-                            writer_metrics,
-                        )?;
-                        Ok((writer, reads))
-                    }
-                    .await;
-                    match setup {
-                        Ok((writer, reads)) => {
-                            let _ = ready.send(Ok(reads));
-                            writer.run().await;
-                        }
-                        Err(error) => {
-                            let _ = ready.send(Err(error));
-                        }
-                    }
-                });
-            })
-            .map_err(Error::Io)?;
+        let thread = rocky_platform::task::dedicated("rocky-writer", move || async move {
+            // One domain can use the file writer directly.
+            let pool = read::ReadPool::new();
+            let setup = async {
+                let (owner, raw) = database::DatabaseOwner::open(&path).await?;
+                let conn = Arc::new(raw);
+                let scoped = scoped_connection::ScopedConnection::shared(
+                    conn.clone(),
+                    None,
+                    &app.installed_schema().statements,
+                );
+                let worker = worker::Worker::open_connection(
+                    scoped,
+                    DomainInstallation {
+                        app,
+                        policy,
+                        identity,
+                        config,
+                    },
+                    options,
+                    worker::Notifications { revisions, changes },
+                    pool.clone(),
+                    writer_metrics.clone(),
+                )
+                .await?;
+                let reads = worker.reads();
+                let writer = writer::Writer::new(
+                    owner,
+                    conn,
+                    vec![(worker, receiver)],
+                    options,
+                    pool,
+                    writer_metrics,
+                )?;
+                Ok((writer, reads))
+            }
+            .await;
+            match setup {
+                Ok((writer, reads)) => {
+                    let _ = ready.send(Ok(reads));
+                    writer.run().await;
+                }
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                }
+            }
+        })
+        .map_err(Error::Io)?;
         let reads = initialized.await.map_err(|_| Error::Closed)??;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -406,8 +391,8 @@ where
                 thread: Mutex::new(Some(thread)),
                 nonce: rocky_core::commitment(
                     "rocky.submission.session",
-                    &std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    &web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
                         .map_err(|e| Error::Incompatible(e.to_string()))?
                         .as_nanos()
                         .to_le_bytes(),
@@ -590,10 +575,7 @@ where
         result.await.map_err(|_| Error::Closed)??;
         let thread = self.inner.thread.lock().map_err(|_| Error::Closed)?.take();
         if let Some(thread) = thread {
-            tokio::task::spawn_blocking(move || thread.join())
-                .await
-                .map_err(|_| Error::Closed)?
-                .map_err(|_| Error::Closed)?;
+            thread.join().await.map_err(|_| Error::Closed)?;
         }
         Ok(())
     }

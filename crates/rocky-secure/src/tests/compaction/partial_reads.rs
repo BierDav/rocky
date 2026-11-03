@@ -4,7 +4,7 @@ use super::*;
 use crate::MAX_SNAPSHOT_ROWS;
 
 /// `a` holds two items and three tags, sealed and compacted.
-async fn source(lineage: &Lineage, dir: &TempDir, key: &PrivateKey) -> Replica {
+async fn source(lineage: &Lineage, dir: &Scratch, key: &PrivateKey) -> Replica {
     let a = open(lineage, dir, "a", key).await;
     follow_main(lineage, &a).await;
     insert(&a, "x", "first").await;
@@ -39,7 +39,7 @@ async fn source(lineage: &Lineage, dir: &TempDir, key: &PrivateKey) -> Replica {
     a
 }
 /// A joiner of `a` that imported its items base only.
-async fn items_only(lineage: &Lineage, dir: &TempDir, a: &Replica, key: &PrivateKey) -> Replica {
+async fn items_only(lineage: &Lineage, dir: &Scratch, a: &Replica, key: &PrivateKey) -> Replica {
     let j = open(lineage, dir, "j", key).await;
     crate::tests::exchange_graphs(a, &j, lineage.domain).await;
     j.follow_bookmark(lineage.domain, "main").await.unwrap();
@@ -115,10 +115,10 @@ async fn scoped(lineage: &Lineage, j: &Replica) {
     assert!(status.finalized.is_none() && status.waiting.is_some());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_verified_scope_reads_and_writes_while_an_unbegun_one_waits() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = source(&lineage, &dir, &keys[0]).await;
     let j = items_only(&lineage, &dir, &a, &keys[1]).await;
@@ -139,10 +139,10 @@ async fn partial(a: &Replica, j: &Replica) {
     author_refused(j).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_direct_import_shows_its_verified_pages_incomplete_until_it_finishes() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = source(&lineage, &dir, &keys[0]).await;
     let j = items_only(&lineage, &dir, &a, &keys[1]).await;
@@ -204,10 +204,10 @@ async fn a_direct_import_shows_its_verified_pages_incomplete_until_it_finishes()
     insert(&j, "w", "authored once whole").await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unauthenticated_staged_statement_proves_nothing_for_its_scope() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = source(&lineage, &dir, &keys[0]).await;
     let j = items_only(&lineage, &dir, &a, &keys[1]).await;

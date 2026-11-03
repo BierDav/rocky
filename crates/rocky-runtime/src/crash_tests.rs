@@ -6,11 +6,11 @@ use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use inventory_app::InventoryApp;
 use rocky_core::CompiledSchema;
+use rocky_platform::fs::Scratch;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Stdio};
-use tempfile::TempDir;
 
 const CASE: &str = "ROCKY_CRASH_CASE";
 const DIR: &str = "ROCKY_CRASH_DIR";
@@ -23,7 +23,7 @@ fn stream_handle(index: u16) -> MutationHandle {
     handle[..2].copy_from_slice(&index.to_le_bytes());
     MutationHandle(handle)
 }
-fn child(case: &str, dir: &TempDir) -> Child {
+fn child(case: &str, dir: &Scratch) -> Child {
     std::process::Command::new(std::env::current_exe().unwrap())
         .args(["crash_tests::crash_child", "--exact", "--test-threads=1"])
         .env(CASE, case)
@@ -35,6 +35,8 @@ fn child(case: &str, dir: &TempDir) -> Child {
 }
 
 /// Does nothing in an ordinary run; a parent test selects the case to die in.
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
     let (Ok(case), Ok(dir)) = (std::env::var(CASE), std::env::var(DIR)) else {
@@ -55,7 +57,7 @@ async fn crash_child() {
         let submitters: Vec<_> = (0..SUBMITTERS)
             .map(|submitter| {
                 let (replica, acknowledged) = (replica.clone(), acknowledged.clone());
-                tokio::spawn(async move {
+                rocky_platform::task::spawn(async move {
                     for index in (submitter..STREAM).step_by(SUBMITTERS as usize) {
                         let mutation = || Mutation {
                             entity: None,
@@ -63,7 +65,7 @@ async fn crash_child() {
                         };
                         let receipt = loop {
                             match replica.mutate_with_handle(stream_handle(index), mutation()) {
-                                Err(Error::Backpressure) => tokio::task::yield_now().await,
+                                Err(Error::Backpressure) => rocky_platform::task::yield_now().await,
                                 receipt => break receipt.unwrap(),
                             }
                         };
@@ -115,7 +117,7 @@ async fn crash_child() {
         )
         .unwrap();
         injected.await.unwrap().unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        rocky_platform::time::sleep(std::time::Duration::from_secs(10)).await;
         panic!("the checkpoint did not end the process");
     }
     let fault = match case.as_str() {
@@ -169,7 +171,7 @@ fn group_domain<'a, A: StoredApplication>(
 /// replayed history of both domains; this adds the per-handle and exact
 /// revision checks. `handles` are those of the first domain.
 async fn recovered(
-    dir: &TempDir,
+    dir: &Scratch,
     handles: &[MutationHandle],
 ) -> (Runtime<InventoryApp>, Vec<Option<Envelope>>) {
     let runtime = open_node(&dir.path().join("crash.db"), NODE, grouped()).await;
@@ -204,7 +206,7 @@ async fn consistent(
 /// The paused first mutation (handle 100) always survives; the group's steps
 /// survive together or not at all, in both domains.
 async fn group_dies(case: &str, survives: bool) {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let status = child(case, &dir).wait().unwrap();
     assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
     let handle = |index: u8| MutationHandle([index; 32]);
@@ -249,29 +251,29 @@ async fn group_dies(case: &str, survives: bool) {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_a_group_leaves_every_handle_absent() {
     group_dies("mid-group", false).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_between_the_last_savepoint_and_commit_leaves_every_handle_absent() {
     group_dies("before-commit", false).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_after_a_group_commit_keeps_every_handle() {
     group_dies("after-commit", true).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let status = child("checkpoint", &dir).wait().unwrap();
     assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
     // It died after copying the log into the database file, before resetting it.
     let copy = dir.path().join("copy.db");
-    std::fs::copy(dir.path().join("crash.db"), &copy).unwrap();
+    rocky_platform::fs::copy(dir.path().join("crash.db"), &copy).unwrap();
     let copied = crate::scoped_connection::ScopedConnection::new(
         crate::sqlite::Connection::open(&copy).unwrap(),
         Some(&crate::runtime::namespace(scope(1))),
@@ -285,7 +287,7 @@ async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
     );
     let mut wal = dir.path().join("crash.db").into_os_string();
     wal.push("-wal");
-    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    assert!(rocky_platform::fs::len(&wal).unwrap() > 0);
     let handle = |index: u8| MutationHandle([index; 32]);
     let first: Vec<_> = (0..GROUP).step_by(2).map(handle).collect();
     let second: Vec<_> = (1..GROUP).step_by(2).map(handle).collect();
@@ -297,9 +299,9 @@ async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
 
 /// A page dies with half of its receipts written: none of them survives, and
 /// the sender's retry is received as new.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_an_incoming_page_leaves_none_of_its_records() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let status = child("page", &dir).wait().unwrap();
     assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
     let source = open_node(&dir.path().join("peer.db"), PEER, grouped()).await;
@@ -325,14 +327,15 @@ async fn death_inside_an_incoming_page_leaves_none_of_its_records() {
     source.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn killed_writers_keep_every_acknowledged_group() {
     let handles: Vec<_> = (0..STREAM).map(stream_handle).collect();
     for threshold in [1, 64, 500] {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let mut child = child("stream", &dir);
         let acknowledged = || {
-            let text = std::fs::read_to_string(dir.path().join("acknowledged")).unwrap_or_default();
+            let text = rocky_platform::fs::read_to_string(dir.path().join("acknowledged"))
+                .unwrap_or_default();
             // A line without its newline may be a torn final write.
             let complete = text.rfind('\n').map_or("", |end| &text[..end]);
             complete
@@ -342,7 +345,7 @@ async fn killed_writers_keep_every_acknowledged_group() {
         };
         while acknowledged().len() < threshold {
             assert!(child.try_wait().unwrap().is_none(), "child ended early");
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
         child.kill().unwrap();
         child.wait().unwrap();
@@ -358,9 +361,9 @@ async fn killed_writers_keep_every_acknowledged_group() {
 
 /// Death after the second file is installed and before file 0 records the
 /// set: the next open resumes the install instead of refusing or losing it.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_between_installing_files_resumes_the_install() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let status = child("install", &dir).wait().unwrap();
     assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
     let path = dir.path().join("crash.db");

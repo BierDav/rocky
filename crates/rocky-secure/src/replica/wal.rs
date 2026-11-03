@@ -75,7 +75,7 @@ impl Passive {
             state.epoch
         };
         let checkpoint = self.clone();
-        tokio::task::spawn_blocking(move || {
+        rocky_platform::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some((started, resume)) = checkpoint
                 .pause
@@ -87,7 +87,7 @@ impl Passive {
                 let _ = resume.recv();
             }
             #[cfg(feature = "qualification")]
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             let result = checkpoint.conn.rows("PRAGMA wal_checkpoint(PASSIVE)", ());
             #[cfg(feature = "qualification")]
             if let Ok(result) = &result {
@@ -128,6 +128,8 @@ impl Passive {
         }
     }
     #[cfg(test)]
+    // Pause hooks of native-only tests.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn pause(
         &self,
         started: tokio::sync::oneshot::Sender<()>,
@@ -139,6 +141,8 @@ impl Passive {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((started, resume));
     }
     #[cfg(test)]
+    // Pause hooks of native-only tests.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn completed(&self) -> usize {
         self.completed.load(Ordering::Relaxed)
     }

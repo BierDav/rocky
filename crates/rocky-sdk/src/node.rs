@@ -178,12 +178,12 @@ struct Link {
     transport: Arc<dyn Transport>,
     owned: bool,
     stage: watch::Sender<Stage>,
-    server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    synchronizer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    publisher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    server: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
+    synchronizer: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
+    publisher: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     /// What the transport finds peers with, and the worker announcing on it.
     discovery: Option<Arc<dyn crate::transport::Discovery>>,
-    discoverer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    discoverer: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     /// Inbound streams being served, served so far and dropped over budget.
     active: Arc<Semaphore>,
     live_budget: Arc<Semaphore>,
@@ -236,7 +236,7 @@ const LOCAL_SETTLE: std::time::Duration =
 /// Waits `LOCAL_SETTLE`; with none there is no timer at all.
 async fn settle() {
     if !LOCAL_SETTLE.is_zero() {
-        tokio::time::sleep(LOCAL_SETTLE).await;
+        rocky_platform::time::sleep(LOCAL_SETTLE).await;
     }
 }
 
@@ -282,6 +282,8 @@ pub(crate) struct Node {
     link_revision: AtomicU64,
     /// What the node did in the background, for applications to show.
     pub(crate) activity: crate::activity::Activity,
+    // Backups are refused in a browser.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     backups: Mutex<()>,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
     /// Peers whose sessions this device served, with the last time; at
@@ -294,7 +296,13 @@ pub(crate) struct Node {
     /// By scope, the last staged row of an import another peer would
     /// restart and when it was last seen to move.
     import_sources: std::sync::Mutex<
-        BTreeMap<ResourceScope, (Option<rocky_core::Commitment>, tokio::time::Instant)>,
+        BTreeMap<
+            ResourceScope,
+            (
+                Option<rocky_core::Commitment>,
+                rocky_platform::time::Instant,
+            ),
+        >,
     >,
     sync_failures: std::sync::Mutex<BTreeMap<(PublicKey, ResourceScope), SyncFailure>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
@@ -308,7 +316,7 @@ pub(crate) struct Node {
     observations: crate::status::Observations,
     node_identity: Result<String, String>,
     #[cfg(test)]
-    status_clock: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
+    status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
     /// Each peer's last exchange that was not skipped.
     last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
@@ -650,7 +658,7 @@ impl Node {
         };
         link.stage.send_replace(Stage::Draining);
         link.transport.listen(false);
-        let mut slot = match tokio::time::timeout(DRAIN, self.network.write()).await {
+        let mut slot = match rocky_platform::time::timeout(DRAIN, self.network.write()).await {
             Ok(slot) => slot,
             Err(_) => {
                 link.stage.send_replace(Stage::Cancelled);
@@ -701,7 +709,7 @@ impl Node {
     }
     /// Serves inbound streams until the service drains or the transport ends.
     async fn accept(self: Arc<Self>, link: Arc<Link>) {
-        let mut tasks = tokio::task::JoinSet::new();
+        let mut tasks = rocky_platform::task::JoinSet::new();
         let mut stage = link.stage.subscribe();
         loop {
             let inbound = tokio::select! {
@@ -743,8 +751,10 @@ impl Node {
             });
             while tasks.try_join_next().is_some() {}
         }
-        let _ =
-            tokio::time::timeout(DRAIN, async { while tasks.join_next().await.is_some() {} }).await;
+        let _ = rocky_platform::time::timeout(DRAIN, async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
         tasks.shutdown().await;
     }
     /// Runs a call that uses the network. A closing service cancels it once
@@ -1440,11 +1450,14 @@ impl Node {
     /// How far the bootstrap intent has imported, in the stored rows of the
     /// checkpoints its peer offered; `null` until a peer offered one.
     async fn bootstrap_progress(&self) -> Result<Value, Failure> {
-        let intent: Value = match std::fs::read(self.path.with_file_name("bootstrap.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
-            Err(error) => return Err(error.into()),
-        };
+        let intent: Value =
+            match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
+                Ok(bytes) => serde_json::from_slice(&bytes)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Value::Null);
+                }
+                Err(error) => return Err(error.into()),
+            };
         let Some(totals) = intent.get("totals") else {
             return Ok(Value::Null);
         };
@@ -1491,7 +1504,7 @@ impl Node {
                 .and_then(|service| service.transport.connectivity());
             // Read before the status and anchored to that instant: an expiry
             // while the status is computed must still wake this wait.
-            let (time, read) = (self.status_time()?, tokio::time::Instant::now());
+            let (time, read) = (self.status_time()?, rocky_platform::time::Instant::now());
             let status = self.readiness().await?;
             if status["token"] != after {
                 return Ok(status);
@@ -1521,7 +1534,7 @@ impl Node {
                     let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).filter(|expires| *expires > time).min();
                     drop(settings);
                     if let Some(expires) = expires {
-                        tokio::time::sleep_until(read + Duration::from_secs(expires - time)).await;
+                        rocky_platform::time::sleep_until(read + Duration::from_secs(expires - time)).await;
                     } else {
                         std::future::pending().await
                     }
@@ -1530,12 +1543,19 @@ impl Node {
             }
         }
     }
+    /// An archive is a file the user moves elsewhere; a browser would have
+    /// to offer it as a download, which the SDK does not.
+    #[cfg(target_family = "wasm")]
+    async fn backup(&self, _target: &std::path::Path) -> Result<Value, Failure> {
+        Err("backups are unavailable in a browser".into())
+    }
+    #[cfg(not(target_family = "wasm"))]
     /// Writes a signed backup archive to `target`: a coherent copy of the
     /// file and the identity, which holds no
     /// key. See `docs/runtime/backup-and-restore.md`.
     async fn backup(&self, target: &std::path::Path) -> Result<Value, Failure> {
         let _backup = self.backups.lock().await;
-        if target.exists() {
+        if rocky_platform::fs::exists(target) {
             return Err(refused("the backup target exists"));
         }
         let directory = self
@@ -1552,8 +1572,8 @@ impl Node {
                 )[..8]
             )
         ));
-        let _ = std::fs::remove_dir_all(&staging);
-        std::fs::create_dir_all(&staging)?;
+        let _ = rocky_platform::fs::remove_dir_all(&staging);
+        rocky_platform::fs::create_dir_all(&staging)?;
         let result = async {
             let settings = self.settings.lock().await;
             let database = staging.join("rocky.sqlite");
@@ -1562,19 +1582,19 @@ impl Node {
             drop(settings);
             let settings = snapshot;
             let identity = staging.join("identity.json");
-            std::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
+            rocky_platform::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
             let staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
             let node = PrivateKey::from_bytes(&self.vault.get("node")?);
             let scope = serde_json::to_value(self.domain().scope)?;
             let target = target.to_path_buf();
-            let inventory = tokio::task::spawn_blocking(move || {
+            let inventory = rocky_platform::task::spawn_blocking(move || {
                 crate::backup::write(&target, &staged, &settings, scope, revision, &node, now()?)
             })
             .await??;
             Ok::<_, Failure>(serde_json::to_value(inventory)?)
         }
         .await;
-        let _ = std::fs::remove_dir_all(&staging);
+        let _ = rocky_platform::fs::remove_dir_all(&staging);
         result
     }
     /// The definition generation, the earlier ones still admitted and a
@@ -2040,7 +2060,7 @@ impl Node {
             }
         }
     }
-    fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+    fn retry_deadline(&self) -> Option<rocky_platform::time::Instant> {
         self.retries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2152,7 +2172,7 @@ impl Node {
                 } => { self.reset_retry(None); }
                 () = async {
                     match deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
                 }, if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) && self.foreground.load(Ordering::SeqCst) => { retry_only = true; }
@@ -2712,7 +2732,7 @@ impl Node {
     }
     /// The inviter a joined device still owes one exchange, if any.
     fn awaited_inviter(&self) -> Option<PublicKey> {
-        let bytes = std::fs::read(self.path.with_file_name("bootstrap.json")).ok()?;
+        let bytes = rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")).ok()?;
         serde_json::from_slice::<Value>(&bytes)
             .ok()?
             .get("inviter")?
@@ -2744,7 +2764,7 @@ impl Node {
     pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
         // An intent the bootstrap itself refuses holds nothing back; the
         // bootstrap reports it.
-        let pending = match std::fs::read(self.path.with_file_name("bootstrap.json")) {
+        let pending = match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
                 Err(_) => Vec::new(),
@@ -2778,7 +2798,7 @@ impl Node {
             sources.remove(&scope);
             return false;
         }
-        let now = tokio::time::Instant::now();
+        let now = rocky_platform::time::Instant::now();
         let seen = sources.entry(scope).or_insert((cursor, now));
         if seen.0 != cursor {
             *seen = (cursor, now);
@@ -3097,12 +3117,12 @@ impl Node {
         let mut bootstrapped = sync::Transfer::default();
         let mut importing = Vec::new();
         let mut bootstrap_retry = false;
-        if marker.exists() {
+        if rocky_platform::fs::exists(&marker) {
             self.sync_state.send_replace("bootstrapping");
             // An ancestor checkpoint needs its verified schema before import;
             // learning it after this exchange would back off a usable peer.
             self.acquire_schemas(transport).await?;
-            let expected = std::fs::read(&marker)?;
+            let expected = rocky_platform::fs::read(&marker)?;
             let pending = self
                 .bootstrap_pending(&serde_json::from_slice(&expected)?)
                 .await?;
@@ -3134,12 +3154,14 @@ impl Node {
             if completed.is_none() {
                 bootstrap_retry = true;
                 importing = self
-                    .bootstrap_pending(&serde_json::from_slice(&std::fs::read(&marker)?)?)
+                    .bootstrap_pending(&serde_json::from_slice(&rocky_platform::fs::read(
+                        &marker,
+                    )?)?)
                     .await?;
             }
             if let Some(completed) = completed {
                 self.replica.flush().await?;
-                if std::fs::read(&marker)? != completed {
+                if rocky_platform::fs::read(&marker)? != completed {
                     return Err("bootstrap authority changed; retry with the new intent".into());
                 }
                 self.replica
@@ -3148,7 +3170,7 @@ impl Node {
                 if let Some(waiting) = self.awaits_inviter(peer, &completed).await? {
                     rocky_credentials::write_private(&marker, &waiting)?;
                 } else {
-                    std::fs::remove_file(&marker)?;
+                    rocky_platform::fs::remove_file(&marker)?;
                     #[cfg(unix)]
                     std::fs::File::open(
                         marker.parent().ok_or("bootstrap marker has no directory")?,
@@ -3352,7 +3374,7 @@ impl Node {
         ))
     }
 
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     async fn service_call(
         &self,
         service: &crate::owner::Service,
@@ -3395,7 +3417,7 @@ impl Node {
         );
         result
     }
-    #[cfg(not(feature = "iroh"))]
+    #[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
     async fn service_call(
         &self,
         service: &crate::owner::Service,
@@ -3858,7 +3880,7 @@ mod error_tests {
         })))
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn clock_skew_reports_authority_time_through_every_error_path() {
         let time = 1_900_000_000;
         let errors: [Failure; 2] = [
@@ -3879,7 +3901,7 @@ mod error_tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replica_refusals_keep_their_codes() {
         assert_eq!(code(refusal("sealed")), ("sealed".into(), false));
         assert_eq!(
@@ -3890,9 +3912,15 @@ mod error_tests {
         assert_eq!(code(sealed), ("sealed".into(), false));
     }
 }
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod delivery_tests;
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod revocation_tests;
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod sync_tests;

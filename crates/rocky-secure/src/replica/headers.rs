@@ -244,7 +244,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         loop {
             if !single {
                 drop(inner);
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 inner = self.inner.lock(Class::Background).await;
             }
             match scan.page(&inner).await? {

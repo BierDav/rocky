@@ -1,5 +1,7 @@
 //! One sync pass between two nodes as a tree of spans whose fields name no
 //! row value, key or invitation.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};

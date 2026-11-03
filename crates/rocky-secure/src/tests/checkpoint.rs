@@ -178,10 +178,10 @@ async fn finalized_compacted<A: rocky_core::RowApplication>(
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("a.db");
     let node = PrivateKey::new();
     let (mut replica, _) = open(&f, &path, &node).await;
@@ -318,10 +318,10 @@ async fn import_no_frames(
 /// The public scope's base row: the first scope state of these fixtures.
 const PUBLIC_BASE: &str = "scope=(SELECT MIN(id) FROM secure_scope_state)";
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("a.db");
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (mut a, _) = open(&f, &path, &a_key).await;
@@ -497,10 +497,10 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     a.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothing() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -587,10 +587,10 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
 }
 
 /// Serves `source` until the client closes the session.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -636,10 +636,10 @@ async fn serve(mut session: NativeSession, source: &Replica) {
     while session.serve_once(source).await.is_ok() {}
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edits() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &keys[1]).await;
@@ -717,7 +717,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     let quota = 8192;
     let before = all_rows(&f, &c).await;
     for fault in [Some((Stage::Import, 1)), Some((Stage::Switch, 0)), None] {
-        let (near, far) = network::link::testing::tcp().await;
+        let (near, far) = network::link::testing::connected().await;
         let (session, served) = network::link::testing::sessions_over(
             near,
             far,
@@ -805,10 +805,10 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     assert_eq!(next.signer(), keys[2].public_key());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -891,10 +891,10 @@ async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
     assert!(a.begin_rebootstrap(original).await.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rebootstrap_refuses_unverifiable_checkpoints() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, c_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (c, c_credentials) = open(&f, &dir.path().join("c.db"), &c_key).await;
@@ -961,10 +961,10 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -1035,10 +1035,10 @@ async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
     b.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &a_key).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -1123,7 +1123,9 @@ async fn crash_rebootstrap(
     replica.finish_rebootstrap(f.public).await
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits"]
 async fn checkpoint_crash_child() {
     let dir = std::env::var("ROCKY_CHECKPOINT_CRASH_DIR").unwrap();
@@ -1178,10 +1180,12 @@ async fn checkpoint_crash_child() {
 /// Process exit inside each step of checkpoint creation, pruning and
 /// rebootstrap: the step's transaction is gone, every file opens and passes
 /// the audit, and the work completes afterwards.
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits() {
     for step in CRASH_STEPS {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1234,10 +1238,10 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let writer_key = PrivateKey::new();
     let reader_key = PrivateKey::new();
     let target_key = PrivateKey::new();
@@ -1292,10 +1296,10 @@ async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let writer_key = PrivateKey::new();
     let target_key = PrivateKey::new();
     let (writer, _) = open(&f, &dir.path().join("writer.db"), &writer_key).await;
@@ -1333,10 +1337,10 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
 
 /// A scope being imported from a checkpoint makes none of its own until the
 /// switch: the database thread serves the import instead.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn maintenance_waits_for_a_scope_being_imported() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, _) = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let (b, _) = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
     a.author(handle(0), insert(&f, 0, "source"), vec![])
@@ -1402,10 +1406,10 @@ async fn page_of(
 /// A replica that holds nothing of a scope reads each verified page as it
 /// commits; an interrupted import resumes at the next page and ends as the
 /// source's rows, verified like any switch.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     for index in 0..40 {
@@ -1465,10 +1469,10 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
 
 /// A page whose rows a key holder changed, dropped or reordered, or one
 /// moved to another place, is refused before anything is stored.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     for index in 0..40 {
@@ -1533,10 +1537,10 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
 }
 
 /// A direct import refuses any row already stored, including one late in a page.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_direct_page_never_overwrites_an_existing_row() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     for index in 0..20 {
@@ -1585,10 +1589,10 @@ async fn a_direct_page_never_overwrites_an_existing_row() {
 }
 
 /// Shared creations count once; conflicting clocks in or across pages roll back.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_creation_clocks_agree_within_and_across_pages() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     a.author_buffered(
@@ -1653,10 +1657,10 @@ async fn checkpoint_creation_clocks_agree_within_and_across_pages() {
 
 /// A failed first page leaves no durable cursor. Its already requested
 /// window is discarded with the channel, and a later session resumes it.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &a_key).await;
     for index in 0..40 {
@@ -1695,10 +1699,10 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
 
 /// Frames for a scope its import fills wait and apply after the switch; a
 /// local write meanwhile is replayed over the imported rows.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
     for index in 0..40 {
@@ -1750,10 +1754,10 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
 
 /// A holder of an imported checkpoint serves the pages its signer cut and
 /// signed; a third replica verifies them like the signer's own.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &keys[1]).await;
@@ -1792,10 +1796,10 @@ async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
     c.audit(f.private).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
     let fixture = Fixture::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let node = PrivateKey::new();
     let principal = PrivateKey::new();
     let root = crate::credentials::Authority::owner(&fixture.publisher)
@@ -1844,10 +1848,10 @@ mod no_frames;
 
 mod audit;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_pages_travel_in_windows_of_four_and_install_in_order() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_credentials) = open(&f, &dir.path().join("window-a.db"), &a_key).await;
     let name = "w".repeat(200);
@@ -1897,10 +1901,10 @@ async fn checkpoint_pages_travel_in_windows_of_four_and_install_in_order() {
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_partial_page_resumes_with_smaller_pages_and_is_served_onward() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("prefix-a.db"), &keys[0]).await;
     let name = "prefix".repeat(32);
@@ -1988,10 +1992,10 @@ async fn a_partial_page_resumes_with_smaller_pages_and_is_served_onward() {
     c.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_export_validates_its_source_between_pages() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source_key = PrivateKey::new();
     let (a, _) = open(&f, &dir.path().join("export-a.db"), &source_key).await;
     for index in 1..=12 {
@@ -2033,10 +2037,10 @@ async fn checkpoint_export_validates_its_source_between_pages() {
     a.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_preflight_validates_only_its_scope_and_authority() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, _) = open(
         &f,
         &dir.path().join("preflight-source.db"),

@@ -3,9 +3,9 @@ use super::*;
 use crate::checkpoint::{Request, Response, Step};
 use crate::tests::{create, fault, mutation};
 use rocky_core::{SqlValue, fixtures};
+use rocky_platform::fs::Scratch;
 use runtime_todo_app::{Action, StaticPolicy, TodoApp};
 use std::os::unix::process::ExitStatusExt;
-use tempfile::TempDir;
 
 const CASE: &str = "ROCKY_RETENTION_CASE";
 const DIR: &str = "ROCKY_RETENTION_DIR";
@@ -43,7 +43,7 @@ async fn open_at(dir: &Path, node: NodeId, options: RuntimeOptions) -> Replica<T
     .await
     .unwrap()
 }
-async fn open(dir: &TempDir, node: NodeId) -> Replica<TodoApp> {
+async fn open(dir: &Scratch, node: NodeId) -> Replica<TodoApp> {
     open_at(dir.path(), node, manual()).await
 }
 async fn edit(replica: &Replica<TodoApp>, entity: OperationId, action: Action) -> Envelope {
@@ -88,13 +88,13 @@ async fn rebootstrap(from: &Replica<TodoApp>, to: &Replica<TodoApp>) -> Rebootst
         }
     }
 }
-async fn disk(dir: &TempDir, node: NodeId, sql: &str) -> Vec<Vec<SqlValue>> {
+async fn disk(dir: &Scratch, node: NodeId, sql: &str) -> Vec<Vec<SqlValue>> {
     let db = crate::sqlite::Connection::open(&dir.path().join(file(node))).unwrap();
     storage::collect_rows(db.query(sql, ()).await.unwrap())
         .await
         .unwrap()
 }
-async fn count(dir: &TempDir, node: NodeId, table: &str) -> i64 {
+async fn count(dir: &Scratch, node: NodeId, table: &str) -> i64 {
     match disk(dir, node, &format!("SELECT COUNT(*) FROM {table}"))
         .await
         .as_slice()
@@ -120,9 +120,9 @@ async fn step(replica: &Replica<TodoApp>, request: Request) -> Result<Step, Erro
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let kept = create(&laptop, "kept").await.id;
@@ -194,9 +194,9 @@ async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery()
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unverifiable_checkpoint_blocks_pruning() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let todo = create(&laptop, "original").await;
@@ -244,9 +244,9 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
 /// The phone is offline across a prune. Slightly behind, it converges from
 /// retained operations; behind the pruned prefix it is told so, imports the
 /// checkpoint and converges with its own unsent edits.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let shared = create(&laptop, "shared").await.id;
@@ -336,9 +336,9 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_late_operation_from_before_the_pruned_prefix_cannot_resurrect_a_deleted_row() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let created = create(&laptop, "short lived").await;
@@ -372,9 +372,9 @@ async fn a_late_operation_from_before_the_pruned_prefix_cannot_resurrect_a_delet
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retried_handles_from_before_the_pruned_prefix_do_not_execute_twice() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let handle = MutationHandle([7; 32]);
@@ -444,9 +444,9 @@ async fn retried_handles_from_before_the_pruned_prefix_do_not_execute_twice() {
 
 /// With `behind_after`, a delivery target that holds back the pruned_prefix that
 /// long is declared behind; contact restarts its time.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let timed = |after| RuntimeOptions {
         retention: RetentionPolicy {
             behind_after: Some(after),
@@ -494,9 +494,9 @@ async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let bounded = |automatic| RuntimeOptions {
         retention: RetentionPolicy {
             checkpoint_operations: 0,
@@ -562,9 +562,9 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
 /// A failure injected into every step of checkpoint creation, pruning and
 /// rebootstrap rolls that step back alone; the file reopens, passes the
 /// audit and the step then completes.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let mut laptop = open(&dir, fixtures::LAPTOP).await;
     let mut phone = open(&dir, fixtures::PHONE).await;
     let first = create(&laptop, "first").await.id;
@@ -636,9 +636,11 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     for index in 0..600 {
@@ -708,7 +710,7 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
     phone.close().await.unwrap();
 }
 
-fn child(case: &str, dir: &TempDir) -> std::process::Child {
+fn child(case: &str, dir: &Scratch) -> std::process::Child {
     std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "retention_tests::crash_child",
@@ -733,6 +735,8 @@ async fn seed(dir: &Path) -> (Replica<TodoApp>, Replica<TodoApp>) {
     (laptop, phone)
 }
 /// Does nothing in an ordinary run; the parent selects the step to die in.
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
     let (Ok(case), Ok(dir)) = (std::env::var(CASE), std::env::var(DIR)) else {
@@ -789,10 +793,10 @@ async fn crash_child() {
 
 /// Process death inside each step: the uncommitted step is gone, the file
 /// opens, passes the audit, and the work completes afterwards.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_any_step_leaves_a_file_that_opens_and_audits() {
     for case in ["candidate", "replay", "prune", "stage", "switch"] {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let status = child(case, &dir).wait().unwrap();
         assert_eq!(status.signal(), Some(6), "{case} must abort: {status:?}");
         let laptop = open(&dir, fixtures::LAPTOP).await;
@@ -820,9 +824,9 @@ async fn death_inside_any_step_leaves_a_file_that_opens_and_audits() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_definite_local_drop_after_pruning_keeps_the_trusted_author_log_running() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
     let created = create(&laptop, "pruned").await;

@@ -47,21 +47,14 @@ where
     A: StoredApplication,
     A::Policy: Send + 'static,
 {
-    let (done, result) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("rocky-install".into())
-        .spawn(move || {
-            let outcome = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(Error::Io)
-                .and_then(|runtime| {
-                    runtime.block_on(prepare(&path, requested, used, &binding, &installations))
-                });
-            let _ = done.send(outcome.map(|files| (installations, files)));
-        })
-        .map_err(Error::Io)?;
-    result.await.map_err(|_| Error::Closed)?
+    rocky_platform::task::dedicated("rocky-install", move || async move {
+        let files = prepare(&path, requested, used, &binding, &installations).await;
+        files.map(|files| (installations, files))
+    })
+    .map_err(Error::Io)?
+    .join()
+    .await
+    .map_err(|_| Error::Closed)?
 }
 
 enum State {
@@ -114,7 +107,7 @@ fn layout(binding: &[u8], requested: usize, used: usize, index: usize) -> Vec<u8
     bytes
 }
 fn present(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|file| file.len() > 0)
+    rocky_platform::fs::len(path).is_ok_and(|len| len > 0)
 }
 
 async fn prepare<A: StoredApplication>(
@@ -147,7 +140,7 @@ async fn prepare<A: StoredApplication>(
         }
     };
     for index in used..MAX_FILES {
-        if file_path(path, index).exists() {
+        if rocky_platform::fs::exists(file_path(path, index)) {
             return Err(Error::Incompatible(format!(
                 "{} is not part of this runtime's {used}-file layout",
                 name(index)

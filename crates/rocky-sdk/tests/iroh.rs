@@ -1,5 +1,7 @@
 //! A database on an iroh endpoint the application owns, next to the
 //! application's own protocol. Loopback only: no relay, no address lookup.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 #![cfg(feature = "iroh")]
 use common::{Device, Failure};
 use rocky_sdk::{

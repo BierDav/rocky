@@ -1,11 +1,12 @@
-use crate::{Error, files, sqlite};
+use crate::{Error, sqlite};
+use rocky_platform::fs;
 use std::path::{Path, PathBuf};
 
 /// File lifetime is separate from scoped reducer/author/revision scheduling.
-/// One writer owns the file; `files::Owner` excludes the others.
+/// One writer owns the file; `fs::Owner` excludes the others.
 pub struct DatabaseOwner {
     path: PathBuf,
-    _owner: files::Owner,
+    _owner: fs::Owner,
 }
 impl DatabaseOwner {
     pub fn path(&self) -> &Path {
@@ -24,15 +25,19 @@ impl DatabaseOwner {
         if path_string == ":memory:" {
             return Err(Error::Incompatible("an on-disk file is required".into()));
         }
-        files::prepare(path).await?;
+        fs::prepare(path).await.map_err(Error::Io)?;
         check_file_format(path).await?;
         let owner = Self {
             path: path.to_path_buf(),
-            _owner: files::Owner::acquire(path).await?,
+            _owner: fs::Owner::acquire(path).await.map_err(|error| {
+                Error::Incompatible(format!(
+                    "replica is already open or file lock unavailable: {error}"
+                ))
+            })?,
         };
         check_file_format(path).await?;
         let connection = owner.connect()?;
-        if !files::has_data(path) {
+        if !has_data(path) {
             // Only an empty file takes `auto_vacuum`; maintenance reclaims
             // free pages in bounded steps.
             connection
@@ -46,12 +51,16 @@ impl DatabaseOwner {
     }
 }
 
+fn has_data(path: &Path) -> bool {
+    fs::len(path).is_ok_and(|len| len > 0)
+}
+
 /// Current Rocky SQLite file identity. Application schema generations are independent.
 pub const FILE_FORMAT: i64 = 0x524b5902;
 
 /// Read-only preflight, also used before SDK settings/enrollment writes.
 pub async fn check_file_format(path: &Path) -> Result<(), Error> {
-    if !files::has_data(path) {
+    if !has_data(path) {
         return Ok(());
     }
     let conn = sqlite::Connection::open_read_only(path)?;

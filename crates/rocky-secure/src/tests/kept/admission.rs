@@ -45,10 +45,10 @@ async fn resigned_bytes(
     (offered.to_bytes().unwrap(), rows)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn kept_rows_and_newly_signed_statement_bytes_survive_live_admission_growth() {
     let lineage = Lineage::pinned(229);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [230, 231, 232].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let keeper = open(&lineage, &dir, "keeper", &keys[0]).await;
     let writer = open(&lineage, &dir, "writer", &keys[1]).await;

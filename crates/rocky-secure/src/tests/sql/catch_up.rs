@@ -87,7 +87,7 @@ async fn pull_once(
                             .unwrap();
                     link.ready(false).await.unwrap();
                     let (served, mut incoming) = tokio::sync::mpsc::channel(1);
-                    let driven = tokio::spawn(link.drive(served));
+                    let driven = rocky_platform::task::spawn(link.drive(served));
                     let mut session = incoming.recv().await.unwrap();
                     session.serve(&source).await.unwrap();
                     session.close().await.unwrap();
@@ -109,7 +109,7 @@ async fn pull_once(
     .unwrap();
     link.ready(false).await.unwrap();
     let handle = link.channels.handle.clone();
-    let driven = tokio::spawn(link.drive(tokio::sync::mpsc::channel(1).0));
+    let driven = rocky_platform::task::spawn(link.drive(tokio::sync::mpsc::channel(1).0));
     let mut session = handle.open().await.unwrap();
     let report = session
         .catch_up(target, scope, MAX_SECURE_FRAME / 2)
@@ -117,7 +117,7 @@ async fn pull_once(
         .unwrap();
     session.close().await.unwrap();
     driven.abort();
-    tokio::task::spawn_blocking(move || server.join().unwrap())
+    rocky_platform::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();
     report
@@ -140,7 +140,7 @@ async fn source_node_key(replica: &EncryptedReplica<TypedRows>) -> PublicKey {
 /// per transaction.
 async fn catch_up_beside_a_writer(operations: usize) -> usize {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
         let (creator, updater) = (PrivateKey::new(), PrivateKey::new());
@@ -199,7 +199,7 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
             .await
             .unwrap();
             writes += 1;
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
         writes
     };
@@ -220,7 +220,7 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
     writes
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_writer_commits_during_a_catch_up() {
     // Six receive pages retain concurrent writes and cross-log dependencies.
     assert!(catch_up_beside_a_writer(192).await > 0);
@@ -228,19 +228,19 @@ async fn a_writer_commits_during_a_catch_up() {
 
 /// A catch-up interrupted between two apply transactions, at any of them,
 /// resumes when the replica opens again; every operation applies once.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_catch_up_resumes_and_applies_every_operation_once() {
     interrupted_catch_up(false).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening() {
     interrupted_catch_up(true).await;
 }
 
 async fn interrupted_catch_up(retry_receipt: bool) {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
         let (creator, updater) = (PrivateKey::new(), PrivateKey::new());
@@ -354,10 +354,10 @@ async fn interrupted_catch_up(retry_receipt: bool) {
 }
 /// Regression: a SQL commit between every settle step restarted the pending
 /// pass, so a receive waiting for it never returned while writes continued.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sql_commits_between_pending_steps_do_not_restart_the_pass() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let creator = PrivateKey::new();
     let source = t

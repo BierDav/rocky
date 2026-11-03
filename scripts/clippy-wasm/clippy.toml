@@ -1,0 +1,43 @@
+# Clippy's configuration for wasm32, a browser Worker; scripts/check sets
+# CLIPPY_CONF_DIR to this directory for that target only. These calls panic or
+# always fail in a browser, so shared code uses rocky_platform instead.
+# Native-only seam modules are not compiled for wasm32 and are not checked.
+disallowed-methods = [
+    { path = "std::path::Path::exists", reason = "use rocky_platform::fs::exists" },
+    { path = "std::path::Path::is_file", reason = "use rocky_platform::fs::exists" },
+    { path = "std::path::Path::is_dir", reason = "directories are prefixes in a browser" },
+    { path = "std::fs::read", reason = "use rocky_platform::fs" },
+    { path = "std::fs::read_to_string", reason = "use rocky_platform::fs" },
+    { path = "std::fs::read_dir", reason = "use rocky_platform::fs" },
+    { path = "std::fs::write", reason = "use rocky_platform::fs" },
+    { path = "std::fs::copy", reason = "use rocky_platform::fs" },
+    { path = "std::fs::rename", reason = "use rocky_platform::fs" },
+    { path = "std::fs::remove_file", reason = "use rocky_platform::fs" },
+    { path = "std::fs::remove_dir_all", reason = "use rocky_platform::fs" },
+    { path = "std::fs::create_dir_all", reason = "use rocky_platform::fs" },
+    { path = "std::fs::metadata", reason = "use rocky_platform::fs::len" },
+    { path = "std::thread::spawn", reason = "use rocky_platform::task" },
+    { path = "std::thread::Builder::spawn", reason = "use rocky_platform::task::dedicated" },
+    { path = "std::thread::scope", reason = "a browser Worker has one thread" },
+    { path = "std::thread::sleep", reason = "a browser Worker cannot block" },
+    { path = "std::time::Instant::now", reason = "use rocky_platform::time::Instant" },
+    { path = "std::time::SystemTime::now", reason = "use rocky_platform::time::SystemTime" },
+    { path = "tokio::spawn", reason = "use rocky_platform::task::spawn" },
+    { path = "tokio::task::spawn", reason = "use rocky_platform::task::spawn" },
+    { path = "tokio::task::spawn_local", reason = "use rocky_platform::task::spawn_local" },
+    { path = "tokio::task::spawn_blocking", reason = "use rocky_platform::task::spawn_blocking" },
+    { path = "tokio::task::yield_now", reason = "use rocky_platform::task::yield_now" },
+    { path = "tokio::time::sleep", reason = "use rocky_platform::time" },
+    { path = "tokio::time::sleep_until", reason = "use rocky_platform::time" },
+    { path = "tokio::time::timeout", reason = "use rocky_platform::time" },
+    { path = "tokio::time::timeout_at", reason = "use rocky_platform::time" },
+    { path = "tokio::time::interval", reason = "use rocky_platform::time" },
+    { path = "tokio::time::Instant::now", reason = "use rocky_platform::time::Instant" },
+]
+disallowed-types = [
+    { path = "std::fs::File", reason = "use rocky_platform::fs" },
+    { path = "std::fs::OpenOptions", reason = "use rocky_platform::fs" },
+    { path = "std::sync::Condvar", reason = "a browser Worker cannot block" },
+    { path = "tokio::runtime::Runtime", reason = "use rocky_platform::task::dedicated" },
+    { path = "tokio::task::JoinSet", reason = "use rocky_platform::task::JoinSet" },
+]

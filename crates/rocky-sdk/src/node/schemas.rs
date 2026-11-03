@@ -49,7 +49,7 @@ impl Node {
                     .map(move |(peer, contact)| (*manifest, *tip, *peer, contact.clone()))
             })
             .collect();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = rocky_platform::time::Instant::now() + Duration::from_secs(30);
         let mut authority = self.replica.observe_authority().await;
         let mut attempted = BTreeSet::new();
         let mut learned = false;
@@ -60,7 +60,7 @@ impl Node {
             .cursor;
         for offset in 0..work.len() {
             if attempted.len() >= crate::enrollment::MAX_DIALED
-                || tokio::time::Instant::now() >= deadline
+                || rocky_platform::time::Instant::now() >= deadline
             {
                 break;
             }
@@ -110,7 +110,7 @@ impl Node {
             let response = tokio::select! {
                 biased;
                 _ = authority.changed() => None,
-                response = tokio::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => response.ok().and_then(Result::ok),
+                response = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => response.ok().and_then(Result::ok),
             };
             // Authority changes cancel an in-flight request. Its bytes grant nothing.
             if !self
@@ -209,11 +209,11 @@ impl Node {
             .ok_or("staged schema has no closing seal")?;
         let bytes = close.to_bytes()?;
         let request = [b"rocky.sdk.staged-close.v1\n".as_slice(), bytes.as_slice()].concat();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = rocky_platform::time::Instant::now() + Duration::from_secs(30);
         let mut authority = self.replica.observe_authority().await;
         let providers = self.settings.lock().await.targets();
         for (peer, contact) in providers.into_iter().take(crate::enrollment::MAX_DIALED) {
-            if tokio::time::Instant::now() >= deadline {
+            if rocky_platform::time::Instant::now() >= deadline {
                 break;
             }
             let addresses = contact.addresses(transport.kind());
@@ -223,7 +223,7 @@ impl Node {
             let response = tokio::select! {
                 biased;
                 _ = authority.changed() => None,
-                reply = tokio::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => reply.ok().and_then(Result::ok),
+                reply = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => reply.ok().and_then(Result::ok),
             };
             let Some(response) = response else { continue };
             let settings = self.settings.lock().await.clone();

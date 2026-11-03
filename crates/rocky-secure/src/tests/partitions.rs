@@ -144,7 +144,7 @@ impl Fixture {
             )
             .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let recorded = if path.exists() {
+        let recorded = if rocky_platform::fs::exists(path) {
             let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
             let mut rows = conn
                 .query(
@@ -268,9 +268,9 @@ fn all() -> Vec<Right> {
     ]
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_future_import_does_not_make_verified_empty_partition_history_missing() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let replica = f
         .open(
@@ -382,9 +382,9 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unrelated_partition_recovery_does_not_block_constant_queries() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let replica = f
         .open(
@@ -425,9 +425,9 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let author = PrivateKey::new();
     let a = f
@@ -731,9 +731,9 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atomic() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::constrained();
     let a = f
         .open(
@@ -802,9 +802,9 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
     assert_eq!(b_rows().await, before_b);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let writer = f
         .open(
@@ -916,9 +916,9 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let author = PrivateKey::new();
     let writer = f
@@ -989,9 +989,9 @@ async fn a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused() {
     assert_eq!(reader.receive(frame).await.unwrap(), ReceiveStatus::Applied);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_across_held_partitions_agree_inside_and_after_transactions() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let writer = f
         .open(

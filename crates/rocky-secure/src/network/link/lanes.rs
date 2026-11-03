@@ -10,11 +10,11 @@ enum ReadSource {
 }
 struct LaneReader {
     incoming: tokio::sync::mpsc::Receiver<Result<(usize, Option<Frame>), Error>>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<rocky_platform::task::JoinHandle<()>>,
     received: Vec<u64>,
     pending: std::collections::VecDeque<Frame>,
     ended: std::collections::BTreeSet<usize>,
-    ending: Option<tokio::time::Instant>,
+    ending: Option<rocky_platform::time::Instant>,
 }
 impl Drop for LaneReader {
     fn drop(&mut self) {
@@ -32,7 +32,7 @@ enum WriteSink {
 }
 struct LaneWriter {
     sender: tokio::sync::mpsc::Sender<Frame>,
-    task: tokio::task::JoinHandle<Result<(), Error>>,
+    task: rocky_platform::task::JoinHandle<Result<(), Error>>,
     sent: u64,
 }
 impl Drop for LaneWriter {
@@ -110,7 +110,7 @@ impl Link {
         for (index, mut reader) in reads.into_iter().enumerate() {
             received.push(reader.sequence);
             let sender = sender.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(rocky_platform::task::spawn(async move {
                 loop {
                     let result = reader.receive().await.and_then(|frame| {
                         if lane(&frame) != index {
@@ -141,7 +141,7 @@ impl Link {
         for mut writer in writes {
             let (sender, mut outgoing) = tokio::sync::mpsc::channel(64);
             let sent = writer.sequence;
-            let task = tokio::spawn(async move {
+            let task = rocky_platform::task::spawn(async move {
                 while let Some(frame) = outgoing.recv().await {
                     writer.send(frame).await?;
                 }
@@ -178,9 +178,11 @@ impl Reader {
                     .ok_or_else(|| denied("link barrier disappeared"));
             }
             let next = match reader.ending {
-                Some(deadline) => tokio::time::timeout_at(deadline, reader.incoming.recv())
-                    .await
-                    .map_err(|_| timed_out("link lane ended before link close"))?,
+                Some(deadline) => {
+                    rocky_platform::time::timeout_at(deadline, reader.incoming.recv())
+                        .await
+                        .map_err(|_| timed_out("link lane ended before link close"))?
+                }
                 None => reader.incoming.recv().await,
             };
             let (index, frame) = next.ok_or_else(|| Error::Io(closed_by_peer()))??;
@@ -190,7 +192,7 @@ impl Reader {
                 reader.ended.insert(index);
                 reader
                     .ending
-                    .get_or_insert_with(|| tokio::time::Instant::now() + TIMEOUT);
+                    .get_or_insert_with(|| rocky_platform::time::Instant::now() + TIMEOUT);
                 if reader.ended.len() == 5 {
                     return Err(Error::Io(closed_by_peer()));
                 }
@@ -265,7 +267,7 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_final_marker_waits_for_its_request_lanes_but_signals_pass() {
         let (send, incoming) = tokio::sync::mpsc::channel(8);
         let mut reader = Reader {

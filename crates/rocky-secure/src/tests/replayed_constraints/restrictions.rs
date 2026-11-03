@@ -38,7 +38,9 @@ fn ledger() -> Constrained {
 const UPDATE_POSTED: &str = "restriction posted_entries refuses this update of entries";
 const DELETE_POSTED: &str = "restriction posted_entries refuses this delete of entries";
 
-#[tokio::test]
+// Uses a native temporary directory across threads.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
     let c = ledger();
     let root = tempfile::tempdir().unwrap();
@@ -244,7 +246,9 @@ async fn posting_history(root: &Path) -> History {
     }
 }
 
-#[test]
+// Blocks on its own runtime, which a browser Worker cannot.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn edits_ordered_after_a_posting_drop_alike_in_every_order() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(posting_history(root.path()));

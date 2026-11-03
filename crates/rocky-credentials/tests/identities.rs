@@ -1,8 +1,6 @@
 //! Identities hold permissions; nodes sign under certificates their
 //! identity signed; the publisher key stays with the owner's identity and
 //! issuers sign through their chains. Keys and bytes only.
-// Identities here live in the file provider, which needs a filesystem.
-#![cfg(not(target_family = "wasm"))]
 use rocky_core::{
     AppId, ApplicationManifest, AuthorLogScope, DomainId, DomainRule, MeshId, ResourceGrant,
     ResourceScope, Right, RowSelection, Scope,
@@ -61,8 +59,8 @@ impl Domain {
         }
     }
     /// An issuer identity the owner appointed, with its issuer chain.
-    fn issuer(&self, authors: AuthorRange) -> (FileIdentity, CredentialChain) {
-        let identity = FileIdentity::new();
+    async fn issuer(&self, authors: AuthorRange) -> (FileIdentity, CredentialChain) {
+        let identity = FileIdentity::new().await;
         let link = Authority::owner(&self.owner)
             .issue_issuer(identity.key(), Some(authors), VALIDITY)
             .expect("issuer");
@@ -92,12 +90,12 @@ impl Domain {
 
 /// An identity in its own file-backed provider.
 struct FileIdentity {
-    _directory: tempfile::TempDir,
+    _directory: rocky_platform::fs::Scratch,
     provider: FileIdentityProvider,
 }
 impl FileIdentity {
-    fn new() -> Self {
-        let directory = tempfile::tempdir().expect("directory");
+    async fn new() -> Self {
+        let directory = rocky_platform::fs::Scratch::new().await;
         let provider = FileIdentityProvider::open(directory.path()).expect("identity");
         Self {
             _directory: directory,
@@ -129,9 +127,9 @@ fn node(identity: &dyn IdentityProvider, chain: &CredentialChain) -> (PrivateKey
     (node, certified)
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_file_identity_reopens_and_reserves_each_author_once() {
-    let identity = FileIdentity::new();
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_file_identity_reopens_and_reserves_each_author_once() {
+    let identity = FileIdentity::new().await;
     let again = identity.reopen();
     assert_eq!(
         identity.provider.public_key().expect("key"),
@@ -147,14 +145,16 @@ fn a_file_identity_reopens_and_reserves_each_author_once() {
     assert!(PrivateKey::new().reserve_author(AuthorRange::ALL).is_err());
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     let domain = Domain::new();
-    let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
+    let (issuer, issuing) = domain
+        .issuer(AuthorRange::new(100, 199).expect("range"))
+        .await;
     let authority = Authority::issuer(&issuer.provider, &issuing);
     // The issuer grants a member identity a range and its grants; it signs
     // through its own chain, never with the publisher key.
-    let member = FileIdentity::new();
+    let member = FileIdentity::new().await;
     let link = authority
         .issue_terms(
             member.key(),
@@ -228,10 +228,10 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     let domain = Domain::new();
-    let member = FileIdentity::new();
+    let member = FileIdentity::new().await;
     let link = Authority::owner(&domain.owner)
         .issue_terms(
             member.key(),
@@ -293,10 +293,12 @@ fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() {
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() {
     let domain = Domain::new();
-    let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
+    let (issuer, issuing) = domain
+        .issuer(AuthorRange::new(100, 199).expect("range"))
+        .await;
     let authority = Authority::issuer(&issuer.provider, &issuing);
     let none = RevocationSet::new();
     // Before revocation the issuer endorses a manifest through its chain.
@@ -355,7 +357,9 @@ fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() 
     );
     // Every chain through it ends; another issuer renews its members.
     assert!(!domain.verify(&member_chain, &member_node, &revoked));
-    let (other, other_chain) = domain.issuer(AuthorRange::new(200, 299).expect("range"));
+    let (other, other_chain) = domain
+        .issuer(AuthorRange::new(200, 299).expect("range"))
+        .await;
     let renewer = Authority::issuer(&other.provider, &other_chain);
     let (request, secret) =
         RenewRequest::sign(&member_node, other.key(), member_chain.clone(), NOW).expect("request");
@@ -403,9 +407,9 @@ fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() 
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
-    let identity = FileIdentity::new();
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
+    let identity = FileIdentity::new().await;
     let (node, answering) = (PrivateKey::new(), PrivateKey::new());
     let (request, secret) =
         IdentityRequest::sign(&identity.provider, &node, answering.public_key(), NOW)

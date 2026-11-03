@@ -33,9 +33,9 @@ async fn open(f: &Fixture, dir: &std::path::Path, name: &str, rights: &[Right]) 
     .await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unshared_partition_does_not_end_held_recovery_of_other_scopes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let client = open(&f, root.path(), "client.db", &[Right::Read]).await;
     let server = open(&f, root.path(), "server.db", &[Right::Read]).await;
@@ -69,9 +69,9 @@ async fn an_unshared_partition_does_not_end_held_recovery_of_other_scopes() {
     served.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let client = open(&f, root.path(), "client.db", &[Right::Read]).await;
     let server = open(&f, root.path(), "server.db", &[Right::Read]).await;
@@ -179,7 +179,7 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
 }
 
 async fn transcript_case(custody: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let server = open(
         &f,
@@ -264,18 +264,18 @@ async fn transcript_case(custody: bool) {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn every_reader_request_hides_an_unproved_partition() {
     transcript_case(false).await;
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn every_custody_request_hides_an_unproved_partition() {
     transcript_case(true).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn proofs_are_session_bound_bounded_and_remembered() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let server = open(&f, root.path(), "server.db", &[Right::Read]).await;
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
@@ -335,9 +335,9 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         Err(Error::Application(cause)) if cause.downcast_ref::<RequestRefusal>() == Some(&RequestRefusal::NotPermitted)));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retained_siblings_and_previous_generations_prove_but_fresh_peers_refuse() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let retained = open(&f, root.path(), "retained.db", &[Right::Read]).await;
     let fresh = open(&f, root.path(), "fresh.db", &[Right::Read]).await;
@@ -397,9 +397,9 @@ async fn retained_siblings_and_previous_generations_prove_but_fresh_peers_refuse
     assert!(proofs[0].1.windows(2).all(|p| p[0].epoch > p[1].epoch));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn custody_tuple_offers_relay_only_with_both_grants() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let writer = f
         .open(
@@ -497,9 +497,9 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
     assert!(registered.is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn frontier_acknowledgments_require_proved_custody() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let writer = f
         .open(
@@ -542,10 +542,10 @@ async fn frontier_acknowledgments_require_proved_custody() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_session() {
     let f = Fixture::new(1);
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
     let (node, credentials) = {
         let inner = server.inner.lock(crate::replica::Class::Background).await;
@@ -576,7 +576,7 @@ async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_ses
 
 /// The resolver's connection may close once its reply is delivered, so the
 /// dialer's own close fails; the verified reply still resolves the peer.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn saved_peer_resolution_survives_the_resolver_closing_first() {
     struct ClosedByPeer(tokio::io::DuplexStream);
     impl tokio::io::AsyncRead for ClosedByPeer {
@@ -610,7 +610,7 @@ async fn saved_peer_resolution_survives_the_resolver_closing_first() {
         }
     }
     let f = Fixture::new(1);
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
     let (node, credentials) = {
         let inner = server.inner.lock(crate::replica::Class::Background).await;
@@ -631,9 +631,9 @@ async fn saved_peer_resolution_survives_the_resolver_closing_first() {
 /// A no-frames base of a concrete partition moves to a custodian that
 /// proves its tuple, while an unproved reader's offers of it get the
 /// common refusal; a partitioned table's own scope signs none.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     // The server reads the partition without its key and holds no history.
     let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
@@ -739,9 +739,9 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_refused_scope_does_not_end_the_request_channel() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
     let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
     let client = open(&f, root.path(), "client.db", &[Right::Read]).await;

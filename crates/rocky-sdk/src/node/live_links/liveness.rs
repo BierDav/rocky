@@ -188,7 +188,7 @@ impl Node {
                 #[cfg(test)]
                 service.live.closing.fetch_add(1, Ordering::SeqCst);
                 // Cancellation also interrupts a blocked channel write.
-                let _ = tokio::time::timeout(CLOSE, async {
+                let _ = rocky_platform::time::timeout(CLOSE, async {
                     io.send(Frame::new(direction, Message::Close { reason }))
                         .await?;
                     io.finish().await

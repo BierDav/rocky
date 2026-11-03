@@ -24,9 +24,9 @@ use std::{
         atomic::{AtomicU64, Ordering::Relaxed},
     },
     task::Poll,
-    time::Instant,
 };
 use tokio::sync::mpsc;
+use web_time::Instant;
 
 /// Queue bytes one group may hold. With `RuntimeOptions::group_commit` this
 /// bounds the work and memory between two commits.
@@ -732,10 +732,10 @@ where
         let name = path.file_name().unwrap_or_default();
         let mut saved_wal = name.to_owned();
         saved_wal.push("-wal");
-        let _ = std::fs::create_dir_all(directory);
-        let _ = std::fs::copy(path, directory.join(name));
-        if std::fs::copy(&wal, directory.join(&saved_wal)).is_err() {
-            let _ = std::fs::remove_file(directory.join(saved_wal));
+        let _ = rocky_platform::fs::create_dir_all(directory);
+        let _ = rocky_platform::fs::copy(path, directory.join(name));
+        if rocky_platform::fs::copy(&wal, directory.join(&saved_wal)).is_err() {
+            let _ = rocky_platform::fs::remove_file(directory.join(saved_wal));
         }
     }
     fn conn(&self) -> Option<Arc<sqlite::Connection>> {
@@ -756,7 +756,7 @@ where
                         return Err(error);
                     }
                     if attempt + 1 < storage::TRANSACTION_ATTEMPTS {
-                        tokio::time::sleep(storage::backoff(attempt)).await;
+                        rocky_platform::time::sleep(storage::backoff(attempt)).await;
                     }
                 }
             }
@@ -1027,7 +1027,11 @@ where
         wal.push("-wal");
         let flush = |path: &std::path::Path, spent: &AtomicU64| {
             let started = Instant::now();
-            let result = std::fs::File::open(path).and_then(|file| file.sync_all());
+            let result = rocky_platform::fs::sync(path).and_then(|found| {
+                found
+                    .then_some(())
+                    .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+            });
             let elapsed = micros(started);
             spent.fetch_add(elapsed, Relaxed);
             (result, elapsed)

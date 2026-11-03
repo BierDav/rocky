@@ -8,7 +8,7 @@ use crate::CrashPoint;
 /// unclosed, reopens it and delivers everything again.
 async fn crash(point: CrashPoint, before: &[usize], during: &[usize]) {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let units = history(&f, root.path(), true).await;
     let frames: Vec<_> = units.iter().flatten().cloned().collect();
     let expected = canonical(&f, &frames);
@@ -61,28 +61,28 @@ async fn crash(point: CrashPoint, before: &[usize], during: &[usize]) {
     assert_eq!(state(&f, &replica, &expected).await.rows, expected.rows);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_while_applying_an_intent_reopens_and_converges() {
     crash(CrashPoint::Apply, &[], &[0]).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_inside_a_rewind_reopens_and_converges() {
     // W1's doubling applies first; its earlier create rewinds it.
     crash(CrashPoint::Rewind, &[1, 2, 3], &[0]).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_between_redone_transactions_reopens_and_converges() {
     crash(CrashPoint::Redo, &[1, 2, 3], &[0]).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_while_deleting_undo_records_reopens_and_converges() {
     crash(CrashPoint::UndoDeletion, &[0, 1, 2, 3, 4], &[]).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_right_after_a_rewinding_receive_commits_reopens_and_converges() {
     crash(CrashPoint::GroupAfterCommit, &[1, 2, 3], &[0]).await;
 }

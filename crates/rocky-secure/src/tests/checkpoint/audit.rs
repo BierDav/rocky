@@ -1,10 +1,10 @@
 //! Global keyless records remain in the batch's domain even when omitted.
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn omitted_keyless_no_frames_records_are_checked_on_every_batch() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, _) = open(&f, &dir.path().join("a.db"), &key).await;
     a.author(handle(1), insert(&f, 1, "base"), vec![])

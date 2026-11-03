@@ -2,6 +2,8 @@
 //! online together share lists through a keyless custody peer. A duplicate
 //! title converges by policy, a deleted list cascades, a deleted category
 //! nulls only its reference, and a moved item keeps an offline tick. See `docs/runtime/shopping-qualification.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};

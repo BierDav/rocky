@@ -1,6 +1,8 @@
 //! The SQL connections a database driver uses: a writer as a secure SQL
 //! session, readers as snapshot cursors, typed values and SQLite codes.
 //! See `docs/runtime/sql-driver.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod support;
 use rocky_sdk::{
     Connection, ConnectionOptions, Database, Network, Open, Page, Profile, SqlValue,

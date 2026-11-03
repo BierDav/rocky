@@ -521,14 +521,14 @@ impl OracleStats {
         self.scans.fetch_add(1, Ordering::Relaxed);
         OracleTimer {
             stats: self,
-            start: std::time::Instant::now(),
+            start: web_time::Instant::now(),
         }
     }
 }
 #[cfg(test)]
 pub(super) struct OracleTimer<'a> {
     stats: &'a OracleStats,
-    start: std::time::Instant,
+    start: web_time::Instant,
 }
 #[cfg(test)]
 impl Drop for OracleTimer<'_> {
@@ -552,7 +552,8 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-#[cfg(test)]
+// Reads the crate's sources from disk.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     #[test]
     fn position_tables_have_one_writer_module() {
@@ -567,7 +568,9 @@ mod tests {
                     && path.file_name().unwrap() != "positions.rs"
                     && path.file_name().unwrap() != "tests.rs"
                 {
-                    let source = std::fs::read_to_string(&path).unwrap().to_ascii_uppercase();
+                    let source = rocky_platform::fs::read_to_string(&path)
+                        .unwrap()
+                        .to_ascii_uppercase();
                     for literal in source.split('"') {
                         for table in [
                             "SECURE_POSITION_RANGES",

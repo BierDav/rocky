@@ -1107,7 +1107,7 @@ pub(super) fn key_digest(key: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_covered_mark_seeds_only_own_births_and_requires_the_signed_own_field() {
         let key = PrivateKey::from_bytes(&[221; 32]).public_key();
         let marks = [
@@ -1132,7 +1132,7 @@ mod tests {
         assert!(serde_json::from_value::<checkpoint::CoveredMark>(unsigned_own).is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn an_identity_author_with_two_signers_fails_closed() {
         let (one, two) = (PrivateKey::new(), PrivateKey::new());
         let mark = |key: &PrivateKey, sequence| checkpoint::IdentityMark {

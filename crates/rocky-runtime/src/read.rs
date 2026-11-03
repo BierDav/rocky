@@ -12,7 +12,7 @@ use rocky_core::{Commitment, LocalRevision, ReadView, Scope, SqlValue};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Condvar, Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
 
@@ -497,7 +497,8 @@ struct Pooled {
 pub(crate) struct ReadPool {
     permits: tokio::sync::Semaphore,
     state: Mutex<Pooled>,
-    returned: Condvar,
+    /// Some connection is out with a running read.
+    out: rocky_platform::task::Held,
 }
 impl ReadPool {
     pub(crate) fn new() -> Arc<Self> {
@@ -509,7 +510,7 @@ impl ReadPool {
                 out: 0,
                 closed: false,
             }),
-            returned: Condvar::new(),
+            out: rocky_platform::task::Held::new(false),
         })
     }
     pub(crate) fn attach(&self, path: PathBuf) {
@@ -521,17 +522,14 @@ impl ReadPool {
     /// A running read is bounded by `READ_TRANSACTION_BOUND`.
     pub(crate) fn close(&self) {
         self.permits.close();
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        state.closed = true;
-        while state.out > 0 {
-            match self.returned.wait(state) {
-                Ok(next) => state = next,
-                Err(_) => return,
-            }
+        match self.state.lock() {
+            Ok(mut state) => state.closed = true,
+            Err(_) => return,
         }
-        state.idle.clear();
+        self.out.wait_released(storage::READ_TRANSACTION_BOUND);
+        if let Ok(mut state) = self.state.lock() {
+            state.idle.clear();
+        }
     }
     fn checkout(&self) -> Result<sqlite::Connection, Error> {
         let mut state = self.state.lock().map_err(|_| Error::Closed)?;
@@ -548,6 +546,7 @@ impl ReadPool {
             }
         };
         state.out += 1;
+        self.out.set(true);
         Ok(connection)
     }
     fn checkin(&self, connection: sqlite::Connection) {
@@ -556,8 +555,8 @@ impl ReadPool {
             if !state.closed {
                 state.idle.push(connection);
             }
+            self.out.set(state.out > 0);
         }
-        self.returned.notify_all();
     }
     /// Runs `read` on a blocking thread with one pooled connection.
     async fn run<T: Send + 'static>(
@@ -566,7 +565,7 @@ impl ReadPool {
     ) -> Result<T, Error> {
         let _permit = self.permits.acquire().await.map_err(|_| Error::Closed)?;
         let pool = self.clone();
-        tokio::task::spawn_blocking(move || {
+        rocky_platform::task::spawn_blocking(move || {
             let connection = pool.checkout()?;
             let result = read(&connection);
             pool.checkin(connection);
@@ -832,7 +831,7 @@ impl Reads {
         options: &ReadOptions,
     ) -> Result<ReadSnapshot, Error> {
         conn.set_deadline(Some(
-            std::time::Instant::now() + storage::READ_TRANSACTION_BOUND,
+            web_time::Instant::now() + storage::READ_TRANSACTION_BOUND,
         ))?;
         let result = (|| {
             conn.run_now("BEGIN")?;
@@ -972,7 +971,7 @@ fn retried<T>(mut read: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
         match read() {
             Err(error) if storage::retryable(&error) => {
                 if attempt + 1 < storage::TRANSACTION_ATTEMPTS {
-                    std::thread::sleep(storage::backoff(attempt));
+                    rocky_platform::task::backoff_blocking(storage::backoff(attempt));
                 }
             }
             result => return result,
@@ -1089,7 +1088,7 @@ mod tests {
             ..ReadView::default()
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn views_inline_their_values_and_map_only_their_own_tables() {
         let plan = ReadPlan::compile(
             &names(),
@@ -1137,7 +1136,7 @@ mod tests {
         )
         .unwrap()
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn ordered_plain_reads_continue_by_key_and_other_shapes_by_offset() {
         let plan = keyed();
         let source = "(SELECT id,owner,body FROM \"ns_notes\" WHERE owner<>'x') AS \"notes\"";
@@ -1235,9 +1234,9 @@ mod tests {
         }
     }
     /// NULL sorts first ascending: those rows page by offset, then by key.
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_through_null_ordering_values_cover_the_result_once() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = rocky_platform::fs::Scratch::new().await;
         let path = dir.path().join("reads.db");
         let conn = sqlite::Connection::open(&path).unwrap();
         for sql in [
@@ -1315,7 +1314,7 @@ mod tests {
         assert_eq!(kinds, [Offset, Keyset, Keyset, Keyset]);
         pool.close();
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_read_can_name_only_a_view() {
         let plan = ReadPlan::compile(
             &names(),
@@ -1340,7 +1339,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn views_over_protocol_or_unknown_tables_and_miscounted_values_are_refused() {
         for (sql, values) in [
             ("SELECT * FROM rocky_operations", vec![]),
@@ -1371,7 +1370,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn projection_statements_name_the_table_they_write() {
         for (sql, table) in [
             ("INSERT INTO Notes VALUES(?,?)", Some("notes")),
@@ -1386,7 +1385,7 @@ mod tests {
             assert_eq!(written_table(sql).as_deref(), table, "{sql}");
         }
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn the_engine_refuses_tables_outside_a_restricted_read() {
         let conn = sqlite::Connection::open_in_memory().unwrap();
         for sql in [

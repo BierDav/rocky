@@ -3,7 +3,7 @@ use super::*;
 use crate::scaling_option_tests::NODE;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 pub(crate) fn note(replica: &Replica<WideApp>, handle: u8, text: &str) -> MutationReceipt {
     replica
@@ -170,9 +170,9 @@ impl StoredApplication for WideApp {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placement_extends_without_moving_existing_domains_and_opens_selected_files() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("placed.db");
     let app = WideApp {
         domain: Some(0),
@@ -208,7 +208,7 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     }
     // Query independent domains across the four file workers in bounded batches.
     for first in (0..256).step_by(8) {
-        let mut reads = tokio::task::JoinSet::new();
+        let mut reads = rocky_platform::task::JoinSet::new();
         for domain in first..first + 8 {
             let replica = runtime.domain(test_scope(domain)).unwrap();
             reads.spawn(async move {
@@ -280,9 +280,9 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     ));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn additive_indexes_preserve_rows_and_definition_and_refuse_edits_or_removal() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("indexes.db");
     let base = app(0);
     let indexed = WideApp {
@@ -345,7 +345,7 @@ async fn additive_indexes_preserve_rows_and_definition_and_refuse_edits_or_remov
         .unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn bootstrap_child() {
     let Ok(path) = std::env::var("ROCKY_WIDE_CRASH_PATH") else {
         return;
@@ -384,10 +384,12 @@ async fn bootstrap_child() {
     }
     panic!("bootstrap did not abort");
 }
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_schema_resumes_committed_steps_and_never_opens_half_installed() {
     use std::os::unix::process::ExitStatusExt;
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("wide.db");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -440,7 +442,7 @@ async fn interrupted_schema_resumes_committed_steps_and_never_opens_half_install
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_ddl_step_rolls_back_and_a_different_resume_plan_is_refused() {
     let raw = crate::sqlite::Connection::open_in_memory().unwrap();
     let conn = crate::scoped_connection::ScopedConnection::new(raw, None, &[""; 0]);
@@ -472,11 +474,13 @@ async fn a_failed_ddl_step_rolls_back_and_a_different_resume_plan_is_refused() {
     ));
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() {
     use std::os::unix::process::ExitStatusExt;
     for mode in ["placed-partial", "placed-complete"] {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let path = dir.path().join("wide.db");
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -491,7 +495,7 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
             .status()
             .unwrap();
         assert_eq!(status.signal(), Some(6));
-        assert!(!path.exists());
+        assert!(!rocky_platform::fs::exists(&path));
         let runtime = Runtime::open_placed(
             &path,
             vec![installation(app(100), 0)],
@@ -509,7 +513,7 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
             .unwrap();
         runtime.close().await.unwrap();
         let file = crate::layout::file_path(&path, 3);
-        std::fs::remove_file(file).unwrap();
+        rocky_platform::fs::remove_file(file).unwrap();
         assert!(matches!(
             Runtime::open_placed(
                 &path,
@@ -526,10 +530,12 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
     }
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unscoped_wide_bootstrap_resumes_without_admitting_partial_identity() {
     use std::os::unix::process::ExitStatusExt;
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("unscoped.db");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -566,7 +572,7 @@ async fn unscoped_wide_bootstrap_resumes_without_admitting_partial_identity() {
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn repeated_checkpoint_schema_keeps_base_unique_constraints() {
     let conn = crate::sqlite::Connection::open_in_memory().unwrap();
     conn.execute("CREATE TABLE items(value INTEGER)", ())
@@ -586,7 +592,7 @@ async fn repeated_checkpoint_schema_keeps_base_unique_constraints() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn additive_index_does_not_adopt_an_unrecorded_physical_index() {
     let base = app(0);
     let raw = crate::sqlite::Connection::open_in_memory().unwrap();

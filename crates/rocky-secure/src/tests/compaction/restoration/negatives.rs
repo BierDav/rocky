@@ -24,7 +24,7 @@ pub(super) async fn preserved(f: &HeldPrefix, error: bool) {
     assert_eq!(super::super::audit::snapshot(&f.replica).await, before);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     let f = filled().await;
     let endpoint = &f.frames[2];
@@ -96,7 +96,7 @@ async fn unsettled_or_corrupt_original_bytes_cannot_discharge_the_guard() {
     f.replica.audit(f.lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     let f = filled().await;
     let scope = f.lineage.scope("items");
@@ -181,7 +181,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     f.replica.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_guard() {
     let f = HeldPrefix::new(3).await;
     let mut higher = f.frames[2].operation_ref().unwrap().header.clone();
@@ -246,7 +246,7 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
     let f = HeldPrefix::new(3).await;
     let scope = f.lineage.scope("items");

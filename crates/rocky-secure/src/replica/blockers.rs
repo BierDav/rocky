@@ -631,7 +631,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             (BlockerSource::start(&inner)?, blocker_domains(&inner))
         };
         let step = async || {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let inner = self.inner.lock(Class::Background).await;
             source.check(&inner)?;
             Ok::<_, Error>(inner)

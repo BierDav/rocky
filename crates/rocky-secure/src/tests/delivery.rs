@@ -122,10 +122,10 @@ impl Deliveries for Port {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, c) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let ac = fixture.config(&a, fixture.full(), &[fixture.public]);
     let bc = fixture.config(&b, fixture.full(), &[fixture.public]);
@@ -193,10 +193,10 @@ async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_session_without_an_owner_refuses_delivery() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
     let ac = fixture.config(&a, fixture.full(), &[fixture.public]);
     let bc = fixture.config(&b, fixture.full(), &[fixture.public]);

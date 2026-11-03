@@ -8,10 +8,10 @@ type Positions = (
     BTreeMap<(ResourceScope, u32), u64>,
 );
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("optional-index.db");
     let key = PrivateKey::new();
     let replica = open(&f, &path, &key).await;
@@ -82,15 +82,15 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     let pages = rows(&inner.conn, "PRAGMA page_count").await.unwrap();
     let free = rows(&inner.conn, "PRAGMA freelist_count").await.unwrap();
     let wal_path = path.with_extension("db-wal");
-    let wal_before = std::fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
+    let wal_before = rocky_platform::fs::len(&wal_path).unwrap_or(0);
     rows(&inner.conn, "PRAGMA wal_checkpoint(TRUNCATE)")
         .await
         .unwrap();
-    let wal_after = std::fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
+    let wal_after = rocky_platform::fs::len(&wal_path).unwrap_or(0);
     println!(
         "operation index accounting retained=1: operation objects={operation_pages:?}; pages/free={pages:?}/{free:?}; main={}B; WAL before/after={wal_before}/{wal_after}B; compact backup={}B",
-        std::fs::metadata(&path).unwrap().len(),
-        std::fs::metadata(&backup).unwrap().len()
+        rocky_platform::fs::len(&path).unwrap(),
+        rocky_platform::fs::len(&backup).unwrap()
     );
     drop(inner);
     drop(replica);
@@ -144,9 +144,9 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     replica.audit(f.public).await.unwrap();
 }
 
-async fn pending() -> (Fixture, TempDir, Replica, Vec<EncryptedFrame>) {
+async fn pending() -> (Fixture, Scratch, Replica, Vec<EncryptedFrame>) {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("source.db"), &PrivateKey::new()).await;
     let target = open(&f, &dir.path().join("target.db"), &PrivateKey::new()).await;
     let frames = source
@@ -236,7 +236,7 @@ fn rejected<T>(result: Result<T, Error>, expected: &str) {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn excluded_and_other_domain_headers_still_decode_after_warming() {
     let (f, _dir, target, frames) = pending().await;
     let original = frames[0].header_bytes();
@@ -348,7 +348,7 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
     target.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_syntax_keeps_pending_key_ready_and_status_predicates_live() {
     let (f, _dir, target, frames) = pending().await;
     let header: p2panda_core::Header<crate::wire::Extensions> =
@@ -445,7 +445,7 @@ async fn warm_syntax_keeps_pending_key_ready_and_status_predicates_live() {
     target.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
     let (f, _dir, target, frames) = pending().await;
     let header: p2panda_core::Header<crate::wire::Extensions> =
@@ -528,7 +528,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
     target.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn fresh_rows_rollback_and_bounded_fallback_never_reuse_position_results() {
     let (f, _dir, target, frames) = pending().await;
     let first = scan(&target, f.public.domain, &[], &[]).await.unwrap();
@@ -628,7 +628,7 @@ async fn fresh_rows_rollback_and_bounded_fallback_never_reuse_position_results()
     target.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn shared_parsing_keeps_frontier_hash_author_and_live_status_checks() {
     let (f, _dir, target, frames) = pending().await;
     let original = frames[0].header_bytes();
@@ -733,7 +733,7 @@ async fn shared_parsing_keeps_frontier_hash_author_and_live_status_checks() {
     target.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pending_frame_names_why_it_waits_until_it_applies() {
     let (f, _dir, target, frames) = pending().await;
     let blockers = target.blockers().await.unwrap();

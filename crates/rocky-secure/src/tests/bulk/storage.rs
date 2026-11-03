@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::rows;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn storage_accounting_bounds_inputs_and_validates_every_source_table() {
     let (_, _, _, replica, _) = fixture::candidate_tables(40, true).await;
     let (expected, records) = {

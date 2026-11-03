@@ -20,7 +20,7 @@ async fn unchanged_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
     state
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_suffix() {
     let pair = pair().await;
     let replica = &pair.alice;

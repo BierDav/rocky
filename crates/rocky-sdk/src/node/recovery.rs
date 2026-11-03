@@ -121,7 +121,7 @@ impl Node {
                 .iter()
                 .any(|blocker| blocker.clears_by == ClearsBy::LocalWork)
                 || self.settings.lock().await.pending_follow.is_some();
-            let tick = tokio::time::sleep(TICK);
+            let tick = rocky_platform::time::sleep(TICK);
             tokio::pin!(tick);
             loop {
                 tokio::select! {
@@ -141,7 +141,7 @@ impl Node {
                     break;
                 }
             }
-            tokio::time::sleep(SPACING).await;
+            rocky_platform::time::sleep(SPACING).await;
         }
     }
 }

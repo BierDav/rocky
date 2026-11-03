@@ -162,7 +162,7 @@ impl Fixture {
             )
             .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let recorded = if path.exists() {
+        let recorded = if rocky_platform::fs::exists(path) {
             let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
             let mut rows = conn
                 .query(

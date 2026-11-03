@@ -211,7 +211,7 @@ impl Settings {
         settings.add_peer(&vault, contact)?;
         settings.learn_issuers(&vault, &bundle.issuers);
         settings.save(path)?;
-        std::fs::remove_file(Intent::path(path, false))?;
+        rocky_platform::fs::remove_file(Intent::path(path, false))?;
         Ok(settings)
     }
 }

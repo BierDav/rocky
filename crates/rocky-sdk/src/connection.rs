@@ -947,7 +947,7 @@ impl TableEvents {
 mod next_id_tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_next_id_shapes_are_refused_before_sql_execution() {
         for sql in [
             "SELECT rocky_next_id('t') AS x",

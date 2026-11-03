@@ -233,7 +233,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut first = true;
         loop {
             if !std::mem::take(&mut first) {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
             }
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             let Some((publication, stored)) = current.as_mut() else {

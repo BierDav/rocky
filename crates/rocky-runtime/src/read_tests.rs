@@ -3,8 +3,8 @@
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
+use rocky_platform::fs::Scratch;
 use std::sync::atomic::Ordering;
-use tempfile::TempDir;
 
 const NODE: NodeId = NodeId([3; 16]);
 const CALLER: PrincipalId = PrincipalId([7; 16]);
@@ -17,7 +17,7 @@ fn scope(domain: u8) -> Scope {
     }
 }
 /// Two domains in one file; domain 1 may read only notes with `prefix`.
-async fn open(dir: &TempDir, prefix: Option<&str>) -> Runtime<InventoryApp> {
+async fn open(dir: &Scratch, prefix: Option<&str>) -> Runtime<InventoryApp> {
     let installations = [1, 2]
         .into_iter()
         .map(|domain| DomainInstallation {
@@ -90,9 +90,9 @@ async fn pages(
     pages
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, None).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -212,9 +212,9 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, None).await;
     let a = runtime.domain(scope(1)).unwrap();
     for text in ["public b", "private c", "public d", "public f", "public h"] {
@@ -345,9 +345,9 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn denied_rows_protocol_tables_and_other_domains_are_unreachable_in_every_read_shape() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, None).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -445,9 +445,9 @@ async fn denied_rows_protocol_tables_and_other_domains_are_unreachable_in_every_
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn point_reads_use_the_stored_tables_indexes_through_a_filtered_view() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, Some("public")).await;
     let a = runtime.domain(scope(1)).unwrap();
     let created = note(&a, "public point").await;
@@ -490,9 +490,9 @@ async fn point_reads_use_the_stored_tables_indexes_through_a_filtered_view() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn observers_wake_for_their_domain_only_and_share_one_execution() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, None).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -562,9 +562,9 @@ fn futures_poll<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> 
 
 /// A read does not pass through the writer: it answers while the writer is
 /// held inside a group, and reports the committed revision it was read at.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_answer_while_the_writer_is_inside_a_group() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, None).await;
     let a = runtime.domain(scope(1)).unwrap();
     note(&a, "committed").await;

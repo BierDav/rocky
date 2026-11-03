@@ -92,7 +92,7 @@ mod tests {
     #[derive(Serialize, Deserialize)]
     struct Page(#[serde(with = "super")] Vec<ByteBuf>);
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn origin_dictionaries_preserve_witnesses_and_refuse_ambiguous_references() {
         let origins: Vec<_> = (0..32)
             .map(|index| {

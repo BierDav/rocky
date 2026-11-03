@@ -318,7 +318,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// refused chunk leaves the publication staged for the next call.
     pub async fn author_staged_publication(&self, publication: Commitment) -> Result<(), Error> {
         while self.author_publication_step(publication).await? {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
         Ok(())
     }

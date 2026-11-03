@@ -1,3 +1,5 @@
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};

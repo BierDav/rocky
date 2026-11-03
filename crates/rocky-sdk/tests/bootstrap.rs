@@ -1,3 +1,5 @@
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 #[path = "bootstrap/link_gate.rs"]
 mod link_gate;

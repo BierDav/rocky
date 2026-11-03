@@ -4,10 +4,10 @@ use crate::storage::rows;
 use rocky_core::SqlValue;
 use rocky_credentials::{AuthorMark, SEAL_FORMAT, SealAction, SealStatement, SignedSeal};
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn audit_rejects_altered_position_indexes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("corrupt.db"),
@@ -59,10 +59,10 @@ async fn audit_rejects_altered_position_indexes() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("runs.db"),
@@ -165,10 +165,10 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     inner.audit_positions_for_test().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn waiting_seal_and_invalidated_frontier_match_the_log() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("frontier.db"),
@@ -249,10 +249,10 @@ async fn waiting_seal_and_invalidated_frontier_match_the_log() {
     inner.audit_positions_for_test().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn audit_rejects_a_range_table_with_the_wrong_shape() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("shape.db"),

@@ -3,8 +3,8 @@
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
+use rocky_platform::fs::Scratch;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tempfile::TempDir;
 
 const NODE: NodeId = NodeId([3; 16]);
 const CALLER: PrincipalId = PrincipalId([7; 16]);
@@ -108,14 +108,14 @@ impl StoredApplication for Watched {
     }
 }
 async fn open(
-    dir: &TempDir,
+    dir: &Scratch,
     node: NodeId,
     options: RuntimeOptions,
 ) -> Result<Runtime<Watched>, Error> {
     open_app(dir, node, options, Watched::default()).await
 }
 async fn open_app(
-    dir: &TempDir,
+    dir: &Scratch,
     node: NodeId,
     options: RuntimeOptions,
     app: Watched,
@@ -123,7 +123,7 @@ async fn open_app(
     open_domains(dir, node, options, app, &[scope()]).await
 }
 async fn open_domains(
-    dir: &TempDir,
+    dir: &Scratch,
     node: NodeId,
     options: RuntimeOptions,
     app: Watched,
@@ -186,9 +186,9 @@ async fn count_in(replica: &Replica<Watched>, scope: Scope) -> i64 {
 
 /// Local and incoming transitions are reduced on the one row they touch,
 /// whatever the domain holds, and open builds no window at all.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn transitions_load_only_the_rows_they_touch() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let app = Watched::default();
     let open = |node| open_app(&dir, node, RuntimeOptions::default(), app.clone());
     let source = open(NODE).await.unwrap();
@@ -225,9 +225,9 @@ async fn transitions_load_only_the_rows_they_touch() {
 /// Open does not replay history: the explicit audit finds a tampered row.
 /// With default options a domain grows past the former operation quota,
 /// checkpoints and prunes on its own, and reopens from the checkpoint.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let options = RuntimeOptions::default();
     let edit = async |note: &str| {
         let db = crate::sqlite::Connection::open(&dir.path().join("3.db")).unwrap();
@@ -297,9 +297,9 @@ async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
 /// A checkpoint of a `WITHOUT ROWID` table is exported over several pages
 /// and imported into one domain of a multi-domain file; the other domain is
 /// untouched and every domain audits, also after reopening.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rowless_checkpoint_imports_into_one_domain_of_a_shared_file() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let options = RuntimeOptions {
         retention: RetentionPolicy {
             window: 0,

@@ -28,7 +28,7 @@ pub(super) fn assert_empty_checkpoint(signed: &crate::SignedCheckpoint, seal: Co
 
 pub(super) async fn open(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
     name: &str,
     key: &PrivateKey,
 ) -> Replica {
@@ -152,10 +152,10 @@ pub(super) async fn titles(replica: &Replica) -> Vec<Vec<SqlValue>> {
     select(replica, "SELECT key,title FROM items ORDER BY key").await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "alice", &key).await;
     follow_main(&lineage, &replica).await;
@@ -243,10 +243,10 @@ async fn update(replica: &Replica, key: &str, title: &str) {
         .unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_alike() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -338,10 +338,10 @@ fn rival(lineage: &Lineage, seal: &SignedSeal) -> (SignedSeal, Vec<TipStatement>
     (rival, statements)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_rebootstraps() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "keep", &key).await;
     follow_main(&lineage, &replica).await;
@@ -551,10 +551,10 @@ pub(super) async fn list_checkpoints(lineage: &Lineage, replica: &Replica) -> Ve
     records
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_lists() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -677,10 +677,10 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     assert_eq!(titles(&a).await.len(), 3);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -823,10 +823,10 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
     let lineage = Lineage::pinned(121);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [122, 123].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -936,10 +936,10 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
     assert_eq!(titles(&a).await, vec![vec![text("live"), text("kept")]]);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "alice", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "before").await;

@@ -1,17 +1,17 @@
 //! Losing-seal coverage is retained accounting, never a state bound at a new seal.
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn empty_scope_coverage_survives_two_earlier_seals_and_an_items_only_import() {
     coverage_after_import(false, false).await;
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_missing_position_beyond_the_anchor_requires_a_listed_checkpoint() {
     coverage_after_import(true, false).await;
 }
 /// The same, with the first base switch interrupted and the restoration of
 /// this node's own pruned suffix checked step by step.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_import_that_leaves_own_pruned_frames_uncovered_waits_for_them() {
     coverage_after_import(true, true).await;
 }
@@ -21,7 +21,7 @@ async fn guards(replica: &Replica) -> i64 {
 }
 async fn coverage_after_import(missing: bool, restoration: bool) {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -289,10 +289,10 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
     assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn bounds_without_a_base_gain_coverage_before_the_settle_wipe() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = lineage
         .open_scoped(&dir.path().join("a.db"), &keys[0], false, &["items"])
@@ -388,10 +388,10 @@ async fn bounds_without_a_base_gain_coverage_before_the_settle_wipe() {
     assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn restoration_endpoints_merge_as_pairs() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&lineage, &dir, "a", &PrivateKey::new()).await;
     let items = lineage.scope("items");
     let (one, two) = (Hash::new(b"one"), Hash::new(b"two"));
@@ -424,10 +424,10 @@ async fn restoration_endpoints_merge_as_pairs() {
 
 /// A base that supersedes a writer's frames keeps their positions placed in
 /// their scope: another scope that writer never wrote is not missing them.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn superseded_frames_stay_placed_for_scopes_their_writer_never_wrote() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;

@@ -26,24 +26,38 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_bytes = "0.11"
 rand = "=0.8.8"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros", "signal"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros"] }
+rocky-platform.workspace = true
+# `std::time` natively; the browser clock on wasm32.
+web-time = "1"
 data-encoding = "2"
 futures-util = "0.3"
 sha2 = "0.10"
 rocky-iroh = { workspace = true, optional = true }
+
+# A database's own thread, its network workers and the peer binary's signals.
+# The coordination service client and its voter build natively only.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
 rocky-coordinator = { workspace = true, optional = true }
 
 [dev-dependencies]
 p2panda-core = "=0.5.2"
-rocky-iroh = { path = "../rocky-iroh", features = ["test-utils"] }
+rocky-platform = { workspace = true, features = ["test-support"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
-tokio = { version = "1", features = ["test-util"] }
-rocky-coordinator = { path = "../rocky-coordinator" }
 # The simulation crashes replicas at named points.
 rocky-secure = { path = "../rocky-secure", features = ["qualification"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
-tempfile = "3"
 tracing-subscriber.workspace = true
+# Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+# Local relay and in-process iroh networks.
+rocky-iroh = { path = "../rocky-iroh", features = ["test-utils"] }
+rocky-coordinator = { path = "../rocky-coordinator" }
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

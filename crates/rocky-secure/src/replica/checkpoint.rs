@@ -1951,6 +1951,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Exits the process inside the step's transaction instead of failing it.
     #[cfg(test)]
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) async fn inject_stage_exit(&self, stage: Stage, skip: usize) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.stage_fault = Some((stage, skip));

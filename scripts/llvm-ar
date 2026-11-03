@@ -1,0 +1,8 @@
+#!/bin/sh
+# The toolchain's llvm-ar (rustup component llvm-tools), which .cargo/config.toml
+# gives C builds for wasm32: a host ar such as Apple's writes no symbol index
+# for wasm objects, and rust-lld then finds none of their symbols.
+set -eu
+sysroot=$(rustc --print sysroot)
+host=$(rustc -vV | sed -n 's/^host: //p')
+exec "$sysroot/lib/rustlib/$host/bin/llvm-ar" "$@"

@@ -98,6 +98,8 @@ struct Outcome {
 
 /// Fault points inside a group, for crash and visibility tests.
 #[cfg(test)]
+// The exiting faults belong to crash tests, which run natively.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GroupFault {
     ExitAfterRequests(usize),
@@ -175,7 +177,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             if std::mem::take(&mut first) {
                 drop(inner);
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 inner = self.inner.lock(class).await;
             }
             let mut cohort: VecDeque<_> = self.drain().into();
@@ -237,7 +239,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 // Yield outside the guard even when no mutex waiter has registered.
                 // A drained local write keeps the leader interactive.
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 let class = class.min(class_of(cohort.iter().map(|request| &request.work)));
                 inner = self.inner.lock(class).await;
             }
@@ -248,7 +250,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     settle_failure.get_or_insert(error);
                 }
                 while !pending_replies.is_empty() {
-                    tokio::task::yield_now().await;
+                    rocky_platform::task::yield_now().await;
                     let count = pending_replies.len().min(STEP_REQUESTS);
                     let replies = pending_replies.drain(..count).collect();
                     let inner = self.inner.lock(Class::Background).await;
@@ -412,7 +414,7 @@ impl Exposed {
     /// One flush covers every exposed result in the group.
     async fn answer(self, flusher: Arc<Flusher>) {
         // A cancelled leader still owes every queued caller its durable reply.
-        let _ = tokio::task::spawn_blocking(move || {
+        let _ = rocky_platform::task::spawn_blocking(move || {
             let flushed = flusher.flush(self.commit);
             for (reply, done) in self.replies {
                 let _ = reply.send(match &flushed {
@@ -821,7 +823,7 @@ impl<A: RowApplication> Inner<A> {
     /// [`Self::checkpoint_if_due`], truncating once the WAL holds `limit`.
     pub(super) async fn checkpoint_over(&mut self, limit: u64) {
         self.reclaim_free_pages().await;
-        let size = std::fs::metadata(&self.wal).map_or(0, |metadata| metadata.len());
+        let size = rocky_platform::fs::len(&self.wal).unwrap_or(0);
         let truncate = size >= limit;
         if !truncate {
             if size >= self.wal_limits.0 {
@@ -835,7 +837,7 @@ impl<A: RowApplication> Inner<A> {
             .set_busy_timeout(TRUNCATE_WAIT)
             .is_ok();
         #[cfg(feature = "qualification")]
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let checkpoint = rows(&self.conn, "PRAGMA wal_checkpoint(TRUNCATE)").await;
         #[cfg(feature = "qualification")]
         if let Ok(result) = &checkpoint {

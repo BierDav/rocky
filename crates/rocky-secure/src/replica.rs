@@ -564,10 +564,10 @@ impl Flusher {
             return Ok(());
         }
         #[cfg(feature = "qualification")]
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         #[cfg(feature = "qualification")]
         let measurements = self.measurements.clone();
-        let result = tokio::task::spawn_blocking(move || self.flush(commit))
+        let result = rocky_platform::task::spawn_blocking(move || self.flush(commit))
             .await
             .map_err(|_| Error::Closed)?;
         #[cfg(feature = "qualification")]
@@ -602,19 +602,9 @@ impl Flusher {
             let _ = entered.send(());
             let _ = resume.recv();
         }
-        // `sync_all` is `F_FULLFSYNC` on Apple platforms, like `fullfsync=1`.
-        // Windows requires write access for FlushFileBuffers.
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.wal)
-        {
-            Ok(wal) => wal.sync_all().map_err(Error::Io)?,
-            // Without a WAL every commit is in the database file, which
-            // checkpoints flush.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::Io(error)),
-        }
+        // Without a WAL every commit is in the database file, which
+        // checkpoints flush.
+        rocky_platform::fs::sync(&self.wal).map_err(Error::Io)?;
         self.durable.fetch_max(commit, Ordering::AcqRel);
         #[cfg(test)]
         {
@@ -627,10 +617,10 @@ impl Flusher {
             if let Some(directory) = directory {
                 for (from, name) in [(&self.path, "copy.db"), (&self.wal, "copy.db-wal")] {
                     let to = directory.join(name);
-                    match std::fs::copy(from, &to) {
+                    match rocky_platform::fs::copy(from, &to) {
                         Ok(_) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            let _ = std::fs::remove_file(&to);
+                            let _ = rocky_platform::fs::remove_file(&to);
                         }
                         Err(error) => return Err(Error::Io(error)),
                     }
@@ -772,7 +762,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
 /// Refuse another persisted format before opening a writer or changing SDK settings.
 pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     rocky_storage::database::check_file_format(path).await?;
-    if !std::fs::metadata(path).is_ok_and(|file| file.len() > 0) {
+    if !rocky_platform::fs::len(path).is_ok_and(|len| len > 0) {
         return Ok(());
     }
     let raw = crate::sqlite::Connection::open_read_only(path)?;
@@ -1295,6 +1285,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .contains(&scope)
     }
     #[cfg(test)]
+    // Pause hooks of native-only tests.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) async fn pause_flush(
         &self,
     ) -> (
@@ -1540,7 +1532,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         if flusher.durable() < commit {
             let flushing = flusher.clone();
-            tokio::task::spawn_blocking(move || flushing.flush(commit))
+            rocky_platform::task::spawn_blocking(move || flushing.flush(commit))
                 .await
                 .map_err(|_| Error::Closed)??;
         }
@@ -1574,7 +1566,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.deferred_maintenance.remove(&scope);
             }
             drop(inner);
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
     }
     pub(crate) async fn maintain_scopes(&self, mut scopes: BTreeSet<ResourceScope>) {
@@ -1586,7 +1578,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if !more {
                     break;
                 }
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
             }
         }
     }

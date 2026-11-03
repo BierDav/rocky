@@ -3,10 +3,10 @@ use super::*;
 use rocky_core::SqlValue;
 use rocky_credentials::TipGraph;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_refresh_does_not_decode_live_or_continued_history() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     main(&f, &a).await;
     for id in 1..=8 {
@@ -35,10 +35,10 @@ async fn held_refresh_does_not_decode_live_or_continued_history() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn abandoned_history_walks_bookmarks_once_per_source_and_refresh() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
     main(&f, &a).await;
@@ -78,13 +78,13 @@ async fn abandoned_history_walks_bookmarks_once_per_source_and_refresh() {
 
 async fn fixture() -> (
     Fixture,
-    TempDir,
+    Scratch,
     Replica,
     Vec<EncryptedFrame>,
     SealStatement,
 ) {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(
         &f,
         &dir.path().join("a.db"),
@@ -183,7 +183,7 @@ async fn snapshot(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
     result
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn metadata_close_is_discovered_lazily_per_author_and_sequence() {
     let (f, _dir, a, frames, statement) = fixture().await;
     let close = SignedSeal::sign(statement, &f.publisher).unwrap();
@@ -251,7 +251,7 @@ async fn metadata_close_is_discovered_lazily_per_author_and_sequence() {
     assert_eq!(snapshot(&a).await, once);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_later_hold_keeps_committed_bundles_then_retry_and_reopen_agree() {
     let (f, dir, a, frames, statement) = fixture().await;
     let close = SignedSeal::sign(statement, &f.publisher).unwrap();
@@ -371,7 +371,7 @@ async fn failed_later_hold_keeps_committed_bundles_then_retry_and_reopen_agree()
     reopened.audit(f.public).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
     let (f, _dir, a, frames, mut statement) = fixture().await;
     let close = SignedSeal::sign(statement.clone(), &f.publisher).unwrap();
@@ -414,7 +414,7 @@ async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     let (f, _dir, a, frames, statement) = fixture().await;
     assert!(page(&a, f.public).await.unwrap().is_empty());
@@ -575,7 +575,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy() {
     let (f, _dir, a, frames, statement) = fixture().await;
     let close = SignedSeal::sign(statement, &f.publisher).unwrap();
@@ -609,7 +609,7 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
     assert_eq!(shared, vec![Ok("Sealed".into()), Ok("Live".into())]);
     inner.graphs.remove(&other);
     drop(inner);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let empty = open(&f, &dir.path().join("empty.db"), &PrivateKey::new()).await;
     let mut malformed = TipGraph::new(
         other,
@@ -630,10 +630,10 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_refresh_pages_live_metadata_without_opening_its_bodies() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(
         &f,
         &dir.path().join("bounded-refresh.db"),
@@ -690,7 +690,7 @@ async fn held_refresh_pages_live_metadata_without_opening_its_bodies() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_tokens_and_pages_bound_raw_rows_and_validate_their_source() {
     let (f, _dir, a, frames, statement) = fixture().await;
     a.receive_tip_statements(&[TipStatement::Seal(
@@ -788,7 +788,7 @@ async fn held_tokens_and_pages_bound_raw_rows_and_validate_their_source() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
     let (f, dir, a, _, statement) = fixture().await;
     let writer = open(
@@ -869,14 +869,14 @@ async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
         let holder = a.inner.lock(crate::replica::Class::Background).await;
         resume.send(()).unwrap();
         for _ in 0..16 {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
         let interactive = async {
             let _guard = a.inner.lock(crate::replica::Class::Interactive).await;
             measurements.work_snapshot()[unit]
         };
         let release = async {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             drop(holder);
         };
         let (seen, ()) = tokio::join!(interactive, release);

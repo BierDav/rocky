@@ -1,10 +1,10 @@
 use super::*;
 use crate::{FrontierLog, ScopeFrontier};
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -112,10 +112,10 @@ async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
     assert_eq!(page.frames.len(), 32);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn advised_import_reapplies_a_write_authored_after_the_frontier_request() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -169,10 +169,10 @@ async fn advised_import_reapplies_a_write_authored_after_the_frontier_request() 
     assert!(titles(&b).await.iter().any(|row| row[1] == text("local")));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cached_writable_tip_refuses_writes_after_its_bookmark_is_deleted() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&lineage, &dir, "writer", &PrivateKey::new()).await;
     follow_main(&lineage, &a).await;
     insert(&a, "before", "warm the writability cache").await;

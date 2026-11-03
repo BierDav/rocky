@@ -339,8 +339,8 @@ pub(crate) struct Mailbox {
 impl Mailbox {
     /// Loads the current format only; a missing file holds nothing.
     pub fn open(path: &Path) -> Result<Self, Failure> {
-        let deposits = if path.exists() {
-            let file: MailboxFile = serde_json::from_slice(&std::fs::read(path)?)?;
+        let deposits = if rocky_platform::fs::exists(path) {
+            let file: MailboxFile = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
             if file.version != MAILBOX_VERSION {
                 return Err("unsupported mailbox version; reinstall the domain".into());
             }

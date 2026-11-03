@@ -63,10 +63,10 @@ fn widened(error: Error) -> bool {
     matches!(error, Error::Rejected(message) if message == "delegation expands authority")
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn widening_delegations_are_refused_at_every_admitting_boundary() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let writer = PrivateKey::new();
     let held = vec![grant(
         f.public,

@@ -6042,11 +6042,12 @@ dependencies = [
  "p2panda-core",
  "rand 0.8.8",
  "rocky-core",
+ "rocky-platform",
  "serde",
  "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
+ "tokio",
  "wasm-bindgen-test",
 ]
 
@@ -6072,17 +6073,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rocky-platform"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "rocky-platform",
+ "rocky-sqlite-opfs",
+ "rusqlite",
+ "sqlite-wasm-rs",
+ "tempfile",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
 name = "rocky-runtime"
 version = "0.1.0"
 dependencies = [
  "inventory-app",
  "rocky-core",
+ "rocky-platform",
  "rocky-storage",
  "runtime-todo-app",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "wasm-bindgen-test",
+ "web-time",
 ]
 
 [[package]]
@@ -6097,6 +6120,7 @@ dependencies = [
  "rocky-core",
  "rocky-credentials",
  "rocky-iroh",
+ "rocky-platform",
  "rocky-runtime",
  "rocky-secure",
  "rocky-storage",
@@ -6110,6 +6134,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wasm-bindgen-test",
+ "web-time",
 ]
 
 [[package]]
@@ -6124,6 +6150,7 @@ dependencies = [
  "rocky-coordinator",
  "rocky-core",
  "rocky-credentials",
+ "rocky-platform",
  "rocky-storage",
  "rusqlite",
  "serde",
@@ -6132,6 +6159,23 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wasm-bindgen-test",
+ "web-time",
+]
+
+[[package]]
+name = "rocky-sqlite-opfs"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "rsqlite-vfs",
+ "sqlite-wasm-rs",
+ "thiserror 2.0.21",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
@@ -6139,9 +6183,8 @@ name = "rocky-storage"
 version = "0.1.0"
 dependencies = [
  "rocky-core",
+ "rocky-platform",
  "rusqlite",
- "sqlite-wasm-rs",
- "sqlite-wasm-vfs",
  "sqlparser",
  "tempfile",
  "tokio",
@@ -6945,19 +6988,6 @@ dependencies = [
  "js-sys",
  "rsqlite-vfs",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "sqlite-wasm-vfs"
-version = "0.2.0"
-dependencies = [
- "js-sys",
- "rsqlite-vfs",
- "thiserror 2.0.21",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

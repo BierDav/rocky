@@ -598,7 +598,7 @@ where
     async fn steps(&self, request: impl Fn() -> Request) -> Result<(), Error> {
         loop {
             match self.retention_request(request()).await? {
-                Response::Step(Step::More) => tokio::task::yield_now().await,
+                Response::Step(Step::More) => rocky_platform::task::yield_now().await,
                 Response::Step(Step::Done) => return Ok(()),
                 _ => return Err(Error::Corrupt("retention step".into())),
             }
@@ -773,7 +773,7 @@ mod tests {
     use super::*;
     use rocky_core::fixtures;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn records_notices_and_pages_round_trip_and_reject_trailing_bytes() {
         let frontier = AppliedFrontier(vec![
             (fixtures::LAPTOP, AuthorSequence::new(7).unwrap()),

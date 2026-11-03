@@ -37,10 +37,10 @@ async fn write(f: &Fixture, replica: &Replica, scope: ResourceScope, row: u8) ->
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn frames_whose_key_arrives_later_apply_without_another_frame() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(
         &f,
         &dir.path().join("source.db"),
@@ -84,10 +84,10 @@ async fn frames_whose_key_arrives_later_apply_without_another_frame() {
 /// A frame whose application fails as its own fault waits alone: another
 /// log of the same group applies, and the frame applies once a key, grant,
 /// schema or the tip graph changes, not before.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(
         &f,
         &dir.path().join("a.db"),
@@ -172,10 +172,10 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     assert!(target.blockers().await.unwrap().is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn import_failures_count_per_scope_across_a_restart() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("target.db");
     let node = PrivateKey::new();
     let checkpoint = [5; 32];
@@ -202,10 +202,10 @@ async fn import_failures_count_per_scope_across_a_restart() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn maintenance_finalizes_one_seal_per_step() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(
         &f,
         &dir.path().join("replica.db"),
@@ -233,10 +233,10 @@ async fn maintenance_finalizes_one_seal_per_step() {
 
 /// Pending log heads list one per acquisition in tests; counts of
 /// different authors' logs still add up across pages.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn paged_pending_blockers_add_up_across_authors() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let target = open(&f, &dir.path().join("target.db"), &PrivateKey::new(), &[]).await;
     let mut frames = Vec::new();
     for (index, rows) in [(0, [1, 2].as_slice()), (1, [3].as_slice())] {

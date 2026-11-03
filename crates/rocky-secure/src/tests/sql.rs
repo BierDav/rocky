@@ -1,5 +1,7 @@
 //! SQL sessions on typed tables of an encrypted replica.
 use super::*;
+// A server thread serves the catch-up over a socket.
+#[cfg(not(target_family = "wasm"))]
 mod catch_up;
 mod intents;
 mod maintenance;
@@ -412,10 +414,10 @@ async fn insert(
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -561,10 +563,10 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -687,10 +689,10 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let node = PrivateKey::new();
     let alice = t
@@ -715,9 +717,9 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     let learning = {
         let alice = alice.clone();
         let policy = crate::tests::revoking(&t.publisher, t.app().manifest().app, &[], &[root]);
-        tokio::spawn(async move { alice.learn_revocations(&policy).await })
+        rocky_platform::task::spawn(async move { alice.learn_revocations(&policy).await })
     };
-    tokio::task::yield_now().await;
+    rocky_platform::task::yield_now().await;
     assert!(!learning.is_finished());
     let committed = session.commit([1; 32]).await.unwrap();
     assert_eq!(committed.committed.unwrap().frames.len(), 1);
@@ -750,10 +752,10 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let node = PrivateKey::new();
     let alice = t
@@ -836,10 +838,10 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -904,10 +906,10 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn savepoint_rollback_and_cancellation_do_not_cache_uncommitted_frontiers() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = [t.items, t.salaries];
     let replica = t
         .open(
@@ -964,10 +966,10 @@ async fn savepoint_rollback_and_cancellation_do_not_cache_uncommitted_frontiers(
     assert_eq!(replica.frontier(t.items).await.unwrap(), committed);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_handle_recovers_its_commit_after_restart() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let node = PrivateKey::new();
     let path = dir.path().join("a.db");
@@ -1036,10 +1038,10 @@ async fn a_handle_recovers_its_commit_after_restart() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_sql_edits_converge_in_every_typed_table() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -1087,10 +1089,10 @@ async fn concurrent_sql_edits_converge_in_every_typed_table() {
     assert_eq!(rows[0][2], SqlValue::Integer(1));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_edit_concurrent_with_a_delete_applies_and_its_log_continues() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -1161,12 +1163,12 @@ async fn rows_of(cursor: &mut crate::cursor::SnapshotCursor) -> Vec<Vec<SqlValue
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence() {
     use crate::cursor::CursorLimits;
     use crate::sql::Unavailable;
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -1259,11 +1261,11 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     use crate::cursor::CursorLimits;
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -1319,11 +1321,11 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn secure_table_events_follow_commits_receipts_and_authority() {
     use crate::observe::Cause;
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -1394,7 +1396,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
     assert!(items.next().await.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
@@ -1416,7 +1418,7 @@ async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reop
         .build()
         .unwrap();
     let t = Typed::with_schema(publisher, schema);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let author = PrivateKey::new();
     let alice = t
@@ -1487,10 +1489,10 @@ async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reop
     drop(reopened);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn identity_descriptor_installs_shared_columns_and_reopens() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let path = directory.path().join("identity.sqlite");
     let node = PrivateKey::new();
     for _ in 0..2 {
@@ -1544,10 +1546,10 @@ fn identity_fixture() -> Typed {
         .unwrap();
     Typed::with_schema(publisher, schema)
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_and_reopen() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let path = directory.path().join("identities.sqlite");
     let node = PrivateKey::new();
     let key = node.clone();
@@ -1633,10 +1635,10 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     session_sql.run("ROLLBACK", vec![]).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bundle() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let node = PrivateKey::new();
     let replica = fixture
         .open_number(
@@ -1731,10 +1733,10 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is_refused() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let node = PrivateKey::new();
     let replica = fixture
         .open_number(
@@ -1822,10 +1824,10 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let replica = fixture
         .open(
             &directory.path().join("local_ids.sqlite"),
@@ -1862,10 +1864,10 @@ async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes() {
     let fixture = identity_fixture();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rocky_platform::fs::Scratch::new().await;
     let principal = PrivateKey::new();
     let nodes = [PrivateKey::new(), PrivateKey::new()];
     let root = crate::credentials::Authority::owner(&fixture.publisher)
@@ -2023,11 +2025,11 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
     use crate::cursor::CursorLimits;
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("read.db"),
@@ -2045,7 +2047,7 @@ async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
     .await
     .unwrap();
     let writer = replica.inner.lock(crate::replica::Class::Background).await;
-    let mut cursor = tokio::time::timeout(
+    let mut cursor = rocky_platform::time::timeout(
         std::time::Duration::from_millis(500),
         reader.cursor("SELECT title FROM items", vec![], CursorLimits::default()),
     )
@@ -2059,10 +2061,10 @@ async fn cursor_readiness_and_snapshot_do_not_wait_for_the_writer_lease() {
     drop(writer);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn ordinary_sql_commits_do_not_restart_held_history_scans() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("held-sql.db"),
@@ -2093,10 +2095,10 @@ async fn ordinary_sql_commits_do_not_restart_held_history_scans() {
 }
 
 #[cfg(feature = "qualification")]
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sql_begin_and_writing_autocommit_are_interactive() {
     let t = Typed::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let replica = t
         .open(
             &directory.path().join("classes.db"),
@@ -2134,10 +2136,10 @@ async fn sql_begin_and_writing_autocommit_are_interactive() {
 
 /// The epoch advances before the commit's lock holder refreshes readers; a
 /// cursor opened between them waits for the refresh instead of failing.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
     use crate::cursor::CursorLimits;
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let fixture = Typed::new();
     let replica = fixture
         .open(
@@ -2158,7 +2160,7 @@ async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
         session.cursor("SELECT key FROM items", vec![], CursorLimits::default()),
         async {
             // Lets the cursor meet the stale epoch and queue for the lock.
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
             inner.refresh_readers().await;
             drop(inner);
         },

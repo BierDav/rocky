@@ -10,7 +10,7 @@ use crate::{
     service::{Network, ServiceError},
     transport::Transport,
 };
-use rocky_secure::{EncryptedReplica, PrivateKey};
+use rocky_secure::EncryptedReplica;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -18,7 +18,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    thread::JoinHandle,
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
@@ -41,7 +40,7 @@ pub struct Open<'a> {
 #[derive(Clone)]
 pub enum Coordination {
     Composed(Arc<dyn rocky_core::DomainLog>),
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     Service(Box<crate::TrustBundle>),
 }
 /// An open database and the network service it opened with, if any.
@@ -50,6 +49,9 @@ pub struct Opened {
     pub network: Option<NetworkService>,
 }
 
+// The blocking constructors make the other installs; a browser has create,
+// join and open (`Configuration`).
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) enum Install {
     Create {
         ttl: u64,
@@ -102,20 +104,20 @@ enum Command {
         options: ConnectionOptions,
         shared: Arc<Shared>,
         #[cfg(feature = "qualification")]
-        queued: std::time::Instant,
+        queued: web_time::Instant,
         reply: oneshot::Sender<Result<Connection, Failure>>,
     },
     Sql {
         connection: u64,
         call: connection::Call,
         #[cfg(feature = "qualification")]
-        queued: std::time::Instant,
+        queued: web_time::Instant,
         reply: oneshot::Sender<Result<connection::Reply, SqlFailure>>,
     },
     Disconnect {
         connection: u64,
         #[cfg(feature = "qualification")]
-        queued: std::time::Instant,
+        queued: web_time::Instant,
         reply: oneshot::Sender<()>,
     },
     Coordinate(Option<Arc<dyn rocky_core::DomainLog>>, oneshot::Sender<()>),
@@ -132,13 +134,13 @@ enum Command {
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     Claim(
         crate::counters::Name,
         crate::counters::Claim,
         oneshot::Sender<Result<u64, Failure>>,
     ),
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     Counter(
         crate::counters::Name,
         Option<crate::counters::Claim>,
@@ -148,19 +150,19 @@ enum Command {
 /// The scope and the network service a database opened with.
 type Greeting = Result<(String, Option<u64>), Failure>;
 /// Where `run` reports how opening went: to the opener blocked on the
-/// database's thread, or to a hosting task that awaits it.
+/// database's thread, or to an opener that awaits it.
 enum Hello {
+    #[cfg(not(target_family = "wasm"))]
     Thread(std::sync::mpsc::SyncSender<Greeting>),
-    #[cfg(test)]
     Task(std::sync::Mutex<Option<oneshot::Sender<Greeting>>>),
 }
 impl Hello {
     fn send(&self, greeting: Greeting) -> Result<(), Failure> {
         match self {
+            #[cfg(not(target_family = "wasm"))]
             Self::Thread(sender) => sender
                 .send(greeting)
                 .map_err(|_| "database opener abandoned")?,
-            #[cfg(test)]
             Self::Task(sender) => sender
                 .lock()
                 .map_err(|_| "greeting poisoned")?
@@ -201,18 +203,20 @@ pub struct Database {
     scope: String,
     worker: Mutex<Option<Worker>>,
 }
-/// What serves a database: its own thread, or in a simulation a task on
-/// the caller's thread.
+/// What serves a database: its own thread natively, or a task on the
+/// caller's thread in a browser Worker and in a simulation.
 enum Worker {
-    Thread(JoinHandle<()>),
-    #[cfg(test)]
-    Task(tokio::task::JoinHandle<()>),
+    #[cfg(not(target_family = "wasm"))]
+    Thread(std::thread::JoinHandle<()>),
+    #[cfg(any(test, target_family = "wasm"))]
+    Task(rocky_platform::task::JoinHandle<()>),
 }
 impl Worker {
     async fn join(self) -> Result<(), Failure> {
         match self {
+            #[cfg(not(target_family = "wasm"))]
             Self::Thread(thread) => thread.join().map_err(|_| "database thread failed")?,
-            #[cfg(test)]
+            #[cfg(any(test, target_family = "wasm"))]
             Self::Task(task) => task.await.map_err(|_| "database task failed")?,
         }
         Ok(())
@@ -231,29 +235,39 @@ impl Database {
             .await?
             .ok_or_else(|| "reactor measurement context missing".into())
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Creates a domain in an empty directory, owned by this node's
     /// identity, whose key is the publisher key. Credentials last
     /// `credential_ttl` seconds, 30 days by default.
     pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
+        Self::start(open, Self::create_install(credential_ttl)?)
+    }
+    fn create_install(credential_ttl: Option<u64>) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
             return Err("credential lifetime must be between a minute and a year".into());
         }
-        Self::start(open, Install::Create { ttl })
+        Ok(Install::Create { ttl })
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Enrolls this device with the issuer an invitation names, as the
     /// grant profile it names, over `open.network`, which stays attached.
     pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
+        let install = Self::join_install(&open, invitation)?;
+        Self::start(open, install)
+    }
+    fn join_install(open: &Open<'_>, invitation: &str) -> Result<Install, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("join").into());
         }
-        Self::start(
-            open,
-            Install::Join {
-                invitation: invitation.into(),
-            },
-        )
+        Ok(Install::Join {
+            invitation: invitation.into(),
+        })
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Installs another node of the identity `open.identity` supplies: a
     /// node of that identity, which `contact` names, hands it what the
     /// identity holds over `open.network`, and its provider certifies this
@@ -287,30 +301,38 @@ impl Database {
         secrets: Option<Arc<dyn SecretStore>>,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<DeviceKeys, Failure> {
-        std::fs::create_dir_all(directory)?;
+        rocky_platform::fs::create_dir_all(directory)?;
         let path = directory.join("identity.json");
-        if path.exists() {
+        if rocky_platform::fs::exists(&path) {
             return Err("a domain exists in this directory: open it instead".into());
         }
         let secrets =
             secrets.unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets"))));
         Settings::prepare_install(&path, &secrets, identity)
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Installs credentials and reader keys supplied for the device that
     /// `device` prepared. They are verified like any others; no issuer is
     /// contacted and no network is needed.
     pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
         Self::start(open, Install::Supplied(Box::new(supplied)))
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Opens the domain installed in the directory. A member whose
     /// credentials expired renews them over `open.network` first.
     pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::start(open, Install::Installed)
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Opens after the application confirms the exact removal impact report.
     pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
         Self::start_confirmed(open, Install::Installed, Some(digest.into()))
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     /// Restores a backup archive into an empty directory under a fresh
     /// signing identity, which `invitation` enrolls over `open.network`.
     /// The archive's operations, handles, tickets, results and effects keep
@@ -349,9 +371,13 @@ impl Database {
         }
         Ok(reply["value"].to_string())
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
         Self::start_confirmed(open, install, None)
     }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
     fn start_confirmed(
         open: Open<'_>,
         install: Install,
@@ -364,25 +390,56 @@ impl Database {
         let hello = Hello::Thread(hello);
         let thread = std::thread::Builder::new()
             .name("rocky-sdk".into())
-            .spawn(move || {
-                let result = (|| -> Result<(), Failure> {
-                    // Transports run their tasks on the workers; the
-                    // database's tasks stay on this thread.
-                    let runtime = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(2)
-                        .thread_name("rocky-sdk-io")
-                        .enable_all()
-                        .build()?;
-                    let local = tokio::task::LocalSet::new();
-                    runtime
-                        .block_on(local.run_until(run(setup, network, receiver, cleanups, &hello)))
-                })();
-                if let Err(error) = result {
-                    let _ = hello.send(Err(error));
-                }
-            })?;
+            .spawn(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
         let greeting = greeting.recv().map_err(|_| "database failed to start")?;
         Self::opened(greeting, input, cleanup, Worker::Thread(thread))
+    }
+    /// Opens without blocking the caller: natively the database gets its
+    /// own thread, as `start` gives it; in a browser it is a task on the
+    /// Worker's event loop.
+    async fn launch(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+    ) -> Result<Opened, Failure> {
+        let (setup, network) = Self::setup(open, install, confirmation)?;
+        let (input, receiver) = mpsc::channel(32);
+        let (cleanup, cleanups) = mpsc::unbounded_channel();
+        let (hello, greeting) = oneshot::channel();
+        let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
+        #[cfg(not(target_family = "wasm"))]
+        let worker = Worker::Thread(
+            std::thread::Builder::new()
+                .name("rocky-sdk".into())
+                .spawn(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?,
+        );
+        #[cfg(target_family = "wasm")]
+        let worker = {
+            // Everything after this is synchronous storage.
+            rocky_platform::fs::prepare(&setup.directory.join("rocky.sqlite")).await?;
+            Worker::Task(crate::reactor::spawn_local("database", async move {
+                if let Err(error) = run(setup, network, receiver, cleanups, &hello).await {
+                    let _ = hello.send(Err(error));
+                }
+            }))
+        };
+        let greeting = greeting
+            .await
+            .unwrap_or_else(|_| Err("database failed to start".into()));
+        Self::opened(greeting, input, cleanup, worker)
+    }
+    pub(crate) async fn launch_create(
+        open: Open<'_>,
+        credential_ttl: Option<u64>,
+    ) -> Result<Opened, Failure> {
+        Self::launch(open, Self::create_install(credential_ttl)?, None).await
+    }
+    pub(crate) async fn launch_join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
+        let install = Self::join_install(&open, invitation)?;
+        Self::launch(open, install, None).await
+    }
+    pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
+        Self::launch(open, Install::Installed, None).await
     }
     fn setup(
         open: Open<'_>,
@@ -434,9 +491,10 @@ impl Database {
             }
             Err(error) => {
                 match worker {
+                    #[cfg(not(target_family = "wasm"))]
                     Worker::Thread(thread) => drop(thread.join()),
                     // The task ends with the error it sent.
-                    #[cfg(test)]
+                    #[cfg(any(test, target_family = "wasm"))]
                     Worker::Task(_) => {}
                 }
                 Err(error)
@@ -494,7 +552,7 @@ impl Database {
     /// `counters::CLAIM_WINDOW` of its issue time and the counter's latest
     /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
     /// never takes a second value. Only the domain's trusted nodes claim.
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     pub async fn claim(
         &self,
         counter: crate::counters::Name,
@@ -506,7 +564,7 @@ impl Database {
     }
     /// `counter`'s last claimed value and, for `claim`, what it took: a
     /// linearizable read for reconciliation after a restart.
-    #[cfg(feature = "iroh")]
+    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
     pub async fn counter(
         &self,
         counter: crate::counters::Name,
@@ -525,7 +583,7 @@ impl Database {
                 options,
                 shared: self.shared.clone(),
                 #[cfg(feature = "qualification")]
-                queued: std::time::Instant::now(),
+                queued: web_time::Instant::now(),
                 reply,
             })
             .await?
@@ -658,7 +716,7 @@ impl Connection {
                 connection,
                 call,
                 #[cfg(feature = "qualification")]
-                queued: std::time::Instant::now(),
+                queued: web_time::Instant::now(),
                 reply,
             })
             .await
@@ -696,7 +754,7 @@ impl Connection {
             connection: self.id,
             call: connection::Call::Finish { statement },
             #[cfg(feature = "qualification")]
-            queued: std::time::Instant::now(),
+            queued: web_time::Instant::now(),
             reply: oneshot::channel().0,
         });
     }
@@ -739,7 +797,7 @@ impl Connection {
                 .request(|reply| Command::Disconnect {
                     connection: self.id,
                     #[cfg(feature = "qualification")]
-                    queued: std::time::Instant::now(),
+                    queued: web_time::Instant::now(),
                     reply,
                 })
                 .await;
@@ -752,7 +810,7 @@ impl Drop for Connection {
             let _ = self.shared.cleanup.send(Command::Disconnect {
                 connection: self.id,
                 #[cfg(feature = "qualification")]
-                queued: std::time::Instant::now(),
+                queued: web_time::Instant::now(),
                 reply: oneshot::channel().0,
             });
         }
@@ -1006,17 +1064,17 @@ async fn identity(
         install,
         ..
     } = setup;
-    let exists = path.exists();
+    let exists = rocky_platform::fs::exists(path);
     // A restore interrupted after it enrolled continues.
     let resuming = matches!(install, Install::Restore { .. })
-        && directory.join(crate::backup::MARKER).exists();
+        && rocky_platform::fs::exists(directory.join(crate::backup::MARKER));
     if exists && !matches!(install, Install::Installed) && !resuming {
         return Err("a domain exists in this directory: open it instead".into());
     }
     if !exists && matches!(install, Install::Installed) {
         return Err("no domain in this directory: create or join one".into());
     }
-    if exists && !resuming && !directory.join("rocky.sqlite").exists() {
+    if exists && !resuming && !rocky_platform::fs::exists(directory.join("rocky.sqlite")) {
         return Err("existing identity has no runtime database; recovery is required".into());
     }
     match install {
@@ -1084,6 +1142,7 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(false, key).await?)))
         }
+        #[cfg(not(target_family = "wasm"))]
         Install::Restore {
             archive,
             invitation,
@@ -1094,6 +1153,9 @@ async fn identity(
             )
             .await
         }
+        // Archives are not made or read in a browser.
+        #[cfg(target_family = "wasm")]
+        Install::Restore { .. } => Err("restoring a backup is unavailable in a browser".into()),
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             settings.provider = setup.identity.clone();
@@ -1274,6 +1336,7 @@ pub(crate) async fn insert_rows(
     }
     Ok(())
 }
+#[cfg(not(target_family = "wasm"))]
 /// Verifies the archive, enrolls a fresh identity with the invitation's
 /// issuer and puts the archive's files in place. The marker, written
 /// before enrolling, names the predecessor whose file is rebound at open.
@@ -1290,8 +1353,8 @@ async fn restore(
     let staging = directory.join("restore");
     let opened = crate::backup::open(archive, &staging)?;
     let marker = directory.join(MARKER);
-    if marker.exists() {
-        let saved: Marker = serde_json::from_slice(&std::fs::read(&marker)?)?;
+    if rocky_platform::fs::exists(&marker) {
+        let saved: Marker = serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
         if saved.archive != opened.id {
             return Err("another restore is unfinished in this directory".into());
         }
@@ -1307,7 +1370,7 @@ async fn restore(
             })?,
         )?;
     }
-    let (settings, link) = if path.exists() {
+    let (settings, link) = if rocky_platform::fs::exists(path) {
         let settings = Settings::load(path)?;
         let vault = settings.vault(secrets);
         let key = Settings::transport_key(&vault)?;
@@ -1320,7 +1383,8 @@ async fn restore(
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {
             Ok(mut settings) => {
-                let node = PrivateKey::from_bytes(&settings.vault(secrets).get("node")?);
+                let node =
+                    rocky_secure::PrivateKey::from_bytes(&settings.vault(secrets).get("node")?);
                 settings.learn_contacts(
                     &opened.identity,
                     &[node.public_key(), opened.inventory.node],
@@ -1341,11 +1405,35 @@ async fn restore(
     }
     for (name, staged) in &opened.files {
         if name != "identity.json" {
-            std::fs::rename(staged, directory.join(name))?;
+            rocky_platform::fs::rename(staged, directory.join(name))?;
         }
     }
-    std::fs::remove_dir_all(&staging)?;
+    rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, Some(link)))
+}
+
+/// Serves a database on the calling thread: its tasks stay on it, and
+/// transports run theirs on two workers.
+#[cfg(not(target_family = "wasm"))]
+fn serve_on_thread(
+    setup: Setup,
+    network: Option<Network>,
+    receiver: mpsc::Receiver<Command>,
+    cleanups: mpsc::UnboundedReceiver<Command>,
+    hello: &Hello,
+) {
+    let result = (|| -> Result<(), Failure> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("rocky-sdk-io")
+            .enable_all()
+            .build()?;
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(run(setup, network, receiver, cleanups, hello)))
+    })();
+    if let Err(error) = result {
+        let _ = hello.send(Err(error));
+    }
 }
 
 async fn run(
@@ -1369,13 +1457,15 @@ async fn run_inner(
     hello: &Hello,
 ) -> Result<(), Failure> {
     let directory = setup.directory.clone();
-    if matches!(setup.install, Install::Installed) && directory.join("identity.json").exists() {
+    if matches!(setup.install, Install::Installed)
+        && rocky_platform::fs::exists(directory.join("identity.json"))
+    {
         Settings::load(&directory.join("identity.json"))?;
     }
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     if matches!(setup.install, Install::Installed) {
-        if !directory.join("identity.json").exists() {
-            return Err(if directory.join("identity.join.json").exists() {
+        if !rocky_platform::fs::exists(directory.join("identity.json")) {
+            return Err(if rocky_platform::fs::exists(directory.join("identity.join.json")) {
                 "a join in this directory is unfinished: join again with its or a newer invitation"
             } else {
                 "no domain in this directory: create or join one"
@@ -1384,13 +1474,9 @@ async fn run_inner(
         }
         Settings::load(&directory.join("identity.json"))?;
     }
-    std::fs::create_dir_all(&directory)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(directory.join("sdk.lock"))?;
-    lock.try_lock()
+    rocky_platform::fs::create_dir_all(&directory)?;
+    let _lock = rocky_platform::fs::Owner::acquire(&directory.join("sdk"))
+        .await
         .map_err(|_| "data directory is already in use")?;
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     let path = directory.join("identity.json");
@@ -1398,7 +1484,7 @@ async fn run_inner(
     if matches!(
         setup.install,
         Install::Join { .. } | Install::Identity { .. }
-    ) && !path.exists()
+    ) && !rocky_platform::fs::exists(&path)
     {
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
     }
@@ -1448,7 +1534,7 @@ async fn run_inner(
             let renewed = settings
                 .request_renewal(&vault, transport, false, None)
                 .await?;
-            if path.exists() {
+            if rocky_platform::fs::exists(&path) {
                 // Rows of a newly revoked author arrive by checkpoint.
                 if settings.lacks(&renewed.revocations)? {
                     rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
@@ -1488,8 +1574,9 @@ async fn run_inner(
         let domain = settings.domain()?;
         // A restored file is rebound to this device's identity first.
         let marker = directory.join(crate::backup::MARKER);
-        let replica = if marker.exists() {
-            let restored: crate::backup::Marker = serde_json::from_slice(&std::fs::read(&marker)?)?;
+        let replica = if rocky_platform::fs::exists(&marker) {
+            let restored: crate::backup::Marker =
+                serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
             let replica = EncryptedReplica::open_restored(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
@@ -1497,7 +1584,7 @@ async fn run_inner(
                 restored.predecessor,
             )
             .await?;
-            std::fs::remove_file(&marker)?;
+            rocky_platform::fs::remove_file(&marker)?;
             replica
         } else if let Some(bootstrap) = &settings.bootstrap {
             bootstrap.verify(&settings)?;
@@ -1530,12 +1617,15 @@ async fn run_inner(
             .await?;
         settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
-        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
+        #[cfg_attr(
+            not(all(feature = "iroh", not(target_family = "wasm"))),
+            allow(unused_mut)
+        )]
         let mut service: Option<crate::owner::Service> = None;
         let log: Option<Arc<dyn rocky_core::DomainLog>> = match &setup.coordination {
             None => None,
             Some(Coordination::Composed(log)) => Some(log.clone()),
-            #[cfg(feature = "iroh")]
+            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
             Some(Coordination::Service(bundle)) => {
                 let transport = link
                     .as_ref()
@@ -1610,7 +1700,7 @@ async fn run_inner(
     hello
         .send(Ok((scope, network)))
         .map_err(|_| "database opener abandoned")?;
-    if directory.join("bootstrap.json").exists() && network.is_some() {
+    if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();
         crate::reactor::spawn_local("bootstrap", async move {
             // Failure leaves the durable bootstrap intent for the next sync/open.
@@ -1619,7 +1709,7 @@ async fn run_inner(
     }
     let budget = Arc::new(Semaphore::new(128));
     let connections = Arc::new(connection::Registry::default());
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = rocky_platform::task::JoinSet::new();
     let mut shutdown = None;
     let settling = crate::reactor::spawn_local("settle_commits", settle_commits(replica.clone()));
     let recovering = crate::reactor::spawn_local("recovery", node.clone().drive_recovery());
@@ -1806,13 +1896,13 @@ async fn run_inner(
                     let _ = reply.send(flushed);
                 });
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
             Command::Claim(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "claim", async move {
                     let _ = reply.send(node.claim(counter, claim).await);
                 });
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
             Command::Counter(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "counter", async move {
                     let _ = reply.send(node.counter(counter, claim).await);
@@ -1872,7 +1962,7 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
             changed = revisions.changed() => if changed.is_err() { break },
             () = async {
                 match deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
                     None => std::future::pending().await,
                 }
             } => {},
@@ -1896,12 +1986,12 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         "rocky.sqlite-wal",
         "rocky.sqlite-shm",
     ] {
-        match std::fs::remove_file(directory.join(name)) {
+        match rocky_platform::fs::remove_file(directory.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
     }
-    match std::fs::remove_dir_all(directory.join("secrets")) {
+    match rocky_platform::fs::remove_dir_all(directory.join("secrets")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
@@ -1927,9 +2017,11 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "qualification")]
+    // Needs threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn blocking_reactor_task_and_queued_sql_call_are_attributed() -> Result<(), Failure> {
-        let directory = tempfile::tempdir()?;
+        let directory = rocky_platform::fs::Scratch::new().await;
         let schema = crate::Schema::builder("reactor_timing", 1)
             .table(
                 crate::Table::replayed("items")
@@ -1971,7 +2063,7 @@ mod tests {
             ))
             .await?;
         waiting.await?;
-        let queued = std::time::Instant::now();
+        let queued = web_time::Instant::now();
         let (reply, result) = oneshot::channel();
         database
             .shared
@@ -2001,13 +2093,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unread_connection_reply_cleans_up_with_a_full_request_queue() -> Result<(), Failure> {
         let (input, _requests) = mpsc::channel(1);
         input.try_send(Command::Disconnect {
             connection: 99,
             #[cfg(feature = "qualification")]
-            queued: std::time::Instant::now(),
+            queued: web_time::Instant::now(),
             reply: oneshot::channel().0,
         })?;
         let (cleanup, mut cleanups) = mpsc::unbounded_channel();
@@ -2034,11 +2126,13 @@ mod tests {
         Ok(())
     }
 
+    // Needs threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
         const SCHEMA: &str = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         for format in [0, 1, 2, 3, 5] {
-            let directory = tempfile::tempdir()?;
+            let directory = rocky_platform::fs::Scratch::new().await;
             let path = directory.path().join("rocky.sqlite");
             let conn = rocky_storage::sqlite::Connection::open(&path)?;
             conn.execute("CREATE TABLE secure_typed(descriptor BLOB NOT NULL)", ())
@@ -2055,7 +2149,7 @@ mod tests {
             conn.execute("INSERT INTO sentinel VALUES('retained')", ())
                 .await?;
             drop(conn);
-            let before = std::fs::read(&path)?;
+            let before = rocky_platform::fs::read(&path)?;
             for create in [false, true] {
                 let options = Open {
                     identity: None,
@@ -2074,7 +2168,7 @@ mod tests {
                 .ok_or("old database admitted")?
                 .to_string();
                 assert!(error.contains("unsupported Rocky file format"), "{error}");
-                assert_eq!(std::fs::read(&path)?, before);
+                assert_eq!(rocky_platform::fs::read(&path)?, before);
                 for name in [
                     "sdk.lock",
                     "identity.json",
@@ -2082,13 +2176,18 @@ mod tests {
                     "secrets",
                     "rocky.sqlite-wal",
                 ] {
-                    assert!(!directory.path().join(name).exists(), "{name}");
+                    assert!(
+                        !rocky_platform::fs::exists(directory.path().join(name)),
+                        "{name}"
+                    );
                 }
             }
         }
         Ok(())
     }
 
+    // Needs threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_numeric_consumer_continues_node_author_after_reopen() -> Result<(), Failure>
     {
@@ -2107,7 +2206,7 @@ mod tests {
             }
             Ok(reply["value"].clone())
         }
-        let directory = tempfile::tempdir()?;
+        let directory = rocky_platform::fs::Scratch::new().await;
         let options = || Open {
             identity: None,
             directory: directory.path(),
@@ -2168,9 +2267,11 @@ mod tests {
         Ok(())
     }
 
+    // Needs threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn saturated_waits_cannot_block_session_shutdown() -> Result<(), Failure> {
-        let directory = tempfile::tempdir()?;
+        let directory = rocky_platform::fs::Scratch::new().await;
         let opened = Database::create(
             Open {
                 identity: None,
@@ -2217,7 +2318,7 @@ mod tests {
                 .await?;
             replies.push(receiver);
         }
-        tokio::time::timeout(std::time::Duration::from_secs(5), session.close()).await?;
+        rocky_platform::time::timeout(std::time::Duration::from_secs(5), session.close()).await?;
         drop(replies);
         database.close().await?;
         Ok(())

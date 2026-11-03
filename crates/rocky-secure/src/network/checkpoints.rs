@@ -711,7 +711,7 @@ async fn staged_progress<A: RowApplication>(
 #[cfg(test)]
 mod format_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_parent_checkpoint_offer_with_removed_metadata_is_refused() {
         #[derive(Serialize)]
         enum Parent {

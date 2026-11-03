@@ -77,7 +77,7 @@ pub(super) fn deliver_all(history: &History, splits: bool, expected: &Canonical)
                         let state = receiver.state(&history.c, expected).await;
                         assert_eq!(&state, expected, "schedule {index}");
                         drop(receiver);
-                        std::fs::remove_file(&path).ok();
+                        rocky_platform::fs::remove_file(&path).ok();
                     }
                 })
             });
@@ -275,7 +275,7 @@ async fn graph_history(root: &Path) -> History {
     History { c, setup, units }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn composite_many_to_many_graph_converges_in_all_720_orders() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(graph_history(root.path()));
@@ -369,7 +369,7 @@ async fn checks_history(root: &Path) -> History {
     History { c, setup, units }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn complex_checks_converge_in_all_120_orders() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(checks_history(root.path()));
@@ -432,7 +432,7 @@ async fn indexes_history(root: &Path) -> History {
     History { c, setup, units }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn expression_and_partial_unique_indexes_converge_in_every_schedule() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(indexes_history(root.path()));
@@ -511,7 +511,7 @@ async fn cascades_history(root: &Path) -> History {
     History { c, setup, units }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn cascades_roll_back_with_their_transaction_in_every_schedule() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(cascades_history(root.path()));
@@ -551,7 +551,7 @@ async fn caps_history(root: &Path) -> History {
     History { c, setup, units }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn assertion_caps_converge_in_every_schedule() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(caps_history(root.path()));

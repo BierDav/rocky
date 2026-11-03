@@ -14,10 +14,13 @@ use rocky_core::{
     AdmissionBoundary, AuthorSequence, Envelope, LamportTime, LocalRevision, NodeId, OperationId,
     ProjectionStatement, SqlValue, StoredApplication, required_dependencies,
 };
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::watch;
+use web_time::Instant;
 
 #[cfg(test)]
+// The process-killing faults belong to crash tests, which run natively.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) enum Fault {
     FailBeforeCommit,
     RetryBeforeCommit(usize),
@@ -633,7 +636,7 @@ where
             match result {
                 Err(error) if retryable(&error) => {
                     if attempt + 1 < storage::TRANSACTION_ATTEMPTS {
-                        tokio::time::sleep(storage::backoff(attempt)).await;
+                        rocky_platform::time::sleep(storage::backoff(attempt)).await;
                     }
                 }
                 Ok((value, digests)) => {
@@ -659,7 +662,7 @@ where
         for attempt in 0..storage::TRANSACTION_ATTEMPTS {
             self.reading = true;
             let deadline = (!self.unbounded)
-                .then(|| std::time::Instant::now() + storage::READ_TRANSACTION_BOUND);
+                .then(|| web_time::Instant::now() + storage::READ_TRANSACTION_BOUND);
             let result = match self.conn().connection().set_deadline(deadline) {
                 Ok(()) => match self.conn().execute("BEGIN", ()).await {
                     Ok(_) => {
@@ -676,7 +679,7 @@ where
             match result {
                 Err(error) if retryable(&error) => {
                     if attempt + 1 < storage::TRANSACTION_ATTEMPTS {
-                        tokio::time::sleep(storage::backoff(attempt)).await;
+                        rocky_platform::time::sleep(storage::backoff(attempt)).await;
                     }
                 }
                 result => return result,

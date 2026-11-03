@@ -1,6 +1,8 @@
 //! Roster-free admission on the in-process hub: acceptance 5 of
 //! `docs/features_07/scope-mesh.md` and a device revoked while offline. See
 //! `docs/decisions/0051-roster-free-admission.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::json;

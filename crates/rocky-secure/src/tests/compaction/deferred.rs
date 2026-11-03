@@ -2,10 +2,10 @@
 use super::*;
 use crate::KeptSeals;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_keyless_scope_without_covered_payload_has_a_truthful_zero_bound() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -51,10 +51,10 @@ async fn a_keyless_scope_without_covered_payload_has_a_truthful_zero_bound() {
     assert_empty_checkpoint(&empty, sealed);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -146,10 +146,10 @@ async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
     assert_eq!(scalar(&b, "SELECT count(*) FROM items").await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn deferred_intermediate_seals_are_never_signed_from_an_earlier_empty_base() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;

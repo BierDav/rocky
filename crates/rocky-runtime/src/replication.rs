@@ -194,7 +194,7 @@ where
     pub async fn process_pending(&self) -> Result<(), Error> {
         loop {
             match self.sync_request(Request::Process).await? {
-                Response::More(true) => tokio::task::yield_now().await,
+                Response::More(true) => rocky_platform::task::yield_now().await,
                 Response::More(false) => return Ok(()),
                 _ => return Err(Error::Corrupt("pending response".into())),
             }

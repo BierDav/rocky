@@ -54,7 +54,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         query: &str,
         mut parameters: Vec<SqlValue>,
     ) -> Result<Vec<Vec<SqlValue>>, Error> {
-        tokio::task::yield_now().await;
+        rocky_platform::task::yield_now().await;
         let records = {
             let inner = self.inner.lock(Class::Background).await;
             source.check()?;

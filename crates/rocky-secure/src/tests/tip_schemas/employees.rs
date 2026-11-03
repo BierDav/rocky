@@ -31,10 +31,10 @@ impl RowApplication for Probe {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn employees_held_originals_keep_callbacks_and_the_current_acl_guard() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[193; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let author = PrivateKey::from_bytes(&[194; 32]);
     let source = EncryptedReplica::open(
         dir.path().join("source"),

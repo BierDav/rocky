@@ -60,7 +60,7 @@ pub async fn installed_tip_schema(
     from: Option<TipId>,
 ) -> Result<Option<InstalledTipSchema>, Error> {
     check_replica_format(path).await?;
-    if !path.exists() {
+    if !rocky_platform::fs::exists(path) {
         return Ok(None);
     }
     let conn = ScopedConnection::new(

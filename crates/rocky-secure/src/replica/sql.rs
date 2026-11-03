@@ -11,8 +11,8 @@ use crate::{
 };
 use rocky_core::TableClass;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 use tokio::sync::OwnedMutexGuard;
+use web_time::Instant;
 
 /// SQLite's result code for a violated constraint.
 const SQLITE_CONSTRAINT: i32 = 19;
@@ -715,8 +715,8 @@ impl<A: RowApplication> SecureSql<A> {
             lease.turn,
             self.options.transaction_timeout,
         );
-        tokio::spawn(async move {
-            tokio::time::sleep(timeout).await;
+        rocky_platform::task::spawn(async move {
+            rocky_platform::time::sleep(timeout).await;
             let mut lease = watched.lock().await;
             if lease.turn == turn && lease.held.take().is_some() {
                 lease.aborted = Some(AbortReason::Timeout);

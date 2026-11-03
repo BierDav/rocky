@@ -90,10 +90,10 @@ async fn rows(replica: &EncryptedReplica<Employees>, f: &Fixture) -> usize {
     replica.snapshot(f.public).await.unwrap().rows.len()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob, carol) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let open = |name: &'static str, node: &PrivateKey, grants| {
         EncryptedReplica::open(
@@ -220,10 +220,10 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     assert_eq!(member.audit(f.public).await.unwrap().operations, 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = PrivateKey::new();
     let path = dir.path().join("alice.db");
     let open = |keys: Vec<KeyMaterial>| {
@@ -277,10 +277,10 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
     assert_eq!(rows(&open(both()).await.unwrap(), &f).await, 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = PrivateKey::new();
     let opened = config(&f, &alice, f.full(), vec![key(f.public, 1, OLD)]);
     let replica = EncryptedReplica::open(dir.path().join("alice.db"), f.app(), opened)
@@ -360,10 +360,10 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_learned_revocation_alone_refreshes_the_base_at_its_seal_without_a_new_write() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("policy.db"),
@@ -394,10 +394,10 @@ async fn a_learned_revocation_alone_refreshes_the_base_at_its_seal_without_a_new
     assert_eq!(replica.audit(f.public).await.unwrap().rows, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reusing_another_scopes_key_names_the_collision_and_keeps_epochs() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("keys.db"),
@@ -449,10 +449,10 @@ async fn reusing_another_scopes_key_names_the_collision_and_keeps_epochs() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
     let mut siblings = [[77; 32], [78; 32]];
     siblings.sort_by_key(|secret| rocky_core::KeyEpoch::new(2, secret));
@@ -542,10 +542,10 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
     assert_eq!(left.key_epochs(f.public).await, vec![epoch(&winner)]);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_257th_sibling_is_refused_without_changing_the_winner() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let keys = (0..256u64)
         .map(|index| {
@@ -572,10 +572,10 @@ async fn the_257th_sibling_is_refused_without_changing_the_winner() {
     assert_eq!(replica.key_epochs(f.public).await, before);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_revocations_list_the_exposure_window_and_close_it_at_the_superseding_writer() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob, carol, dave) = (
         PrivateKey::new(),
         PrivateKey::new(),

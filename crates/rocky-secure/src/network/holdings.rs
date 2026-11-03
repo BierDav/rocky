@@ -353,7 +353,7 @@ mod tests;
 #[cfg(test)]
 mod primitives {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn proof_binds_key_scope_epoch_and_session() {
         let scope = ResourceScope {
             domain: rocky_core::Scope {

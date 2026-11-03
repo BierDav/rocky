@@ -1,14 +1,15 @@
 use super::*;
 use crate::{Failure, service::ServiceError};
+use rocky_platform::time::Instant;
 use std::sync::{
     Arc, Mutex, PoisonError,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::{sync::watch, time::Instant};
+use tokio::sync::watch;
 
 pub(crate) fn epoch_millis() -> Option<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
 }
@@ -152,7 +153,7 @@ impl Drop for Attempt {
 pub(crate) fn failure(error: &Failure, stage: &AttemptStage) -> AttemptFailure {
     let mut kind = FailureKind::Other;
     let mut code = None;
-    if error.is::<tokio::time::error::Elapsed>() {
+    if error.is::<rocky_platform::time::error::Elapsed>() {
         kind = FailureKind::Timeout;
     }
     if let Some(error) = error.downcast_ref::<std::io::Error>() {
@@ -218,7 +219,7 @@ pub(crate) fn failure(error: &Failure, stage: &AttemptStage) -> AttemptFailure {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn cancellation_is_an_observation_and_diagnostic_text_does_not_establish_revocation() {
         let observations = Observations::default();
         let attempt = observations.begin(
@@ -245,7 +246,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn completed_diagnostics_are_bounded_without_displacing_an_active_attempt() {
         let observations = Observations::default();
         let active = observations.begin(

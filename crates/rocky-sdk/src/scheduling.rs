@@ -1,5 +1,5 @@
 //! Retry deadlines use Tokio's clock; successful idle peers have no deadline.
-use tokio::time::{Duration, Instant};
+use rocky_platform::time::{Duration, Instant};
 
 pub(crate) struct Retry {
     random: u64,
@@ -71,7 +71,7 @@ impl Retry {
     #[cfg(test)]
     pub async fn wait(&self) {
         match self.deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
             None => std::future::pending().await,
         }
     }
@@ -80,6 +80,8 @@ impl Retry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn jitter_spreads_nodes_with_the_same_seed_and_preserves_failure_history() {
         let mut a = Retry::seeded(7, b"node a");
@@ -107,7 +109,7 @@ mod tests {
         assert_eq!(a.failures, 0);
         assert!(a.deadline.is_none());
         assert!(
-            tokio::time::timeout(Duration::ZERO, a.wait())
+            rocky_platform::time::timeout(Duration::ZERO, a.wait())
                 .await
                 .is_err()
         );

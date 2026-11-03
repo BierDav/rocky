@@ -72,7 +72,7 @@ pub(super) fn same_error(actual: Error, expected: Error) {
     assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
     let (l, dir, key, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;
@@ -174,7 +174,7 @@ async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_reconstruction_preserves_sql_shapes_and_first_errors() {
     let (l, _, _, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;
@@ -220,7 +220,7 @@ async fn warm_reconstruction_preserves_sql_shapes_and_first_errors() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_reconstruction_keeps_parser_validation_and_uncached_errors() {
     let (l, _, _, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;
@@ -277,7 +277,7 @@ async fn warm_reconstruction_keeps_parser_validation_and_uncached_errors() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_reconstruction_observes_publication_and_actual_proof_refusals() {
     let (l, _, _, replica, signed) = candidate_tables(2, true).await;
     release(&replica, &signed).await;

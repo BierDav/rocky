@@ -2,7 +2,7 @@
 use super::*;
 use crate::storage::bindings;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_bridge_returns() {
     let f = super::negatives::filled().await;
     let scope = f.lineage.scope("items");
@@ -98,7 +98,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
     f.replica.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn admitted_historical_frames_do_not_need_a_fresh_unexpired_grant() {
     let f = super::negatives::filled().await;
     let scope = f.lineage.scope("items");

@@ -216,9 +216,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn the_server_refuses_a_ninth_request_before_calling_the_handler() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = rocky_platform::fs::Scratch::new().await;
         let fixture = Fixture::new(1);
         let client_key = PrivateKey::new();
         let server_key = PrivateKey::new();

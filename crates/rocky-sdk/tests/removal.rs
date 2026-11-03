@@ -2,6 +2,8 @@
 //! follows it. A removed-and-readded name filters earlier values through
 //! the schema path; an unsent change it would split is held. See
 //! `docs/runtime/removal.md` and `docs/runtime/held-changes.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};

@@ -14,10 +14,10 @@ async fn checked(replica: &Replica, scope: ResourceScope, count: u64) {
     assert_eq!(inner.frontier(scope).await.unwrap(), cached);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::new();
     let (replica, identity_chain) = identity_replica(
         &f,
@@ -74,10 +74,10 @@ async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
     checked(&replica, f.public, 1).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_sql_changes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("graphs.db"), &PrivateKey::new()).await;
     insert(&f, &replica, 1, "source").await;
     let source = replica.followed_tip().await;
@@ -153,10 +153,10 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
     assert_eq!(inner.frontier(f.public).await.unwrap(), original);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_graph_admission_restores_the_warmed_workspace() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("admission.db"), &PrivateKey::new()).await;
     main(&f, &replica).await;
     insert(&f, &replica, 1, "source").await;
@@ -187,10 +187,10 @@ async fn failed_graph_admission_restores_the_warmed_workspace() {
     assert_ne!(replica.followed_tip().await, tip);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pending_bundle_and_missing_prefix_invalidate_cached_readiness() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("source.db"), &PrivateKey::new()).await;
     let target = open(&f, &dir.path().join("target.db"), &PrivateKey::new()).await;
     let writes = (1..=40)
@@ -222,10 +222,10 @@ async fn pending_bundle_and_missing_prefix_invalidate_cached_readiness() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_signed_void_fills_a_cached_gap_without_applying_its_payload() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let source = open(&f, &dir.path().join("void-source.db"), &key).await;
     let target = open(&f, &dir.path().join("void-target.db"), &PrivateKey::new()).await;
@@ -244,10 +244,10 @@ async fn a_signed_void_fills_a_cached_gap_without_applying_its_payload() {
     assert_eq!(rows.values().next().unwrap(), &f.app().name("kept"));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rollback_and_retry_never_publish_transactional_frontiers() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("retry.db"), &PrivateKey::new()).await;
     main(&f, &replica).await;
     insert(&f, &replica, 1, "one").await;
@@ -309,10 +309,10 @@ async fn rollback_and_retry_never_publish_transactional_frontiers() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_commit_discards_the_transactional_frontier() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("commit.db"), &PrivateKey::new()).await;
     main(&f, &replica).await;
     insert(&f, &replica, 1, "one").await;
@@ -343,10 +343,10 @@ async fn a_failed_commit_discards_the_transactional_frontier() {
     assert_eq!(inner.frontier(f.public).await.unwrap(), committed);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn offering_pages_and_recording_acknowledgments_compute_once_without_header_decodes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("pages.db"), &PrivateKey::new()).await;
     main(&f, &replica).await;
     for row in 1..=66 {
@@ -470,10 +470,10 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interleaved_scope_coordinates_clip_inside_an_ancestor_log_run() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("interleaved.db"),

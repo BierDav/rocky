@@ -24,21 +24,14 @@ where
     A: StoredApplication,
     A::Policy: Send + 'static,
 {
-    let (done, result) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("rocky-placement".into())
-        .spawn(move || {
-            let outcome = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(Error::Io)
-                .and_then(|runtime| {
-                    runtime.block_on(prepare(path, files, placement, &installations))
-                });
-            let _ = done.send(outcome.map(|files| (installations, files)));
-        })
-        .map_err(Error::Io)?;
-    result.await.map_err(|_| Error::Closed)?
+    rocky_platform::task::dedicated("rocky-placement", move || async move {
+        let files = prepare(path, files, placement, &installations).await;
+        files.map(|files| (installations, files))
+    })
+    .map_err(Error::Io)?
+    .join()
+    .await
+    .map_err(|_| Error::Closed)?
 }
 async fn prepare<A: StoredApplication>(
     path: PathBuf,
@@ -65,8 +58,8 @@ async fn prepare<A: StoredApplication>(
         .collect();
     let mut recorded = BTreeMap::new();
     let id = if fresh {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nonce = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_err(|error| Error::Incompatible(error.to_string()))?
             .as_nanos();
         rocky_core::commitment(
@@ -150,7 +143,7 @@ async fn prepare<A: StoredApplication>(
             recorded
                 .get(&key(domain.identity.scope))
                 .is_some_and(|(_, _, ready)| *ready)
-        }) && !file.exists()
+        }) && !rocky_platform::fs::exists(&file)
         {
             return Err(Error::Incompatible(
                 "assigned runtime file is missing".into(),
@@ -298,28 +291,25 @@ async fn prepare<A: StoredApplication>(
         if batch.is_empty() {
             break;
         }
-        let outcomes = std::thread::scope(|threads| {
-            let handles: Vec<_> = batch
-                .into_iter()
-                .map(|(index, owner, conn, binding, statements, pending)| {
-                    threads.spawn(move || {
-                        if !statements.is_empty() {
-                            let runtime = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .map_err(Error::Io)?;
-                            runtime
-                                .block_on(crate::bootstrap::install(&conn, &binding, statements))?;
-                        }
-                        Ok::<_, Error>((index, owner, conn, pending))
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or(Err(Error::Closed)))
-                .collect::<Vec<_>>()
-        });
+        let mut installing = Vec::new();
+        for (index, owner, conn, binding, statements, pending) in batch {
+            installing.push(rocky_platform::task::dedicated(
+                "rocky-install",
+                move || async move {
+                    if !statements.is_empty() {
+                        crate::bootstrap::install(&conn, &binding, statements).await?;
+                    }
+                    Ok::<_, Error>((index, owner, conn, pending))
+                },
+            ));
+        }
+        let mut outcomes = Vec::new();
+        for task in installing {
+            outcomes.push(match task {
+                Ok(task) => task.join().await.unwrap_or(Err(Error::Closed)),
+                Err(error) => Err(Error::Io(error)),
+            });
+        }
         for outcome in outcomes {
             let (index, owner, conn, pending) = outcome?;
             if !pending.is_empty() {

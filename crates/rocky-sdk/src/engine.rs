@@ -76,12 +76,14 @@ impl Engine {
         let coordination = match (options.coordinator.clone(), coordination) {
             (None, coordination) => coordination,
             (Some(_), Some(_)) => return Err("two coordinators supplied".into()),
-            #[cfg(feature = "iroh")]
+            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
             (Some(bundle), None) => Some(crate::Coordination::Service(Box::new(
                 serde_json::from_value(bundle)?,
             ))),
-            #[cfg(not(feature = "iroh"))]
-            (Some(_), None) => return Err("a coordination service needs iroh".into()),
+            #[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
+            (Some(_), None) => {
+                return Err("a coordination service needs iroh and a native target".into());
+            }
         };
         let network =
             network.unwrap_or_else(|| Network::Owned(Arc::new(options.transport.clone())));

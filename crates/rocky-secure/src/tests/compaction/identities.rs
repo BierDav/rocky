@@ -152,10 +152,10 @@ fn marks(signed: &crate::SignedCheckpoint) -> Vec<(u32, u32)> {
         .collect()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_reused_identity_beyond_the_seal_applies_once() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &keys[0]).await;
@@ -190,10 +190,10 @@ async fn a_reused_identity_beyond_the_seal_applies_once() {
     assert_eq!(own_mark(&j, scope).await, (author, covered + 1));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_retired_covered_birth_cannot_be_reused_after_an_import() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &keys[0]).await;
@@ -270,10 +270,10 @@ async fn import_kept(
     (offered, report)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &keys[0]).await;
@@ -334,10 +334,10 @@ async fn transaction(replica: &Replica, statements: &[(&str, Option<i64>)]) -> R
     sql.run("COMMIT", vec![]).await.map(|_| ())
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &keys[0]).await;
@@ -404,10 +404,10 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
     s.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_signed_empty_base_carries_its_retired_marks() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &keys[0]).await;
@@ -432,10 +432,10 @@ async fn a_signed_empty_base_carries_its_retired_marks() {
     j.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_kept_prefix_seed_counts_retired_births_and_is_unavailable_once_pruned() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let scope = lineage.scope("items");
     let a = open(&lineage, &dir, "a", &key).await;

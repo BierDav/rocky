@@ -48,10 +48,10 @@ async fn frames(replica: &EncryptedReplica<Employees>, f: &Fixture, node: &Priva
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for (pragma, expected) in [
@@ -69,10 +69,10 @@ async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("a.db");
     let replica = open(&f, &path, &PrivateKey::new()).await;
     let buffered = replica
@@ -81,7 +81,7 @@ async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
         .unwrap();
     assert!(replica.durable_commit().await < buffered.commit);
     let wal = path.with_extension("db-wal");
-    let contents = std::fs::read(&wal).unwrap();
+    let contents = rocky_platform::fs::read(&wal).unwrap();
     #[cfg(windows)]
     assert_eq!(
         std::fs::File::open(&wal)
@@ -92,18 +92,18 @@ async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
         Some(5)
     );
     assert!(replica.flush().await.unwrap() >= buffered.commit);
-    assert_eq!(std::fs::read(wal).unwrap(), contents);
+    assert_eq!(rocky_platform::fs::read(wal).unwrap(), contents);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &node).await;
     let mut observer = replica.observe_revision();
     let before = replica.group_commits().await;
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = rocky_platform::task::JoinSet::new();
     for row in 1..=8u8 {
         let (replica, changes) = (replica.clone(), insert(&f, row));
         tasks.spawn(async move {
@@ -148,14 +148,16 @@ async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
 /// A group's flush runs after the replica lock is released, so other callers
 /// lead the next group or read meanwhile. Every exposed result still arrives,
 /// and only after a flush that covers it.
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_flush() {
     const AUTHORS: u8 = 48;
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &node).await;
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = rocky_platform::task::JoinSet::new();
     for row in 1..=AUTHORS {
         let (replica, changes, scope) = (replica.clone(), insert(&f, row), f.public);
         tasks.spawn(async move {
@@ -180,10 +182,10 @@ async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_f
     assert_eq!(frames(&replica, &f, &node).await, usize::from(AUTHORS));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failing_request_in_a_group_rolls_back_alone() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &node).await;
     let before = replica.group_commits().await;
@@ -216,10 +218,10 @@ async fn failing_request_in_a_group_rolls_back_alone() {
     assert_eq!(frames(&replica, &f, &node).await, 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn nothing_is_observable_when_the_group_does_not_commit() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &node).await;
     let observer = replica.observe_revision();
@@ -259,10 +261,10 @@ async fn nothing_is_observable_when_the_group_does_not_commit() {
     assert_eq!(target.receive(frame).await.unwrap(), ReceiveStatus::Applied);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_received_page_shares_one_flush_and_refuses_frames_alone() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let mut page = Vec::new();
     for row in 1..=10u8 {
@@ -299,16 +301,16 @@ async fn a_received_page_shares_one_flush_and_refuses_frames_alone() {
     assert_eq!(frames(&target, &f, &target_key).await, 10);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_ready_received_frame_never_exposes_pending_custody_to_a_reader() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("ready-source.db"), &PrivateKey::new()).await;
     let target = open(&f, &dir.path().join("ready-target.db"), &PrivateKey::new()).await;
     let frame = source.author([1; 32], insert(&f, 1), vec![]).await.unwrap();
     let hash = frame.id().unwrap();
     let receiver = target.clone();
-    let receiving = tokio::spawn(async move { receiver.receive(frame).await });
+    let receiving = rocky_platform::task::spawn(async move { receiver.receive(frame).await });
     let mut observed = false;
     loop {
         let inner = target.inner.lock(crate::replica::Class::Background).await;
@@ -336,21 +338,21 @@ async fn a_ready_received_frame_never_exposes_pending_custody_to_a_reader() {
         if receiving.is_finished() {
             break;
         }
-        tokio::task::yield_now().await;
+        rocky_platform::task::yield_now().await;
     }
     assert_eq!(receiving.await.unwrap().unwrap(), ReceiveStatus::Applied);
     assert!(observed);
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn busy_file_retries_whole_transaction_then_reports_exhaustion() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("a.db");
     let node = PrivateKey::new();
     let replica = open(&f, &path, &node).await;
-    let blocker = rusqlite::Connection::open(&path).unwrap();
+    let blocker = rocky_storage::files::raw(&path).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let attempts = Arc::new(AtomicUsize::new(0));
     let seen = attempts.clone();
@@ -372,7 +374,7 @@ async fn busy_file_retries_whole_transaction_then_reports_exhaustion() {
     assert_eq!(frame.operation().unwrap().header.seq_num, 0);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
-    let blocker = rusqlite::Connection::open(&path).unwrap();
+    let blocker = rocky_storage::files::raw(&path).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     attempts.store(0, Ordering::SeqCst);
     let mut observer = replica.observe_revision();
@@ -393,10 +395,10 @@ async fn busy_file_retries_whole_transaction_then_reports_exhaustion() {
     assert_eq!(frames(&replica, &f, &node).await, 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn wal_stays_bounded_under_sustained_authoring() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("a.db");
     let node = PrivateKey::new();
     let replica = open(&f, &path, &node).await;
@@ -419,7 +421,7 @@ async fn wal_stays_bounded_under_sustained_authoring() {
             )
             .await
             .unwrap();
-        largest = largest.max(std::fs::metadata(&wal).unwrap().len());
+        largest = largest.max(rocky_platform::fs::len(&wal).unwrap());
     }
     assert!(replica.checkpoints().await > 0);
     // One group's frames may land after the last check.
@@ -427,14 +429,16 @@ async fn wal_stays_bounded_under_sustained_authoring() {
     replica.optimize().await;
     drop(replica);
     // Closing the connections checkpoints and removes the WAL.
-    assert!(std::fs::metadata(&wal).map_or(0, |wal| wal.len()) == 0);
+    assert!(rocky_platform::fs::len(&wal).unwrap_or(0) == 0);
     let replica = open(&f, &path, &node).await;
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 200);
 }
 
 const CRASH_PHASES: [&str; 3] = ["inside-group", "before-commit", "after-commit"];
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_a_group_leaves_each_handle_whole_or_absent"]
 async fn group_crash_child() {
     let path = std::env::var("ROCKY_GROUP_CRASH_PATH").unwrap();
@@ -456,10 +460,12 @@ async fn group_crash_child() {
     std::process::exit(1);
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
     for phase in CRASH_PHASES {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let path = dir.path().join("crash.db");
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::group::group_crash_child", "--ignored"])
@@ -505,10 +511,10 @@ fn public_futures_are_send(
     send(replica.learn_revocations(&f.policy.clone()));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn buffered_commits_are_flushed_before_they_leave_the_device() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir.path().join("a.db"), &a_key).await;
     let b = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -611,22 +617,22 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
 pub(super) fn lose_unflushed(copy: &std::path::Path, path: &std::path::Path) {
     let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
     let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
-    std::fs::copy(copy.join("copy.db"), path).unwrap();
-    let _ = std::fs::remove_file(&wal);
-    let _ = std::fs::remove_file(&shm);
-    if copy.join("copy.db-wal").exists() {
-        std::fs::copy(copy.join("copy.db-wal"), &wal).unwrap();
+    rocky_platform::fs::copy(copy.join("copy.db"), path).unwrap();
+    let _ = rocky_platform::fs::remove_file(&wal);
+    let _ = rocky_platform::fs::remove_file(&shm);
+    if rocky_platform::fs::exists(copy.join("copy.db-wal")) {
+        rocky_platform::fs::copy(copy.join("copy.db-wal"), &wal).unwrap();
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[61; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::from_bytes(&[62; 32]), PrivateKey::new());
     let (a_copy, b_copy) = (dir.path().join("a-copy"), dir.path().join("b-copy"));
-    std::fs::create_dir_all(&a_copy).unwrap();
-    std::fs::create_dir_all(&b_copy).unwrap();
+    rocky_platform::fs::create_dir_all(&a_copy).unwrap();
+    rocky_platform::fs::create_dir_all(&b_copy).unwrap();
     let (a_path, b_path) = (dir.path().join("a.db"), dir.path().join("b.db"));
     let a = open(&f, &a_path, &a_key).await;
     let b = open(&f, &b_path, &b_key).await;
@@ -722,10 +728,10 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_the_cache() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let author = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let member = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
     let first = author
@@ -757,10 +763,12 @@ async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_t
     assert!(member.receive(second).await.is_err());
 }
 
-#[tokio::test]
+// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let (entered, resume) = replica.pause_flush().await;
     let author = replica.author([91; 32], insert(&f, 1), vec![]);
@@ -769,7 +777,7 @@ async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
         result = &mut author => panic!("reply preceded the flush: {result:?}"),
         result = entered => result.unwrap(),
     }
-    let available = tokio::time::timeout(
+    let available = rocky_platform::time::timeout(
         std::time::Duration::ZERO,
         replica.inner.lock(crate::replica::Class::Background),
     )
@@ -781,16 +789,16 @@ async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
 }
 
 /// Admission, atomic application and empty settlement without maintenance or flush.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("steps.db"), &PrivateKey::new()).await;
     let initial_commit = replica.watermark().await.0;
     replica
         .inject_group_fault(Some(GroupFault::FailAfterCommits(2)))
         .await;
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = rocky_platform::task::JoinSet::new();
     for row in 1u8..=8 {
         let replica = replica.clone();
         let changes = insert(&f, row);
@@ -827,10 +835,12 @@ async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
 }
 
-#[tokio::test]
+// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("passive.db"), &PrivateKey::new()).await;
     replica
         .author_buffered([1; 32], insert(&f, 1), vec![])
@@ -845,7 +855,7 @@ async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
     inner.checkpoint_if_due().await;
     ready.await.unwrap();
     let (scheduled, polled) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
+    rocky_platform::task::spawn(async move {
         scheduled.send(()).unwrap();
     });
     polled.await.unwrap();
@@ -859,10 +869,10 @@ async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
     assert_eq!(inner.passive.completed(), before + 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("truncate.db"), &PrivateKey::new()).await;
     replica
         .author_buffered([1; 32], insert(&f, 1), vec![])
@@ -874,12 +884,12 @@ async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
     let before = inner.checkpoints;
     let (started, ready) = tokio::sync::oneshot::channel();
     let target = replica.clone();
-    let task = tokio::spawn(async move {
+    let task = rocky_platform::task::spawn(async move {
         started.send(()).unwrap();
         target.maintain().await
     });
     ready.await.unwrap();
-    tokio::task::yield_now().await;
+    rocky_platform::task::yield_now().await;
     assert!(!task.is_finished());
     assert_eq!(inner.checkpoints, before);
     drop(inner);
@@ -887,10 +897,10 @@ async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
     assert_eq!(replica.checkpoints().await, before + 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pending_discovery_and_application_are_bounded_across_log_heads() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let target = staged_heads(&f, &dir, "heads", 4).await;
     let mut revision = target.observe_revision();
     let mut applied = 0;
@@ -930,7 +940,7 @@ async fn pending_discovery_and_application_are_bounded_across_log_heads() {
 /// Frames from distinct authors, stored without applying them.
 async fn staged_heads(
     f: &Fixture,
-    dir: &TempDir,
+    dir: &Scratch,
     name: &str,
     heads: u8,
 ) -> EncryptedReplica<Employees> {
@@ -962,10 +972,10 @@ async fn staged_heads(
     target
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn stored_work_invalidates_pending_discovery_before_application() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let target = staged_heads(&f, &dir, "invalidated", 3).await;
     assert!(target.pending_step_for_test().await.unwrap());
     assert!(target.pending_step_for_test().await.unwrap());
@@ -988,10 +998,10 @@ async fn stored_work_invalidates_pending_discovery_before_application() {
 
 /// Regression: a local write between every settle step restarted the pass,
 /// so a receive waiting for settle never returned while writes continued.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn local_writes_between_pending_steps_do_not_restart_the_pass() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let target = staged_heads(&f, &dir, "interleaved", 3).await;
     let mut steps = 0u8;
     while target.pending_step_for_test().await.unwrap() {
@@ -1006,10 +1016,10 @@ async fn local_writes_between_pending_steps_do_not_restart_the_pass() {
     assert_eq!(rows, 3 + usize::from(steps));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pending_discovery_resumes_after_reopening() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("resume-source.db"), &PrivateKey::new()).await;
     let frames = vec![
         source.author([1; 32], insert(&f, 1), vec![]).await.unwrap(),
@@ -1035,10 +1045,10 @@ async fn pending_discovery_resumes_after_reopening() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn receive_steps_isolate_indivisible_frames_and_keep_one_flush() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(
         &f,
         &dir.path().join("bounded-source.db"),
@@ -1120,10 +1130,10 @@ async fn receive_steps_isolate_indivisible_frames_and_keep_one_flush() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn receive_retry_keeps_committed_steps_and_resumes_the_failed_suffix() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("retry-source.db"), &PrivateKey::new()).await;
     let target = open(&f, &dir.path().join("retry-target.db"), &PrivateKey::new()).await;
     let limit = crate::replica::group::RECEIVE_REQUESTS;
@@ -1165,11 +1175,11 @@ async fn receive_retry_keeps_committed_steps_and_resumes_the_failed_suffix() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reclamation_releases_between_page_steps_and_resumes_after_reopen() {
     use crate::replica::group::{RECLAIM_PAGES, RECLAIM_STEP};
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("reclamation.db");
     let node = PrivateKey::new();
     let replica = open(&f, &path, &node).await;

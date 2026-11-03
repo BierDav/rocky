@@ -16,10 +16,10 @@ fn rebootstrap(kind: &crate::BlockerKind) -> bool {
     matches!(kind, crate::BlockerKind::SealRebootstrap { .. })
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_scope_awaiting_a_seal_rebootstrap_holds_back_only_itself() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -87,10 +87,10 @@ async fn a_scope_awaiting_a_seal_rebootstrap_holds_back_only_itself() {
 
 /// The finalized seals and the identity ledger they fold are the domain's:
 /// a compaction that lost refuses every scope until each rebootstraps.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_lost_compaction_holds_back_every_scope_of_its_domain() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "keep", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
@@ -121,10 +121,10 @@ async fn a_lost_compaction_holds_back_every_scope_of_its_domain() {
 /// A recovery pass with nothing to finalize changes nothing: a scope that
 /// never verifies (here `tags`, with no base at the seal) does not count
 /// as finalized work, so no revision is published.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_idle_finalization_pass_publishes_nothing() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;

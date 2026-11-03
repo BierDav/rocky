@@ -1,6 +1,8 @@
 //! Deterministic network faults on the in-process transport: disconnects,
 //! backpressure and inbound work over budget. Durable outgoing work
 //! survives, nothing is applied in part and resources stay bounded.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{
     Network,

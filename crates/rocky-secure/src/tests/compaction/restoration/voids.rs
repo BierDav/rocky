@@ -1,7 +1,7 @@
 //! Incoming author-signed cancellation records remain distinct from payloads.
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn held_frames_and_separate_signed_void_records_require_every_link() {
     let mut f = HeldPrefix::new(4).await;
     let scope = f.lineage.scope("items");

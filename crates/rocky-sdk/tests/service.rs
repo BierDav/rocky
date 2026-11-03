@@ -1,4 +1,6 @@
 //! Ordinary rows, seal finality, staged publication and rollback over real voters.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 #![cfg(feature = "iroh")]
 mod support;
 use rocky_coordinator::{

@@ -1271,7 +1271,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let logs: Vec<_> = chunk.iter().map(|log| (log.author, log.sequence)).collect();
                 inner.offer_covered(scope, &logs).await?;
                 drop(inner);
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 inner = self.inner.lock(Class::Background).await;
                 inner.check_export_source(&source)?;
             }
@@ -1322,7 +1322,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut had_records = false;
         'records: loop {
             drop(inner);
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             inner = self.inner.lock(Class::Background).await;
             inner.check_export_source(&source)?;
             let records = collect_rows(inner.conn.query(
@@ -1525,7 +1525,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         plain.creations = legend_creations.into_iter().collect();
         for (index, row) in plain.rows.iter_mut().enumerate().filter(|_| !replayed) {
             if index % EXPORT_ROWS == 0 {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
             }
             let record: Materialized = decode(&row.fields)?;
             let origin = record
@@ -1806,7 +1806,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.crypto.clone(),
             )
         };
-        let (page, plain, supplied, origins) = tokio::task::spawn_blocking(move || {
+        let (page, plain, supplied, origins) = rocky_platform::task::spawn_blocking(move || {
             let plain: PagePlain = decode(&page.rows.open(&key)?)?;
             let supplied: BTreeSet<_> = plain
                 .headers
@@ -1824,13 +1824,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .map_err(|_| Error::Closed)??;
         let mut known_headers = BTreeMap::new();
         for digest in origins {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             if !supplied.contains(&digest) && !known_headers.contains_key(&digest) {
                 let inner = self.inner.lock(Class::Background).await;
                 known_headers.insert(digest, inner.stored_creation_header(digest).await?);
             }
         }
-        let opened = tokio::task::spawn_blocking(move || {
+        let opened = rocky_platform::task::spawn_blocking(move || {
             open_page(
                 page,
                 plain,
@@ -1889,7 +1889,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             (writes, version)
         };
         for rows in opened.rows.chunks(store) {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let inner = self.inner.lock(Class::Background).await;
             let version = (writes.count(), inner.authority, inner.workspace.tip);
             if source != version {
@@ -1972,7 +1972,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let split = metadata.len().saturating_sub(1) / metadata_step * metadata_step;
         let (leading_metadata, final_metadata) = metadata.split_at(split);
         for chunk in leading_metadata.chunks(metadata_step) {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let mut inner = self.inner.lock(Class::Background).await;
             let id = inner
                 .find_scope_id(scope)
@@ -1995,7 +1995,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let finish_cursor = opened.rows.last().map(|(row, ..)| *row);
         let chunks = opened.rows.len().max(1).div_ceil(store);
         for chunk_index in 0..chunks {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let mut inner = self.inner.lock(Class::Background).await;
             let id = inner
                 .find_scope_id(scope)

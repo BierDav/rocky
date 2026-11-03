@@ -12,10 +12,10 @@ async fn outcomes(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_late_write_of_a_removed_column_drops_as_schema_in_the_successor() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open(

@@ -1,14 +1,16 @@
 //! Process death in each step of a placement migration.
 use super::*;
 use crate::wide_schema_tests::{app, installation, options, test_scope};
+use rocky_platform::fs::Scratch;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
-use tempfile::TempDir;
 
 const CASE: &str = "ROCKY_RELOCATION_CRASH_STEP";
 const DIR: &str = "ROCKY_RELOCATION_CRASH_DIR";
 
 /// Does nothing in an ordinary run; a parent test selects where to die.
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
     let (Ok(step), Ok(dir)) = (std::env::var(CASE), std::env::var(DIR)) else {
@@ -39,7 +41,7 @@ fn crash(step: usize, dir: &Path) {
     assert_eq!(status.signal(), Some(6), "step {step}: {status:?}");
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_migration_resumes_from_every_step() {
     let placed = |file: usize| {
         vec![
@@ -57,7 +59,7 @@ async fn an_interrupted_migration_resumes_from_every_step() {
         let domains = vec![installation(app(3), 0), installation(app(3), 1)];
         Runtime::open_placed(path, domains, placed(file), options()).await
     };
-    let template = TempDir::new().unwrap();
+    let template = Scratch::new().await;
     let source = template.path().join("placed.db");
     let runtime = serve(&source, 0).await.unwrap();
     for domain in 0..2 {
@@ -70,11 +72,11 @@ async fn an_interrupted_migration_resumes_from_every_step() {
     }
     runtime.close().await.unwrap();
     for step in 1..=4 {
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let path = dir.path().join("placed.db");
         for entry in std::fs::read_dir(template.path()).unwrap() {
             let entry = entry.unwrap();
-            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+            rocky_platform::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
         }
         crash(step, dir.path());
         // Neither assignment opens while the migration is pending.

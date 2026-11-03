@@ -114,8 +114,8 @@ fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error>
 }
 /// Microseconds since the epoch: the wall part of hybrid stamp clocks.
 fn micros() -> Result<u64, Error> {
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let time = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|time| u64::try_from(time.as_micros()).unwrap_or(u64::MAX))
         .map_err(|_| denied("clock before epoch"))?;
     #[cfg(test)]
@@ -127,8 +127,8 @@ fn micros() -> Result<u64, Error> {
     Ok(time)
 }
 fn now() -> Result<u64, Error> {
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let time = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|time| time.as_secs())
         .map_err(|_| denied("clock before epoch"))?;
     #[cfg(test)]
@@ -158,6 +158,8 @@ fn apply_allowed() -> bool {
 }
 
 #[cfg(test)]
+// Crash and thread tests run natively; some of their helpers are unused here.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 mod tests;
 
 pub use replica::checkpoint::IMPORT_ATTEMPTS;

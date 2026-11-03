@@ -2,20 +2,21 @@
 //! the domain under a tenant key and sign later control revisions. Only
 //! identities and generations leave the device. See
 //! `docs/runtime/public-coordination.md`.
-#[cfg(feature = "iroh")]
+#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
 pub(crate) use service::{Domain, Service};
 
-/// Never constructed without iroh: no coordination service is reachable.
-#[cfg(not(feature = "iroh"))]
+/// Never constructed without iroh, or in a browser, where the coordination
+/// service client does not build: no coordination service is reachable.
+#[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
 pub(crate) enum Service {}
-#[cfg(not(feature = "iroh"))]
+#[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
 impl Service {
     pub(crate) fn certify(&self, _: &rocky_credentials::CredentialChain) {
         match *self {}
     }
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
 mod service {
     use crate::{Failure, enrollment::now, node::Refused, transport::Transport};
     use data_encoding::HEXLOWER;
@@ -259,7 +260,7 @@ mod service {
             inputs: rocky_core::Commitment,
         ) -> Result<u64, Failure> {
             let path = self.directory.join("tenant.requests");
-            let mut signed: Vec<Signed> = match std::fs::read(&path) {
+            let mut signed: Vec<Signed> = match rocky_platform::fs::read(&path) {
                 Ok(bytes) => serde_json::from_slice(&bytes)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
                 Err(error) => return Err(error.into()),

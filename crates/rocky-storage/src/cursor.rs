@@ -1,21 +1,23 @@
 //! Snapshot cursors served by a bounded pool of reusable read-only connections.
 //! Each active cursor leases one worker and pins its snapshot until it ends.
+//! A worker is a `dedicated` task: its own thread natively, a task on the
+//! Worker's event loop in a browser.
 use crate::{
     Error,
     sql::{AbortReason, SqlError},
     sqlite, storage,
 };
 use rocky_core::SqlValue;
+use rocky_platform::{task, time};
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Condvar, Mutex, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc,
     },
     time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use web_time::Instant;
 
 /// Bounds of one cursor.
@@ -40,7 +42,7 @@ impl Default for CursorLimits {
         }
     }
 }
-/// How often an idle cursor thread checks for a closing host.
+/// How often an idle cursor worker checks for a closing host.
 const POLL: Duration = Duration::from_millis(50);
 /// Open cursors one session may hold.
 pub const MAX_SESSION_CURSORS: usize = 64;
@@ -134,14 +136,15 @@ struct Opened {
     revision: Option<u64>,
 }
 
-/// Shared between a cursor's handle, its thread and its host.
+/// Shared between a cursor's handle, its worker and its host.
 struct Control {
     cancelled: Arc<AtomicBool>,
     /// Why the cursor ended, once it has.
     ended: Mutex<Option<End>>,
-    /// The thread still holds its connection.
-    alive: Mutex<bool>,
-    finished: Condvar,
+    /// The worker still holds its connection.
+    alive: task::Held,
+    /// The handle is gone; the worker ends the cursor on its next turn.
+    dropped: AtomicBool,
 }
 #[derive(Clone, Copy, Debug)]
 enum End {
@@ -156,7 +159,6 @@ impl Control {
         if let Ok(mut ended) = self.ended.lock() {
             ended.get_or_insert(end);
         }
-        self.finished.notify_all();
     }
     fn error(&self) -> Error {
         match self.ended.lock().ok().and_then(|ended| *ended) {
@@ -193,20 +195,12 @@ impl CursorHost {
         for control in controls.iter().filter_map(Weak::upgrade) {
             control.end(End::Closed);
             control.cancelled.store(true, Ordering::SeqCst);
-            let Ok(mut alive) = control.alive.lock() else {
-                continue;
-            };
-            // An idle thread notices within its poll interval.
-            while *alive {
-                match control.finished.wait_timeout(alive, POLL) {
-                    Ok((next, _)) => alive = next,
-                    Err(_) => break,
-                }
-            }
+            // An idle worker notices within its poll interval.
+            control.alive.wait_released(POLL);
         }
         for worker in std::mem::take(&mut *workers) {
             drop(worker.jobs);
-            let _ = worker.thread.join();
+            worker.task.release();
         }
     }
     /// Workers allocated so far; connections are reused between leases.
@@ -233,7 +227,7 @@ impl CursorHost {
 pub struct SnapshotCursor {
     columns: Vec<ResultColumn>,
     revision: Option<u64>,
-    requests: Option<mpsc::Sender<Request>>,
+    requests: Option<mpsc::UnboundedSender<Request>>,
     control: Arc<Control>,
     /// The session's open-cursor count, released on drop.
     count: Arc<AtomicUsize>,
@@ -242,16 +236,10 @@ impl Drop for SnapshotCursor {
     fn drop(&mut self) {
         self.requests = None;
         self.control.cancelled.store(true, Ordering::SeqCst);
+        self.control.dropped.store(true, Ordering::SeqCst);
         self.count.fetch_sub(1, Ordering::SeqCst);
         // The disconnected channel wakes the leased worker immediately.
-        if let Ok(mut alive) = self.control.alive.lock() {
-            while *alive {
-                match self.control.finished.wait_timeout(alive, POLL) {
-                    Ok((next, _)) => alive = next,
-                    Err(_) => break,
-                }
-            }
-        }
+        self.control.alive.wait_released(POLL);
     }
 }
 impl SnapshotCursor {
@@ -275,10 +263,10 @@ impl SnapshotCursor {
         let control = Arc::new(Control {
             cancelled: Arc::new(AtomicBool::new(false)),
             ended: Mutex::new(None),
-            alive: Mutex::new(true),
-            finished: Condvar::new(),
+            alive: task::Held::new(true),
+            dropped: AtomicBool::new(false),
         });
-        let (requests, receiver) = mpsc::channel();
+        let (requests, receiver) = mpsc::unbounded_channel();
         let (opened, opening) = oneshot::channel();
         let cursor = Self {
             columns: Vec::new(),
@@ -294,10 +282,7 @@ impl SnapshotCursor {
             control: cursor.control.clone(),
         };
         if let Err(error) = host.lease(job) {
-            if let Ok(mut alive) = cursor.control.alive.lock() {
-                *alive = false;
-            }
-            cursor.control.finished.notify_all();
+            cursor.control.alive.set(false);
             return Err(error);
         }
         let mut cursor = cursor;
@@ -369,14 +354,28 @@ fn engine(error: rusqlite::Error) -> Error {
 
 struct Job {
     plan: CursorPlan,
-    requests: mpsc::Receiver<Request>,
+    requests: mpsc::UnboundedReceiver<Request>,
     opened: oneshot::Sender<Result<Opened, Error>>,
     control: Arc<Control>,
 }
 struct Worker {
-    jobs: mpsc::SyncSender<Job>,
+    jobs: mpsc::Sender<Job>,
     busy: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<()>,
+    task: task::Dedicated<()>,
+    /// The cursor it serves or last served.
+    serving: Weak<Control>,
+}
+impl Worker {
+    /// Free, or ending a cursor whose handle is gone, with room to queue the
+    /// next job. Natively a dropped handle waits until its worker is free.
+    fn available(&self) -> bool {
+        !self.busy.load(Ordering::SeqCst)
+            || (self.jobs.capacity() > 0
+                && self
+                    .serving
+                    .upgrade()
+                    .is_none_or(|control| control.dropped.load(Ordering::SeqCst)))
+    }
 }
 impl Drop for CursorHost {
     fn drop(&mut self) {
@@ -389,10 +388,7 @@ impl CursorHost {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
         }
-        let worker = match workers
-            .iter_mut()
-            .find(|worker| !worker.busy.load(Ordering::SeqCst))
-        {
+        let worker = match workers.iter_mut().find(|worker| worker.available()) {
             Some(worker) => worker,
             None => {
                 if workers.len() >= MAX_SESSION_CURSORS {
@@ -401,25 +397,25 @@ impl CursorHost {
                         limit: MAX_SESSION_CURSORS,
                     });
                 }
-                let (jobs, receiver) = mpsc::sync_channel::<Job>(1);
+                let (jobs, mut receiver) = mpsc::channel::<Job>(1);
                 let busy = Arc::new(AtomicBool::new(false));
                 let working = busy.clone();
-                let thread = std::thread::Builder::new()
-                    .name("rocky-reader".into())
-                    .spawn(move || {
-                        let mut connection: Option<(PathBuf, sqlite::Connection)> = None;
-                        while let Ok(job) = receiver.recv() {
-                            let control = job.control.clone();
-                            serve(job, &mut connection);
-                            working.store(false, Ordering::SeqCst);
-                            if let Ok(mut alive) = control.alive.lock() {
-                                *alive = false;
-                            }
-                            control.finished.notify_all();
-                        }
-                    })
-                    .map_err(Error::Io)?;
-                workers.push(Worker { jobs, busy, thread });
+                let task = task::dedicated("rocky-reader", move || async move {
+                    let mut connection: Option<(PathBuf, sqlite::Connection)> = None;
+                    while let Some(job) = receiver.recv().await {
+                        let control = job.control.clone();
+                        serve(job, &mut connection).await;
+                        working.store(false, Ordering::SeqCst);
+                        control.alive.set(false);
+                    }
+                })
+                .map_err(Error::Io)?;
+                workers.push(Worker {
+                    jobs,
+                    busy,
+                    task,
+                    serving: Weak::new(),
+                });
                 workers.last_mut().ok_or(Error::Closed)?
             }
         };
@@ -428,17 +424,21 @@ impl CursorHost {
             controls.push(Arc::downgrade(&job.control));
         }
         worker.busy.store(true, Ordering::SeqCst);
-        worker.jobs.send(job).map_err(|_| Error::Closed)
+        worker.serving = Arc::downgrade(&job.control);
+        worker.jobs.try_send(job).map_err(|_| Error::Closed)
     }
 }
-fn serve(job: Job, connection: &mut Option<(PathBuf, sqlite::Connection)>) {
+// The worker owns its connection; nothing else locks it while a cursor
+// holds it across the awaits between pages.
+#[allow(clippy::await_holding_lock)]
+async fn serve(job: Job, connection: &mut Option<(PathBuf, sqlite::Connection)>) {
     let Job {
         plan,
-        requests,
+        mut requests,
         opened,
         control,
     } = job;
-    let (end, reusable) = (|| {
+    let (end, reusable) = async {
         if connection
             .as_ref()
             .is_none_or(|(path, _)| *path != plan.path)
@@ -454,14 +454,13 @@ fn serve(job: Job, connection: &mut Option<(PathBuf, sqlite::Connection)>) {
         let Some((_, connection)) = connection else {
             return (End::Failed, false);
         };
-        let (end, reusable) = connection
-            .hold(|raw| {
-                let end = run(raw, &plan, &requests, opened, &control);
-                (end, clean(raw).is_ok())
-            })
-            .unwrap_or((End::Failed, false));
-        (end, reusable)
-    })();
+        let Ok(raw) = connection.hold() else {
+            return (End::Failed, false);
+        };
+        let end = run(&raw, &plan, &mut requests, opened, &control).await;
+        (end, clean(&raw).is_ok())
+    }
+    .await;
     if !reusable {
         *connection = None;
     }
@@ -484,10 +483,10 @@ fn clean(raw: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn run(
+async fn run(
     raw: &rusqlite::Connection,
     plan: &CursorPlan,
-    requests: &mpsc::Receiver<Request>,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
     opened: oneshot::Sender<Result<Opened, Error>>,
     control: &Control,
 ) -> End {
@@ -600,7 +599,7 @@ fn run(
             Err(error) => {
                 // Reported on the next request.
                 let error = engine(error);
-                if let Ok(request) = requests.recv_timeout(plan.limits.idle) {
+                if let Ok(Some(request)) = time::timeout(plan.limits.idle, requests.recv()).await {
                     request.fail(error);
                 }
                 break 'exec End::Failed;
@@ -614,18 +613,18 @@ fn run(
                 break 'exec End::Expired;
             }
             let wait = (active + plan.limits.idle).min(expires) - now;
-            let request = requests.recv_timeout(wait.min(POLL));
-            if request.is_ok() {
+            let request = time::timeout(wait.min(POLL), requests.recv()).await;
+            if matches!(request, Ok(Some(_))) {
                 active = Instant::now();
             }
             if control.cancelled.load(Ordering::SeqCst) {
-                if let Ok(request) = request {
+                if let Ok(Some(request)) = request {
                     request.fail(control.error());
                 }
                 break 'exec End::Cancelled;
             }
             match request {
-                Ok(Request::Next(reply)) => {
+                Ok(Some(Request::Next(reply))) => {
                     let page = page(&mut rows, plan, &mut position, control);
                     let failed = page.is_err();
                     let _ = reply.send(page);
@@ -638,11 +637,11 @@ fn run(
                             .unwrap_or(End::Failed);
                     }
                 }
-                Ok(Request::Reset(reply)) => {
+                Ok(Some(Request::Reset(reply))) => {
                     let _ = reply.send(Ok(()));
                     continue 'exec;
                 }
-                Ok(Request::Run(statement)) => {
+                Ok(Some(Request::Run(statement))) => {
                     let result = whole(
                         raw,
                         plan,
@@ -656,8 +655,8 @@ fn run(
                         break 'exec End::Cancelled;
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break 'exec End::Finished,
+                Err(_elapsed) => {}
+                Ok(None) => break 'exec End::Finished,
             }
         }
     };
@@ -800,18 +799,17 @@ fn page(
     Ok(page)
 }
 
-// Cursor readers are threads, which wasm32 does not have yet.
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     struct File {
-        _directory: tempfile::TempDir,
+        _directory: rocky_platform::fs::Scratch,
         path: PathBuf,
         writer: sqlite::Connection,
     }
-    fn file(rows: i64) -> File {
-        let directory = tempfile::tempdir().unwrap();
+    async fn file(rows: i64) -> File {
+        let directory = rocky_platform::fs::Scratch::new().await;
         let path = directory.path().join("cursor.db");
         let writer = sqlite::Connection::open(&path).unwrap();
         writer.run_now("PRAGMA journal_mode=wal").unwrap();
@@ -860,7 +858,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_thousand_cursor_leases_reuse_the_worker_and_clear_temporary_views() {
-        let file = file(1);
+        let file = file(1).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         for _ in 0..1000 {
@@ -898,7 +896,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn readiness_from_another_commit_is_refused_inside_the_snapshot() {
-        let file = file(1);
+        let file = file(1).await;
         let host = CursorHost::new();
         let mut plan = plan(&file, "SELECT id FROM items", small(1), open());
         plan.epoch = Some(("SELECT count(*) FROM items".into(), 1));
@@ -913,7 +911,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_come_from_one_snapshot_and_reset_restarts_it() {
-        let file = file(5);
+        let file = file(5).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         let mut cursor = SnapshotCursor::open(
@@ -984,7 +982,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn further_statements_read_the_cursor_snapshot() {
-        let file = file(3);
+        let file = file(3).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         let mut cursor = SnapshotCursor::open(
@@ -1032,7 +1030,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn statements_are_confined_and_pages_are_bounded() {
-        let file = file(3);
+        let file = file(3).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         for sql in [
@@ -1087,7 +1085,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn bounds_revocation_and_host_close_end_cursors_deterministically() {
-        let file = file(3);
+        let file = file(3).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         let idle = CursorLimits {
@@ -1104,7 +1102,7 @@ mod tests {
         cursor.next().await.unwrap();
         // Waits for the thread to end the transaction rather than sleeping blindly.
         while host.open_cursors() > 0 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         assert!(matches!(
             cursor.next().await,
@@ -1175,7 +1173,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_session_holds_at_most_its_cursor_quota() {
-        let file = file(1);
+        let file = file(1).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         let mut open_cursors = Vec::new();

@@ -15,7 +15,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// not exist, after flushing every commit. Writes wait for the copy;
     /// no transaction is held across anything else. Returns the revision.
     pub async fn backup_into(&self, target: &Path) -> Result<u64, Error> {
-        if target.exists() {
+        if rocky_platform::fs::exists(target) {
             return Err(denied("the backup target exists"));
         }
         let target = target

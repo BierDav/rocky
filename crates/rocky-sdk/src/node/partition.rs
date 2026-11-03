@@ -813,8 +813,8 @@ impl Node {
         let marker = self.path.with_file_name("bootstrap.json");
         // A pending intent waits for a peer that offers checkpoints, which a
         // keyless custody peer never does: later partitions join it.
-        let mut intent = if marker.exists() {
-            serde_json::from_slice::<Value>(&std::fs::read(&marker)?)?
+        let mut intent = if rocky_platform::fs::exists(&marker) {
+            serde_json::from_slice::<Value>(&rocky_platform::fs::read(&marker)?)?
         } else {
             json!({"intent": true, "pending": []})
         };

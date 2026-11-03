@@ -1,6 +1,8 @@
 //! Direct sync between admitted peers, and identities that do not depend
 //! on routes or transport kinds. See
 //! `docs/runtime/sdk-enrollment.md` and `docs/runtime/sdk-transports.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure, introduce};
 use data_encoding::BASE64URL_NOPAD;
 use rocky_sdk::{

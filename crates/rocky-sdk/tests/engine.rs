@@ -1,5 +1,7 @@
 //! The secure SDK engine end to end: enrollment, sync over iroh,
 //! durable mutations, observation, renewal, revocation and logout.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{Engine, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};

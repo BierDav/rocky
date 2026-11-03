@@ -4,6 +4,7 @@
 //! permissions; see `docs/runtime/credentials.md#identities`.
 use crate::{AuthorRange, Error, PrivateKey, PublicKey, Signature, denied};
 use rocky_core::ResourceScope;
+use rocky_platform::fs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -107,7 +108,7 @@ impl FileIdentityProvider {
         let directory = directory.into();
         let path = directory.join("identity");
         let provider = |error: std::io::Error| Error::Provider(error.into());
-        let key = match std::fs::read(&path) {
+        let key = match fs::read(&path) {
             Ok(bytes) => {
                 let bytes: [u8; 32] = bytes
                     .try_into()
@@ -115,10 +116,10 @@ impl FileIdentityProvider {
                 PrivateKey::from_bytes(&bytes)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                create_private_directory(&directory.join("authors")).map_err(provider)?;
+                fs::create_private_dir_all(directory.join("authors")).map_err(provider)?;
                 let key = PrivateKey::new();
                 // Two processes creating at once: the first file wins.
-                match create_new(&path, key.as_bytes()) {
+                match fs::create_new(&path, key.as_bytes()) {
                     Ok(()) => key,
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         return Self::open(directory);
@@ -143,10 +144,10 @@ impl IdentityProvider for FileIdentityProvider {
     }
     fn reserve_author(&self, range: AuthorRange) -> Result<u32, Error> {
         let authors = self.directory.join("authors");
-        create_private_directory(&authors).map_err(|error| Error::Provider(error.into()))?;
+        fs::create_private_dir_all(&authors).map_err(|error| Error::Provider(error.into()))?;
         // An exclusive create is the reservation, across processes.
         for author in range.first..=range.last {
-            match create_new(&authors.join(author.to_string()), &[]) {
+            match fs::create_new(authors.join(author.to_string()), &[]) {
                 Ok(()) => return Ok(author),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(Error::Provider(error.into())),
@@ -156,25 +157,4 @@ impl IdentityProvider for FileIdentityProvider {
             "every author number of the identity's range is taken",
         ))
     }
-}
-fn create_private_directory(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
-}
-/// Writes a new owner-only file, durable on return; an existing one fails.
-fn create_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        create_private_directory(parent)?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
 }

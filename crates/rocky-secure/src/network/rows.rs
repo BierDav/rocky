@@ -519,7 +519,7 @@ pub(super) async fn receive_voids<A: RowApplication>(
 #[cfg(test)]
 mod format_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn parent_transfer_pages_with_removed_metadata_are_refused() {
         #[derive(Serialize)]
         enum Parent {

@@ -74,10 +74,10 @@ async fn graph(replica: &super::super::compaction::Replica, lineage: &Lineage) -
     encode(&replica.tip_graph(lineage.domain).await.unwrap()).unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_source_write_between_preflight_and_admission_refuses_the_stage_atomically() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = lineage
         .open(&dir.path().join("a.db"), &key, 2, None)
@@ -91,7 +91,7 @@ async fn a_source_write_between_preflight_and_admission_refuses_the_stage_atomic
     let mut staging = {
         let a = a.clone();
         let stage = stage.clone();
-        tokio::spawn(async move { a.stage_schema(stage).await })
+        rocky_platform::task::spawn(async move { a.stage_schema(stage).await })
     };
     tokio::select! {
         ready = ready => ready.unwrap(),
@@ -160,10 +160,10 @@ async fn applied_binding(
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn racing_stages_recheck_private_state_before_admission() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = lineage
         .open(&dir.path().join("a.db"), &key, 2, None)
@@ -175,7 +175,7 @@ async fn racing_stages_recheck_private_state_before_admission() {
     let mut first = {
         let a = a.clone();
         let stage = stage.clone();
-        tokio::spawn(async move { a.stage_schema(stage).await })
+        rocky_platform::task::spawn(async move { a.stage_schema(stage).await })
     };
     tokio::select! {
         ready = ready => ready.unwrap(),
@@ -213,10 +213,10 @@ async fn racing_stages_recheck_private_state_before_admission() {
     a.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_source_move_between_preflight_and_admission_refuses_the_stage_atomically() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = lineage
         .open(&dir.path().join("a.db"), &key, 2, None)
@@ -228,7 +228,7 @@ async fn a_source_move_between_preflight_and_admission_refuses_the_stage_atomica
     let mut staging = {
         let a = a.clone();
         let stage = stage.clone();
-        tokio::spawn(async move { a.stage_schema(stage).await })
+        rocky_platform::task::spawn(async move { a.stage_schema(stage).await })
     };
     tokio::select! {
         ready = ready => ready.unwrap(),

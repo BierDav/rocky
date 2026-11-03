@@ -1,7 +1,7 @@
 use super::syntax::*;
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn actual_reconstruction_has_one_raw_bounded_slot_and_valid_uncached_fallback() {
     let (l, _, _, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;
@@ -46,7 +46,7 @@ async fn actual_reconstruction_has_one_raw_bounded_slot_and_valid_uncached_fallb
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_attempt_keeps_only_syntax_and_retry_reads_and_credits_original_sql_once() {
     let (l, _, _, replica, signed) = candidate_tables(1, true).await;
     release(&replica, &signed).await;

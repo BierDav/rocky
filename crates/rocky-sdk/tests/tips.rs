@@ -1,5 +1,7 @@
 //! Seals, tips and bookmarks through the JSON contract and `Session`. See
 //! `docs/runtime/tips-and-bookmarks.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 #[path = "tips/schema_changes.rs"]
 mod schema_changes;

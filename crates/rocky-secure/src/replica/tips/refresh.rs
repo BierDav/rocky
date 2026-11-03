@@ -254,7 +254,7 @@ impl<A: RowApplication> Inner<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_private_malformed_cyclic_path_checks_each_bound_before_the_cycle() {
         let scope = Scope {
             mesh: rocky_core::MeshId([1; 16]),

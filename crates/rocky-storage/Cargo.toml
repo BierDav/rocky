@@ -12,10 +12,11 @@ license-file.workspace = true
 # Process-death probes inside SQLite COMMIT, omitted from packaged runtimes.
 qualification = []
 # Fault-injection hooks and scratch directories for the tests of dependent crates.
-test-support = ["dep:tempfile"]
+test-support = ["rocky-platform/test-support"]
 
 [dependencies]
 rocky-core.workspace = true
+rocky-platform.workspace = true
 # Application statements are analyzed as a SQLite-dialect syntax tree.
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 rusqlite = { version = "=0.40.2", features = ["bundled", "column_decltype", "functions", "hooks", "preupdate_hook"] }
@@ -23,16 +24,8 @@ tokio = { version = "1", features = ["sync", "time"] }
 # `std::time::Instant` on native; the browser clock on wasm32.
 web-time = "1"
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-tempfile = { version = "3", optional = true }
-
-# The browser's SQLite: native's amalgamation and flags (vendor/sqlite-wasm-rs),
-# on OPFS through a pool whose WAL works across connections (vendor/sqlite-wasm-vfs).
-[target.'cfg(target_family = "wasm")'.dependencies]
-sqlite-wasm-rs = "0.5"
-sqlite-wasm-vfs = { path = "../../vendor/sqlite-wasm-vfs" }
-
 [dev-dependencies]
+rocky-platform = { workspace = true, features = ["test-support"] }
 # Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
 wasm-bindgen-test = "0.3"
 tokio = { version = "1", features = ["macros", "rt"] }

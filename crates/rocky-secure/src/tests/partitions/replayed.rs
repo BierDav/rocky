@@ -3,6 +3,8 @@
 use super::*;
 use rocky_core::replay::{DropReason, TransactionOutcome};
 
+// Exhaustive delivery schedules run across threads.
+#[cfg(not(target_family = "wasm"))]
 mod convergence;
 
 async fn keys(
@@ -84,9 +86,9 @@ fn transaction(frame: &EncryptedFrame, key: [u8; 32], f: &Fixture) -> rocky_core
     payload(frame, key, f).membership().unwrap().transaction
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let open =
         |name: &'static str, node: &PrivateKey, held: Option<&'static [&'static str]>, number| {
@@ -186,9 +188,9 @@ async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() 
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let (w, r) = (PrivateKey::new(), PrivateKey::new());
     let writer = f
@@ -250,9 +252,9 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
     assert_eq!(records(&f, &writer, &w, "A").await.len(), 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let open = |name: &'static str, node: &PrivateKey, number| {
@@ -316,9 +318,9 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
     assert_eq!(records(&f, &writer, &w, "A").await.len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engines() {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let open = |name: &'static str, node: &PrivateKey, number| {

@@ -1,7 +1,7 @@
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 pub(super) const NODE: NodeId = NodeId([3; 16]);
 pub(super) const PEER: NodeId = NodeId([4; 16]);
@@ -13,7 +13,7 @@ pub(super) fn scope(domain: u8) -> Scope {
         domain: DomainId([domain; 16]),
     }
 }
-async fn open(dir: &TempDir, options: RuntimeOptions) -> Runtime<InventoryApp> {
+async fn open(dir: &Scratch, options: RuntimeOptions) -> Runtime<InventoryApp> {
     open_node(&dir.path().join("options.db"), NODE, options).await
 }
 /// Two domains that accept operations authored by either node.
@@ -97,9 +97,9 @@ async fn select(replica: &Replica<InventoryApp>, domain: u8, sql: &str) -> ReadS
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn grouped_mutations_keep_order_identity_and_survive_reopen() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, grouped()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let (first, resume) = pause(&replica).await;
@@ -131,9 +131,9 @@ async fn grouped_mutations_keep_order_identity_and_survive_reopen() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_busy_step_reruns_only_its_savepoint() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, grouped()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let (first, resume) = pause(&replica).await;
@@ -162,9 +162,9 @@ async fn a_busy_step_reruns_only_its_savepoint() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_follow_commits_and_page_instead_of_refusing() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, RuntimeOptions::default()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     note(&replica, 1, "one").committed().await.unwrap();
@@ -204,9 +204,11 @@ async fn reads_follow_commits_and_page_instead_of_refusing() {
     runtime.close().await.unwrap();
 }
 
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_domains_share_the_file_writer_and_reopen() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, RuntimeOptions::default()).await;
     let writes = |domain: u8| {
         let replica = runtime.domain(scope(domain)).unwrap();
@@ -232,9 +234,9 @@ async fn concurrent_domains_share_the_file_writer_and_reopen() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_follow_incoming_application_and_reopen() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open_node(&dir.path().join("peer.db"), PEER, RuntimeOptions::default()).await;
     let remote = note(&source.domain(scope(1)).unwrap(), 1, "remote")
         .committed()
@@ -273,9 +275,9 @@ async fn reads_follow_incoming_application_and_reopen() {
     source.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn group_size_and_checkpoint_frames_are_bounded() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let defaults = RuntimeOptions::default();
     let group = |group_commit| RuntimeOptions {
         group_commit,

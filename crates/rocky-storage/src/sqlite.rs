@@ -833,11 +833,10 @@ impl Connection {
         }
         Ok(())
     }
-    /// Runs `serve` with the engine connection. A cursor's thread holds it
-    /// for the cursor's whole life.
-    pub(crate) fn hold<T>(&self, serve: impl FnOnce(&rusqlite::Connection) -> T) -> Result<T> {
-        let raw = self.raw()?;
-        Ok(serve(&raw))
+    /// The engine connection. A cursor's worker holds it for the cursor's
+    /// whole life, across the awaits between pages.
+    pub(crate) fn hold(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+        self.raw()
     }
     fn raw(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>> {
         self.0
@@ -1170,7 +1169,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_wide_read_only_connection_keeps_first_reads_bounded_and_read_only() {
-        let directory = crate::files::Scratch::new().await;
+        let directory = rocky_platform::fs::Scratch::new().await;
         let path = directory.path().join("wide.db");
         let writer = Connection::open(&path).unwrap();
         let mut schema = String::from(

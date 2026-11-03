@@ -1,5 +1,7 @@
 //! Signed backup archives restored into a fresh signing identity. See
 //! `docs/runtime/backup-and-restore.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure, SCHEMA, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};

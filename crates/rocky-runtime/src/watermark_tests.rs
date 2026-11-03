@@ -5,8 +5,8 @@ use crate::scaling_option_tests::{NODE, PEER, note, open_node, scope};
 use crate::worker::Fault;
 use inventory_app::InventoryApp;
 use rocky_core::*;
+use rocky_platform::fs::Scratch;
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
 
 fn one_file() -> RuntimeOptions {
     RuntimeOptions {
@@ -20,9 +20,9 @@ async fn snapshots(replica: &Replica<InventoryApp>, directory: &Path) {
 }
 /// Rows of `domain` as power loss after the latest flush would leave them.
 async fn flushed(snapshot: &Path, file: &str, domain: u8, sql: &str) -> Vec<Vec<SqlValue>> {
-    let copy = TempDir::new().unwrap();
+    let copy = Scratch::new().await;
     for name in [file.to_string(), format!("{file}-wal")] {
-        let _ = std::fs::copy(snapshot.join(&name), copy.path().join(&name));
+        let _ = rocky_platform::fs::copy(snapshot.join(&name), copy.path().join(&name));
     }
     let conn = crate::scoped_connection::ScopedConnection::new(
         crate::sqlite::Connection::open(&copy.path().join(file)).unwrap(),
@@ -47,9 +47,9 @@ async fn flushed_operations(snapshot: &Path, file: &str) -> Vec<Vec<u8>> {
     .collect()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_buffered_commit_is_never_reported_as_flushed() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open_node(&dir.path().join("buffered.db"), NODE, one_file()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let first = note(&replica, 1, "buffered").receipt().await.unwrap();
@@ -99,9 +99,9 @@ async fn a_buffered_commit_is_never_reported_as_flushed() {
 
 /// Every exposure point answers only after a flush covering what it shows:
 /// the latest flushed copy of the file already holds it.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn nothing_leaves_the_device_before_a_flush_covers_it() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let snapshot = dir.path().join("flushed");
     let runtime = open_node(&dir.path().join("author.db"), NODE, one_file()).await;
     let replica = runtime.domain(scope(1)).unwrap();
@@ -168,10 +168,10 @@ async fn nothing_leaves_the_device_before_a_flush_covers_it() {
 /// Restores the files as they stood at the latest flush, as power loss would.
 fn lose_unflushed(snapshot: &Path, live: &Path, file: &str) {
     for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(live.join(format!("{file}{suffix}")));
+        let _ = rocky_platform::fs::remove_file(live.join(format!("{file}{suffix}")));
     }
     for suffix in ["", "-wal"] {
-        let _ = std::fs::copy(
+        let _ = rocky_platform::fs::copy(
             snapshot.join(format!("{file}{suffix}")),
             live.join(format!("{file}{suffix}")),
         );
@@ -180,9 +180,9 @@ fn lose_unflushed(snapshot: &Path, live: &Path, file: &str) {
 
 /// Local writes stay buffered while incoming pages and strong commands run
 /// on the same domain, and each exposure is on the device when it returns.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn exposure_stays_behind_the_watermark_with_incoming_work() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let snapshot = dir.path().join("flushed");
     let remote = crate::write_concurrency_tests::peer_operations(dir.path(), 12).await;
     let runtime = open_node(&dir.path().join("node.db"), NODE, one_file()).await;
@@ -222,9 +222,9 @@ async fn exposure_stays_behind_the_watermark_with_incoming_work() {
 
 /// Replaces the earlier fork demonstration: losing buffered commits can no
 /// longer fork an author log, because nothing above the watermark was sent.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn losing_unflushed_commits_drops_only_unexposed_work_and_never_forks() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (live, snapshot): (PathBuf, PathBuf) =
         (dir.path().join("author"), dir.path().join("flushed"));
     let file = live.join("author.db");

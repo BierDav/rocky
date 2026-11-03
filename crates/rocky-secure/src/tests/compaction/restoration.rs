@@ -9,7 +9,7 @@ mod roots;
 mod voids;
 use fixture::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_endpoint_first_held_prefix_waits_across_reopen_until_the_last_gap_arrives() {
     let mut f = HeldPrefix::new(3).await;
     let scope = f.lineage.scope("items");
@@ -49,7 +49,7 @@ async fn an_endpoint_first_held_prefix_waits_across_reopen_until_the_last_gap_ar
     f.replica.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
     let mut f = HeldPrefix::new(3).await;
     let scope = f.lineage.scope("items");
@@ -90,7 +90,7 @@ async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
     f.replica.audit(scope).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn author_admission_clears_only_with_the_whole_write_transaction() {
     let mut f = negatives::filled().await;
     let scope = f.lineage.scope("items");

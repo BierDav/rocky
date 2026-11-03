@@ -1,6 +1,8 @@
 //! Replayed tables through the SDK: concurrent increments both apply, and
 //! a transaction that loses its key in canonical order drops, reported to
 //! observers and through its commit token.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, DropReason, Network, Open, SqlValue, TransactionOutcome, TransactionToken,

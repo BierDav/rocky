@@ -1,5 +1,7 @@
 //! Credential primitives through the call contract: raw grants to a device
 //! that is not an issuer. See `docs/runtime/credentials.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};

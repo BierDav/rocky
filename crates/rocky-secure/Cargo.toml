@@ -17,7 +17,10 @@ tracing.workspace = true
 rocky-core.workspace = true
 rocky-credentials.workspace = true
 rocky-storage.workspace = true
-tokio = { version = "1", features = ["macros", "rt", "sync", "time", "net", "io-util"] }
+rocky-platform.workspace = true
+# `std::time` natively; the browser clock on wasm32.
+web-time = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "io-util"] }
 
 p2panda-core = "=0.5.2"
 p2panda-store = { version = "=0.5.2", default-features = false }
@@ -29,11 +32,17 @@ rand = "=0.8.8"
 [dev-dependencies]
 serde_json = "1"
 employees-app = { path = "../../examples/employees-app" }
-rocky-coordinator = { path = "../rocky-coordinator" }
 rocky-storage = { path = "../rocky-storage", features = ["test-support"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rocky-platform = { workspace = true, features = ["test-support"] }
+# Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
+wasm-bindgen-test = "0.3"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rocky-coordinator = { path = "../rocky-coordinator" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

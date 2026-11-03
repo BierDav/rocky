@@ -618,7 +618,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             let mut pass = Refresh::default();
             loop {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 let mut inner = self.inner.lock(Class::Background).await;
                 let saved = pass.clone();
                 let more = transaction!(@commit inner, |inner| {
@@ -709,7 +709,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             let mut after = Vec::new();
             loop {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 let inner = self.inner.lock(Class::Background).await;
                 source.check(&inner)?;
                 let records = collect_rows(inner.conn.query(
@@ -892,7 +892,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 #[cfg(test)]
 mod token_encoding_tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn token_array_headers_match_the_current_encoding_at_length_boundaries() {
         for count in [0, 1, 23, 24, 255, 256, 65_535, 65_536] {
             let encoded = encode(&vec![Vec::<u8>::new(); count]).unwrap();

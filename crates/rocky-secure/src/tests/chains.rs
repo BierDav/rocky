@@ -31,7 +31,7 @@ fn widened(
     assert_eq!(grants.len(), count);
     grants
 }
-async fn open(f: &Fixture, dir: &TempDir, node: &PrivateKey, grants: usize) -> (Replica, Chain) {
+async fn open(f: &Fixture, dir: &Scratch, node: &PrivateKey, grants: usize) -> (Replica, Chain) {
     let config = f.config(node, widened(f, f.full(), grants, false), &[f.public]);
     let chain = Chain::new(config.credentials.clone()).unwrap();
     let path = dir.path().join(format!("{}.db", node.public_key()));
@@ -83,10 +83,10 @@ async fn sessions(
     (accepted, dialed)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_session_carries_an_authors_chain_once_across_its_pages() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 20).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
@@ -124,10 +124,10 @@ async fn a_session_carries_an_authors_chain_once_across_its_pages() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_next_pass() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
@@ -166,10 +166,10 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pushed_frame_without_its_chain_is_not_received() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
@@ -198,10 +198,10 @@ async fn a_pushed_frame_without_its_chain_is_not_received() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob, carol) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let (a, _) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
@@ -234,10 +234,10 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
     assert_eq!(count(&c, "SELECT hash FROM secure_operations").await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_chain_goes_with_the_last_operation_that_names_it() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
@@ -291,7 +291,7 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
 /// bootstrap.
 struct Checkpointed {
     f: Fixture,
-    _dir: TempDir,
+    _dir: Scratch,
     source: Replica,
     target: Replica,
     target_key: PrivateKey,
@@ -301,7 +301,7 @@ struct Checkpointed {
 }
 async fn checkpointed() -> Checkpointed {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (source_key, target_key) = (PrivateKey::new(), PrivateKey::new());
     let scopes = [f.public, f.private];
     let ac = f.config(&source_key, f.full(), &scopes);
@@ -339,7 +339,7 @@ async fn checkpointed() -> Checkpointed {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_installed_checkpoint_is_not_imported_again() {
     let c = checkpointed().await;
     let (mut server, mut client) = sessions(

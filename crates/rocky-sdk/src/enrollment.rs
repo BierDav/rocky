@@ -32,9 +32,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
@@ -509,13 +510,13 @@ impl Intent {
         store: &std::sync::Arc<dyn crate::SecretStore>,
         provider: Option<&Arc<dyn IdentityProvider>>,
     ) -> Result<(Self, Vault), Failure> {
-        if path.exists() {
-            let previous: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        if rocky_platform::fs::exists(path) {
+            let previous: Self = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
             let vault = Vault::new(store.clone(), &previous.installation);
             if previous.invitation == invitation && previous.stored_identity == provider.is_none() {
                 return Ok((previous, vault));
             }
-            std::fs::remove_file(path)?;
+            rocky_platform::fs::remove_file(path)?;
             vault.forget(
                 [crate::identities::ROLE, "node", "transport", "credential"]
                     .into_iter()
@@ -695,7 +696,7 @@ impl Settings {
     }
 
     pub(crate) fn revocation(&self, path: &Path) -> Result<Option<SignedRevocation>, Failure> {
-        let bytes = match std::fs::read(path.with_file_name("revoked.json")) {
+        let bytes = match rocky_platform::fs::read(path.with_file_name("revoked.json")) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -777,7 +778,7 @@ impl Settings {
 
     /// Loads only the current identity format, without changing the file or keys.
     pub fn load(path: &Path) -> Result<Self, Failure> {
-        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let value: serde_json::Value = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
         if value["version"].as_u64() != Some(u64::from(VERSION)) {
             return Err("unsupported identity version; reinstall the domain".into());
         }
@@ -2269,11 +2270,13 @@ impl Settings {
     }
 
     /// The publisher key an invitation names, before anything is stored.
+    #[cfg(not(target_family = "wasm"))]
     pub fn invitation_publisher(invitation: &str) -> Result<PublicKey, Failure> {
         Ok(Invite::parse(invitation)?.publisher)
     }
     /// Adds the contacts of another identity of this domain, such as the
     /// one a restored backup carried, without replacing known ones.
+    #[cfg(not(target_family = "wasm"))]
     pub fn learn_contacts(&mut self, other: &Settings, exclude: &[PublicKey]) {
         for (node, contact) in &other.peers {
             if exclude.contains(node) || self.peers.contains_key(node) {
@@ -2429,7 +2432,7 @@ impl Settings {
         provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Result<Self, Failure> {
         let intent_path = Intent::path(path, true);
-        if !intent_path.exists() {
+        if !rocky_platform::fs::exists(&intent_path) {
             return Err("no device keys in this directory: prepare the device first".into());
         }
         let (intent, vault) = Intent::resume(&intent_path, None, store, provider.as_ref())?;
@@ -2525,7 +2528,7 @@ impl Settings {
             }
         }
         settings.save(path)?;
-        std::fs::remove_file(intent_path)?;
+        rocky_platform::fs::remove_file(intent_path)?;
         Ok(settings)
     }
     /// Stores a reader key and lists its epoch. A held epoch keeps its key.
@@ -2713,7 +2716,7 @@ impl Joining {
         settings.adopt_groups(&vault, &enrollment.groups)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
-        std::fs::remove_file(Intent::path(path, false))?;
+        rocky_platform::fs::remove_file(Intent::path(path, false))?;
         Ok(settings)
     }
 }
@@ -3820,10 +3823,10 @@ async fn dial_any(
     let mut failure = None;
     let mut timed_out = false;
     for address in addresses {
-        match tokio::time::timeout(TIMEOUT, transport.connect(address, protocol)).await {
+        match rocky_platform::time::timeout(TIMEOUT, transport.connect(address, protocol)).await {
             Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(error)) => {
-                timed_out = error.is::<tokio::time::error::Elapsed>()
+                timed_out = error.is::<rocky_platform::time::error::Elapsed>()
                     || error
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
@@ -3858,7 +3861,7 @@ pub(crate) async fn exchange_stream(
     mut stream: Stream,
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
-    tokio::time::timeout(2 * TIMEOUT, async {
+    rocky_platform::time::timeout(2 * TIMEOUT, async {
         write_message(&mut stream, request).await?;
         let reply = read_message(&mut stream).await?;
         let _ = stream.shutdown().await;
@@ -3882,7 +3885,7 @@ pub async fn answer(
     mut stream: Stream,
     answer: impl AsyncFnOnce(Vec<u8>) -> Result<Vec<u8>, Failure>,
 ) -> Result<(), Failure> {
-    let request = tokio::time::timeout(TIMEOUT, read_message(&mut stream)).await??;
+    let request = rocky_platform::time::timeout(TIMEOUT, read_message(&mut stream)).await??;
     let reply = match answer(request).await {
         Ok(reply) => serde_json::json!({"reply": HEXLOWER.encode(&reply)}),
         Err(error) => {
@@ -3890,7 +3893,7 @@ pub async fn answer(
         }
     };
     let reply = serde_json::to_vec(&reply).unwrap_or_default();
-    tokio::time::timeout(TIMEOUT, async {
+    rocky_platform::time::timeout(TIMEOUT, async {
         write_message(&mut stream, &reply).await?;
         stream.shutdown().await?;
         // Wait for the peer to close, so the answer is delivered.
@@ -4219,7 +4222,9 @@ impl Settings {
     }
 }
 
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
 
 #[cfg(test)]
@@ -4263,6 +4268,8 @@ mod deadline_tests {
         }
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn exchange_tries_later_routes_after_two_full_dial_deadlines() {
         let (client, server) = tokio::io::duplex(1024);
@@ -4271,15 +4278,15 @@ mod deadline_tests {
             attempts: AtomicUsize::new(0),
             stream: Mutex::new(Some(Stream::new(client))),
         };
-        let answer = tokio::spawn(async move {
+        let answer = rocky_platform::task::spawn(async move {
             assert_eq!(read_message(&mut server).await.unwrap(), b"request");
             // Use some of the exchange budget, after the two dial budgets.
-            tokio::time::sleep(TIMEOUT).await;
+            rocky_platform::time::sleep(TIMEOUT).await;
             write_message(&mut server, br#"{"reply":"6f6b"}"#)
                 .await
                 .unwrap();
         });
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         let reply = exchange(
             &transport,
             &["first".into(), "second".into(), "third".into()],

@@ -14,6 +14,8 @@ use rocky_credentials::{Authority, PartitionGrant};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+// Exhaustive delivery schedules run across threads.
+#[cfg(not(target_family = "wasm"))]
 mod convergence;
 mod restrictions;
 
@@ -744,10 +746,10 @@ async fn exchange(
     expected
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
     let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, mut history) = devices(
         &c,
         root.path(),
@@ -811,10 +813,10 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
     assert!(devices[0].fresh().await.is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checks_pass_null_and_hold_after_every_statement() {
     let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, mut history) = devices(
         &c,
         root.path(),
@@ -857,10 +859,10 @@ async fn checks_pass_null_and_hold_after_every_statement() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() {
     let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, mut history) = devices(
         &c,
         root.path(),
@@ -987,10 +989,10 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
     assert!(matches!(error, Error::Rejected(_)), "{error:?}");
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_releases_them() {
     let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, mut history) = devices(
         &c,
         root.path(),
@@ -1101,10 +1103,10 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
 
 /// Statements one replayed single-row insert costs its receiver, by what
 /// it must check. Printed for the phase evidence; not a budget.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_per_assertion_are_recorded() {
     let c = Constrained::new();
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, _) = devices(
         &c,
         root.path(),

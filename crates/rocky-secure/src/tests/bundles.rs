@@ -50,10 +50,10 @@ fn public_reader(f: &Fixture) -> Vec<ResourceGrant> {
     )]
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions_atomically() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let alice = PrivateKey::new();
     let source = open(&f, &dir.path().join("a.db"), &alice, f.full(), &both).await;
@@ -159,10 +159,10 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
     assert_eq!(live(&late, f.private).await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let alice = PrivateKey::new();
     let path = dir.path().join("a.db");
@@ -298,10 +298,10 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     ));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn members_that_disagree_reject_every_held_partition() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     // Two files with one signing identity fork its private log: the private
     // sequence zero of one bundle is another bundle's member.
@@ -366,10 +366,10 @@ async fn members_that_disagree_reject_every_held_partition() {
     assert_eq!(live(&reversed, f.public).await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let alice = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &alice, f.full(), &both).await;
@@ -505,10 +505,10 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     assert_eq!(operations(&replica).await, before);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn logout_drops_keys_and_ends_sessions() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let replica = open(
         &f,
@@ -542,10 +542,10 @@ async fn logout_drops_keys_and_ends_sessions() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let alice = open(
         &f,
@@ -665,10 +665,10 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
     assert_eq!(assigned.commit([4; 32]).await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let source = open(
         &f,
@@ -732,11 +732,11 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
     assert_eq!(live(&dave, f.public).await, 40);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     use network::{NativeSession, link};
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [f.public, f.private];
     let (hub, carol, bob) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let hub_config = f.config(&hub, f.full(), &both);

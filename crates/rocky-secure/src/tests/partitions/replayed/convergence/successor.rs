@@ -131,10 +131,10 @@ fn outcome(dropped: Option<DropReason>, sealed: bool) -> TransactionOutcome {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let mut h = offline_history(&f, root.path()).await;
     let late_k = transaction(&h.offline[2][0], [1; 32], &f);
     assert_eq!(
@@ -198,10 +198,10 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
 /// Every order of the owner's and the offline transactions, with the
 /// successor learned before, between or after them, converges once the
 /// receiver finalizes the seal.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let h = offline_history(&f, root.path()).await;
     let expected = h.expected(&f);
     let units: Vec<Vec<EncryptedFrame>> = std::iter::once(h.sealed.clone())
@@ -232,7 +232,7 @@ async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
                 "{order:?} {graph}"
             );
             drop(replica);
-            std::fs::remove_file(&path).ok();
+            rocky_platform::fs::remove_file(&path).ok();
         }
     }
 }
@@ -242,7 +242,7 @@ async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
 /// receives the seal's members again.
 async fn finalization_crash(point: CrashPoint) {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let mut h = offline_history(&f, root.path()).await;
     let unsealed = h.a.replica.unsealed_replayed_transactions().await.unwrap();
     h.a.replica.arm_crash(Some(point)).await;
@@ -286,17 +286,17 @@ async fn finalization_crash(point: CrashPoint) {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_while_a_seal_deletes_undo_records_reopens_and_converges() {
     finalization_crash(CrashPoint::UndoDeletion).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_while_a_seal_rewinds_its_late_transactions_reopens_and_converges() {
     finalization_crash(CrashPoint::Rewind).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_while_a_seal_redoes_its_late_transactions_reopens_and_converges() {
     finalization_crash(CrashPoint::Redo).await;
 }
@@ -304,10 +304,10 @@ async fn a_crash_while_a_seal_redoes_its_late_transactions_reopens_and_converges
 /// Compaction signs a replayed partition's rows at the seal as its base;
 /// with every frame still retained, a member joining after it replays
 /// them instead of installing the base.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compaction_signs_a_replayed_base_and_a_later_member_replays_the_frames() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let mut owner = Author::open(&f, root.path(), 1).await;
     follow_main(&f, &owner.replica).await;
     owner.create(&f, &[("A", "x", 1)], 1).await;

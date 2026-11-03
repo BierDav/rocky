@@ -43,7 +43,7 @@ async fn stage(f: &HeldPrefix) {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_verified_lower_prefix_anchors_a_held_and_signed_void_suffix() {
     let mut f = HeldPrefix::with_anchor(2, 3).await;
     let scope = f.lineage.scope("items");
@@ -83,7 +83,7 @@ async fn a_verified_lower_prefix_anchors_a_held_and_signed_void_suffix() {
     assert_eq!(titles(&f.replica).await.len(), 3);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
     let mut f = HeldPrefix::with_anchor(3, 0).await;
     let scope = f.lineage.scope("items");

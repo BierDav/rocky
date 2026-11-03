@@ -1,5 +1,7 @@
 //! Issuer recovery: a second issuer keeps a domain enrolling, renewing and
 //! revoking after its creator is lost. See `docs/runtime/sdk-enrollment.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};

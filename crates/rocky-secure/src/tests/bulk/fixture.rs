@@ -1,7 +1,7 @@
 use super::*;
 type Candidate = (
     Lineage,
-    TempDir,
+    Scratch,
     PrivateKey,
     EncryptedReplica<TypedRows>,
     SignedMigrationPublication,
@@ -34,7 +34,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
                     .unwrap(),
             ])
         });
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = l
         .open_certified(&dir.path().join("source.db"), (signer, &key), 2, None)

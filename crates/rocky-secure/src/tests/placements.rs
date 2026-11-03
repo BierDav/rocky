@@ -8,10 +8,10 @@ use crate::{PlacementPage, PlacementRequest};
 use std::collections::BTreeSet;
 mod conflicts;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice_key = PrivateKey::new();
     let bob_key = PrivateKey::new();
     let alice = lineage
@@ -79,7 +79,7 @@ async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
 
 struct Pair {
     lineage: Lineage,
-    _dir: TempDir,
+    _dir: Scratch,
     alice: Replica,
     bob: (PrivateKey, Replica),
     seal: Commitment,
@@ -112,7 +112,7 @@ async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
 /// before her seal are in `tags`, so bob misses their positions.
 async fn pair() -> Pair {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = lineage
         .open(&dir.path().join("alice.db"), &PrivateKey::new(), 3, None)
         .await
@@ -146,7 +146,7 @@ async fn pair() -> Pair {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_custody() {
     let pair = pair().await;
     let scope = pair.lineage.scope("tags");
@@ -189,10 +189,10 @@ async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_cust
     assert_eq!(scalar(&pair.bob.1, "SELECT count(*) FROM tags").await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = lineage
         .open(&dir.path().join("a.db"), &PrivateKey::new(), 3, None)
         .await
@@ -249,7 +249,7 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     bob.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_member_finalizes_and_compacts_a_seal_whose_tail_lies_in_a_scope_it_cannot_hold() {
     let pair = pair().await;
     let (lineage, bob) = (&pair.lineage, &pair.bob);
@@ -280,7 +280,7 @@ async fn a_member_finalizes_and_compacts_a_seal_whose_tail_lies_in_a_scope_it_ca
     bob.1.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_later_held_frame_places_gaps_before_an_older_seals_frontier() {
     let pair = pair().await;
     insert(&pair.alice, "b", "two").await;
@@ -299,7 +299,7 @@ async fn a_later_held_frame_places_gaps_before_an_older_seals_frontier() {
     assert_eq!(scalar(&pair.bob.1, "SELECT count(*) FROM tags").await, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     let pair = pair().await;
     let (alice, bob) = (&pair.alice, &pair.bob);
@@ -437,7 +437,7 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_placement_from_a_revoked_author_is_refused() {
     let pair = pair().await;
     let request = pair.bob.1.wanted_placements().await.unwrap()[0];
@@ -470,7 +470,7 @@ async fn a_placement_from_a_revoked_author_is_refused() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivocation() {
     let pair = pair().await;
     let (lineage, alice, bob) = (&pair.lineage, &pair.alice, &pair.bob);
@@ -604,10 +604,10 @@ fn revoking_node(lineage: &Lineage, node: PublicKey) -> RevocationSet {
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let relay_path = dir.path().join("relay.db");
     let alice = lineage

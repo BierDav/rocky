@@ -159,7 +159,7 @@ fn check_lt(actual: &Lt, state: &[u8], digest: &[u8]) {
     assert_eq!(actual.digest().as_slice(), digest);
     assert!(Lt::from_bytes(state).unwrap() == *actual);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn full_lanes_keep_independent_bytes_and_wrapping() {
     let row = [[8; 32].as_slice(), frozen!("materialized-live.cbor")].concat();
     let creation = creation_item(Hash::from_bytes([6; 32]), 7);
@@ -224,7 +224,7 @@ fn check_sets(actual: &Sets, state: &[u8], summaries: &[u8], counts: (u64, u64, 
         &summaries[32..]
     );
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
     let live = encode(&materialized(false)).unwrap();
     let deleted = encode(&materialized(true)).unwrap();
@@ -276,7 +276,7 @@ fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
     direct.create(Hash::from_bytes([6; 32]), 7);
     assert!(sets == direct);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn signed_checkpoint_reproduces_and_verifies_the_software_fixture() {
     let checkpoint = signed();
     assert_eq!(

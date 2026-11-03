@@ -378,7 +378,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             let mut needs = Vec::new();
             for (scope, id) in &plan.scopes {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 let inner = self.inner.lock(crate::replica::Class::Background).await;
                 if inner.rebootstrap_context() != context {
                     continue 'pass;

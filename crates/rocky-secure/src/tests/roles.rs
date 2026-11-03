@@ -98,7 +98,7 @@ async fn insert(
             .inner
             .lock(crate::replica::Class::Background)
             .await;
-        let mut pending = tokio::task::JoinSet::new();
+        let mut pending = rocky_platform::task::JoinSet::new();
         for _ in 0..64 {
             if start == range.end {
                 break;
@@ -173,7 +173,10 @@ async fn stored_rows(replica: &Replica, scope: ResourceScope) -> i64 {
         .unwrap();
     result.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
-async fn connect(node: &Node, server: &Node) -> (NativeSession, tokio::task::JoinHandle<()>) {
+async fn connect(
+    node: &Node,
+    server: &Node,
+) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
     connect_with(node, server, MAX_SECURE_BYTES).await
 }
 /// A client session with its own byte budget; `server` answers it until the
@@ -182,7 +185,7 @@ async fn connect_with(
     node: &Node,
     server: &Node,
     budget: usize,
-) -> (NativeSession, tokio::task::JoinHandle<()>) {
+) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
     // As a link's tip exchange does before rows move.
     let domain = *server
         .replica
@@ -194,7 +197,7 @@ async fn connect_with(
         .next()
         .unwrap();
     exchange_graphs(&node.replica, &server.replica, domain).await;
-    let (near, far) = network::link::testing::tcp().await;
+    let (near, far) = network::link::testing::connected().await;
     let (session, mut served) = network::link::testing::sessions_over(
         near,
         far,
@@ -208,7 +211,7 @@ async fn connect_with(
     .await
     .unwrap();
     let replica = server.replica.clone();
-    let task = tokio::spawn(async move {
+    let task = rocky_platform::task::spawn(async move {
         loop {
             if let Err(error) = served.serve_once(&replica).await {
                 // A disconnect ends the session; anything else is printed for the failing test.
@@ -240,10 +243,10 @@ fn keep_one_copy() -> RetentionPolicy {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scope = department(&f, 0);
     let full = open_node(
         &f,
@@ -332,10 +335,10 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
     server.await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_partial_replica_holds_only_its_subscription() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 20);
     let full = open_node(
         &f,
@@ -418,10 +421,10 @@ async fn a_partial_replica_holds_only_its_subscription() {
     assert_eq!((page.rows.len(), page.complete), (20, false));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 2);
     let full = open_node(
         &f,
@@ -613,10 +616,10 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 1);
     let scope = scopes[0];
     let full = open_node(
@@ -670,10 +673,10 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
     assert_eq!(all_rows(&device.replica, scope).await, expected);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pruning_counts_full_nodes_only_once_they_applied() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scope = department(&f, 0);
     let full = open_node(
         &f,
@@ -743,10 +746,10 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
     assert_eq!((report.pruned, report.blocked), (10, None));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_remote_read_states_its_source_and_is_never_local_state() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 2);
     let full = open_node(
         &f,
@@ -823,10 +826,10 @@ async fn a_remote_read_states_its_source_and_is_never_local_state() {
     server.await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 3);
     let full_key = PrivateKey::new();
     let full_path = dir.path().join("full.db");
@@ -1070,10 +1073,10 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         && lag.ahead == 0));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scopes = departments(&f, 2);
     let full = open_node(
         &f,
@@ -1105,7 +1108,7 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
             let mut count = 0u32;
             let mut slowest = std::time::Duration::ZERO;
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                let started = std::time::Instant::now();
+                let started = web_time::Instant::now();
                 let mut handle = key.public_key().as_bytes().to_vec();
                 handle.extend(count.to_le_bytes());
                 replica
@@ -1123,7 +1126,7 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
                     .unwrap();
                 slowest = slowest.max(started.elapsed());
                 count += 1;
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
             }
             (count, slowest)
         }
@@ -1164,10 +1167,10 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_sync_larger_than_a_session_continues_on_the_next() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scope = department(&f, 0);
     let full = open_node(
         &f,

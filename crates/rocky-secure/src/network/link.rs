@@ -702,7 +702,7 @@ impl FrameReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn channels_are_bounded_and_control_has_its_own_channel() {
         let close = || Message::Close {
             reason: CloseReason::NetworkingDisabled,
@@ -740,7 +740,7 @@ mod tests {
             .is_err()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn scope_bounds_and_maximal_frame_fit_the_byte_quota() {
         let scope = ResourceScope {
             domain: rocky_core::Scope {
@@ -804,7 +804,7 @@ mod tests {
             .is_err()
         );
     }
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_current_link_name_and_handshake_label() {
         // Transport and handshake each accept one current version.
         assert_eq!(
@@ -819,10 +819,13 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// Every test here needs tokio's paused clock.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod integration_tests {
     use super::*;
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_signed_link_frame_can_arrive_across_multiple_read_deadlines() {
         let signer = PrivateKey::from_bytes(&[7; 32]);
@@ -856,7 +859,7 @@ mod integration_tests {
         let deliver = async {
             far.write_u32(bytes.len() as u32).await.unwrap();
             for chunk in bytes.chunks(IO_CHUNK) {
-                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 5).await;
                 far.write_all(chunk).await.unwrap();
             }
         };
@@ -866,6 +869,8 @@ mod integration_tests {
         );
         assert_eq!(reader.sequence, 1);
     }
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn oversized_and_empty_headers_are_refused_before_body_read() {
         for length in [0, FRAME_BYTES as u32 + 1] {
@@ -903,8 +908,10 @@ pub(crate) mod testing {
         let (near, far) = tokio::io::duplex(64 * 1024);
         sessions_over(near, far, client, server).await
     }
-    /// Both ends of a loopback TCP connection.
-    pub(crate) async fn tcp() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    /// Both ends of a connected byte stream: loopback TCP natively, and an
+    /// in-memory pipe in a browser, which has no sockets.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn connected() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (near, far) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
@@ -913,6 +920,10 @@ pub(crate) mod testing {
         near.set_nodelay(true).unwrap();
         far.set_nodelay(true).unwrap();
         (near, far)
+    }
+    #[cfg(target_family = "wasm")]
+    pub(crate) async fn connected() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+        tokio::io::duplex(64 * 1024)
     }
     /// The dialed and the accepted end of a link, each as its handshake ended.
     pub(crate) async fn links<A: RowApplication, B: RowApplication>(
@@ -938,8 +949,8 @@ pub(crate) mod testing {
         far?;
         let handle = dialed.channels.handle.clone();
         let (served, mut incoming) = tokio::sync::mpsc::channel(4);
-        tokio::spawn(dialed.drive(tokio::sync::mpsc::channel(1).0));
-        tokio::spawn(accepted.drive(served));
+        rocky_platform::task::spawn(dialed.drive(tokio::sync::mpsc::channel(1).0));
+        rocky_platform::task::spawn(accepted.drive(served));
         let session = handle.open().await?;
         let answering = incoming.recv().await.ok_or_else(|| denied("link ended"))?;
         Ok((session, answering))

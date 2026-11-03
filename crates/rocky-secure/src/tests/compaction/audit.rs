@@ -5,7 +5,7 @@ mod fixture;
 pub(in crate::tests) use fixture::snapshot;
 use fixture::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reports_match_single_audits_with_bases_suffixes_and_no_base() {
     for based in [false, true] {
         let f = AuditFixture::new(based).await;

@@ -1,6 +1,8 @@
 //! Services composed without the starter engine: a database that opens with
 //! no network, sessions sharing it, and network services that own or borrow
 //! their transport. See `docs/runtime/sdk-composition.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{
     Database, Engine, Network, NetworkService, Open, Opened, ServiceError, Session,
     transport::{

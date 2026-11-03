@@ -57,9 +57,9 @@ async fn b_rows(replica: &EncryptedReplica<TypedRows>, f: &Fixture) -> Vec<Vec<S
         .rows
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_partition() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let f = Fixture::build_with(true, PrivateKey::from_bytes(&[210; 32]));
     let mut schema = f.schema.clone();
     let table = &mut schema.tables[0];

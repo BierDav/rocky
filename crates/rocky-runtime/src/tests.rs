@@ -2,7 +2,7 @@ use super::*;
 use rocky_core::CompiledSchema;
 use rocky_core::{SqlValue, StoredApplication, fixtures};
 
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 pub(super) async fn rows(
     conn: &crate::sqlite::Connection,
     sql: &str,
@@ -11,7 +11,7 @@ pub(super) async fn rows(
 }
 use runtime_todo_app::{Action, StaticPolicy, TodoApp, TodoEntry};
 
-async fn open(dir: &TempDir) -> Replica<TodoApp> {
+async fn open(dir: &Scratch) -> Replica<TodoApp> {
     Replica::open_with_config(
         dir.path().join("laptop.db"),
         TodoApp,
@@ -47,16 +47,16 @@ pub(super) async fn fault<A: StoredApplication>(replica: &Replica<A>, fault: wor
     enqueue(&replica.inner.commands, Command::Fault(fault, reply)).unwrap();
     result.await.unwrap().unwrap();
 }
-pub(super) async fn disk(dir: &TempDir, sql: &str) -> Vec<Vec<SqlValue>> {
+pub(super) async fn disk(dir: &Scratch, sql: &str) -> Vec<Vec<SqlValue>> {
     let db = crate::sqlite::Connection::open(&dir.path().join("laptop.db")).unwrap();
     storage::collect_rows(db.query(sql, ()).await.unwrap())
         .await
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn actions_reopen_counters_outbox_and_rebuild() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let deleted = create(&replica, "delete me").await.id;
     let kept = create(&replica, "old title").await.id;
@@ -135,9 +135,9 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
     reopened.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rollback_is_whole_and_never_notifies() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let mut observer = replica.observe().unwrap();
     assert_eq!(observer.next().await.unwrap().revision.get(), 0);
@@ -174,9 +174,9 @@ async fn rollback_is_whole_and_never_notifies() {
     reopened.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn retries_reuse_bytes_and_are_bounded() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     fault(&replica, worker::Fault::RetryBeforeCommit(2)).await;
     let op = create(&replica, "once").await;
@@ -206,9 +206,9 @@ async fn retries_reuse_bytes_and_are_bounded() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn registration_race_slow_observer_and_close() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let mut observer = replica.observe().unwrap();
     create(&replica, "between registration and initial read").await;
@@ -233,9 +233,9 @@ async fn registration_race_slow_observer_and_close() {
     reopened.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cancelled_waiter_and_backpressure_do_not_cancel_admitted_work() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let (entered, entered_rx) = oneshot::channel();
     let (resume, resume_rx) = oneshot::channel();
@@ -285,9 +285,9 @@ async fn cancelled_waiter_and_backpressure_do_not_cancel_admitted_work() {
     reopened.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rejection_incompatible_identity_and_exclusive_open_preserve_data() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let op = create(&replica, "preserve").await;
     assert!(
@@ -386,13 +386,13 @@ async fn rejection_incompatible_identity_and_exclusive_open_preserve_data() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cancelled_observer_query_reconciles_latest_revision() {
     use std::{
         future::Future,
         task::{Context, Poll, Waker},
     };
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let mut observer = replica.observe().unwrap();
     observer.next().await.unwrap();
@@ -424,9 +424,9 @@ async fn cancelled_observer_query_reconciles_latest_revision() {
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn dropping_last_runtime_drains_work_and_stops_observer() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let mut observer = replica.observe().unwrap();
     observer.next().await.unwrap();
@@ -452,9 +452,9 @@ async fn dropping_last_runtime_drains_work_and_stops_observer() {
 /// Another connection holding the write lock makes the file writer retry
 /// `BEGIN IMMEDIATE` with backoff, then report `RetryExhausted` after the
 /// 318 ms bound. Nothing commits while the lock is held.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_file_held_by_another_connection_is_retried_then_exhausted() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     // Answered after the writer's opening flush.
     replica.query().await.unwrap();
@@ -470,11 +470,11 @@ async fn a_file_held_by_another_connection_is_retried_then_exhausted() {
     };
     other.execute("BEGIN IMMEDIATE", ()).await.unwrap();
     let receipt = replica.mutate(todo("after release")).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    rocky_platform::time::sleep(std::time::Duration::from_millis(30)).await;
     other.execute("ROLLBACK", ()).await.unwrap();
     assert_eq!(receipt.committed().await.unwrap().id.sequence.get(), 1);
     other.execute("BEGIN IMMEDIATE", ()).await.unwrap();
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     let error = replica
         .mutate(todo("never"))
         .unwrap()

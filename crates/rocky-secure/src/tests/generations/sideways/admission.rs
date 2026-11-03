@@ -2,10 +2,10 @@
 //! applies it once.
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_write_to_a_removed_table_applies_once_its_path_returns() {
     let lineage = Lineage::pinned(131);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::from_bytes(&[132; 32]);
     let keys = [133, 134].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let path = dir.path().join("alice.db");

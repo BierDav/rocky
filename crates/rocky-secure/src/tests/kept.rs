@@ -61,10 +61,10 @@ async fn numbered_items(replica: &Replica, rows: i64) {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn kept_seals_show_their_rows_while_the_live_tables_move_on() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "alice", &key).await;
     follow_main(&lineage, &replica).await;
@@ -175,10 +175,10 @@ async fn kept_seals_show_their_rows_while_the_live_tables_move_on() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_learned_before_its_frames_is_shallow_until_they_arrive() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -239,11 +239,11 @@ async fn stored_bytes(replica: &Replica, table: &str) -> i64 {
     .await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn five_kept_seals_of_one_percent_changes_add_about_five_percent() {
     const ROWS: i64 = 500;
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "alice", &key).await;
     follow_main(&lineage, &replica).await;
@@ -289,11 +289,11 @@ async fn five_kept_seals_of_one_percent_changes_add_about_five_percent() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_before_a_removal_still_shows_the_removed_field_and_table() {
     use super::generations::identity_insert;
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     // Generation 3 has items(key,title,note,rank) and tags; 4 removes both
     // `note` and `tags`.
@@ -429,7 +429,7 @@ async fn pull_seal(
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that_keeps_it() {
     use crate::TipStatement;
     use rocky_credentials::{
@@ -437,7 +437,7 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
         TIP_OPENING_FORMAT, TipOpeningStatement,
     };
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -592,7 +592,7 @@ async fn follow_changing(lineage: &Lineage, replica: &Replica, bookmark: &str) -
     changes().await - before
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_since() {
     use crate::TipStatement;
     use rocky_credentials::{
@@ -601,7 +601,7 @@ async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_si
     };
     const ROWS: i64 = 400;
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "alice", &key).await;
     follow_main(&lineage, &replica).await;
@@ -688,7 +688,7 @@ async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_si
     same_state(&workspace_state(&replica).await, &on_main);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_branch_on_a_kept_seal_keeps_its_own_writes_across_switches() {
     branch_writes_across_switches(Lineage::new()).await;
 }
@@ -699,7 +699,7 @@ async fn branch_writes_across_switches(lineage: Lineage) {
         BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
         TIP_OPENING_FORMAT, TipOpeningStatement,
     };
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (identity, node) = (PrivateKey::new(), PrivateKey::new());
     let replica = lineage
         .open_certified(
@@ -800,7 +800,7 @@ async fn branch_writes_across_switches(lineage: Lineage) {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_it() {
     use crate::TipStatement;
     use rocky_credentials::{
@@ -808,7 +808,7 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
         TIP_OPENING_FORMAT, TipOpeningStatement,
     };
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
@@ -879,7 +879,7 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
     a.follow_bookmark(lineage.domain, "dev").await.unwrap();
     b.want_seal(lineage.domain, first).await.unwrap();
     assert_eq!(b.wanted_seals(lineage.domain).await.unwrap(), vec![first]);
-    let (near, far) = crate::network::link::testing::tcp().await;
+    let (near, far) = crate::network::link::testing::connected().await;
     let (session, mut served) = crate::network::link::testing::sessions_over(
         near,
         far,

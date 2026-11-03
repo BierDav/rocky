@@ -39,13 +39,17 @@ index for wasm objects. The pregenerated bindings are upstream's: 3.53.0 and
 `rocky-storage`'s `every_target_links_the_same_sqlite` checks the version,
 source id and compile options on every target.
 
-`sqlite-wasm-vfs` 0.2.0 provides the OPFS sync-access-handle pool
-(`sahpool`). Rocky adds `src/locks.rs`: SQLite's file locks and a heap
+`rocky-sqlite-opfs` is Rocky's fork of `sqlite-wasm-vfs` 0.2.0, the OPFS
+sync-access-handle pool (`sahpool`). It is a workspace member and publishes
+under Rocky's name, because `rocky-platform` depends on it; it keeps upstream's
+MIT license and edition, and the workspace lints do not apply to its `unsafe`
+C-ABI code. Rocky adds `src/locks.rs`: SQLite's file locks and a heap
 wal-index shared by the connections one worker opens, behind version 2 io
 methods (`xLock`, `xUnlock`, `xCheckReservedLock`, `xShm*`). Upstream's locks
 are no-ops and it has no shared memory, so WAL was impossible and several
 connections to a file could see each other's unfinished pages. OPFS access
 handles already exclude other workers and tabs; the lock state is plain safe
 Rust with unit tests, and the callbacks only translate pointers and codes.
-`OpfsSAHPoolUtil` gains `size`. The IndexedDB VFS is removed. Rocky's
+`OpfsSAHPoolUtil` gains `write`, `flush`, `rename` and `size` for
+`rocky_platform::fs`. The IndexedDB VFS is removed. `rocky-storage`'s
 `files::tests` run the same WAL and locking test natively and in Firefox.

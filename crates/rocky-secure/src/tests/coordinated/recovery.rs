@@ -27,7 +27,7 @@ async fn recovery_seal(
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_recovery_proposal_replaces_the_exact_head_and_abandons_nothing() {
     let f = Fixture::new(1).await;
     follow_main(&f).await;
@@ -73,7 +73,7 @@ async fn a_recovery_proposal_replaces_the_exact_head_and_abandons_nothing() {
     assert!(error.to_string().contains("sealed"), "{error}");
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn recovery_candidates_wait_for_two_trusted_nodes() {
     let f = Fixture::new(1).await;
     follow_main(&f).await;
@@ -131,7 +131,7 @@ async fn recovery_candidates_wait_for_two_trusted_nodes() {
     assert_eq!(f.alice.1.followed_tip().await, next);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_ordinary_terminal_cannot_confirm_a_recovery_at_another_head() {
     let f = Fixture::new(1).await;
     follow_main(&f).await;

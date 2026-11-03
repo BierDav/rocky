@@ -2,9 +2,10 @@ use std::{
     ops::{Deref, DerefMut},
     panic::Location,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{Mutex, MutexGuard, Notify, OwnedMutexGuard};
+use web_time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Class {
@@ -565,7 +566,7 @@ mod tests {
         fn exit(&self, _: &Id) {}
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn slow_holds_report_the_request_site_and_class() {
         let events = Events::default();
         let _subscriber = tracing::subscriber::set_default(events.clone());
@@ -592,7 +593,7 @@ mod tests {
     }
 
     #[cfg(any(test, feature = "qualification"))]
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn histogram_records_both_classes_and_owned_guards() {
         let measurements = LockMeasurements::default();
         let mutex = ReplicaLock::new((), measurements.clone());
@@ -626,7 +627,7 @@ mod tests {
         assert_eq!(interactive.1.hold_us.len(), 1);
         assert!(measurements.take().holders.is_empty());
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn indivisible_requests_keep_their_own_histogram() {
         let measurements = LockMeasurements::default();
         let mutex = ReplicaLock::new((), measurements.clone());
@@ -659,18 +660,18 @@ mod tests {
     }
     async fn settle() {
         for _ in 0..16 {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
         }
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn background_queued_first_acquires_after_interactive() {
         let (order, lock, measurements) = order();
         let lock = Arc::new(lock);
         let holder = lock.lock(Class::Background).await;
         let spawn = |class, name| {
             let (lock, order) = (lock.clone(), order.clone());
-            tokio::spawn(async move {
+            rocky_platform::task::spawn(async move {
                 let _guard = lock.lock(class).await;
                 order.lock().unwrap().push(name);
             })
@@ -688,7 +689,7 @@ mod tests {
         assert_eq!(measurements.stop().interactive_steps, [1]);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn cancelled_interactive_waiter_unregisters() {
         let (_, lock, _) = order();
         let holder = lock.lock(Class::Background).await;
@@ -708,7 +709,7 @@ mod tests {
         drop(lock.lock(Class::Background).await);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn interactive_acquisitions_stay_fifo() {
         let (order, lock, _) = order();
         let lock = Arc::new(lock);
@@ -716,7 +717,7 @@ mod tests {
         let mut tasks = Vec::new();
         for name in ["first", "second", "third"] {
             let (lock, order) = (lock.clone(), order.clone());
-            tasks.push(tokio::spawn(async move {
+            tasks.push(rocky_platform::task::spawn(async move {
                 let _guard = lock.lock(Class::Interactive).await;
                 order.lock().unwrap().push(name);
             }));
@@ -729,14 +730,14 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), ["first", "second", "third"]);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn starvation_guard_lets_background_advance() {
         let (order, lock, _) = order();
         let lock = Arc::new(lock);
         let mut holder = Some(lock.lock_owned(Class::Interactive).await);
         let background = {
             let (lock, order) = (lock.clone(), order.clone());
-            tokio::spawn(async move {
+            rocky_platform::task::spawn(async move {
                 let _guard = lock.lock(Class::Background).await;
                 order.lock().unwrap().push("background");
             })
@@ -744,7 +745,7 @@ mod tests {
         // Overlapping interactive writes keep a waiter registered throughout.
         for _ in 0..2 * STARVATION_YIELDS {
             let (lock, order) = (lock.clone(), order.clone());
-            let next = tokio::spawn(async move {
+            let next = rocky_platform::task::spawn(async move {
                 let guard = lock.lock_owned(Class::Interactive).await;
                 order.lock().unwrap().push("interactive");
                 guard

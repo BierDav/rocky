@@ -76,10 +76,10 @@ async fn partial(replica: &Replica, full: &Replica, scope: ResourceScope) {
 /// importer lose it for good). Q takes A's base, F replays every frame. At
 /// the next seal, which covers the record, P writes a base and R takes it;
 /// all hold the same items and drops.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys: [PrivateKey; 4] = std::array::from_fn(|_| PrivateKey::new());
     let (items, tags) = (lineage.scope("items"), lineage.scope("tags"));
     let a = open(&lineage, &dir, "a", &keys[0]).await;

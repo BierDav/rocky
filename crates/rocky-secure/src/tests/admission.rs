@@ -90,10 +90,10 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
     RevocationSet::try_from(signed).unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_recorded() {
     let (f, other) = (Fixture::new(), Fixture::new());
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob, stranger) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "a.db", &alice).await;
     let b = open(&f, &dir, "b.db", &bob).await;
@@ -151,10 +151,10 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
     assert_eq!(b.recorded_peers().await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, dave, erin) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "a.db", &alice).await;
     let d = open(&f, &dir, "d.db", &dave).await;
@@ -200,7 +200,7 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     open(&f, &dir, "e.db", &erin).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn another_session_version_is_refused_with_the_authentication_error() {
     // The first version and the parent format, `rocky.link.v10`.
     for version in [1, 10] {
@@ -209,7 +209,7 @@ async fn another_session_version_is_refused_with_the_authentication_error() {
 }
 async fn refused_session_version(version: u32) {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "a.db", &alice).await;
     let b = open(&f, &dir, "b.db", &bob).await;
@@ -239,10 +239,10 @@ async fn refused_session_version(version: u32) {
     assert!(dialed.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn full_revocation_sets_converge_when_equal_or_missing() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob, carol) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "a.db", &alice).await;
     let b = open(&f, &dir, "b.db", &bob).await;
@@ -252,7 +252,7 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
     b.learn_revocations(&full).await.unwrap();
 
     // Equal sets: the exchange after the hellos is one digest each way.
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     let (left, right) = hello((&alice, &a), (&bob, &b), &f).await;
     let elapsed = started.elapsed();
     let spent = right.unwrap().handshake_bytes;
@@ -260,7 +260,7 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
     eprintln!("1,024 equal statements: {spent} bytes after the hellos, handshake {elapsed:?}");
 
     // 1,024 against none: every page fits a frame and the sets end equal.
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     let (left, right) = hello((&alice, &a), (&carol, &c), &f).await;
     let elapsed = started.elapsed();
     let spent = right.unwrap().handshake_bytes;
@@ -273,11 +273,11 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_leave_first() {
     use crate::replica::MAX_UNCONFIGURED_PEERS;
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = PrivateKey::new();
     let a = open(&f, &dir, "a.db", &alice).await;
     insert(&a, &f, 1, "held").await;

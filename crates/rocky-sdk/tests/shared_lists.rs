@@ -1,6 +1,8 @@
 //! A list shared with an enrolled writer: one envelope, delivered by sync,
 //! opens the list, its categories and items, which then bootstrap from a
 //! checkpoint and sync. See `docs/runtime/partitioned-scopes.md#group-secrets`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};

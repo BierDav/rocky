@@ -30,10 +30,10 @@ async fn open_keyed(f: &Fixture, path: &Path, node: &PrivateKey) -> (Replica, Cr
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author(handle(1), insert(&f, 1, "base"), vec![])
@@ -162,10 +162,10 @@ async fn compacted_and_pruned(
     empty
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_joiner_with_only_the_public_key_moves_on_through_a_live_session() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [
         PrivateKey::new(),
         PrivateKey::new(),
@@ -178,7 +178,7 @@ async fn a_joiner_with_only_the_public_key_moves_on_through_a_live_session() {
     list(&f, &a).await;
     let c_path = dir.path().join("c.db");
     let (c, c_credentials) = open(&f, &c_path, &keys[2]).await;
-    let (near, far) = network::link::testing::tcp().await;
+    let (near, far) = network::link::testing::connected().await;
     let (session, served) = network::link::testing::sessions_over(
         near,
         far,
@@ -260,10 +260,10 @@ async fn a_joiner_with_only_the_public_key_moves_on_through_a_live_session() {
     assert_eq!(all_rows(&f, &d).await, all_rows(&f, &c).await);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn covered_keyless_ciphertext_stays_deferred_and_signs_no_empty_state() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     let (e, _) = open_keyed(&f, &dir.path().join("e.db"), &keys[1]).await;
@@ -303,10 +303,10 @@ fn resigned(
     SignedCheckpoint::sign(statement, node, credentials.clone()).unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn malformed_forged_or_unauthorized_no_frames_records_are_refused() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &keys[1]).await;
@@ -403,10 +403,10 @@ async fn malformed_forged_or_unauthorized_no_frames_records_are_refused() {
     import_no_frames(&f, &a, (&c, &keys[2], &c_credentials)).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn covered_private_history_contradicts_a_no_frames_claim_now_or_later() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [
         PrivateKey::new(),
         PrivateKey::new(),
@@ -475,10 +475,10 @@ async fn covered_private_history_contradicts_a_no_frames_claim_now_or_later() {
     let _ = d_credentials;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_late_key_applies_the_private_suffix_past_a_no_frames_base() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &keys[1]).await;
@@ -508,10 +508,10 @@ async fn a_late_key_applies_the_private_suffix_past_a_no_frames_base() {
     a.audit(f.private).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tampered_stored_no_frames_base_fails_open_and_full_audit() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let path = dir.path().join("a.db");
     let (a, _) = open(&f, &path, &keys[0]).await;
@@ -540,10 +540,10 @@ async fn a_tampered_stored_no_frames_base_fails_open_and_full_audit() {
     assert!(reopened.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_custody_relay_serves_the_original_no_frames_statement() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author_buffered(handle(1), insert(&f, 1, "base"), vec![])
@@ -577,10 +577,10 @@ async fn a_custody_relay_serves_the_original_no_frames_statement() {
     assert_eq!(relayed.signer(), empty.signer());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_no_frames_switch_reopens_and_finishes_without_churn() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author_buffered(handle(1), insert(&f, 1, "base"), vec![])
@@ -628,10 +628,10 @@ async fn an_interrupted_no_frames_switch_reopens_and_finishes_without_churn() {
     b.audit(f.private).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pulled_seal_state_can_be_a_no_frames_record() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author_buffered(handle(1), insert(&f, 1, "base"), vec![])

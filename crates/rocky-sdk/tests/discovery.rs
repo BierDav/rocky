@@ -4,6 +4,8 @@
 //! record on a local lookup server. And the first relay run: two endpoints
 //! with no direct path converge through a local relay. See
 //! `docs/runtime/sdk-transports.md#qualification`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 #![cfg(feature = "iroh")]
 use common::{Device, Failure};
 use rocky_sdk::{

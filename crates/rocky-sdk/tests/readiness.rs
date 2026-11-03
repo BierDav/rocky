@@ -1,3 +1,5 @@
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure};
 use rocky_sdk::{Network, Session, transport::memory::Hub};

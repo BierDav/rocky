@@ -11,7 +11,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         #[cfg(test)]
         let expected = if self.compare_finalization {
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             self.conn
                 .execute("SAVEPOINT finalization_oracle", ())
                 .await?;
@@ -34,7 +34,7 @@ impl<A: RowApplication> Inner<A> {
             None
         };
         #[cfg(test)]
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         self.finalize_seal_impl(domain, seal, scopes, keep, true)
             .await?;
         #[cfg(test)]
@@ -47,7 +47,7 @@ impl<A: RowApplication> Inner<A> {
         {
             self.finalization_time += started.elapsed();
             if let Some(expected) = expected {
-                let started = std::time::Instant::now();
+                let started = web_time::Instant::now();
                 let actual = self.finalization_snapshot().await?;
                 self.finalization_oracle_time += started.elapsed();
                 if actual != expected {

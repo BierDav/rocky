@@ -1,7 +1,15 @@
 //! Always-on custody launcher; configuration and runbook are in docs.
-use rocky_sdk::{CustodyPeer, Failure};
+use rocky_sdk::Failure;
 
+/// The custody peer is a native server.
+#[cfg(target_family = "wasm")]
 fn main() -> Result<(), Failure> {
+    Err("rocky-peer runs natively".into())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn main() -> Result<(), Failure> {
+    use rocky_sdk::CustodyPeer;
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [config] = args.as_slice() else {
         return Err("usage: rocky-peer <configuration.json>".into());

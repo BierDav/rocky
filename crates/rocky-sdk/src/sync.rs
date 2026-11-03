@@ -300,7 +300,7 @@ pub(crate) async fn bootstrap(
     }
     planned.sort_by_key(|plan| (plan.rows == 0, plan.rows));
     let record = |pending: &[ResourceScope], expected: &mut Vec<u8>| -> Result<(), Failure> {
-        if std::fs::read(marker)? != *expected {
+        if rocky_platform::fs::read(marker)? != *expected {
             return Err("bootstrap authority changed; retry with the new intent".into());
         }
         let mut next = serde_json::json!({"intent": intent, "pending": pending, "totals": totals});

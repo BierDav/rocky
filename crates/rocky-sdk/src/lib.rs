@@ -1,4 +1,6 @@
 #![recursion_limit = "256"]
+// The protocol suites run natively; their test support is unused in a browser.
+#![cfg_attr(all(test, target_family = "wasm"), allow(dead_code, unused_imports))]
 //! Rocky DB's official Rust application SDK.
 //!
 //! Add `rocky-sdk = "<release version>"` to your dependencies.
@@ -140,10 +142,14 @@ mod activity;
 mod backup;
 mod configuration;
 mod connection;
+// The always-on peer drives its own runtime.
+#[cfg(not(target_family = "wasm"))]
 mod custody;
 mod database;
 mod delivery;
 mod domain;
+// The starter composition opens synchronously, which a browser cannot.
+#[cfg(not(target_family = "wasm"))]
 mod engine;
 mod enrollment;
 mod generation;
@@ -161,12 +167,16 @@ mod secrets;
 mod self_enrollment;
 mod service;
 mod session;
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod simulation;
 mod sql;
 mod status;
 mod sync;
-#[cfg(test)]
+// Multi-node protocol suites: native transports, threads, paused clocks and
+// native temporary directories.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod test_directory;
 mod tip_schemas;
 mod tips;
@@ -177,18 +187,21 @@ pub use configuration::Configuration;
 pub use connection::{
     Binding, ConnectionOptions, Durability, Page, Profile, SqlFailure, TableChange, TableEvents,
 };
+#[cfg(not(target_family = "wasm"))]
 pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
+#[cfg(not(target_family = "wasm"))]
 pub use engine::Engine;
 pub use enrollment::{DeviceKeys, Supplied, route_enrollment};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// Named domain counters whose idempotent claims hand out unique,
-/// increasing values; see [`Database::claim`].
-#[cfg(feature = "iroh")]
+/// increasing values; see [`Database::claim`]. Claims go through the
+/// coordination service, which is native-only.
+#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
 pub use rocky_coordinator::counters;
 /// The client of a coordination service and the bundle that pins it.
-#[cfg(feature = "iroh")]
+#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
 pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};
 /// Coordinator refusals, such as `Unavailable` (uncertain: retry the same
 /// claim) and `Expired`, inside a claim's [`Failure`].

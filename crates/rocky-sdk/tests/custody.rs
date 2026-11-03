@@ -1,4 +1,6 @@
 //! Custody-only enrollment and staggered device availability.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Network, transport::memory::Hub};

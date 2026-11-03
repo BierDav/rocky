@@ -9,14 +9,14 @@ use rocky_credentials::{
     SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
     TipOpeningStatement,
 };
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path};
 
 type Replica = EncryptedReplica<Employees>;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_a_branch_replays_initially_held_history_in_causal_order() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("held-source.db"), &PrivateKey::new()).await;
     let target = open(&f, &dir.path().join("held-target.db"), &PrivateKey::new()).await;
     main(&f, &source).await;
@@ -70,10 +70,10 @@ async fn following_a_branch_replays_initially_held_history_in_causal_order() {
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn returning_to_a_branch_preserves_its_inherited_held_snapshot() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("held-snapshot.db"), &PrivateKey::new()).await;
     main(&f, &replica).await;
     let genesis = replica.followed_tip().await;
@@ -113,10 +113,10 @@ async fn returning_to_a_branch_preserves_its_inherited_held_snapshot() {
     assert_eq!(frontier.logs[0].applied, 3);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn late_frames_on_a_previously_continued_abandoned_line_are_held() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("abandoned-a.db"), &PrivateKey::new()).await;
     let b = open(&f, &dir.path().join("abandoned-b.db"), &PrivateKey::new()).await;
     main(&f, &a).await;
@@ -284,11 +284,11 @@ async fn raw_rows(replica: &Replica) -> Vec<Vec<rocky_core::SqlValue>> {
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or_ten_thousand_rows()
 {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let mut costs = Vec::new();
     for count in [10, 10_000] {
         let key = PrivateKey::new();
@@ -341,10 +341,10 @@ async fn adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or
     assert!(costs[0] > 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn graph_admission_rolls_back_its_database_and_memory_and_survives_reopen() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("graph.db");
     let key = PrivateKey::new();
     let replica = open(&f, &path, &key).await;
@@ -396,10 +396,10 @@ async fn graph_admission_rolls_back_its_database_and_memory_and_survives_reopen(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn offline_writes_cross_two_continue_seals_without_changing_their_author() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir.path().join("a.db"), &a_key).await;
     let b = open(&f, &dir.path().join("b.db"), &b_key).await;
@@ -426,10 +426,10 @@ async fn offline_writes_cross_two_continue_seals_without_changing_their_author()
     assert_eq!(a.snapshot(f.public).await.unwrap().rows.len(), 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
     main(&f, &a).await;
@@ -520,10 +520,12 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
     );
 }
 
-#[tokio::test]
+// The coordinator's memory log is native-only, like the coordinator.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&f, &dir.path().join("coordinated.db"), &key).await;
     main(&f, &replica).await;
@@ -538,7 +540,9 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
         bookmark(&f, "main", Some(tip), signed.successor().unwrap()),
     ];
     let coordinator = rocky_coordinator::coordinated::MemoryLog::new();
-    replica.set_domain_log(Some(Arc::new(coordinator.client(key.public_key()))));
+    replica.set_domain_log(Some(std::sync::Arc::new(
+        coordinator.client(key.public_key()),
+    )));
     // A seal admission refuses never ends the log.
     let mut forged = signed.statement.clone();
     forged.frontier.clear();
@@ -637,10 +641,10 @@ async fn identity_replica(
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_node() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::new();
     let original = PrivateKey::new();
     let (replica, identity_chain) = identity_replica(
@@ -734,10 +738,10 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::new();
     let original = PrivateKey::new();
     let (replica, identity_chain) =
@@ -799,10 +803,10 @@ async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node()
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn branch_snapshot_inherits_late_writes_already_inside_its_opening_seal() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
     let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
     main(&f, &a).await;
@@ -824,10 +828,10 @@ async fn branch_snapshot_inherits_late_writes_already_inside_its_opening_seal() 
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("restart.db");
     let identity = PrivateKey::new();
     let original = PrivateKey::new();
@@ -919,10 +923,10 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn backward_bookmark_close_and_move_roll_back_together_then_hold_abandoned_writes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&f, &dir.path().join("rollback.db"), &key).await;
     main(&f, &replica).await;
@@ -1003,10 +1007,10 @@ async fn backward_bookmark_close_and_move_roll_back_together_then_hold_abandoned
     assert_eq!(peer.held_changes().await.unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn offline_across_close_is_held_and_relayed_unchanged_by_every_holder() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::new();
     let (a_key, b_key, c_key) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let (a, _) = identity_replica(&f, &dir.path().join("a.db"), &identity, &a_key).await;
@@ -1071,10 +1075,10 @@ async fn offline_across_close_is_held_and_relayed_unchanged_by_every_holder() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir.path().join("held-server.db"), &a_key).await;
     let b = open(&f, &dir.path().join("held-client.db"), &b_key).await;
@@ -1159,10 +1163,10 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_frames() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let main_key = PrivateKey::new();
     let main_replica = open(&f, &dir.path().join("main.db"), &main_key).await;
     let (b_identity, c_identity) = (PrivateKey::new(), PrivateKey::new());
@@ -1286,10 +1290,10 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     assert_eq!(c.snapshot(f.public).await.unwrap().rows.len(), 3);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_resolves_again() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a_key = PrivateKey::new();
     let a = open(&f, &dir.path().join("a.db"), &a_key).await;
     let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;

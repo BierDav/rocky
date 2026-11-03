@@ -174,7 +174,7 @@ impl Registry {
 
     pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
         let mut events = self.events.subscribe();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        rocky_platform::time::timeout(Duration::from_secs(10), async {
             loop {
                 events.borrow_and_update();
                 if !self.inbound_short(peer) {
@@ -665,7 +665,7 @@ impl Node {
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
         crate::reactor::spawn_local("live_link", async move {
-            let started = tokio::time::Instant::now();
+            let started = rocky_platform::time::Instant::now();
             let _permit = permit;
             let result = node
                 .run_link(&service, opened, close_rx, changed_tx, authority)
@@ -905,13 +905,13 @@ pub(super) fn control_probe(
     far: link::Link,
 ) -> (
     std::sync::mpsc::Receiver<Result<(), Failure>>,
-    tokio::task::JoinHandle<()>,
+    rocky_platform::task::JoinHandle<()>,
 ) {
     let (near_direction, far_direction) = (near.direction, far.direction);
     let mut near = io::Io::start(near, None);
     let mut far = io::Io::start(far, None);
     let (done, answer) = std::sync::mpsc::sync_channel(1);
-    let task = tokio::spawn(async move {
+    let task = rocky_platform::task::spawn(async move {
         let result: Result<(), Failure> = async {
             near.send(Frame::new(
                 near_direction,

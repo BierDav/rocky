@@ -34,19 +34,13 @@ pub async fn migrate_placement(
     moves: Vec<DomainPlacement>,
 ) -> Result<Vec<DomainPlacement>, Error> {
     let path = path.as_ref().to_path_buf();
-    let (done, result) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("rocky-relocation".into())
-        .spawn(move || {
-            let outcome = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(Error::Io)
-                .and_then(|runtime| runtime.block_on(run(&path, moves)));
-            let _ = done.send(outcome);
-        })
-        .map_err(Error::Io)?;
-    result.await.map_err(|_| Error::Closed)?
+    rocky_platform::task::dedicated("rocky-relocation", move || async move {
+        run(&path, moves).await
+    })
+    .map_err(Error::Io)?
+    .join()
+    .await
+    .map_err(|_| Error::Closed)?
 }
 
 fn scope(key: &[u8]) -> Result<Scope, Error> {
@@ -75,7 +69,7 @@ async fn run(path: &Path, moves: Vec<DomainPlacement>) -> Result<Vec<DomainPlace
     let mut catalog_path = path.as_os_str().to_owned();
     catalog_path.push("-placement.sqlite");
     let catalog_path = PathBuf::from(catalog_path);
-    if !catalog_path.exists() {
+    if !rocky_platform::fs::exists(&catalog_path) {
         return Err(Error::Incompatible("no placement catalog".into()));
     }
     let (_owner, raw) = DatabaseOwner::open(&catalog_path).await?;
@@ -381,7 +375,7 @@ async fn copy(
     target_binding: &[u8],
     namespace: &str,
 ) -> Result<(), Error> {
-    if !source.exists() {
+    if !rocky_platform::fs::exists(source) {
         return Err(Error::Incompatible(
             "assigned runtime file is missing".into(),
         ));
@@ -509,7 +503,7 @@ async fn copy(
 }
 /// Drops the namespace's tables from the file the domain left.
 async fn discard(source: &Path, namespace: &str) -> Result<(), Error> {
-    if !source.exists() {
+    if !rocky_platform::fs::exists(source) {
         return Ok(());
     }
     let (_owner, raw) = DatabaseOwner::open(source).await?;

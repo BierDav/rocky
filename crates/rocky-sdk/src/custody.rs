@@ -41,7 +41,7 @@ impl CustodyPeer {
         }
         let directory = Path::new(&config.directory);
         let identity = directory.join("identity.json");
-        let existing = identity.exists();
+        let existing = rocky_platform::fs::exists(&identity);
         if existing {
             let settings = Settings::load(&identity)?;
             if !matches!(settings.profile, Profile::Custody { .. })

@@ -630,7 +630,7 @@ pub(super) fn words(sql: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn words_keep_quoted_names_and_drop_the_final_semicolon() {
         assert_eq!(
             words("PRAGMA table_info(`my ``t```);"),

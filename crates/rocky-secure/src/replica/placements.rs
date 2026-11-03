@@ -603,7 +603,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let id = seal.id().map_err(credential)?;
             let mut gaps = BTreeSet::new();
             for (scope, scope_id) in &plan.scopes {
-                tokio::task::yield_now().await;
+                rocky_platform::task::yield_now().await;
                 let inner = self.inner.lock(crate::replica::Class::Background).await;
                 // A plan from another authority or tip only asks for placements the
                 // peer refuses or this replica no longer needs.

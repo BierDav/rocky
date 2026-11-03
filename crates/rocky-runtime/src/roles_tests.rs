@@ -2,8 +2,8 @@
 use super::*;
 use crate::tests::{create, mutation};
 use rocky_core::fixtures;
+use rocky_platform::fs::Scratch;
 use runtime_todo_app::{Action, StaticPolicy, TodoApp};
-use tempfile::TempDir;
 
 const SERVER: NodeId = NodeId([0x77; 16]);
 
@@ -27,7 +27,7 @@ fn manual(custody: usize) -> RuntimeOptions {
     }
 }
 async fn open(
-    dir: &TempDir,
+    dir: &Scratch,
     node: NodeId,
     full_nodes: &[NodeId],
     custody: usize,
@@ -90,9 +90,9 @@ fn at(frontier: &rocky_core::AppliedFrontier, node: NodeId) -> u64 {
         .map_or(0, |(_, sequence)| sequence.get())
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, &[], 0).await;
     let phone = open(&dir, fixtures::PHONE, &[], 0).await;
     let server = open(&dir, SERVER, &[], 0).await;
@@ -165,9 +165,9 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, &[SERVER], 1).await;
     let phone = open(&dir, fixtures::PHONE, &[SERVER], 1).await;
     let server = open(&dir, SERVER, &[], 0).await;
@@ -256,9 +256,9 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn custody_needs_configured_full_nodes() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let result = Replica::open_with_options(
         dir.path().join("a.db"),
         TodoApp,

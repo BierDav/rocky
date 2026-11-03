@@ -1,9 +1,9 @@
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_incremental_finalization_rolls_back_rows_positions_drops_and_revision() {
     let lineage = Lineage::pinned(205);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(
         &lineage,
         &dir,

@@ -1139,7 +1139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let mut status = Vec::new();
         for scope in scopes {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             let me = inner.config.node.public_key();
             let holding = match inner.holding(scope).await? {

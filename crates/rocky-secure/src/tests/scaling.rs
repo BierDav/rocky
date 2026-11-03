@@ -3,10 +3,10 @@ use crate::storage::rows;
 use rocky_core::SqlValue;
 use std::collections::BTreeMap;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn bounded_pages_scope_filtering_and_pending_passes_do_not_starve() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = PrivateKey::new();
     let b = PrivateKey::new();
     let bc = f.config(&b, f.full(), &[f.public]);
@@ -164,10 +164,10 @@ async fn bounded_pages_scope_filtering_and_pending_passes_do_not_starve() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn shadow_switch_rollback_reopen_and_tombstones_preserve_original_history() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let config = f.config(&node, f.full(), &[f.public, f.private]);
     let credentials = config.credentials.clone();
@@ -258,10 +258,10 @@ fn wide_row(index: u16) -> [u8; 32] {
     row
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("a.db"),
@@ -398,10 +398,10 @@ async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn read_and_replay_queries_use_indexes() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = EncryptedReplica::open(
         dir.path().join("a.db"),
         f.app(),
@@ -427,7 +427,7 @@ async fn read_and_replay_queries_use_indexes() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
     use rocky_core::{ApplicationManifest, DefinitionItem, RowApplication};
     use std::sync::{
@@ -532,7 +532,7 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
             keys: vec![KeyMaterial::new(f.public, 1, [11; 32])],
         }
     };
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = PrivateKey::new();
     let b = PrivateKey::new();
     let source_calls = Arc::new(AtomicUsize::new(0));
@@ -590,10 +590,10 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
 
 /// Statements the target prepares to apply ordinary updates: one frame of
 /// 32 updated rows, then a frame updating one row.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_ordinary_update_applies_in_few_statements_per_row() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
     let config = f.config(&b, f.full(), &[f.public]);
     let credentials = config.credentials.clone();
@@ -734,10 +734,10 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
 ///
 /// The corpus is deliberately small: this verifies the canonical digest and
 /// record encoding, not the throughput of hashing a large database.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn lthash_fixture_matches_phase_start() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::from_bytes(&[42; 32]);
     let replica = EncryptedReplica::open(
         dir.path().join("digest.db"),
@@ -763,10 +763,10 @@ async fn lthash_fixture_matches_phase_start() {
     assert_eq!(digest, repeated);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn frame_metadata_observes_writes_and_rollback() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = EncryptedReplica::open(
         dir.path().join("cache.db"),
         f.app(),
@@ -805,10 +805,10 @@ async fn frame_metadata_observes_writes_and_rollback() {
     assert_eq!(inner.holding(f.public).await.unwrap(), holding);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unchanged_held_refresh_does_not_scan_history() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = EncryptedReplica::open(
         dir.path().join("held.db"),
         f.app(),
@@ -862,7 +862,7 @@ async fn an_unchanged_held_refresh_does_not_scan_history() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn selected_row_replay_does_not_materialize_the_remaining_history() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     db.execute_batch("CREATE TABLE secure_operations(hash INTEGER PRIMARY KEY,header BLOB,body BLOB,status TEXT);
@@ -894,10 +894,10 @@ fn selected_row_replay_does_not_materialize_the_remaining_history() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_writer_bounds_both_main_and_temporary_page_caches() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = EncryptedReplica::open(
         dir.path().join("cache.db"),
         f.app(),
@@ -933,10 +933,10 @@ async fn the_writer_bounds_both_main_and_temporary_page_caches() {
 }
 
 #[cfg(feature = "qualification")]
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn author_transaction_and_bundle_acquisitions_are_interactive() {
     let f = Fixture::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let source = EncryptedReplica::open(
         directory.path().join("classes.db"),
         f.app(),

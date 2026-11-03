@@ -1,4 +1,6 @@
 //! Phase 8: sibling histories and writer convergence through the in-process hub.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, credentials::PrivateKey, transport::memory::Hub};
 use serde_json::{Value, json};

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// E that C holds as ciphertext, and `voidable`, another E frame under it.
 struct Contradicted {
     f: Fixture,
-    dir: TempDir,
+    dir: Scratch,
     a: Replica,
     c: Replica,
     e: Replica,
@@ -22,7 +22,7 @@ struct Contradicted {
 
 async fn contradicted() -> Contradicted {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[199; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [200, 201, 202].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author_buffered(handle(1), insert(&f, 1, "base"), vec![])
@@ -145,10 +145,10 @@ async fn reopen(f: &Fixture, path: &Path, key: &PrivateKey) -> Replica {
     replica
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_installed_no_frames_base_reopens_under_an_interrupted_keyed_import() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
     a.author_buffered(handle(1), insert(&f, 1, "base"), vec![])
@@ -210,10 +210,10 @@ async fn an_installed_no_frames_base_reopens_under_an_interrupted_keyed_import()
         .unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_installed_keyed_base_reopens_under_a_staged_no_frames_import_or_pull() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [
         PrivateKey::new(),
         PrivateKey::new(),
@@ -304,13 +304,13 @@ async fn an_installed_keyed_base_reopens_under_a_staged_no_frames_import_or_pull
 
 /// Copies the closed file at `from`, with its log, to `to`.
 fn copy_file(from: &Path, to: &Path) {
-    std::fs::copy(from, to).unwrap();
+    rocky_platform::fs::copy(from, to).unwrap();
     let mut wal = from.as_os_str().to_owned();
     wal.push("-wal");
     let mut copied = to.as_os_str().to_owned();
     copied.push("-wal");
-    if std::path::Path::new(&wal).exists() {
-        std::fs::copy(&wal, &copied).unwrap();
+    if rocky_platform::fs::exists(std::path::Path::new(&wal)) {
+        rocky_platform::fs::copy(&wal, &copied).unwrap();
     }
 }
 /// Each `tamper` applied to a copy of the closed file at `path` fails the
@@ -351,10 +351,10 @@ async fn refused_when_tampered(
 
 const PRIVATE: &str = "(SELECT MAX(id) FROM secure_scope_state)";
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn tampered_no_frames_records_fail_open_and_audit_in_their_own_store() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let a_path = dir.path().join("a.db");
     let (a, _) = open(&f, &a_path, &keys[0]).await;
@@ -428,7 +428,7 @@ async fn tampered_no_frames_records_fail_open_and_audit_in_their_own_store() {
     let _ = sealed;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_frame_that_passed_the_early_check_is_refused_once_a_no_frames_base_installs() {
     let x = contradicted().await;
     let key = PrivateKey::new();
@@ -439,7 +439,7 @@ async fn a_frame_that_passed_the_early_check_is_refused_once_a_no_frames_base_in
     let (reached, resume) = d.gate_next_receive().await;
     let receiving = {
         let (d, frame) = (d.clone(), x.covered.clone());
-        tokio::spawn(async move { d.receive(frame).await })
+        rocky_platform::task::spawn(async move { d.receive(frame).await })
     };
     reached.await.unwrap();
     d.finish_rebootstrap(x.f.private).await.unwrap();
@@ -471,7 +471,7 @@ async fn a_frame_that_passed_the_early_check_is_refused_once_a_no_frames_base_in
     reopen(&x.f, &path, &key).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
     let x = contradicted().await;
     let key = PrivateKey::new();
@@ -524,7 +524,7 @@ async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
     reopen(&x.f, &v_path, &key).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_staged_no_frames_claim_survives_covered_history_until_finish_refuses_it() {
     let x = contradicted().await;
     let key = PrivateKey::new();
@@ -544,7 +544,7 @@ async fn a_staged_no_frames_claim_survives_covered_history_until_finish_refuses_
     reopen(&x.f, &path, &key).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn revoking_the_signer_refuses_a_no_frames_state_before_it_is_used() {
     let x = contradicted().await;
     let signer = PrivateKey::new();
@@ -593,7 +593,7 @@ async fn revoking_the_signer_refuses_a_no_frames_state_before_it_is_used() {
 /// another authorized signer restates the private no-frames state.
 struct DevPull {
     f: Fixture,
-    _dir: TempDir,
+    _dir: Scratch,
     a: Replica,
     b: Replica,
     b_key: PrivateKey,
@@ -628,7 +628,7 @@ async fn dev_pull(resign: bool) -> DevPull {
         TIP_OPENING_FORMAT, TipOpeningStatement,
     };
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let domain = f.public.domain;
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
@@ -754,7 +754,7 @@ impl DevPull {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_through_a_pulled_no_frames_seal_installs_it_and_serves_it_onward() {
     let x = dev_pull(false).await;
     let (f, b) = (&x.f, &x.b);
@@ -786,7 +786,7 @@ async fn following_through_a_pulled_no_frames_seal_installs_it_and_serves_it_onw
     assert_eq!(served.id().unwrap(), empty.id().unwrap());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pulled_state_that_no_longer_passes_neither_starts_a_branch_nor_is_dropped_by_reading() {
     let x = dev_pull(true).await;
     let (f, b) = (&x.f, &x.b);
@@ -857,7 +857,7 @@ async fn needing(
     assert_eq!(d.finish_seal_pull(f.private).await.unwrap(), x.sealed);
     (d, path, key)
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn learning_a_revocation_drops_the_signers_pulled_states_before_any_follow() {
     // The restated no-frames state alone, or both of A's states, one keyed.
     for restated in [true, false] {
@@ -896,7 +896,7 @@ async fn learning_a_revocation_drops_the_signers_pulled_states_before_any_follow
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tampered_pulled_state_fails_install_as_corruption_and_stays() {
     let x = dev_pull(false).await;
     let (f, b) = (&x.f, &x.b);
@@ -917,7 +917,7 @@ async fn a_tampered_pulled_state_fails_install_as_corruption_and_stays() {
     assert!(b.audit(f.private).await.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
     let x = contradicted().await;
     let f = &x.f;
@@ -985,7 +985,7 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
 
 const DAY: u64 = 86_400;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     let x = contradicted().await;
     let f = &x.f;
@@ -1096,12 +1096,12 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     reopen(f, &path, &key).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sealer_is_revoked() {
     use rocky_credentials::{Authority, SEAL_FORMAT, SealAction, SealStatement, SignedSeal};
     let f = Fixture::new();
     let domain = f.public.domain;
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [
         PrivateKey::new(),
         PrivateKey::new(),
@@ -1265,7 +1265,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     reopen(&f, &path, &keys[3]).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     let x = contradicted().await;
     let key = PrivateKey::from_bytes(&[203; 32]);
@@ -1328,7 +1328,7 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     assert_eq!(pulled_stores(&d).await, before);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_installed_base_refuses_at_the_early_gate_without_dropping_a_candidate() {
     let x = contradicted().await;
     let key = PrivateKey::from_bytes(&[204; 32]);
@@ -1350,7 +1350,7 @@ async fn an_installed_base_refuses_at_the_early_gate_without_dropping_a_candidat
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     use rocky_credentials::{
         SEAL_FORMAT, SealAction, SealStatement, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
@@ -1491,14 +1491,14 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     reopen(&x.f, &path, &key).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     use rocky_credentials::{
         BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove, SignedTipOpening,
         TIP_OPENING_FORMAT, TipOpeningStatement,
     };
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let domain = f.public.domain;
     let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
@@ -1630,7 +1630,7 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_drops_the_signers_state_first()
  {
     use rocky_credentials::{

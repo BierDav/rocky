@@ -947,7 +947,7 @@ type BundleMember = (EncryptedFrame, RowPayload, Vec<rocky_core::ResourceGrant>)
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn member_openings_bind_scope_even_when_scopes_share_a_secret() {
         let scope = ResourceScope {
             domain: rocky_core::Scope {

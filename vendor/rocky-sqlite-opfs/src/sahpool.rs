@@ -1026,6 +1026,51 @@ impl OpfsSAHPoolUtil {
         Ok(self.pool.has_filename(filename))
     }
 
+    /// Creates `filename` with `bytes`, durable on return (Rocky).
+    pub fn write(&self, filename: &str, bytes: &[u8]) -> Result<()> {
+        self.pool
+            .with_new_file(filename, SQLITE_OPEN_MAIN_DB, |file| {
+                let written = file
+                    .handle
+                    .write_with_u8_array_and_options(
+                        bytes,
+                        &read_write_options(HEADER_OFFSET_DATA as f64),
+                    )
+                    .map_err(OpfsSAHError::Write)?;
+                if written != bytes.len() as f64 {
+                    return Err(OpfsSAHError::Generic(format!(
+                        "wrote {written} of {} bytes",
+                        bytes.len()
+                    )));
+                }
+                file.handle.flush().map_err(OpfsSAHError::Flush)
+            })?
+    }
+
+    /// Makes `filename` durable (Rocky).
+    pub fn flush(&self, filename: &str) -> Result<()> {
+        self.pool
+            .with_file(filename, |file| {
+                file.handle.flush().map_err(OpfsSAHError::Flush)
+            })
+            .unwrap_or_else(|| Err(OpfsSAHError::Generic(format!("{filename} not found"))))
+    }
+
+    /// Renames `from` to `to`, replacing `to` (Rocky). Not atomic: a crash
+    /// between the two header writes leaves `from` and no `to`.
+    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.pool.delete_file(to)?;
+        let mut files = self.pool.map_filename_to_file.borrow_mut();
+        let file = files
+            .remove(from)
+            .ok_or_else(|| OpfsSAHError::Generic(format!("{from} not found")))?;
+        self.pool
+            .set_associated_filename(&file.handle, Some(to), SQLITE_OPEN_MAIN_DB)?;
+        file.handle.flush().map_err(OpfsSAHError::Flush)?;
+        files.insert(to.into(), file);
+        Ok(())
+    }
+
     /// The size of a file's contents, if it exists (Rocky).
     pub fn size(&self, filename: &str) -> Result<Option<u64>> {
         self.pool

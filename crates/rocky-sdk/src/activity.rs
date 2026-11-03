@@ -3,8 +3,9 @@
 //! and group key changes. Bounded and in memory only; see
 //! `docs/runtime/activity.md`.
 use serde_json::{Value, json};
-use std::{collections::VecDeque, time::SystemTime};
+use std::collections::VecDeque;
 use tokio::sync::watch;
+use web_time::SystemTime;
 
 /// Events kept; an observer further behind misses the oldest.
 const KEPT: usize = 512;
@@ -111,7 +112,7 @@ fn sequence(event: &Value) -> u64 {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_are_ordered_bounded_and_resume_after_the_token() {
         let activity = Activity::new();
         for index in 0..(KEPT + 10) {
@@ -134,7 +135,7 @@ mod tests {
         assert_eq!(next["token"], (last + 1).to_string());
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_repeated_event_is_kept_once() {
         let activity = Activity::new();
         activity.record_changed("bootstrap_started", json!({"peer": "a", "scopes": 2}));
@@ -143,7 +144,7 @@ mod tests {
         assert_eq!(activity.after(0)["events"].as_array().unwrap().len(), 2);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn an_empty_log_answers_its_current_token() {
         let activity = Activity::new();
         assert_eq!(activity.after(0), json!({"events": [], "token": "0"}));

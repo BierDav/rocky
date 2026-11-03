@@ -15,10 +15,10 @@ async fn records(replica: &Replica, sql: &str) -> Vec<Vec<SqlValue>> {
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
     let lineage = Lineage::pinned(249);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [250, 251, 252].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
     let source = open(&lineage, &dir, "source", &keys[0]).await;
     insert(&source, "one", "before backup").await;
@@ -138,8 +138,8 @@ pub(super) async fn accounting(
     let mut wal_path = path.as_os_str().to_owned();
     wal_path.push("-wal");
     let wal_path = std::path::PathBuf::from(wal_path);
-    let wal_bytes = || match std::fs::metadata(&wal_path) {
-        Ok(metadata) => metadata.len(),
+    let wal_bytes = || match rocky_platform::fs::len(&wal_path) {
+        Ok(len) => len,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => panic!("WAL accounting: {error}"),
     };
@@ -148,7 +148,7 @@ pub(super) async fn accounting(
         .await
         .unwrap();
     drop(inner);
-    let main = std::fs::metadata(path).unwrap().len();
+    let main = rocky_platform::fs::len(path).unwrap();
     let wal = wal_bytes();
     let graph = scalar(
         replica,

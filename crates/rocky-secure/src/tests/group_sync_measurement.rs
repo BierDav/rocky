@@ -4,8 +4,9 @@ use rocky_core::{
     SchemaDefinition, SqlValue, TypedRows,
 };
 use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
+use web_time::Instant;
 
-use std::{path::Path, time::Instant};
+use std::path::Path;
 
 pub(crate) mod fixture;
 use fixture::Fixture;
@@ -43,9 +44,7 @@ async fn sync(
     };
     let mut visited = BTreeSet::new();
     for attempt in 1..=16 {
-        let (near, far) = crate::network::link::testing::tcp().await;
-        near.set_nodelay(true).unwrap();
-        far.set_nodelay(true).unwrap();
+        let (near, far) = crate::network::link::testing::connected().await;
         let (session, mut served) = crate::network::link::testing::sessions_over(
             near,
             far,
@@ -146,7 +145,7 @@ async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
 }
 
 async fn measure(tables: usize, partitions: i64) {
-    let root = tempfile::tempdir().unwrap();
+    let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(tables);
     let names: Vec<_> = ["customers", "orders", "order_lines", "attachments"]
         .into_iter()
@@ -354,7 +353,7 @@ async fn measure(tables: usize, partitions: i64) {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn erp_group_sync_preserves_all_references_and_reopens() {
     measure(4, 2).await;
 }

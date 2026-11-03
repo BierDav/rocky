@@ -733,7 +733,7 @@ impl<A: RowApplication> Inner<A> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_stored_image_unpacks_to_the_full_image() {
         let mut ordinals = FieldOrdinals::default();
         // Ordinals past one varint byte.

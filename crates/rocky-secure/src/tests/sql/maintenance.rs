@@ -16,10 +16,10 @@ async fn buffered(
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_flush_keeps_sql_maintenance_queued_until_retry() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("failed.db"),
@@ -41,10 +41,12 @@ async fn failed_flush_keeps_sql_maintenance_queued_until_retry() {
     assert!(!replica.maintenance_queued(t.items).await);
 }
 
-#[tokio::test]
+// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("concurrent.db"),
@@ -81,10 +83,10 @@ async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn flushed_commit_defers_maintenance_until_driver_runs() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("flushed.db"),
@@ -102,10 +104,10 @@ async fn flushed_commit_defers_maintenance_until_driver_runs() {
     assert!(!replica.maintenance_queued(t.items).await);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_flushed_commit_retains_maintenance_for_driver_retry() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("failed-flushed.db"),
@@ -133,10 +135,10 @@ async fn failed_flushed_commit_retains_maintenance_for_driver_retry() {
 }
 
 #[cfg(feature = "qualification")]
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sql_status_checks_use_interactive_acquisitions() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = t
         .open(
             &dir.path().join("status.db"),
@@ -170,10 +172,10 @@ async fn sql_status_checks_use_interactive_acquisitions() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn orphaned_pulled_payload_cleanup_is_bounded_and_resumes_after_reopen() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("orphaned-pull.db");
     let node = PrivateKey::new();
     let mut replica = t.open(&path, &node, t.full(), &[t.items]).await;

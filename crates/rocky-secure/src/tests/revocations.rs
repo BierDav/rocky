@@ -5,7 +5,7 @@ use crate::network::link::Link;
 
 pub(super) async fn open(
     f: &Fixture,
-    dir: &TempDir,
+    dir: &Scratch,
     name: &str,
     node: &PrivateKey,
 ) -> EncryptedReplica<Employees> {
@@ -45,10 +45,10 @@ async fn names(replica: &EncryptedReplica<Employees>, f: &Fixture) -> Vec<Vec<u8
     names
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, carol, dave) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "alice.db", &alice).await;
     let c = open(&f, &dir, "carol.db", &carol).await;
@@ -104,10 +104,10 @@ pub(super) async fn hello(
     (accepted, dialed)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_union() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (xavier, yara) = (PrivateKey::new(), PrivateKey::new());
     let x = open(&f, &dir, "x.db", &xavier).await;
     let y = open(&f, &dir, "y.db", &yara).await;

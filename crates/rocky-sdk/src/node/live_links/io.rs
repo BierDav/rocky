@@ -35,7 +35,7 @@ impl Cancellation {
 pub(super) struct Io {
     incoming: mpsc::Receiver<Result<Incoming, Failure>>,
     writes: mpsc::Sender<Write>,
-    tasks: [tokio::task::JoinHandle<()>; 2],
+    tasks: [rocky_platform::task::JoinHandle<()>; 2],
 }
 impl Drop for Io {
     fn drop(&mut self) {
@@ -65,7 +65,7 @@ impl Io {
         let mut writer = opened.writer;
         let errors = incoming.clone();
         let owner = ChannelOwner(handle.clone());
-        let send = tokio::spawn(async move {
+        let send = rocky_platform::task::spawn(async move {
             let _owner = owner;
             let cancelled = async move {
                 match cancellation {
@@ -110,7 +110,7 @@ impl Io {
             let result: Result<(), Failure> = match exit {
                 Ok(result) => result,
                 Err(reason) => {
-                    let _ = tokio::time::timeout(liveness::CLOSE, async {
+                    let _ = rocky_platform::time::timeout(liveness::CLOSE, async {
                         writer
                             .send(Frame::new(direction, Message::Close { reason }))
                             .await?;
@@ -124,7 +124,7 @@ impl Io {
                 let _ = errors.send(Err(error)).await;
             }
         });
-        let receive = tokio::spawn(async move {
+        let receive = rocky_platform::task::spawn(async move {
             let result: Result<(), Failure> = async {
                 loop {
                     let frame = opened.reader.receive().await?;

@@ -465,10 +465,10 @@ mod tests {
     use rocky_credentials::{Revocation, SignedRevocation};
     use std::{collections::BTreeSet, sync::Arc};
     const SCHEMA: &str = r#"{"application":"contacts","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-    #[test]
-    fn equal_sets_derive_equal_topics_missing_values_differ_and_substitution_is_refused()
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn equal_sets_derive_equal_topics_missing_values_differ_and_substitution_is_refused()
     -> Result<(), Failure> {
-        let dir = tempfile::tempdir()?;
+        let dir = rocky_platform::fs::Scratch::new().await;
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
         let mut a = Settings::create(
             &Schema::parse(SCHEMA)?,
@@ -527,10 +527,10 @@ mod tests {
         assert_eq!(Discovery::load(&av)?.values, a_state.values);
         Ok(())
     }
-    #[test]
-    fn a_full_list_evicts_the_oldest_learned_contact_and_preserves_application_routes()
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_full_list_evicts_the_oldest_learned_contact_and_preserves_application_routes()
     -> Result<(), Failure> {
-        let dir = tempfile::tempdir()?;
+        let dir = rocky_platform::fs::Scratch::new().await;
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
         let mut settings = Settings::create(
             &Schema::parse(SCHEMA)?,

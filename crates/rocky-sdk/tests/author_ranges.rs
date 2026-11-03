@@ -1,4 +1,6 @@
 //! Durable principal ranges and local row creation under numbered node keys.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{Database, Open};
 use serde_json::json;

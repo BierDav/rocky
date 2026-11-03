@@ -5,12 +5,11 @@ use crate::scaling_option_tests::{NODE, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
 use inventory_app::InventoryApp;
 use rocky_core::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 const FILE: &str = "writer.db";
 
-async fn open(dir: &TempDir, options: RuntimeOptions) -> Runtime<InventoryApp> {
+async fn open(dir: &Scratch, options: RuntimeOptions) -> Runtime<InventoryApp> {
     open_node(&dir.path().join(FILE), NODE, options).await
 }
 /// Both domains in one file, so their writes share the file writer's groups.
@@ -29,7 +28,7 @@ fn groups(log: &GroupLog) -> Vec<Vec<(usize, usize)>> {
     log.lock().unwrap().clone()
 }
 /// Operations of one domain that another connection can see committed.
-async fn stored(dir: &TempDir, domain: u8) -> Vec<Vec<SqlValue>> {
+async fn stored(dir: &Scratch, domain: u8) -> Vec<Vec<SqlValue>> {
     let conn = crate::scoped_connection::ScopedConnection::new(
         crate::sqlite::Connection::open_read_only(&dir.path().join(FILE)).unwrap(),
         Some(&crate::runtime::namespace(scope(domain))),
@@ -43,9 +42,9 @@ fn count(value: i64) -> Vec<Vec<SqlValue>> {
     vec![vec![SqlValue::Integer(value)]]
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failing_step_rolls_back_alone_while_its_group_commits() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -107,9 +106,9 @@ async fn a_failing_step_rolls_back_alone_while_its_group_commits() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn nothing_of_a_group_is_observable_before_its_commit() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -135,7 +134,7 @@ async fn nothing_of_a_group_is_observable_before_its_commit() {
     waiting.await.unwrap();
     revisions.borrow_and_update();
     changes.borrow_and_update();
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
     // b's step has released its savepoint, yet nothing of it is visible.
     assert!(released.result.try_recv().is_err());
     assert!(!revisions.has_changed().unwrap());
@@ -160,9 +159,9 @@ async fn nothing_of_a_group_is_observable_before_its_commit() {
 
 /// A group whose commit fails publishes nothing, fails every waiter and
 /// leaves each touched domain's memory equal to storage.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_commit_fails_the_group_and_restores_memory() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -243,9 +242,9 @@ async fn a_failed_commit_fails_the_group_and_restores_memory() {
     open(&dir, one_file()).await.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn groups_are_bounded_and_fair_across_domains() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(
         &dir,
         RuntimeOptions {
@@ -287,9 +286,9 @@ async fn groups_are_bounded_and_fair_across_domains() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn groups_are_bounded_by_queued_bytes() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let (a, b) = (
         runtime.domain(scope(1)).unwrap(),
@@ -330,16 +329,18 @@ async fn groups_are_bounded_by_queued_bytes() {
 
 /// Reads run on the read-only connection between groups: the reported
 /// revision is the one their rows and memory-derived fields belong to.
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reads_report_the_revision_their_rows_were_read_at() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let replica = runtime.domain(scope(1)).unwrap();
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let writers: Vec<_> = (0..4)
         .map(|writer| {
             let replica = replica.clone();
-            tokio::spawn(async move {
+            rocky_platform::task::spawn(async move {
                 for index in 0..60 {
                     loop {
                         match replica.mutate(Mutation {
@@ -350,7 +351,7 @@ async fn reads_report_the_revision_their_rows_were_read_at() {
                                 receipt.committed().await.unwrap();
                                 break;
                             }
-                            Err(Error::Backpressure) => tokio::task::yield_now().await,
+                            Err(Error::Backpressure) => rocky_platform::task::yield_now().await,
                             Err(error) => panic!("{error}"),
                         };
                     }
@@ -361,9 +362,9 @@ async fn reads_report_the_revision_their_rows_were_read_at() {
     let readers: Vec<_> = (0..2)
         .map(|_| {
             let (replica, done) = (replica.clone(), done.clone());
-            tokio::spawn(async move {
+            rocky_platform::task::spawn(async move {
                 let mut checked = 0;
-                while !done.load(Ordering::Relaxed) || checked == 0 {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) || checked == 0 {
                     let snapshot = replica.query().await.unwrap();
                     let revision = snapshot.revision.get();
                     assert_eq!(snapshot.rows.len() as u64, revision);
@@ -406,7 +407,7 @@ async fn reads_report_the_revision_their_rows_were_read_at() {
     for writer in writers {
         writer.await.unwrap();
     }
-    done.store(true, Ordering::Relaxed);
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
     for reader in readers {
         assert!(reader.await.unwrap() > 0);
     }
@@ -416,9 +417,9 @@ async fn reads_report_the_revision_their_rows_were_read_at() {
 
 /// A statement or read transaction left open would pin the WAL; after reads
 /// another connection can checkpoint and reset the whole log.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_leave_no_transaction_or_cursor_open() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     note(&replica, 1, "one").committed().await.unwrap();
@@ -449,9 +450,11 @@ async fn reads_leave_no_transaction_or_cursor_open() {
     runtime.close().await.unwrap();
 }
 
+// Needs threads, which a browser Worker lacks.
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
     // Small thresholds, so a short test crosses them many times.
     const FRAMES: i64 = 1000;
@@ -464,37 +467,37 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     let mut wal = path.clone().into_os_string();
     wal.push("-wal");
     let wal = std::path::PathBuf::from(wal);
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Another connection keeps taking short read transactions.
     let reader = {
         let (path, done) = (path.clone(), done.clone());
-        tokio::spawn(async move {
+        rocky_platform::task::spawn(async move {
             let conn = crate::sqlite::Connection::open_read_only(&path).unwrap();
-            while !done.load(Ordering::Relaxed) {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 conn.execute("BEGIN", ()).await.unwrap();
                 crate::tests::rows(&conn, "SELECT COUNT(*) FROM sqlite_schema")
                     .await
                     .unwrap();
                 conn.execute("COMMIT", ()).await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                rocky_platform::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
     };
     let largest = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let monitor = {
         let (wal, done, largest) = (wal.clone(), done.clone(), largest.clone());
-        tokio::spawn(async move {
-            while !done.load(Ordering::Relaxed) {
-                let size = std::fs::metadata(&wal).map_or(0, |wal| wal.len());
-                largest.fetch_max(size, Ordering::Relaxed);
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        rocky_platform::task::spawn(async move {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let size = rocky_platform::fs::len(&wal).unwrap_or(0);
+                largest.fetch_max(size, std::sync::atomic::Ordering::Relaxed);
+                rocky_platform::time::sleep(std::time::Duration::from_millis(2)).await;
             }
         })
     };
     let clients: Vec<_> = (0..8u8)
         .map(|client| {
             let replica = runtime.domain(scope(client % 2 + 1)).unwrap();
-            tokio::spawn(async move {
+            rocky_platform::task::spawn(async move {
                 for index in 0..600 {
                     loop {
                         match replica.mutate(Mutation {
@@ -505,7 +508,7 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
                                 receipt.committed().await.unwrap();
                                 break;
                             }
-                            Err(Error::Backpressure) => tokio::task::yield_now().await,
+                            Err(Error::Backpressure) => rocky_platform::task::yield_now().await,
                             Err(error) => panic!("{error}"),
                         };
                     }
@@ -519,14 +522,14 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     for client in clients {
         client.await.unwrap();
     }
-    done.store(true, Ordering::Relaxed);
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
     reader.await.unwrap();
     monitor.await.unwrap();
     let frame = 4096 + 24;
     let bound = (3 * FRAMES as u64) * frame;
-    let largest = largest.load(Ordering::Relaxed);
+    let largest = largest.load(std::sync::atomic::Ordering::Relaxed);
     assert!(largest > 0 && largest <= bound, "{largest} > {bound}");
     runtime.close().await.unwrap();
     // A clean close checkpoints and truncates the log.
-    assert!(std::fs::metadata(&wal).map_or(0, |wal| wal.len()) == 0);
+    assert!(rocky_platform::fs::len(&wal).unwrap_or(0) == 0);
 }

@@ -4,10 +4,10 @@ use super::*;
 use rocky_core::RowApplication;
 use rocky_credentials::{SignedTipOpening, TipOpeningStatement};
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition() {
     let lineage = Lineage::pinned(190);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source_key = PrivateKey::from_bytes(&[191; 32]);
     let target_key = PrivateKey::from_bytes(&[192; 32]);
     let source = lineage

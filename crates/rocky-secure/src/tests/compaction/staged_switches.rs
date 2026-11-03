@@ -10,7 +10,7 @@ fn rooted(lineage: &Lineage, version: u32, key: &PrivateKey) -> crate::SecureCon
 
 async fn interrupt(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
     key: &PrivateKey,
 ) -> (Replica, Vec<TipStatement>) {
     let a = open(lineage, dir, "a", key).await;
@@ -34,10 +34,10 @@ async fn interrupt(
     (a, statements)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_different_staged_target_is_refused_before_writes() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, _) = interrupt(&lineage, &dir, &key).await;
     let staged = a.pending_schema().await.unwrap().unwrap().tip;
@@ -113,10 +113,10 @@ async fn a_different_staged_target_is_refused_before_writes() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_moved_bookmark_after_a_switch_crash_can_resume_the_saved_target() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, _) = interrupt(&lineage, &dir, &key).await;
     let staged = a.pending_schema().await.unwrap().unwrap().tip;
@@ -175,10 +175,10 @@ async fn a_moved_bookmark_after_a_switch_crash_can_resume_the_saved_target() {
     assert_eq!(a.followed_tip().await, next);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_sideways_switch_audits_with_the_stored_target_definition() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &a).await;
@@ -298,7 +298,7 @@ async fn switch(
 /// the replica, the source tip and the staged target.
 async fn interrupted(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
     key: &PrivateKey,
 ) -> (Replica, TipId, TipId) {
     interrupted_offering(lineage, dir, key, true).await
@@ -307,7 +307,7 @@ async fn interrupted(
 /// the switch, so no unsent bundle is held.
 async fn interrupted_offering(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
     key: &PrivateKey,
     offered: bool,
 ) -> (Replica, TipId, TipId) {
@@ -395,10 +395,10 @@ async fn withdrawn(a: &Replica) {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn in_process_the_staged_intent_stays_the_only_authority_until_resumed() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, source, target) = interrupted(&lineage, &dir, &key).await;
     // A failed plan leaves the source installed.
@@ -428,10 +428,10 @@ async fn in_process_the_staged_intent_stays_the_only_authority_until_resumed() {
     a.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_descendant_with_another_schema_finishes_at_the_target_then_waits_for_its_own() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, _, target) = interrupted(&lineage, &dir, &key).await;
     let seal = continued(&lineage, target, 3);
@@ -454,11 +454,11 @@ async fn a_descendant_with_another_schema_finishes_at_the_target_then_waits_for_
     assert_eq!(scalar(&a, "SELECT count(*) FROM items").await, 1);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_sideways_move_with_a_close_seal_withdraws_the_staged_switch() {
     for reopened in [false, true] {
         let lineage = Lineage::new();
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let key = PrivateKey::new();
         let (a, source, target) = interrupted(&lineage, &dir, &key).await;
         let a = if reopened {
@@ -520,10 +520,10 @@ async fn a_sideways_move_with_a_close_seal_withdraws_the_staged_switch() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_deleted_bookmark_withdraws_the_staged_switch_and_stays_at_the_source() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, source, target) = interrupted(&lineage, &dir, &key).await;
     delete_main(&lineage, &a, target).await;
@@ -559,11 +559,11 @@ async fn delete_main(lineage: &Lineage, a: &Replica, target: TipId) {
     a.receive_tip_statements(&[deleted]).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_target_withdraws_the_staged_switch() {
     use rocky_credentials::{Authority, CredentialChain};
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &a).await;
@@ -624,10 +624,10 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
     assert_eq!(a.followed_tip().await, source);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_own_publication_withdraws_with_its_staged_switch() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let a = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &a).await;

@@ -2,6 +2,8 @@
 //! idle, and L2 while a peer authors a small write every 20 ms that this device keeps receiving. Diagnostic;
 //! run with `cargo test --release -p rocky-sdk --test write_latency --
 //! --ignored --nocapture --test-threads=1`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, SqlValue, transport::memory::Hub};
 use serde_json::json;

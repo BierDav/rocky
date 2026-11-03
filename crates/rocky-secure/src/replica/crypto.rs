@@ -214,7 +214,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         frames: Vec<EncryptedFrame>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
         // Verify immutable frame signatures before touching replica state.
-        let frames = tokio::task::spawn_blocking(move || {
+        let frames = rocky_platform::task::spawn_blocking(move || {
             for frame in &frames {
                 let _ = frame.operation_ref();
             }
@@ -231,7 +231,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.config.revocations.clone(),
             )
         };
-        tokio::task::spawn_blocking(move || {
+        rocky_platform::task::spawn_blocking(move || {
             for frame in &frames {
                 let Ok(operation) = frame.operation_ref() else {
                     continue;
@@ -256,7 +256,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn cached_headers_reject_changed_signatures_and_unsupported_formats() {
         let key = PrivateKey::from_bytes(&[81; 32]);
         let mut header = p2panda_core::Header {
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(cache.header_verifications.load(Ordering::Relaxed), 2);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn plaintext_retention_is_bounded_even_for_empty_bodies_and_keeps_the_new_page() {
         let mut cache = OpenedPayloads::default();
         let hashes: Vec<_> = (0..OPENED_FRAMES * 2)

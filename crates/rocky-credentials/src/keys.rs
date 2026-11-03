@@ -1,6 +1,7 @@
 //! Where an installation's secrets live. See `docs/runtime/credentials.md`
 //! for the threat model of the file provider.
 use crate::Error;
+use rocky_platform::fs;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,7 +21,8 @@ pub trait KeyProvider: Send + Sync {
 
 /// The fallback provider: owner-only files in one directory, plaintext at
 /// rest. They protect keys from other users of the machine, not from its
-/// owner, a backup or a copy of the disk.
+/// owner, a backup or a copy of the disk. In a browser the files are in
+/// Rocky's OPFS pool, private to the origin (`rocky_platform::fs`).
 pub struct FileKeyProvider {
     directory: PathBuf,
 }
@@ -45,7 +47,7 @@ impl FileKeyProvider {
 }
 impl KeyProvider for FileKeyProvider {
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>, ProviderError> {
-        match std::fs::read(self.path(name)?) {
+        match fs::read(self.path(name)?) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
@@ -53,15 +55,11 @@ impl KeyProvider for FileKeyProvider {
     }
     fn store(&self, name: &str, secret: &[u8]) -> Result<(), ProviderError> {
         let path = self.path(name)?;
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder.create(&self.directory)?;
+        fs::create_private_dir_all(&self.directory)?;
         write_private(&path, secret)
     }
     fn delete(&self, name: &str) -> Result<(), ProviderError> {
-        match std::fs::remove_file(self.path(name)?) {
+        match fs::remove_file(self.path(name)?) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         }
@@ -70,19 +68,7 @@ impl KeyProvider for FileKeyProvider {
 
 /// Replaces `path` atomically with owner-only `bytes`, durable on return.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ProviderError> {
-    use std::io::Write;
-    let tmp = path.with_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(tmp, path)?;
-    #[cfg(unix)]
-    std::fs::File::open(path.parent().ok_or("missing parent")?)?.sync_all()?;
-    Ok(())
+    Ok(fs::write_private(path, bytes)?)
 }
 
 /// One installation's secrets, by role, as `rocky.<installation>.<role>`.
@@ -171,13 +157,12 @@ impl Vault {
     }
 }
 
-// The file provider needs a filesystem.
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn files_are_private_and_names_are_checked() -> Result<(), ProviderError> {
-        let directory = tempfile::tempdir()?;
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn files_are_private_and_names_are_checked() -> Result<(), ProviderError> {
+        let directory = rocky_platform::fs::Scratch::new().await;
         let store = FileKeyProvider::new(directory.path().join("secrets"));
         assert!(store.load("rocky.a.node")?.is_none());
         store.store("rocky.a.node", &[1; 32])?;
@@ -198,9 +183,10 @@ mod tests {
         assert!(store.load("rocky.a.node")?.is_none());
         Ok(())
     }
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_missing_secret_is_an_error_and_an_existing_one_is_not_replaced() -> Result<(), Error> {
-        let directory = tempfile::tempdir().map_err(|error| Error::Provider(error.into()))?;
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_missing_secret_is_an_error_and_an_existing_one_is_not_replaced() -> Result<(), Error>
+    {
+        let directory = rocky_platform::fs::Scratch::new().await;
         let provider: Arc<dyn KeyProvider> = Arc::new(FileKeyProvider::new(directory.path()));
         let vault = Vault::new(provider.clone(), "a");
         assert!(vault.get("node").is_err());

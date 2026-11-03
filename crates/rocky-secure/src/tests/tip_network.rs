@@ -74,10 +74,10 @@ fn opening(f: &Fixture, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
     .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[71; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "refresh-a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "refresh-b.db", &bob).await;
@@ -148,10 +148,10 @@ async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn graph_handshake_verifies_dependencies_across_digest_sorted_pages() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[71; 32]));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "b.db", &bob).await;
@@ -188,10 +188,10 @@ async fn graph_handshake_verifies_dependencies_across_digest_sorted_pages() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn different_followed_tips_exchange_graph_union_and_refresh_peer_tips() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "b.db", &bob).await;
@@ -238,10 +238,10 @@ async fn different_followed_tips_exchange_graph_union_and_refresh_peer_tips() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_prefix() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "b.db", &bob).await;
@@ -272,11 +272,11 @@ async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_pref
     assert!(b.snapshot(f.public).await.unwrap().rows.is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
     use crate::network::link::{Frame, Message, channels::Packet};
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "lane-a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "lane-b.db", &bob).await;
@@ -321,7 +321,7 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
         .send(Frame::new(false, Message::Ready { persistent: true }))
         .await
         .unwrap();
-    let control = tokio::time::timeout(
+    let control = rocky_platform::time::timeout(
         std::time::Duration::from_millis(500),
         right.reader.receive(),
     )
@@ -352,10 +352,10 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
     assert!(found && pushed);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn graph_reconciliation_sends_only_missing_statements_and_none_when_unchanged() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "difference-a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "difference-b.db", &bob).await;

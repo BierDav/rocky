@@ -86,10 +86,10 @@ async fn sync_scope(
 
 /// A seal rebootstrap that replays `items` from its frames clears its rows
 /// first; the tags that reference them come back once the frames stand.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "keep", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
@@ -122,10 +122,10 @@ async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
 /// `items` base at a later seal that lacks both: the base clears the item
 /// and its tag; the item applies again over the base and its tag returns.
 /// B and the owner then converge.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_parent_base_keeps_children_of_rows_applied_over_it() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -183,10 +183,10 @@ async fn drops(replica: &Replica) -> Vec<Vec<SqlValue>> {
 /// replay restarts from an imported base that covers it, and across
 /// restarts after compaction. `a_parent_replayed_from_frames_…` covers a
 /// replay from frames.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_authored_outcome_survives_imports_and_restarts_after_compaction() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -221,7 +221,7 @@ async fn an_authored_outcome_survives_imports_and_restarts_after_compaction() {
     assert_eq!(a.transaction_outcome(authored).await.unwrap(), applied);
 }
 
-async fn reopen(lineage: &Lineage, dir: &TempDir, replica: Replica, key: &PrivateKey) -> Replica {
+async fn reopen(lineage: &Lineage, dir: &Scratch, replica: Replica, key: &PrivateKey) -> Replica {
     drop(replica);
     lineage
         .reopen(&dir.path().join("a.db"), key, 3, 3)
@@ -281,10 +281,10 @@ async fn tag_rows(replica: &Replica) -> Vec<Vec<SqlValue>> {
 /// rows and outcomes of a fresh partial device that only ever held `tags`:
 /// tags that reference an item drop there, whatever their delete action.
 /// Holding `items` again brings them back as replay orders them.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -348,10 +348,10 @@ async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
 /// drops, so its tag has no parent and drops too. Rebuilding from the
 /// seal's rows must reach the same rows: restoring them must not leave the
 /// keys of the members replayed after them deferred.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;
@@ -424,7 +424,7 @@ async fn sync_with_gap(
 /// B's key, B's late tag and the tags B had.
 async fn import_while_a_frame_waits(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
 ) -> (Replica, Replica, PrivateKey, Commitment, Vec<Vec<SqlValue>>) {
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(lineage, dir, "a", &keys[0]).await;
@@ -471,10 +471,10 @@ async fn import_while_a_frame_waits(
 
 /// The frame `items` waited for arrives by ordinary sync: settling derives
 /// the rows again, and B's tags are back.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn children_return_when_a_frame_that_waited_through_an_import_arrives() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, key, late, expected) = import_while_a_frame_waits(&lineage, &dir).await;
     sync_scope(&lineage, &a, &b, &key, lineage.scope("items")).await;
     b.settle().await.unwrap();
@@ -494,10 +494,10 @@ async fn children_return_when_a_frame_that_waited_through_an_import_arrives() {
 /// While the rows wait to be derived again, no seal finalizes and nothing
 /// compacts, though B holds every frame of A's last seal; status says why.
 /// Once they are derived again, the seal finalizes.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn no_seal_finalizes_while_rows_wait_to_be_derived_again() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, key, _, expected) = import_while_a_frame_waits(&lineage, &dir).await;
     let before = b.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(b.finalize_arrived(lineage.domain).await.unwrap(), 0);
@@ -537,7 +537,7 @@ async fn no_seal_finalizes_while_rows_wait_to_be_derived_again() {
 /// Returns A, B, their keys and B's two transactions: dropped, applied.
 async fn tagged_before_a_seal_drops_one(
     lineage: &Lineage,
-    dir: &TempDir,
+    dir: &Scratch,
 ) -> (Replica, Replica, [PrivateKey; 2], Commitment, Commitment) {
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(lineage, dir, "a", &keys[0]).await;
@@ -583,10 +583,10 @@ async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateK
 /// decided them, from the bases' sealed outcomes, never its stale records:
 /// the dropped tag as a final `constraint` drop with A's violation. B
 /// keeps outcomes only of what it authored.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, keys, late, _) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
     let violation = a.transaction_violation(late).await.unwrap();
     assert!(violation.is_some());
@@ -611,10 +611,10 @@ async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record(
 
 /// A covered tag the seal applied reports `Applied` from the base, as a
 /// final outcome no record changes afterwards.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_applied_outcome_a_base_covers_is_final() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, keys, _, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
     import_both(&lineage, &a, &b, &keys[1]).await;
     assert_eq!(
@@ -645,10 +645,10 @@ fn hex(bytes: &[u8]) -> String {
 /// A, B through A's bases and C replaying every frame itself report the
 /// same outcome and violation for each of B's transactions, and A and C
 /// state the same sealed outcomes at the seal.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replicas_at_one_seal_report_identical_outcomes() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, keys, late, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
     import_both(&lineage, &a, &b, &keys[1]).await;
     let c_key = PrivateKey::new();
@@ -700,11 +700,11 @@ async fn replicas_at_one_seal_report_identical_outcomes() {
 /// A drop list altered after signing, or signed but no replica's, is
 /// refused before anything is staged; one that contradicts an outcome
 /// this replica already sealed is refused at install.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_forged_drop_list_is_refused_on_import() {
     use crate::{SealedOutcome, SealedOutcomes, SealedTransaction};
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (a, b, keys, late, kept) = tagged_before_a_seal_drops_one(&lineage, &dir).await;
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     let tag_scope = lineage.scope("tags");
@@ -782,10 +782,10 @@ async fn a_forged_drop_list_is_refused_on_import() {
 
 /// Kept outcomes go once their member's record is back and a seal covers
 /// it, and only the newest `KEPT_OUTCOMES` stay.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "keep", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
@@ -846,10 +846,10 @@ async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
 
 /// An authored outcome stays readable after a seal rebootstrap replays its
 /// scope from frames, and across a restart.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &replica).await;
@@ -873,10 +873,10 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
 
 /// A rebuild that leaves a foreign key violated rolls back, says why and
 /// is not tried again until what it derives from changes.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "p", "parent").await;
@@ -937,12 +937,12 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
 /// A partitioned `tags` cannot reference the unpartitioned `items`, so no
 /// reference reaches across partitions into another table's scopes; the
 /// fixture's schema is refused before any replica opens.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[should_panic(expected = "a partitioned child cannot reference an unpartitioned parent")]
 async fn a_partitioned_child_of_an_unpartitioned_parent_is_refused() {
     let mut lineage = linked();
     lineage.partitioned = true;
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let _ = lineage
         .open(
             &dir.path().join("p.db"),
@@ -957,16 +957,16 @@ async fn a_partitioned_child_of_an_unpartitioned_parent_is_refused() {
 /// replayed rows holds the replica, once from frames and once from a base.
 /// `cargo test --release -p rocky-secure --lib
 /// tests::compaction::cascades::rederive_of_100000_rows -- --ignored --nocapture`
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "measurement; run in release"]
 async fn rederive_of_100000_rows() {
     const TRANSACTIONS: usize = 1_000;
     const ROWS: usize = 100;
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&lineage, &dir, "measure", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
-    let filled = std::time::Instant::now();
+    let filled = web_time::Instant::now();
     for transaction in 0..TRANSACTIONS {
         let session = session(&replica).await;
         session.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
@@ -985,7 +985,7 @@ async fn rederive_of_100000_rows() {
     let items = lineage.scope("items");
     let measure = async |label: &str| {
         replica.mark_rederive_for_test(items).await.unwrap();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         replica.rederive().await.unwrap();
         println!(
             "rederive from {label}, {} rows: {:?}",
@@ -1010,10 +1010,10 @@ async fn rederive_of_100000_rows() {
 
 /// A direct import fills a scope that holds nothing, so cancelling it
 /// (`abort_direct`) clears no row: it marks nothing and B's tags stay.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cancelled_direct_import_reaches_no_rows_and_marks_nothing() {
     let lineage = linked();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     follow_main(&lineage, &a).await;

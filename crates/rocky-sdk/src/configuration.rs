@@ -60,17 +60,15 @@ impl Configuration {
             coordination: self.coordination.clone(),
         }
     }
-    /// Creates an installation; refuses an existing one. Startup runs off the caller’s async executor.
+    /// Creates an installation; refuses an existing one. Startup runs off the
+    /// caller's async executor: natively on the database's own thread.
     ///
     /// The creating device owns the domain and follows a new bookmark,
     /// [`Self::BOOKMARK`], so its sync passes seal routinely: only seals make
     /// replay drops final and bound the undo history. `Database::create`
     /// leaves bookmarks to the caller.
     pub async fn create(&self) -> Result<Opened, Failure> {
-        let configuration = self.clone();
-        let opened = tokio::runtime::Handle::try_current()?
-            .spawn_blocking(move || Database::create(configuration.options(), None))
-            .await??;
+        let opened = Database::launch_create(self.options(), None).await?;
         let session = opened.database.session();
         let followed = async {
             session.create_bookmark(Self::BOOKMARK, None).await?;
@@ -89,19 +87,12 @@ impl Configuration {
         }
         Ok(opened)
     }
-    /// Opens an existing installation. Startup runs off the caller’s async executor.
+    /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {
-        let configuration = self.clone();
-        tokio::runtime::Handle::try_current()?
-            .spawn_blocking(move || Database::open(configuration.options()))
-            .await?
+        Database::launch_open(self.options()).await
     }
-    /// Enrolls using the configured network. Enrollment runs off the caller’s async executor.
+    /// Enrolls using the configured network. Enrollment runs off the caller's async executor.
     pub async fn join(&self, invitation: &str) -> Result<Opened, Failure> {
-        let configuration = self.clone();
-        let invitation = invitation.to_owned();
-        tokio::runtime::Handle::try_current()?
-            .spawn_blocking(move || Database::join(configuration.options(), &invitation))
-            .await?
+        Database::launch_join(self.options(), invitation).await
     }
 }

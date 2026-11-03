@@ -10,12 +10,10 @@ use super::*;
 use p2panda_core::Signature;
 use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowApplication};
+use rocky_platform::time::timeout;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::timeout,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[cfg(test)]
 mod budgets;
@@ -590,10 +588,10 @@ impl NativeSession {
                 .sent(length);
         }
         let deadline = self.request.as_ref().map_or_else(
-            || tokio::time::Instant::now() + REQUEST_LIMIT,
+            || rocky_platform::time::Instant::now() + REQUEST_LIMIT,
             trace::Request::deadline,
         );
-        let written = tokio::time::timeout_at(deadline, async {
+        let written = rocky_platform::time::timeout_at(deadline, async {
             match &mut self.stream {
                 SessionIo::Channel(channel) => channel.send(frame).await,
                 SessionIo::Native(stream) => write_frame(stream, &frame).await,
@@ -661,10 +659,10 @@ impl NativeSession {
     /// The peer's answer; the chains it carries first join the table.
     async fn answered(&mut self) -> Result<Message, Error> {
         let deadline = self.request.as_ref().map_or_else(
-            || tokio::time::Instant::now() + REQUEST_LIMIT,
+            || rocky_platform::time::Instant::now() + REQUEST_LIMIT,
             trace::Request::deadline,
         );
-        match tokio::time::timeout_at(deadline, self.answered_with_idle(false)).await {
+        match rocky_platform::time::timeout_at(deadline, self.answered_with_idle(false)).await {
             Ok(result) => result,
             Err(_) => {
                 if let SessionIo::Channel(channel) = &mut self.stream {
@@ -778,7 +776,7 @@ impl NativeSession {
                     None => std::future::pending().await,
                 }
             };
-            let result = tokio::time::timeout(REQUEST_LIMIT, async {
+            let result = rocky_platform::time::timeout(REQUEST_LIMIT, async {
                 let answer = tracing::Instrument::instrument(answer, span.clone());
                 tokio::pin!(answer, work);
                 tokio::select! {
@@ -894,23 +892,27 @@ async fn read_frame_with_idle(
 mod tests {
     use super::*;
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_requests_wait_while_the_peer_applies_its_answer() {
         let (mut near, mut far) = tokio::io::duplex(64);
         let deliver = async {
-            tokio::time::sleep(TIMEOUT * 2).await;
+            rocky_platform::time::sleep(TIMEOUT * 2).await;
             write_frame(&mut far, &[7]).await.unwrap();
         };
         let (received, ()) = tokio::join!(read_frame_with_idle(&mut near, true), deliver);
         assert_eq!(received.unwrap(), vec![7]);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_requests_bound_a_started_header_after_idle() {
         let (mut near, mut far) = tokio::io::duplex(64);
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         let deliver = async {
-            tokio::time::sleep(TIMEOUT * 2).await;
+            rocky_platform::time::sleep(TIMEOUT * 2).await;
             far.write_all(&[0]).await.unwrap();
             std::future::pending::<()>().await;
         };
@@ -928,13 +930,15 @@ mod tests {
         assert_eq!(start.elapsed(), TIMEOUT * 3);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_reads_follow_bounded_chunk_progress() {
         let (mut near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
         let deliver = async {
             far.write_u32((IO_CHUNK * 3) as u32).await.unwrap();
             for value in 0..3 {
-                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 5).await;
                 far.write_all(&vec![value; IO_CHUNK]).await.unwrap();
             }
         };
@@ -943,6 +947,8 @@ mod tests {
         assert_eq!(received.unwrap(), expected);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_writes_follow_a_slow_reader() {
         let (mut near, mut far) = tokio::io::duplex(IO_CHUNK);
@@ -951,7 +957,7 @@ mod tests {
             assert_eq!(far.read_u32().await.unwrap() as usize, IO_CHUNK * 3);
             let mut bytes = vec![0; IO_CHUNK * 3];
             for chunk in bytes.chunks_mut(IO_CHUNK) {
-                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 5).await;
                 far.read_exact(chunk).await.unwrap();
             }
             bytes
@@ -961,13 +967,15 @@ mod tests {
         assert_eq!(received, vec![7; IO_CHUNK * 3]);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_trickles_still_time_out() {
         let (mut near, mut far) = tokio::io::duplex(IO_CHUNK);
         let deliver = async {
             far.write_u32(IO_CHUNK as u32).await.unwrap();
             for _ in 0..4 {
-                tokio::time::sleep(TIMEOUT * 3 / 10).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 10).await;
                 far.write_all(&[1]).await.unwrap();
             }
         };
@@ -980,7 +988,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_message_signature_binds_session_sequence_and_body_and_the_body_travels_as_bytes() {
         let binding = frame_binding(&[7; 4096]);
         let body = vec![200u8; 70_000];

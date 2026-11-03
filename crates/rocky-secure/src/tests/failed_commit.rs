@@ -23,10 +23,10 @@ async fn snapshot(replica: &Replica) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     super::compaction::audit::snapshot(replica).await
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_sql_commit_changes_nothing_and_the_same_handle_retries_once() {
     let lineage = Lineage::pinned(199);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::from_bytes(&[200; 32]);
     let replica = open(&lineage, &dir, "author", &node).await;
     follow_main(&lineage, &replica).await;

@@ -3,7 +3,7 @@ use rocky_credentials::{SignedTipOpening, TIP_OPENING_FORMAT, TipOpeningStatemen
 
 pub(super) struct HeldPrefix {
     pub lineage: Lineage,
-    pub directory: TempDir,
+    pub directory: Scratch,
     pub key: PrivateKey,
     pub replica: Replica,
     pub frames: Vec<EncryptedFrame>,
@@ -15,7 +15,7 @@ impl HeldPrefix {
     }
     pub async fn with_anchor(prefix: usize, count: usize) -> Self {
         let lineage = Lineage::pinned(181);
-        let directory = TempDir::new().unwrap();
+        let directory = Scratch::new().await;
         let key = PrivateKey::from_bytes(&[182; 32]);
         let peer = PrivateKey::from_bytes(&[183; 32]);
         let replica = open(&lineage, &directory, "a", &key).await;

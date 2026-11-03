@@ -69,7 +69,7 @@ impl Node {
     pub(super) async fn discover(self: Arc<Self>, link: Arc<Link>, discovery: Arc<dyn Discovery>) {
         let mut stage = link.stage.subscribe();
         let mut topics = self.topics.subscribe();
-        let mut check = tokio::time::interval(TOPIC_CHECK);
+        let mut check = rocky_platform::time::interval(TOPIC_CHECK);
         // A local mark describes the network this device is on now.
         let marked = self
             .settings

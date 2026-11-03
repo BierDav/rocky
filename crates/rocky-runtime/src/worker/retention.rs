@@ -26,8 +26,8 @@ pub(crate) fn initial_checkpoint() -> Result<Vec<crate::sqlite::Value>, Error> {
 }
 /// Milliseconds since the Unix epoch on this replica's clock.
 pub(super) fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 /// Operations one requested step replays into the checkpoint copy. A step
@@ -161,7 +161,7 @@ pub(super) struct Retention {
     pub(super) record_flushed: bool,
     /// The pruned prefix may be able to move, or rows remain behind it.
     pub(super) prune_wanted: bool,
-    pub(super) lease: Option<std::time::Instant>,
+    pub(super) lease: Option<web_time::Instant>,
 }
 /// Counters a finished import puts in place of the worker's.
 pub(super) struct Switched {
@@ -643,7 +643,7 @@ where
                 let page = self
                     .read_transaction(async |worker| worker.export(after).await)
                     .await?;
-                self.retention.lease = Some(std::time::Instant::now() + EXPORT_LEASE);
+                self.retention.lease = Some(web_time::Instant::now() + EXPORT_LEASE);
                 Ok(Response::Page(Box::new(page)))
             }
             Request::Import(page) => self.import(*page).await.map(Response::Imported),
@@ -999,7 +999,7 @@ where
 impl Retention {
     pub(super) fn leased(&self) -> bool {
         self.lease
-            .is_some_and(|lease| std::time::Instant::now() < lease)
+            .is_some_and(|lease| web_time::Instant::now() < lease)
     }
 }
 pub(super) fn mark(stored: &mut Stored, peer: NodeId) -> &mut PeerMark {

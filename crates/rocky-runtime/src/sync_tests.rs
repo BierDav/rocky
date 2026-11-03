@@ -3,10 +3,10 @@ use crate::tests::{create, disk, fault, mutation};
 use rocky_core::CompiledSchema;
 use rocky_core::fixtures;
 use rocky_core::{ProtocolError, SqlValue};
+use rocky_platform::fs::Scratch;
 use runtime_todo_app::{Action, StaticPolicy, TodoApp};
-use tempfile::TempDir;
 
-async fn open(dir: &TempDir, node: NodeId, policy: StaticPolicy) -> Replica<TodoApp> {
+async fn open(dir: &Scratch, node: NodeId, policy: StaticPolicy) -> Replica<TodoApp> {
     Replica::open_with_config(
         dir.path().join(if node == fixtures::LAPTOP {
             "laptop.db"
@@ -53,9 +53,9 @@ async fn transfer(from: &Replica<TodoApp>, to: &Replica<TodoApp>, peer: NodeId) 
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pending_survives_reopen_clock_observers_and_no_echo() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
     let first = create(&laptop, "initial").await;
@@ -111,9 +111,9 @@ async fn pending_survives_reopen_clock_observers_and_no_echo() {
     laptop.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn durable_receipt_before_apply_and_atomic_apply_rollback() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
     let op = create(&laptop, "receipt only").await;
@@ -160,9 +160,9 @@ async fn durable_receipt_before_apply_and_atomic_apply_rollback() {
     laptop.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_edits_delete_race_and_full_merge_replay_converge() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
     let op = create(&laptop, "original").await;
@@ -232,9 +232,9 @@ async fn concurrent_edits_delete_race_and_full_merge_replay_converge() {
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn acknowledgments_persist_are_monotonic_and_history_survives_outbox_clear() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let first = create(&laptop, "first").await;
     let second = create(&laptop, "second").await;
@@ -302,9 +302,9 @@ async fn acknowledgments_persist_are_monotonic_and_history_survives_outbox_clear
     laptop.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rejected_frames_and_late_invalid_clock_never_advance_frontier() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
     let first = create(&laptop, "allowed").await;
@@ -378,7 +378,7 @@ async fn rejected_frames_and_late_invalid_clock_never_advance_frontier() {
     phone.close().await.unwrap();
     let mut policy = StaticPolicy::default();
     policy.actions[0] = false;
-    let denied_dir = TempDir::new().unwrap();
+    let denied_dir = Scratch::new().await;
     let denied = open(&denied_dir, fixtures::PHONE, policy).await;
     assert!(matches!(
         denied.receive(first.encode().unwrap()).await,
@@ -390,9 +390,9 @@ async fn rejected_frames_and_late_invalid_clock_never_advance_frontier() {
     laptop.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cross_author_dependency_and_successor_survive_pending_restart() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
     let first = create(&laptop, "cross author").await;

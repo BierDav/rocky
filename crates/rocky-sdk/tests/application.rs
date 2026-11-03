@@ -1,3 +1,5 @@
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 
 fn schema() -> Result<Schema, Failure> {

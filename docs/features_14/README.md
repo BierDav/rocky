@@ -227,26 +227,47 @@ interactive latency for transitions that have not been qualified.
 - Networking stays optional and relay-only in a browser (no mDNS, no direct
   UDP). Native behavior does not change.
 
-Status (2026-11-03): storage foundation done; runtime, SDK and networking not
-yet.
+Status (2026-11-03): the crates build, lint and test in a browser; an
+end-to-end browser node is not yet shown (see "Not yet").
 
 - SQLite: the browser links native's 3.53.2 amalgamation with native's flags
   (`vendor/sqlite-wasm-rs`); only threading, OS layer, extension loading and
   temporary storage differ. Evidence: `rocky-storage`
   `every_target_links_the_same_sqlite` compares version, source id and
-  compile options on both targets.
-- Files live in an OPFS sync-access-handle pool (`rocky-storage` `files`).
-  Rocky's patch adds in-worker locks and a heap wal-index
-  (`vendor/sqlite-wasm-vfs`), so WAL snapshots and several connections per
-  file behave as natively. Evidence: `files::tests` (the same test on both
-  targets).
-- The node must run in a dedicated Worker: OPFS sync access handles exist
-  only there. The pool's handles exclude other workers and tabs, so one tab
-  owns a browser installation at a time.
-- `./scripts/check --wasm` (part of the full check and CI's `wasm` job) runs
-  clippy for wasm32 and the tests of `rocky-core`, `rocky-credentials` and
-  `rocky-storage` in headless Firefox. Not yet in a browser: cursor readers
-  (threads) and the file-backed key and identity providers.
+  compile options on both targets. An application building for wasm32 from
+  crates.io must apply the same `[patch.crates-io]` entry; without it the
+  build links upstream's SQLite 3.53.0 with other flags. Only that test
+  notices today; the engine identity check (lane/engine-identity, not yet
+  merged) refuses another SQLite version at open.
+- Seams (`rocky-platform`): tasks, timers and files are tokio and the
+  filesystem natively and the Worker's event loop, clock and OPFS in a
+  browser. `dedicated` work (writers, cursor readers) is a thread natively and
+  a task in a browser; `spawn_blocking` runs in place there. Files are an
+  OPFS sync-access-handle pool (`vendor/rocky-sqlite-opfs`): databases are
+  pool entries whose WAL works across connections (in-worker locks, heap
+  wal-index); other files are rows of one WAL database, so `write_private`
+  stays atomic and durable on return. Secrets and identities keep their
+  synchronous providers (`FileSecretStore`, `FileIdentityProvider`) and live
+  there, origin-private like IndexedDB, which cannot confirm a synchronous
+  write. Evidence: `rocky-platform` `tests/platform.rs`, `rocky-storage`
+  `files::tests`, both on both targets.
+- Networking: not yet in a browser; the SDK builds there without its `iroh`
+  feature.
+- The node runs in a dedicated Worker: OPFS sync access handles exist only
+  there. The pool's handles exclude other workers and tabs, so one tab owns a
+  browser installation at a time.
+- Browser API: `Configuration::create`, `open` and `join` (async). The
+  blocking `Database` constructors, `Engine`, `CustodyPeer`, backups and
+  restores, and coordination services (`Coordination::Service`, the
+  coordinator crate: openraft voter, file store) are native-only.
+- `./scripts/check --wasm` (part of the full check; CI's `wasm` job) runs
+  clippy for wasm32, with `scripts/clippy-wasm` refusing calls that panic in
+  a browser, and the tests in a dedicated Worker of headless Firefox: core 69,
+  credentials 63, platform 4, storage 52, runtime 87, secure 458, sdk 16. Native-only tests say why: threads, child processes, sockets, tokio's
+  paused clock, exhaustive schedules across threads, or the SDK's blocking
+  constructors (its multi-node suites).
+- Not yet: no test opens a browser node through the SDK, persists across a
+  reload or syncs with a native node over a relay.
 
 ## Outside Rocky
 

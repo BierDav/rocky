@@ -23,7 +23,7 @@ async fn trusted(fixture: &Fixture, name: &str) -> (PrivateKey, Replica) {
     (key, replica)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
     let fixture = Fixture::new(1).await;
     let alice = &fixture.alice;

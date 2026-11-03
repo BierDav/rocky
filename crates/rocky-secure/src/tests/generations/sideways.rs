@@ -134,7 +134,7 @@ fn note_rows(rows: &[(&str, &str, Option<&str>)]) -> Vec<Vec<SqlValue>> {
 /// across `main -> dev -> main`, and nothing is held or voided.
 async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (identity, alice_key, dave_key) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open_certified(
@@ -256,22 +256,22 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     assert_eq!(select(&dave, NOTES).await, main_state);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_back_restores_main_from_a_kept_seal() {
     there_and_back(Rebuild::Rewind, 4).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_back_restores_main_from_a_base_at_the_seal() {
     there_and_back(Rebuild::Base, 4).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_back_restores_main_by_replaying_every_frame() {
     there_and_back(Rebuild::Replay, 4).await;
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_a_branch_of_the_same_schema_and_back_behaves_the_same() {
     for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
         there_and_back(rebuild, 3).await;
@@ -283,7 +283,7 @@ async fn following_a_branch_of_the_same_schema_and_back_behaves_the_same() {
 /// withdrawn with the line.
 async fn rolled_back(rebuild: Rebuild, removing: bool) {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (identity, key) = (PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open_certified(&dir.path().join("alice.db"), (&identity, &key), 3, None)
@@ -366,14 +366,14 @@ fn bookmark_move(lineage: &Lineage, from: TipId, to: TipId) -> TipStatement {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_owner_rollback_past_a_removal_restores_the_field_and_withdraws_unseen_writes() {
     for rebuild in [Rebuild::Replay, Rebuild::Base, Rebuild::Rewind] {
         rolled_back(rebuild, true).await;
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_owner_rollback_within_one_schema_withdraws_the_same_writes() {
     for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
         rolled_back(rebuild, false).await;
@@ -384,7 +384,7 @@ async fn an_owner_rollback_within_one_schema_withdraws_the_same_writes() {
 /// seal at A nor any rebuild of C brings back a note written at A.
 async fn identical_revert(rebuild: Rebuild) {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (identity, key, bob_key) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open_certified(&dir.path().join("alice.db"), (&identity, &key), 3, None)
@@ -451,7 +451,7 @@ async fn identical_revert(rebuild: Rebuild) {
     alice.audit(lineage.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_schema_identical_to_one_before_a_removal_never_restores_its_values() {
     for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
         identical_revert(rebuild).await;

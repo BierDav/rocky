@@ -1457,7 +1457,7 @@ impl<A: RowApplication> Inner<A> {
 mod unique_tests {
     use super::Unique;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn expression_and_partial_indexes_clash_on_their_own_terms() {
         let unique = Unique {
             columns: vec!["\"team\"".into()],

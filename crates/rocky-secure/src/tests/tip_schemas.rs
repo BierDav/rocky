@@ -10,10 +10,10 @@ mod source_availability;
 pub(in crate::tests) mod source_validation;
 mod staging;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let replica = lineage
         .open(&dir.path().join("withdraw.db"), &key, 2, None)
@@ -145,10 +145,10 @@ async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers(
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_followed_unknown_schema_is_pending_read_only_and_survives_reopen() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("pending.db");
     let key = PrivateKey::new();
     let replica = lineage.open(&path, &key, 3, None).await.unwrap();
@@ -232,10 +232,10 @@ async fn a_followed_unknown_schema_is_pending_read_only_and_survives_reopen() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_additive_switch_preserves_rows_observers_cursors_and_existing_sessions() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("additive.db");
     let key = PrivateKey::new();
     let identity = PrivateKey::new();
@@ -320,7 +320,7 @@ async fn an_additive_switch_preserves_rows_observers_cursors_and_existing_sessio
 /// by SQLite over the switch alone, with the switch's observer events.
 async fn additive_switch_changes(rows: usize) -> (i64, usize) {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let identity = PrivateKey::new();
     let replica = lineage
@@ -424,7 +424,7 @@ async fn additive_switch_changes(rows: usize) -> (i64, usize) {
     (changes, events)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_additive_switch_changes_the_same_storage_for_ten_or_a_thousand_rows() {
     // Only metadata changes: SQLite counts no row inserted, updated or
     // deleted by the switch, so the count does not grow with the rows.

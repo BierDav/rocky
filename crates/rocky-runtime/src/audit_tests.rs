@@ -1,13 +1,13 @@
 use super::*;
 use crate::tests::{create, fault, mutation, runtime_config};
 use rocky_core::*;
+use rocky_platform::fs::Scratch;
 use runtime_todo_app::{Action, StaticPolicy, TodoApp};
-use tempfile::TempDir;
 #[path = "../examples/support/ledger_app.rs"]
 mod ledger_app;
 use ledger_app::{LedgerApp, payload};
 
-async fn todo(dir: &TempDir) -> Replica<TodoApp> {
+async fn todo(dir: &Scratch) -> Replica<TodoApp> {
     Replica::open_with_config(
         dir.path().join("test.db"),
         TodoApp,
@@ -18,9 +18,9 @@ async fn todo(dir: &TempDir) -> Replica<TodoApp> {
     .await
     .unwrap()
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn three_named_peers_have_independent_operation_obligations() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let third = NodeId([9; 16]);
     let fourth = NodeId([10; 16]);
     let mut config = runtime_config();
@@ -85,9 +85,9 @@ async fn three_named_peers_have_independent_operation_obligations() {
         vec![vec![SqlValue::Integer(0)]]
     );
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn durable_handles_survive_cancelled_waiters_reopen_and_conflicting_retries() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = todo(&dir).await;
     let receipt = replica
         .mutate(mutation(
@@ -150,9 +150,9 @@ async fn durable_handles_survive_cancelled_waiters_reopen_and_conflicting_retrie
     assert_eq!(replica.query().await.unwrap().rows[0].title, "retained");
     replica.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn local_only_second_app_matches_batched_projection_replay_and_state_admission() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scope = Scope {
         mesh: MeshId([11; 16]),
         app: AppId([12; 16]),
@@ -261,9 +261,9 @@ async fn local_only_second_app_matches_batched_projection_replay_and_state_admis
     assert_eq!(b.query().await.unwrap().rows[0].1, 13);
     b.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn frame_rejection_and_queue_bytes_preserve_committed_state() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = todo(&dir).await;
     let baseline = replica.query().await.unwrap();
     assert!(matches!(
@@ -302,9 +302,9 @@ async fn frame_rejection_and_queue_bytes_preserve_committed_state() {
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn custom_scope_and_second_author_persist_and_reopen() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let scope = Scope {
         mesh: MeshId([21; 16]),
         app: AppId([22; 16]),
@@ -373,9 +373,9 @@ async fn custom_scope_and_second_author_persist_and_reopen() {
     b.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pending_processing_yields_to_queued_query_between_transactions() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = todo(&dir).await;
     let b = Replica::open_with_config(
         dir.path().join("b.db"),
@@ -397,7 +397,7 @@ async fn pending_processing_yields_to_queued_query_between_transactions() {
     let (resume, resumed) = oneshot::channel();
     fault(&b, worker::Fault::Pause(entered, resumed)).await;
     let processing = b.clone();
-    let task = tokio::spawn(async move { processing.process_pending().await });
+    let task = rocky_platform::task::spawn(async move { processing.process_pending().await });
     waiting.await.unwrap();
     let (reply, result) = oneshot::channel();
     b.inner.commands.send(Command::Query(reply)).await.unwrap();
@@ -473,9 +473,9 @@ impl StoredApplication for BrokenApp {
         LedgerApp.admit_read(scope, caller, policy)
     }
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_initialization_rolls_back_and_definition_mismatch_writes_no_schema() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("test.db");
     let identity = crate::tests::identity();
     assert!(
@@ -539,9 +539,9 @@ async fn interrupted_initialization_rolls_back_and_definition_mismatch_writes_no
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = todo(&dir).await;
     let first = create(&replica, "first").await;
     create(&replica, "hidden").await;
@@ -584,9 +584,9 @@ async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields()
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn observer_quota_preserves_existing_observers() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = todo(&dir).await;
     let observers: Vec<_> = (0..MAX_OBSERVERS)
         .map(|_| replica.observe().unwrap())
@@ -597,9 +597,9 @@ async fn observer_quota_preserves_existing_observers() {
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_previous_trusted_file_identity_is_refused_before_writes() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("test.db");
     let replica = todo(&dir).await;
     create(&replica, "kept").await;
@@ -619,7 +619,7 @@ async fn the_previous_trusted_file_identity_is_refused_before_writes() {
             .await
             .unwrap();
     }
-    let before = std::fs::read(&path).unwrap();
+    let before = rocky_platform::fs::read(&path).unwrap();
     assert!(matches!(
         Replica::open_with_config(
             &path,
@@ -631,5 +631,5 @@ async fn the_previous_trusted_file_identity_is_refused_before_writes() {
         .await,
         Err(Error::Incompatible(_))
     ));
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(rocky_platform::fs::read(&path).unwrap(), before);
 }

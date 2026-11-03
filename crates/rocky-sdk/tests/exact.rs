@@ -1,6 +1,8 @@
 //! Exact values through the SDK: integer overflow in a replayed statement,
 //! a `CHECK` and an assertion fails the author's commit and drops with the
 //! same reason wherever it replays; UUIDs, timestamps and JSON round-trip.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, DropReason, Network, Open, SqlValue, Timestamp, TransactionOutcome, TransactionToken,

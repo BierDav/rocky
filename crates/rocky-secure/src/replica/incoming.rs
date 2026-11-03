@@ -36,7 +36,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// a failing one stay committed.
     pub(crate) async fn settle(&self) -> Result<(), Error> {
         loop {
-            tokio::task::yield_now().await;
+            rocky_platform::task::yield_now().await;
             let mut inner = self.inner.lock(Class::Background).await;
             #[cfg(feature = "qualification")]
             let work = (

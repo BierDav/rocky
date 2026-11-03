@@ -1705,7 +1705,7 @@ mod tests {
         births: Vec<Birth>,
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_receipt_has_one_scalar_floor_encoding() {
         let scope = ResourceScope {
             domain: rocky_core::Scope {

@@ -11,10 +11,10 @@ fn configured_revocations(lineage: &Lineage, issuer: &PrivateKey) -> RevocationS
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_stored_ones() {
     let lineage = Lineage::pinned(253);
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::from_bytes(&[254; 32]);
     let issuer = PrivateKey::from_bytes(&[255; 32]);
     let replica = open(&lineage, &dir, "node", &key).await;

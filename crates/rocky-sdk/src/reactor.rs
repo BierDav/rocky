@@ -1,11 +1,11 @@
+use rocky_platform::task::{JoinHandle, JoinSet};
 use std::future::Future;
-use tokio::task::{JoinHandle, JoinSet};
 
 pub(crate) fn spawn_local<T: 'static>(
     name: &'static str,
     future: impl Future<Output = T> + 'static,
 ) -> JoinHandle<T> {
-    tokio::task::spawn_local(task(name, future))
+    rocky_platform::task::spawn_local(task(name, future))
 }
 
 pub(crate) fn spawn_in<T: 'static>(
@@ -34,8 +34,9 @@ mod qualification {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
+        time::Duration,
     };
+    use web_time::Instant;
 
     tokio::task_local! { static RECORDING: ReactorMeasurements; }
 

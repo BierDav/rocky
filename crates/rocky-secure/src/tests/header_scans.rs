@@ -4,10 +4,10 @@ use super::generations::Lineage;
 use super::*;
 use crate::replica::Class;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn header_scans_page_their_reads_and_restart_on_a_changed_source() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = lineage
         .open(&dir.path().join("a.db"), &PrivateKey::new(), 3, None)
         .await

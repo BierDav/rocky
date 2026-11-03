@@ -71,15 +71,22 @@ if [ -n "$packages$changed" ]; then
     selection=$(scripts/check-scope $changed $packages)
 fi
 
-# wasm32 is the browser target. Each package's tests run in a dedicated
-# Worker in headless Firefox; see .cargo/config.toml for the runner.
-wasm_packages="rocky-core rocky-credentials rocky-storage"
+# wasm32 is the browser target. Each package's tests run in a dedicated Worker
+# in headless Firefox (see .cargo/config.toml); tests that need threads,
+# processes, sockets or a paused clock are native-only. Clippy for wasm32 also
+# refuses calls that panic or fail in a browser (scripts/clippy-wasm).
+wasm_packages="rocky-platform rocky-sqlite-opfs rocky-core rocky-credentials rocky-storage
+    rocky-runtime rocky-secure rocky-sdk"
 run_wasm() {
     PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
-    cargo clippy --locked --target wasm32-unknown-unknown --all-targets "$@" -- -D warnings
-    cargo test --locked --no-fail-fast --target wasm32-unknown-unknown "$@"
+    # The SDK's iroh transport is not yet relay-only in a browser.
+    CLIPPY_CONF_DIR="$repo_root/scripts/clippy-wasm" cargo clippy --locked \
+        --target wasm32-unknown-unknown --tests --no-default-features "$@" -- -D warnings
+    # One run of a package's binary holds all its tests; the longest takes minutes.
+    WASM_BINDGEN_TEST_TIMEOUT=1800 cargo test --locked --no-fail-fast \
+        --target wasm32-unknown-unknown --tests --no-default-features "$@"
 }
 if $wasm_only && [ -z "$tiers" ]; then
     run_wasm

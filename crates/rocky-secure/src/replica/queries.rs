@@ -633,7 +633,7 @@ impl<A: RowApplication> SecureSql<A> {
             .map(|index| index.name.to_ascii_lowercase())
             .collect();
         let quoted = format!("\"{}\"", found.replace('"', "\"\""));
-        let rows = tokio::task::spawn_blocking(move || {
+        let rows = rocky_platform::task::spawn_blocking(move || {
             let connection = crate::sqlite::Connection::open_read_only(&path)?;
             connection
                 .rows(&format!("PRAGMA {verb}({quoted})"), ())

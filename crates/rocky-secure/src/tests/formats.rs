@@ -2,9 +2,9 @@ use super::*;
 use crate::storage::rows;
 use std::collections::BTreeMap;
 
-async fn format_template() -> (Fixture, TempDir, std::path::PathBuf, PrivateKey) {
+async fn format_template() -> (Fixture, Scratch, std::path::PathBuf, PrivateKey) {
     let f = Fixture::new();
-    let template = TempDir::new().unwrap();
+    let template = Scratch::new().await;
     let source = template.path().join("template.sqlite");
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(&source, f.app(), f.config(&node, f.full(), &[f.public]))
@@ -28,15 +28,15 @@ async fn format_template() -> (Fixture, TempDir, std::path::PathBuf, PrivateKey)
     (f, template, source, node)
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_checkpoint_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
     for version in [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
     ] {
-        let directory = TempDir::new().unwrap();
+        let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
-        std::fs::copy(&source, &path).unwrap();
+        rocky_platform::fs::copy(&source, &path).unwrap();
         let replica =
             EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
                 .await
@@ -65,7 +65,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
             inner.flush().unwrap();
         }
         drop(replica);
-        let before = std::fs::read(&path).unwrap();
+        let before = rocky_platform::fs::read(&path).unwrap();
         let error = EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
             .await
             .err()
@@ -74,17 +74,17 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
             error.to_string().contains("unsupported checkpoint format"),
             "{error}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(rocky_platform::fs::read(&path).unwrap(), before);
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
     for version in (0..48).chain([49]) {
-        let directory = TempDir::new().unwrap();
+        let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
-        std::fs::copy(&source, &path).unwrap();
+        rocky_platform::fs::copy(&source, &path).unwrap();
         let replica =
             EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
                 .await
@@ -107,7 +107,7 @@ async fn unsupported_replica_formats_refuse_before_writes() {
             inner.flush().unwrap();
         }
         drop(replica);
-        let before = std::fs::read(&path).unwrap();
+        let before = rocky_platform::fs::read(&path).unwrap();
         let error = EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
             .await
             .err()
@@ -118,11 +118,11 @@ async fn unsupported_replica_formats_refuse_before_writes() {
                 .contains("unsupported encrypted replica format"),
             "{error}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(rocky_platform::fs::read(&path).unwrap(), before);
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn damaged_replica_schema_refuses_before_writes() {
     let (f, _template, source, node) = format_template().await;
     for damaged in [
@@ -136,9 +136,9 @@ async fn damaged_replica_schema_refuses_before_writes() {
         "DROP TRIGGER secure_row_positions_delete",
         "DROP INDEX secure_row_position_operations",
     ] {
-        let directory = TempDir::new().unwrap();
+        let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
-        std::fs::copy(&source, &path).unwrap();
+        rocky_platform::fs::copy(&source, &path).unwrap();
         let replica =
             EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
                 .await
@@ -149,7 +149,7 @@ async fn damaged_replica_schema_refuses_before_writes() {
             inner.flush().unwrap();
         }
         drop(replica);
-        let before = std::fs::read(&path).unwrap();
+        let before = rocky_platform::fs::read(&path).unwrap();
         let error = EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
             .await
             .err()
@@ -158,14 +158,18 @@ async fn damaged_replica_schema_refuses_before_writes() {
             error.to_string().contains("secure") || error.to_string().contains("incremental"),
             "{damaged}: {error}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before, "{damaged}");
+        assert_eq!(
+            rocky_platform::fs::read(&path).unwrap(),
+            before,
+            "{damaged}"
+        );
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() {
     let f = Fixture::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         directory.path().join("replica.sqlite"),
@@ -226,7 +230,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_payload_formats_refuse_before_custody_writes() {
     #[derive(Serialize)]
     struct Body {
@@ -244,7 +248,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         creations: Vec<(Commitment, Commitment)>,
     }
     let f = Fixture::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         directory.path().join("replica.sqlite"),
@@ -326,10 +330,10 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn seal_author_positions_span_resource_logs_and_survive_reopen() {
     let f = Fixture::new();
-    let directory = TempDir::new().unwrap();
+    let directory = Scratch::new().await;
     let path = directory.path().join("replica.sqlite");
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
@@ -384,7 +388,7 @@ async fn seal_author_positions_span_resource_logs_and_survive_reopen() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_parent_checkpoint_binding_is_refused_even_with_the_same_version_label() {
     #[derive(Serialize)]
     struct Binding {
@@ -406,7 +410,7 @@ async fn a_parent_checkpoint_binding_is_refused_even_with_the_same_version_label
         signature: p2panda_core::Signature,
     }
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("parent.db"),

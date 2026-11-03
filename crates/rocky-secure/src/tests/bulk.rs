@@ -16,7 +16,7 @@ mod syntax_authority;
 mod syntax_bounds;
 use fixture::{candidate, candidate_tables, frames, release};
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn migration_provenance_is_private_until_endorsed_and_survives_reopen() {
     let (l, dir, key, replica, signed) = candidate(3).await;
     let before = replica.migration_storage().await.unwrap();
@@ -56,7 +56,7 @@ async fn migration_provenance_is_private_until_endorsed_and_survives_reopen() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomically() {
     // Items and tags: two frames.
     let (l, dir, _, source, signed) = candidate_tables(40, true).await;
@@ -236,7 +236,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
         .unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_empty_migration_has_a_signed_canonical_zero_extent() {
     let (_, _, _, replica, signed) = candidate(0).await;
     assert_eq!(signed.statement.frames, 0);
@@ -246,7 +246,7 @@ async fn an_empty_migration_has_a_signed_canonical_zero_extent() {
     assert_eq!(replica.migration_storage().await.unwrap().frames, 0);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn equivocation_stops_acquisition_without_allocating_another_extent() {
     let (l, dir, _, source, signed) = candidate(2).await;
     release(&source, &signed).await;
@@ -303,7 +303,7 @@ async fn equivocation_stops_acquisition_without_allocating_another_extent() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn keyless_custody_verifies_and_relays_proofs_without_claiming_application() {
     let (l, dir, _, source, signed) = candidate(2).await;
     release(&source, &signed).await;
@@ -338,7 +338,7 @@ async fn keyless_custody_verifies_and_relays_proofs_without_claiming_application
     target.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn failed_flush_retains_exact_classification_and_retry_acknowledges_it_once() {
     let (l, dir, _, source, signed) = candidate(4).await;
     release(&source, &signed).await;
@@ -380,7 +380,7 @@ async fn failed_flush_retains_exact_classification_and_retry_acknowledges_it_onc
     target.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn enormous_advertised_extent_reserves_no_frame_storage() {
     let (l, dir, _, source, signed) = candidate(1).await;
     release(&source, &signed).await;
@@ -415,7 +415,7 @@ async fn enormous_advertised_extent_reserves_no_frame_storage() {
     assert!(storage.support_bytes < 32768);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn partial_reader_applies_only_its_encrypted_bundle_members() {
     let (l, dir, _, source, signed) = candidate_tables(2, true).await;
     release(&source, &signed).await;
@@ -475,7 +475,7 @@ async fn partial_reader_applies_only_its_encrypted_bundle_members() {
     target.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proofs() {
     let (l, dir, _, source, signed) = candidate_tables(40, true).await;
     release(&source, &signed).await;

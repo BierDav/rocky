@@ -2,6 +2,8 @@
 //! renews, only issuers open it, concurrent writers converge, answers commit
 //! their record first and the bound holds. See
 //! `docs/decisions/0048-replicated-issuer-registry.md`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, Network, Open,

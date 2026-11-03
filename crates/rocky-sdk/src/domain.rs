@@ -367,7 +367,7 @@ pub(crate) fn registry_table() -> Result<rocky_core::TableDefinition, Failure> {
 mod tests {
     use super::*;
     use rocky_core::Affinity;
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
         let json = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
         // The portable builder supplies both required columns.
@@ -399,7 +399,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
             r#"{"format":6,"application":"measurements","version":1,"tables":[{
@@ -433,7 +433,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
             r#"{"format":6,"application":"references","version":1,"tables":[
@@ -467,7 +467,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_command_definitions_are_refused() {
         let json = r#"{"format":6,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         assert!(Schema::parse(json).is_err());

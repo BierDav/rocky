@@ -649,7 +649,7 @@ pub(crate) struct Progress {
 impl Progress {
     pub(crate) async fn run(&self) -> Result<(), Error> {
         loop {
-            tokio::time::sleep(WORKING_INTERVAL).await;
+            rocky_platform::time::sleep(WORKING_INTERVAL).await;
             self.handle
                 .send_frame(
                     self.key,
@@ -726,7 +726,8 @@ impl Io {
                 })
         };
         let (mut covered, mut progress, started) = received();
-        let mut deadline = (!idle || started).then(|| tokio::time::Instant::now() + TIMEOUT);
+        let mut deadline =
+            (!idle || started).then(|| rocky_platform::time::Instant::now() + TIMEOUT);
         loop {
             tokio::select! {
                 biased;
@@ -735,7 +736,7 @@ impl Io {
                 }
                 _ = async {
                     match deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
                 } => {
@@ -749,7 +750,7 @@ impl Io {
                     if working > progress || (total > covered && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT)) {
                         progress = working;
                         covered = total;
-                        deadline = Some(tokio::time::Instant::now() + TIMEOUT);
+                        deadline = Some(rocky_platform::time::Instant::now() + TIMEOUT);
                     }
                 }
             }
@@ -856,6 +857,8 @@ mod tests {
             message: Message::Channel(packet),
         }
     }
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_timed_out_generation_discards_late_fragments_then_reuses_its_slot() {
         let channels = channels();
@@ -904,7 +907,7 @@ mod tests {
         assert_eq!(io.receive().await.unwrap(), vec![9]);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn losing_the_channel_owner_wakes_reconcile_before_the_writer_drops_its_queue() {
         let mut channels = channels();
         let _outgoing = std::mem::replace(&mut channels.outgoing, mpsc::channel(1).1);
@@ -914,11 +917,11 @@ mod tests {
         tokio::pin!(closing);
         tokio::select! {
             result = &mut closing => panic!("reconcile finished before writer or shutdown: {result:?}"),
-            _ = tokio::task::yield_now() => {}
+            _ = rocky_platform::task::yield_now() => {}
         }
         drop(channels);
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut closing)
+            rocky_platform::time::timeout(Duration::from_millis(100), &mut closing)
                 .await
                 .expect("shutdown did not wake reconcile")
                 .is_err()
@@ -928,7 +931,7 @@ mod tests {
         assert!(handle.begin_reconcile().await.is_err());
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn dropping_a_receiver_retires_its_partial_message() {
         let channels = channels();
         let session = channels
@@ -963,6 +966,8 @@ mod tests {
         assert!(channels.handle.state.lock().unwrap().slots.is_empty());
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn working_renews_only_its_channel_and_the_request_still_has_a_lifetime_limit() {
         let channels = channels();
@@ -970,10 +975,10 @@ mod tests {
             .accept(frame(2, Packet::Open { generation: 0 }))
             .unwrap()
             .unwrap();
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         let work = async {
             loop {
-                tokio::time::sleep(WORKING_INTERVAL).await;
+                rocky_platform::time::sleep(WORKING_INTERVAL).await;
                 channels
                     .accept(frame(2, Packet::Working { generation: 0 }))
                     .unwrap();
@@ -995,6 +1000,8 @@ mod tests {
         assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].closed);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_slow_response_sends_working_every_four_seconds() {
         let mut channels = channels();
@@ -1006,7 +1013,7 @@ mod tests {
             panic!("channel");
         };
         let progress = io.progress();
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         let observed = async {
             for index in 1..=4 {
                 let frame = channels.outgoing.recv().await.unwrap();
@@ -1023,7 +1030,7 @@ mod tests {
             result = progress.run() => panic!("progress ended: {result:?}"),
         }
     }
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn fragments_close_and_generation_reuse_are_bounded() {
         let mut channels = channels();
         let mut session = channels
@@ -1093,6 +1100,8 @@ mod tests {
                 .is_err()
         );
     }
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_requester_can_apply_an_answer_before_asking_again() {
         let channels = channels();
@@ -1104,7 +1113,7 @@ mod tests {
             panic!("request channel")
         };
         let deliver = async {
-            tokio::time::sleep(TIMEOUT * 2).await;
+            rocky_platform::time::sleep(TIMEOUT * 2).await;
             channels
                 .accept(frame(
                     2,
@@ -1120,6 +1129,8 @@ mod tests {
         assert_eq!(received.unwrap(), vec![7]);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_queued_partial_request_is_already_started() {
         let channels = channels();
@@ -1140,7 +1151,7 @@ mod tests {
         let SessionIo::Channel(io) = &mut session.stream else {
             panic!("request channel")
         };
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         assert!(
             io.receive_with_idle(true)
                 .await
@@ -1151,6 +1162,8 @@ mod tests {
         assert_eq!(start.elapsed(), TIMEOUT);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_started_request_cannot_stall_after_idle() {
         let channels = channels();
@@ -1161,9 +1174,9 @@ mod tests {
         let SessionIo::Channel(io) = &mut session.stream else {
             panic!("request channel")
         };
-        let start = tokio::time::Instant::now();
+        let start = rocky_platform::time::Instant::now();
         let deliver = async {
-            tokio::time::sleep(TIMEOUT * 2).await;
+            rocky_platform::time::sleep(TIMEOUT * 2).await;
             channels
                 .accept(frame(
                     2,
@@ -1185,6 +1198,8 @@ mod tests {
         assert_eq!(start.elapsed(), TIMEOUT * 3);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn progressing_reassembly_outlives_one_read_deadline() {
         let channels = channels();
@@ -1197,7 +1212,7 @@ mod tests {
         };
         let deliver = async {
             for index in 0..3 {
-                tokio::time::sleep(TIMEOUT * 3 / 5).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 5).await;
                 channels
                     .accept(frame(
                         2,
@@ -1215,6 +1230,8 @@ mod tests {
         assert_eq!(received.unwrap(), expected);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn reassembly_still_times_out_after_progress_stops() {
         let channels = channels();
@@ -1226,7 +1243,7 @@ mod tests {
             panic!("request channel");
         };
         let read = async {
-            let start = tokio::time::Instant::now();
+            let start = rocky_platform::time::Instant::now();
             assert!(
                 io.receive()
                     .await
@@ -1237,7 +1254,7 @@ mod tests {
             assert_eq!(start.elapsed(), TIMEOUT * 8 / 5);
         };
         let deliver = async {
-            tokio::time::sleep(TIMEOUT * 3 / 5).await;
+            rocky_platform::time::sleep(TIMEOUT * 3 / 5).await;
             channels
                 .accept(frame(
                     2,
@@ -1252,6 +1269,8 @@ mod tests {
         tokio::join!(read, deliver);
     }
 
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn trickles_and_other_channels_do_not_extend_a_read_deadline() {
         let channels = channels();
@@ -1266,14 +1285,14 @@ mod tests {
             panic!("request channel");
         };
         let read = async {
-            let start = tokio::time::Instant::now();
+            let start = rocky_platform::time::Instant::now();
             let error = io.receive().await.unwrap_err();
             assert!(error.to_string().contains("link channel read timeout"));
             assert_eq!(start.elapsed(), TIMEOUT);
         };
         let deliver = async {
             for index in 0..4 {
-                tokio::time::sleep(TIMEOUT * 3 / 10).await;
+                rocky_platform::time::sleep(TIMEOUT * 3 / 10).await;
                 channels
                     .accept(frame(
                         2,
@@ -1299,7 +1318,7 @@ mod tests {
         tokio::join!(read, deliver);
     }
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn oversized_reassembly_and_slow_channel_queues_are_refused() {
         let channels = channels();
         let _session = channels
@@ -1382,7 +1401,7 @@ mod tests {
 #[cfg(test)]
 mod reconcile_tests {
     use super::*;
-    #[tokio::test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_previous_finish_cannot_release_a_new_reconcile() {
         let mut channels = super::tests::channels();
         let first = channels.handle.begin_reconcile().await.unwrap();

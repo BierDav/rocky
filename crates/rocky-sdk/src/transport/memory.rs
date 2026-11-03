@@ -478,7 +478,7 @@ struct Pipe {
     /// The stream in the hub's events.
     label: String,
     /// The drawn wait before the current write crosses.
-    delay: Option<Pin<Box<tokio::time::Sleep>>>,
+    delay: Option<Pin<Box<rocky_platform::time::Sleep>>>,
     /// The current write already waited.
     paced: bool,
 }
@@ -512,7 +512,7 @@ impl AsyncWrite for Pipe {
                 self.hub
                     .event(format!("stall {} {}us", self.label, delay.as_micros()));
             }
-            self.delay = (!delay.is_zero()).then(|| Box::pin(tokio::time::sleep(delay)));
+            self.delay = (!delay.is_zero()).then(|| Box::pin(rocky_platform::time::sleep(delay)));
             self.paced = true;
         }
         if let Some(delay) = &mut self.delay {

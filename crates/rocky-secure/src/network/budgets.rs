@@ -81,7 +81,7 @@ fn fits(message: Message) {
     .unwrap();
     assert!(frame.len() <= MAX_SECURE_FRAME);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledgment() {
     let mut largest = None;
     for grants in 1..=rocky_credentials::MAX_GRANTS {
@@ -145,7 +145,7 @@ fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledg
         rocky_credentials::MAX_FINALITY_BYTES
     );
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn maximal_frontier_batches_are_split_in_both_directions() {
     use crate::replica::roles::{FrontierReply, FrontierState, MAX_FRONTIER_SCOPES};
     let author = PrivateKey::from_bytes(&[7; 32]).public_key();
@@ -193,7 +193,7 @@ fn maximal_frontier_batches_are_split_in_both_directions() {
     }
     assert!(sent > 1);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn holdings_proofs_fit_with_maximal_tuples_and_four_epochs() {
     use rocky_core::{Affinity, Collation, KeyColumn, PartitionTuple, PartitionValue, SqlValue};
     let value = PartitionValue::new(

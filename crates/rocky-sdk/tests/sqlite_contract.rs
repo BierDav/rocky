@@ -1,5 +1,7 @@
 //! Qualifies the scalar and key contracts of `rocky-core` against the pinned
 //! SQLite: getter conversions, storage classes and key equality.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_core::{Affinity, Collation, KeyColumn, SqlValue, key_components};
 use rusqlite::{Connection, types::Value};
 

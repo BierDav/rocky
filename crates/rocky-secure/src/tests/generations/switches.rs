@@ -61,10 +61,10 @@ async fn import(
     offered
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_with_it() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open(&dir.path().join("alice.db"), &alice_key, 1, None)
@@ -200,10 +200,10 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
     bob.audit(items).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tombstones() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, bob_key, carol_key) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let alice = lineage
         .open(&dir.path().join("alice.db"), &alice_key, 1, None)
@@ -337,10 +337,10 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_open_replica_follows_an_additive_schema_in_place() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
     let alice_path = dir.path().join("alice.db");
     let alice = lineage
@@ -444,10 +444,10 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
     let alice_path = dir.path().join("alice.db");
     let alice = lineage
@@ -545,10 +545,10 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     alice.audit(items).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let keys: Vec<_> = (0..4).map(|_| PrivateKey::new()).collect();
     let mut replicas = Vec::new();
     for (index, key) in keys.iter().enumerate() {

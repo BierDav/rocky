@@ -19,6 +19,8 @@ opt-level = 3
 runner = "wasm-bindgen-test-runner"
 
 [env]
+# C dependencies of wasm32 (SQLite, ring) archive with the toolchain's llvm-ar.
+AR_wasm32_unknown_unknown = { value = "scripts/llvm-ar", relative = true }
 # Browser tests run in a dedicated Worker, where a node runs (OPFS needs it).
 WASM_BINDGEN_USE_DEDICATED_WORKER = "1"
 # Tests never apply a pending browser update, which can wait for a prompt.

@@ -2,6 +2,8 @@
 //! reaches its recipient by sync, revocation rotates the group as one unit,
 //! and the holding rule keeps a group partition whole unless a table is
 //! left out explicitly. See `docs/runtime/partitioned-scopes.md#group-secrets`.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{
     Database, DeviceKeys, Network, Open, SecretStore, Session, credentials::ProviderError,
     transport::memory::Hub,

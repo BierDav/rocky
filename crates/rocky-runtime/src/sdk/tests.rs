@@ -1,7 +1,7 @@
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::{DomainId, MeshId};
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 fn scope() -> Scope {
     Scope {
@@ -10,7 +10,7 @@ fn scope() -> Scope {
         domain: DomainId([1; 16]),
     }
 }
-async fn open(dir: &TempDir) -> Replica<InventoryApp> {
+async fn open(dir: &Scratch) -> Replica<InventoryApp> {
     Replica::open(
         dir.path().join("sdk.db"),
         InventoryApp,
@@ -53,9 +53,9 @@ fn query(sql: &str) -> Query {
         cursor: None,
     }
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn subscription_registration_races_coalescing_cancellation_and_scope_denial() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let session = Session::new(replica.clone());
     let id = ok(call(
@@ -114,14 +114,15 @@ async fn subscription_registration_races_coalescing_cancellation_and_scope_denia
         },
     );
     let release = async {
-        tokio::task::yield_now().await;
+        rocky_platform::task::yield_now().await;
         call(&session, Request::Unsubscribe { subscription: id }).await
     };
-    let (waiting, release) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(waiting, release)
-    })
-    .await
-    .unwrap();
+    let (waiting, release) =
+        rocky_platform::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(waiting, release)
+        })
+        .await
+        .unwrap();
     assert!(matches!(waiting, Reply::Error { error, .. } if error.code == "closed"));
     ok(release);
     let mut foreign = scope();
@@ -141,9 +142,9 @@ async fn subscription_registration_races_coalescing_cancellation_and_scope_denia
     ));
     replica.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn precise_handles_preconditions_restart_and_explicit_strong_reads() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let session = Session::new(replica.clone());
     let original = ok(call(
@@ -209,9 +210,9 @@ async fn precise_handles_preconditions_restart_and_explicit_strong_reads() {
     replica.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn noisy_session_quota_and_close_preserve_other_sessions() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let replica = open(&dir).await;
     let noisy = Session::new(replica.clone());
     let other = Session::new(replica.clone());

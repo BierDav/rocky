@@ -21,10 +21,10 @@ fn bookmark(f: &Fixture, name: &str, from: Option<TipId>, to: TipId) -> TipState
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() {
     let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
     let chain = CredentialChain(vec![

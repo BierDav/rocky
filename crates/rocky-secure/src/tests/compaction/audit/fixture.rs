@@ -1,14 +1,14 @@
 use super::*;
 
 pub(super) struct AuditFixture {
-    pub directory: TempDir,
+    pub directory: Scratch,
     pub lineage: Lineage,
     pub node: PrivateKey,
     pub replica: Replica,
 }
 impl AuditFixture {
     pub async fn new(based: bool) -> Self {
-        let directory = TempDir::new().unwrap();
+        let directory = Scratch::new().await;
         let lineage = Lineage::new();
         let node = PrivateKey::new();
         let replica = open(&lineage, &directory, "audit", &node).await;

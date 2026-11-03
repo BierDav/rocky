@@ -4,7 +4,7 @@ use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
 use inventory_app::InventoryApp;
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 /// Encoded operations of `PEER` in domain 1, in author order.
 pub(super) async fn peer_operations(dir: &Path, count: u8) -> Vec<Vec<u8>> {
@@ -22,9 +22,9 @@ async fn rows(replica: &Replica<InventoryApp>) -> usize {
     replica.query().await.unwrap().rows.len()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_refused_or_pending_record_leaves_the_rest_of_its_page_committed() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let operations = peer_operations(dir.path(), 4).await;
     let runtime = open_node(&dir.path().join("node.db"), NODE, grouped()).await;
     let replica = runtime.domain(scope(1)).unwrap();
@@ -77,9 +77,9 @@ async fn a_refused_or_pending_record_leaves_the_rest_of_its_page_committed() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_page_is_split_into_bounded_batches_in_input_order() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let count = 2 * crate::replication::TRANSFER_PAGE_SIZE as u8 + 3;
     let mut page = peer_operations(dir.path(), count).await;
     page.insert(5, vec![0; MAX_FRAME_BYTES]);
@@ -100,9 +100,9 @@ async fn a_page_is_split_into_bounded_batches_in_input_order() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn submit_waits_for_queue_space_instead_of_reporting_backpressure() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open_node(&dir.path().join("node.db"), NODE, grouped()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     assert_eq!(replica.queue_depth().commands, 0);
@@ -123,7 +123,7 @@ async fn submit_waits_for_queue_space_instead_of_reporting_backpressure() {
     assert_eq!(depth.commands, depth.command_capacity);
     assert_eq!(queued.len(), depth.command_capacity);
     assert!(depth.bytes > 0 && depth.bytes < depth.byte_capacity);
-    let waiting = tokio::spawn({
+    let waiting = rocky_platform::task::spawn({
         let replica = replica.clone();
         async move {
             let receipt = replica.submit(mutation(1000)).await.unwrap();
@@ -131,7 +131,7 @@ async fn submit_waits_for_queue_space_instead_of_reporting_backpressure() {
         }
     });
     for _ in 0..16 {
-        tokio::task::yield_now().await;
+        rocky_platform::task::yield_now().await;
     }
     assert!(!waiting.is_finished());
     resume.send(()).unwrap();

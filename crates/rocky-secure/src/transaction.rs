@@ -80,7 +80,7 @@ impl<A: RowApplication> Inner<A> {
                     hook(attempt);
                 }
                 if attempt + 1 < TRANSACTION_ATTEMPTS {
-                    tokio::time::sleep(backoff(attempt)).await;
+                    rocky_platform::time::sleep(backoff(attempt)).await;
                     None
                 } else {
                     Some(Err(Error::RetryExhausted))

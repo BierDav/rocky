@@ -2211,7 +2211,7 @@ pub(super) fn tip_path_seals(
 mod tests {
     use super::*;
 
-    #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_gap_at_the_maximum_sequence_terminates() {
         use rocky_core::{AppId, DomainId, MeshId};
         use rocky_credentials::{AuthorMark, SEAL_FORMAT, SealAction, SealStatement};

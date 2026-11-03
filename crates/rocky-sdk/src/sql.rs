@@ -196,21 +196,21 @@ impl Timestamp {
         self.0
     }
     /// `None` outside the platform's `SystemTime` range.
-    pub fn system_time(self) -> Option<std::time::SystemTime> {
+    pub fn system_time(self) -> Option<web_time::SystemTime> {
         let offset = std::time::Duration::from_micros(self.0.unsigned_abs());
         if self.0 < 0 {
-            std::time::UNIX_EPOCH.checked_sub(offset)
+            web_time::UNIX_EPOCH.checked_sub(offset)
         } else {
-            std::time::UNIX_EPOCH.checked_add(offset)
+            web_time::UNIX_EPOCH.checked_add(offset)
         }
     }
 }
 /// Rounds down to the microsecond; refuses instants outside `i64` microseconds.
-impl TryFrom<std::time::SystemTime> for Timestamp {
+impl TryFrom<web_time::SystemTime> for Timestamp {
     type Error = DecodeError;
-    fn try_from(time: std::time::SystemTime) -> Result<Self, DecodeError> {
+    fn try_from(time: web_time::SystemTime) -> Result<Self, DecodeError> {
         let out_of_range = || DecodeError("instant outside i64 microseconds".into());
-        let micros = match time.duration_since(std::time::UNIX_EPOCH) {
+        let micros = match time.duration_since(web_time::UNIX_EPOCH) {
             Ok(after) => i64::try_from(after.as_micros()).map_err(|_| out_of_range())?,
             Err(before) => {
                 let before = before.duration();

@@ -1,0 +1,42 @@
+[package]
+name = "rocky-sqlite-opfs"
+description = "Rocky's fork of sqlite-wasm-vfs 0.2: an OPFS SQLite VFS whose WAL works across connections"
+version.workspace = true
+# Upstream's edition and license; Rocky's changes are under the same license.
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+readme = "README.md"
+
+[package.metadata.docs.rs]
+targets = ["wasm32-unknown-unknown"]
+
+# Upstream code: SQLite's C ABI needs `unsafe`, so the workspace lints do not
+# apply; `src/locks.rs`, Rocky's addition, is safe Rust.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[dependencies]
+js-sys = "0.3.81"
+rsqlite-vfs = "0.1"
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["sync"] }
+wasm-bindgen = "0.2.104"
+wasm-bindgen-futures = "0.4.54"
+web-sys = { version = "0.3.81", features = [
+    "StorageManager",
+    "FileSystemSyncAccessHandle",
+    "FileSystemDirectoryHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemReadWriteOptions",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "FileSystemGetFileOptions",
+    "FileSystemFileHandle",
+] }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+sqlite-wasm-rs = "0.5"
+wasm-bindgen-test = "0.3"

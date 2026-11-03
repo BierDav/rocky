@@ -1,6 +1,8 @@
 //! Seals of a tip with a composed coordinated log through the JSON
 //! contract: a private close ends the source tip's log only once relayed,
 //! and its finality releases the staged migration.
+// The SDK's blocking constructors, native transports and paused clocks.
+#![cfg(not(target_family = "wasm"))]
 mod common;
 use common::{Device, Failure, introduce};
 use rocky_coordinator::coordinated::MemoryLog;

@@ -2,7 +2,7 @@
 use super::syntax::*;
 use super::*;
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     let ((l, _, _, replica, signed), _) = fixture::issuer_candidate().await;
     assert!(!signed.endorsement.chain.0.is_empty());
@@ -79,7 +79,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_bad_signatures_parse_but_actual_acquisition_refuses_every_time() {
     let ((l, _, _, replica, signed), issuer) = fixture::issuer_candidate().await;
     release(&replica, &signed).await;
@@ -142,7 +142,7 @@ async fn warm_bad_signatures_parse_but_actual_acquisition_refuses_every_time() {
     replica.audit(l.scope("items")).await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn warm_descriptor_uses_the_new_current_migration_minimum() {
     let (l, _, _, replica, signed) = candidate(1).await;
     release(&replica, &signed).await;

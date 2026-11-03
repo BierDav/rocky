@@ -71,10 +71,10 @@ async fn engine(replica: &Replica) -> EngineStatus {
     replica.generations().await.unwrap().engine
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_build_on_another_engine_follows_read_only_until_a_tip_names_it() {
     let lineage = Lineage::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
     let alice_path = dir.path().join("alice.db");
     let alice = lineage

@@ -17,10 +17,10 @@ fn opened(
     (payload.writes().to_vec(), payload.intent().cloned())
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replayed_writes_commit_as_intents() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let node = PrivateKey::new();
     let alice = t
@@ -122,10 +122,10 @@ async fn replayed_writes_commit_as_intents() {
     assert!(header(latest).timestamp > first.timestamp);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn nondeterministic_replayed_writes_are_refused_before_they_run() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -158,10 +158,10 @@ async fn nondeterministic_replayed_writes_are_refused_before_they_run() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_single_row_intent_authors_within_its_statement_budget() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -253,10 +253,10 @@ async fn outcomes(replica: &EncryptedReplica<TypedRows>) -> Vec<Option<String>> 
     .collect()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_increments_replay_in_order_and_both_apply() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let open = |name: &'static str| {
         let (t, dir) = (&t, &dir);
@@ -343,10 +343,10 @@ async fn create(
     frames.into_iter().next().unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_earlier_arrival_rewinds_and_redo_reevaluates_later_outcomes() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let open = |name: &'static str| {
         let (t, dir) = (&t, &dir);
@@ -386,10 +386,10 @@ async fn an_earlier_arrival_rewinds_and_redo_reevaluates_later_outcomes() {
     assert_eq!(outcomes(&carol).await, outcomes(&bob).await);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_ends_rewinds_and_makes_drops_final() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let open = |name: &'static str| {
         let (t, dir) = (&t, &dir);
@@ -455,10 +455,10 @@ fn replay_stamp(frame: &EncryptedFrame) -> (u64, u32, u64) {
     )
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -526,10 +526,10 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -587,10 +587,10 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     assert_eq!(outcomes(&alice).await, vec![None, Some("admission".into())]);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_single_row_intent_receives_within_its_statement_budget() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -646,11 +646,11 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
 /// Receiving a transaction that changed 32 rows costs at most 6.5
 /// statements per row (the features_11 result was 6.40625), whether the
 /// author wrote each row in its own statement or all in one.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_thirty_two_row_intent_receives_within_its_statements_per_row() {
     const ROWS: usize = 32;
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(
@@ -745,10 +745,10 @@ async fn a_thirty_two_row_intent_receives_within_its_statements_per_row() {
     assert!(per_row.iter().all(|count| *count <= 6.5), "{per_row:?}");
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let open = |name: &'static str| {
         let (t, dir) = (&t, &dir);
@@ -773,7 +773,7 @@ async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
     for frame in std::iter::once(created).chain(later) {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     assert_eq!(
         carol.receive(earliest).await.unwrap(),
         ReceiveStatus::Applied
@@ -794,10 +794,10 @@ async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replayed_inserts_take_their_authors_own_identities() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
     let alice = t.open(&dir.path().join("a.db"), &a, t.full(), &both).await;
@@ -863,10 +863,10 @@ async fn replayed_inserts_take_their_authors_own_identities() {
     assert_eq!(amounts(&alice, &both).await.len(), 2);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_update_to_equal_values_needs_no_right() {
     let t = Typed::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let alice = t
         .open(

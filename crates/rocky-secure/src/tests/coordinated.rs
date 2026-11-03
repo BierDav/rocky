@@ -40,7 +40,7 @@ impl Mesh {
 /// Two trusted nodes, alice and bob.
 struct Fixture {
     lineage: Lineage,
-    dir: TempDir,
+    dir: Scratch,
     mesh: Mesh,
     alice: (PrivateKey, Replica),
     bob: (PrivateKey, Replica),
@@ -48,7 +48,7 @@ struct Fixture {
 impl Fixture {
     async fn new(minimum: usize) -> Self {
         let lineage = Lineage::new();
-        let dir = TempDir::new().unwrap();
+        let dir = Scratch::new().await;
         let mesh = Mesh::new(minimum, lineage.domain);
         let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
         let alice = open(&lineage, &dir, "alice", &alice_key).await;
@@ -81,7 +81,7 @@ impl Fixture {
         }
     }
 }
-async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) -> Replica {
+async fn open(lineage: &Lineage, dir: &Scratch, name: &str, key: &PrivateKey) -> Replica {
     lineage
         .open_trusted(
             &dir.path().join(format!("{name}.db")),
@@ -93,7 +93,7 @@ async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) ->
         .unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
     let fixture = Fixture::new(1).await;
     let log = tip_log(&fixture.lineage);

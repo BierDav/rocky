@@ -6,8 +6,8 @@ use rocky_core::{
     Commitment, FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right,
     RowChange, RowFields, RowSelection, RowWrite,
 };
+use rocky_platform::fs::Scratch;
 use std::collections::BTreeSet;
-use tempfile::TempDir;
 
 struct Fixture {
     publisher: PrivateKey,
@@ -468,10 +468,10 @@ fn change(
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn encrypted_offline_publisher_public_private_and_opaque_relay() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = PrivateKey::new();
     let bob = PrivateKey::new();
     let relay_key = PrivateKey::new();
@@ -690,25 +690,24 @@ async fn encrypted_offline_publisher_public_private_and_opaque_relay() {
         .unwrap();
     assert_eq!(page.frames.len(), 2);
     drop(relay);
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-        let path = entry.unwrap().path();
+    for path in rocky_platform::fs::read_dir(dir.path()).unwrap() {
         if path
             .file_name()
             .unwrap()
             .to_string_lossy()
             .starts_with("relay")
         {
-            let bytes = std::fs::read(path).unwrap();
+            let bytes = rocky_platform::fs::read(path).unwrap();
             assert!(!bytes.windows(9).any(|bytes| bytes == b"987654321"));
             assert!(!bytes.windows(5).any(|bytes| bytes == b"Alice"));
         }
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rollback_retry_restart_and_missing_encrypted_dependencies() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let node = PrivateKey::new();
     let config = fixture.config(&node, fixture.full(), &[fixture.public]);
     let credentials = config.credentials.clone();
@@ -843,7 +842,7 @@ async fn rollback_retry_restart_and_missing_encrypted_dependencies() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     let fixture = Fixture::new();
     let key = PrivateKey::new();
@@ -892,7 +891,7 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn row_and_field_pairing_cannot_be_combined_and_mixed_patches_are_atomic() {
     let fixture = Fixture::new();
     let field_a = fixture.app().field("display_name");
@@ -912,10 +911,10 @@ fn row_and_field_pairing_cannot_be_combined_and_mixed_patches_are_atomic() {
     assert!(!a.includes(&b));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = PrivateKey::new();
     let b = PrivateKey::new();
     let ac = fixture.config(&a, fixture.full(), &[fixture.public]);
@@ -941,7 +940,7 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
         )
         .await
         .unwrap();
-    let (near, far) = network::link::testing::tcp().await;
+    let (near, far) = network::link::testing::connected().await;
     let (mut session, mut served) = network::link::testing::sessions_over(
         near,
         far,
@@ -982,10 +981,10 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
     assert_eq!(acknowledged, vec![vec![rocky_core::SqlValue::Integer(1)]]);
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn learned_revocation_lost_keys_and_wrong_generations() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let source_key = PrivateKey::new();
     let target_key = PrivateKey::new();
     let source_config = fixture.config(
@@ -1129,7 +1128,7 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     let fixture = Fixture::new();
     let user = PrivateKey::new();
@@ -1211,10 +1210,10 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_field_updates_converge_and_no_remote_operation_is_reauthored() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let a = PrivateKey::new();
     let b = PrivateKey::new();
     let ar = EncryptedReplica::open(
@@ -1302,7 +1301,9 @@ async fn concurrent_field_updates_converge_and_no_remote_operation_is_reauthored
     );
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by committed_ciphertext_survives_process_exit"]
 async fn crash_child() {
     let path = std::env::var("ROCKY_CRASH_TEST_PATH").unwrap();
@@ -1332,9 +1333,11 @@ async fn crash_child() {
     std::process::exit(77);
 }
 
-#[tokio::test]
+// Crashes a child process.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn committed_ciphertext_survives_process_exit() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let path = dir.path().join("crash.db");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tests::crash_child", "--ignored"])
@@ -1378,7 +1381,7 @@ async fn native_pull(
     target_identity: (&PrivateKey, CredentialChain),
     scopes: Vec<ResourceScope>,
 ) {
-    let (near, far) = network::link::testing::tcp().await;
+    let (near, far) = network::link::testing::connected().await;
     let (mut session, mut served) = network::link::testing::sessions_over(
         near,
         far,
@@ -1404,10 +1407,10 @@ async fn native_pull(
     served.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn two_native_clients_and_keyless_relay_with_offline_manifest() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let alice = PrivateKey::new();
     let bob = PrivateKey::new();
     let relay = PrivateKey::new();
@@ -1480,14 +1483,14 @@ async fn two_native_clients_and_keyless_relay_with_offline_manifest() {
     );
     assert!(b.snapshot(fixture.private).await.is_err());
     assert!(r.snapshot(fixture.private).await.is_err());
-    let artifact = std::fs::read(dir.path().join("relay.db")).unwrap();
+    let artifact = rocky_platform::fs::read(dir.path().join("relay.db")).unwrap();
     assert!(!artifact.windows(9).any(|bytes| bytes == b"777777777"));
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision() {
     let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let other = PrivateKey::new();
     let source = EncryptedReplica::open(
@@ -1588,6 +1591,8 @@ pub(crate) mod blockers;
 mod bundles;
 mod chains;
 mod compaction;
+// The coordinator's memory log is native-only, like the coordinator.
+#[cfg(not(target_family = "wasm"))]
 mod coordinated;
 mod delegation;
 mod delivery;

@@ -2,7 +2,7 @@
 use super::*;
 use crate::scaling_option_tests::{NODE, note, open_node, scope};
 use crate::worker::Fault;
-use std::time::Instant;
+use web_time::Instant;
 
 fn instrumented() -> RuntimeOptions {
     RuntimeOptions {
@@ -12,11 +12,11 @@ fn instrumented() -> RuntimeOptions {
     }
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
     // Default options leave instrumentation off: the subphase counters stay
     // zero even though steps ran.
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(&dir.path().join("off.db"), NODE, RuntimeOptions::default()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     for index in 0..8u8 {
@@ -36,10 +36,20 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
         note(&replica, index, "on").committed().await.unwrap();
     }
     let stats = replica.writer_stats();
-    assert!(stats.admission_micros > 0, "{stats:?}");
-    assert!(stats.reduction_micros > 0, "{stats:?}");
-    assert!(stats.encoding_micros > 0, "{stats:?}");
-    assert!(stats.sql_micros > 0, "{stats:?}");
+    // A browser coarsens its clock to tens of microseconds, so there a short
+    // subphase can measure zero; together they still record time.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        assert!(stats.admission_micros > 0, "{stats:?}");
+        assert!(stats.reduction_micros > 0, "{stats:?}");
+        assert!(stats.encoding_micros > 0, "{stats:?}");
+        assert!(stats.sql_micros > 0, "{stats:?}");
+    }
+    assert!(
+        stats.admission_micros + stats.reduction_micros + stats.encoding_micros + stats.sql_micros
+            > 0,
+        "{stats:?}"
+    );
     // The subphases stay within the total step time (not counting commit).
     assert!(
         stats.admission_micros + stats.reduction_micros + stats.encoding_micros + stats.sql_micros
@@ -49,9 +59,9 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(&dir.path().join("ckpt.db"), NODE, instrumented()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     // A tiny threshold so a short write burst crosses it several times.
@@ -92,11 +102,11 @@ async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented(
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn writer_steps_are_attributed_by_kind_only_when_instrumented() {
     // Default options leave the attribution counters at zero even though
     // local mutations ran.
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(
         &dir.path().join("kind-off.db"),
         NODE,
@@ -128,7 +138,7 @@ async fn writer_steps_are_attributed_by_kind_only_when_instrumented() {
     runtime.close().await.unwrap();
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn the_checkpoint_log_is_bounded_and_counts_dropped_intervals() {
     let metrics = crate::writer::Metrics::default();
     for index in 0..(crate::writer::MAX_CHECKPOINT_INTERVALS + 7) {

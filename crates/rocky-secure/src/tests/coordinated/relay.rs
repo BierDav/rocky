@@ -32,7 +32,7 @@ async fn close(fixture: &Fixture) -> SignedSeal {
     SignedSeal::sign(statement, fixture.lineage.publisher()).unwrap()
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_relay_certifies_only_the_exact_private_close() {
     let fixture = Fixture::new(1).await;
     seals::follow_main(&fixture).await;
@@ -70,7 +70,7 @@ async fn a_relay_certifies_only_the_exact_private_close() {
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unknown_rival_terminal_never_certifies_the_private_candidate() {
     let fixture = Fixture::new(1).await;
     seals::follow_main(&fixture).await;
@@ -108,7 +108,7 @@ async fn an_unknown_rival_terminal_never_certifies_the_private_candidate() {
     assert!(relay.1.tip_graph(log.scope).await.unwrap().seals.is_empty());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn relays_refuse_continuations_and_recovery_candidates() {
     let fixture = Fixture::new(1).await;
     seals::follow_main(&fixture).await;
@@ -129,7 +129,7 @@ async fn relays_refuse_continuations_and_recovery_candidates() {
     assert!(relay.1.staged_close_finality(&[1, 2, 3]).await.is_err());
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_committed_relay_resumes_exact_bytes_after_reopen_without_admitting_the_close() {
     let fixture = Fixture::new(2).await;
     seals::follow_main(&fixture).await;
@@ -202,7 +202,7 @@ async fn a_committed_relay_resumes_exact_bytes_after_reopen_without_admitting_th
     );
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pending_relay_uses_the_raised_signed_minimum_and_distinct_acknowledgers() {
     let fixture = Fixture::new(2).await;
     seals::follow_main(&fixture).await;

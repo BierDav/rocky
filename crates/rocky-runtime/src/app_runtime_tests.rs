@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::fault;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
-use tempfile::TempDir;
+use rocky_platform::fs::Scratch;
 
 fn scope(domain: u8) -> Scope {
     Scope {
@@ -47,7 +47,7 @@ fn policy(domain: u8) -> Policy {
         note_prefix: None,
     }
 }
-async fn open(dir: &TempDir, node: u8) -> Runtime<InventoryApp> {
+async fn open(dir: &Scratch, node: u8) -> Runtime<InventoryApp> {
     Runtime::open(dir.path().join(format!("{node}.db")), installs(node))
         .await
         .unwrap()
@@ -74,14 +74,14 @@ async fn note(replica: &Replica<InventoryApp>, text: &str) -> Envelope {
 }
 /// Domains in one file share the file writer and its groups, but keep their
 /// own revisions and author cursors.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn shared_file_domains_share_groups_with_independent_revisions_and_author_cursors() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let one_file = RuntimeOptions {
         files: 1,
         ..RuntimeOptions::default()
     };
-    let open = async |dir: &TempDir| {
+    let open = async |dir: &Scratch| {
         Runtime::open_with_options(dir.path().join("3.db"), installs(3), one_file)
             .await
             .unwrap()
@@ -102,7 +102,7 @@ async fn shared_file_domains_share_groups_with_independent_revisions_and_author_
     // the next group together with a's second one.
     let mut independent = b.mutate(mutation("independent")).unwrap();
     let second = a.mutate(mutation("second")).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
     assert!(independent.result.try_recv().is_err());
     assert_eq!(b.inner.revisions.borrow().get(), 0);
     resume.send(()).unwrap();
@@ -147,9 +147,9 @@ async fn shared_file_domains_share_groups_with_independent_revisions_and_author_
     }
     runtime.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn shared_transactions_rollback_retry_and_cancel_waiters_with_stable_identity() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let handle = MutationHandle([8; 32]);
@@ -200,9 +200,9 @@ async fn shared_transactions_rollback_retry_and_cancel_waiters_with_stable_ident
     );
     runtime.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_are_bound_scoped_bounded_and_observations_coalesce() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     let a = runtime.domain(scope(1)).unwrap();
     let b = runtime.domain(scope(2)).unwrap();
@@ -273,7 +273,7 @@ async fn reads_are_bound_scoped_bounded_and_observations_coalesce() {
     assert!(page.next.is_some());
     runtime.close().await.unwrap();
 }
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn manifest_reopen_is_immutable() {
     let mut manifest = inventory_app::manifest();
     let hash = manifest.hash();
@@ -284,7 +284,7 @@ async fn manifest_reopen_is_immutable() {
     manifest.validate().unwrap();
     manifest.operations[0].id = [0; 32];
     assert_eq!(manifest.validate(), Err(ProtocolError::InvalidManifest));
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     runtime.close().await.unwrap();
     let mut changed = installs(3);
@@ -297,9 +297,9 @@ async fn manifest_reopen_is_immutable() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn cancelled_progress_reads_recover_and_named_peer_evidence_coalesces() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let handle = MutationHandle([55; 32]);
@@ -359,9 +359,9 @@ async fn cancelled_progress_reads_recover_and_named_peer_evidence_coalesces() {
     runtime.close().await.unwrap();
 }
 
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn dynamic_sql_sees_only_current_authorized_rows() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     let replica = runtime.domain(scope(1)).unwrap();
     note(&replica, "public note").await;
@@ -398,9 +398,9 @@ async fn dynamic_sql_sees_only_current_authorized_rows() {
 }
 /// While the file writer holds its group open, another connection's write
 /// is refused as retryable busy and its reads see only committed state.
-#[tokio::test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn scoped_busy_writes_and_pending_receipts_are_observable() {
-    let dir = TempDir::new().unwrap();
+    let dir = Scratch::new().await;
     let runtime = open(&dir, 3).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let (entered, paused) = oneshot::channel();

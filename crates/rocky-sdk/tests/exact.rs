@@ -218,8 +218,8 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
         assert!(
             matches!(
                 (first, second),
-                (Some(TransactionOutcome::Applied), Some(outcome))
-                    | (Some(outcome), Some(TransactionOutcome::Applied))
+                (Some(TransactionOutcome::Applied { sealed: false }), Some(outcome))
+                    | (Some(outcome), Some(TransactionOutcome::Applied { sealed: false }))
                     if outcome == dropped
             ),
             "{first:?} {second:?}"

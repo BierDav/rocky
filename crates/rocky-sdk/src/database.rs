@@ -532,8 +532,8 @@ impl Database {
     }
     /// How a committed transaction with replayed writes stands here:
     /// `None` until one of its writes replayed. A local commit stays
-    /// visible until replay drops it; a drop is final once a seal covers
-    /// it.
+    /// visible until replay drops it. `Applied` and `Dropped` are final
+    /// (`sealed`) once a seal covers the transaction.
     pub async fn transaction_outcome(
         &self,
         token: rocky_core::TransactionToken,

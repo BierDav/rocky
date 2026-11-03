@@ -959,9 +959,9 @@ impl<A: RowApplication> Inner<A> {
         let taken: Vec<_> = changes
             .iter()
             .filter(|change| change.replayed)
-            .map(|change| (change.scope, change.id, change.through))
+            .map(|change| (change.scope, change.id))
             .collect();
-        self.take_seal_rows(seal_id, &taken).await?;
+        self.take_seal_rows(seal_id, depth, &taken).await?;
         for (_, id, rows) in drops {
             for (row, fields) in rows {
                 self.conn
@@ -1518,6 +1518,10 @@ impl<A: RowApplication> Inner<A> {
             self.forget_seal_rows(id, target.depth).await?;
             return Ok(false);
         }
+        // Rows the seal left undecided make no base; a later seal's does.
+        if self.leaves_open(id, target.depth).await? {
+            return Ok(false);
+        }
         let taken = self.seal_rows(id, target.seal).await?;
         let outcomes = match taken {
             Some(_) => self.seal_outcomes(id, target.seal).await?,
@@ -1552,7 +1556,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let outcomes = match outcomes {
             Some(outcomes) => outcomes,
-            None => self.sealed_outcomes(id, through).await?,
+            None => self.sealed_outcomes(id).await?,
         };
         let sets = replay::base_sets(&rows);
         let (frontier, operations) = self.covered_frontier(id, base, through).await?;

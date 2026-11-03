@@ -36,6 +36,9 @@ pub struct TableChange {
     /// Transactions a committed replay dropped here, by identity; every
     /// observer receives them, whichever tables it follows.
     pub dropped: BTreeSet<Commitment>,
+    /// This replica's own transactions whose outcome a committed seal or
+    /// checkpoint may have made final here; every observer receives them.
+    pub sealed: BTreeSet<Commitment>,
 }
 impl TableChange {
     fn merge(
@@ -73,11 +76,12 @@ impl Slot {
         }
         self.notify.notify_one();
     }
-    fn offer_drops(&self, scope: Scope, revision: u64, dropped: &BTreeSet<Commitment>) {
+    fn offer_outcomes(&self, scope: Scope, revision: u64, outcomes: &Outcomes) {
         if let Ok(mut pending) = self.pending.lock() {
             let change = pending.change.get_or_insert_with(TableChange::default);
             change.merge(std::iter::empty(), scope, revision, &[Cause::Sync]);
-            change.dropped.extend(dropped);
+            change.dropped.extend(&outcomes.dropped);
+            change.sealed.extend(&outcomes.sealed);
         }
         self.notify.notify_one();
     }
@@ -237,11 +241,20 @@ impl TableEvents {
     }
 }
 
+/// Transactions whose outcome a commit changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outcomes {
+    /// Dropped by a replay.
+    pub dropped: BTreeSet<Commitment>,
+    /// Own transactions a seal or checkpoint may have made final.
+    pub sealed: BTreeSet<Commitment>,
+}
+
 impl TableEvents {
-    /// Offers transactions a committed replay dropped to every observer.
-    /// Call only after the commit.
-    pub fn publish_drops(&self, revision: u64, dropped: &BTreeSet<Commitment>) {
-        if dropped.is_empty() {
+    /// Offers transactions whose outcome a commit changed to every
+    /// observer. Call only after the commit.
+    pub fn publish_outcomes(&self, revision: u64, outcomes: &Outcomes) {
+        if outcomes.dropped.is_empty() && outcomes.sealed.is_empty() {
             return;
         }
         let Ok(registry) = self.registry.lock() else {
@@ -251,7 +264,7 @@ impl TableEvents {
         slots.sort_by_key(|slot| Arc::as_ptr(slot) as usize);
         slots.dedup_by_key(|slot| Arc::as_ptr(slot) as usize);
         for slot in slots {
-            slot.offer_drops(self.scope, revision, dropped);
+            slot.offer_outcomes(self.scope, revision, outcomes);
         }
     }
 }
@@ -321,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_observer_receives_dropped_transactions_once() {
+    async fn every_observer_receives_changed_outcomes_once() {
         let events = TableEvents::new(scope(1), ["items".into(), "tags".into()]);
         let mut items = TableObserver::new();
         events
@@ -329,11 +342,18 @@ mod tests {
             .unwrap();
         let mut tags = TableObserver::new();
         events.register(&tags, Some(&own(&["tags"]))).unwrap();
-        events.publish_drops(5, &[[7; 32]].into());
-        events.publish_drops(6, &BTreeSet::new());
+        events.publish_outcomes(
+            5,
+            &Outcomes {
+                dropped: [[7; 32]].into(),
+                sealed: [[8; 32]].into(),
+            },
+        );
+        events.publish_outcomes(6, &Outcomes::default());
         for observer in [&mut items, &mut tags] {
             let change = observer.next().await.unwrap();
             assert_eq!(change.dropped, [[7; 32]].into());
+            assert_eq!(change.sealed, [[8; 32]].into());
             assert!(change.tables.is_empty());
             assert_eq!(change.revisions, [(scope(1), 5)].into());
             assert_eq!(observer.try_next().unwrap(), None);

@@ -77,18 +77,30 @@
 //!   restores itself, from a checkpoint or a rebuild, are not checked.
 //!   Corrections are new rows, such as reversals, that the application
 //!   defines.
-//! - **Drops.** A commit stays visible until replay drops it.
+//! - **Drops and finality.** A commit stays visible until replay drops it.
 //!   [`TableChange::dropped`] names dropped transactions after the commit
 //!   that recorded the drop, and [`Database::transaction_outcome`] gives
-//!   the [`DropReason`]. A drop is provisional until a seal covers it:
-//!   [`TransactionOutcome::Dropped`] with `sealed` set is final. A device
-//!   that takes a seal's rows as a checkpoint learns how its own covered
-//!   transactions ended from the seal's signed drop list: `Applied`, or
-//!   `Dropped` with `sealed` set. The list names the newest 512 drops; an
+//!   the [`DropReason`]. An outcome is provisional until a seal covers the
+//!   transaction: [`TransactionOutcome::Applied`] or
+//!   [`TransactionOutcome::Dropped`] with `sealed` set is final.
+//!   [`TableChange::sealed`] names this installation's transactions a seal
+//!   or checkpoint may have made final. A device that takes a seal's rows
+//!   as a checkpoint learns how its own covered transactions ended from
+//!   the seal's signed drop list. The list names the newest 512 drops; an
 //!   older covered transaction it cannot place reads as `None`, as one past
 //!   the device's 4,096 kept outcomes does.
 //!   [`Configuration::create`] follows a bookmark so the owner seals
 //!   routinely; an installation from `Database::create` must follow one.
+//! - **Irreversible effects.** Perform an external effect (send an email,
+//!   charge a card) only after [`TransactionOutcome::Applied`] with
+//!   `sealed` set. Store [`Transaction::token`] in an outbox row of the
+//!   same transaction; a dispatcher wakes on [`TableChange::sealed`] and
+//!   after a restart reconciles every pending outbox row through
+//!   [`Database::transaction_outcome`], since notifications are not
+//!   replayed. A final apply is not a coordinator decision: an effect that
+//!   must not happen twice across devices still needs one. Finality
+//!   follows the followed seal path: if owners seal one tip concurrently,
+//!   the losing seal's outcomes turn provisional again.
 //!
 //! # Exact values
 //!

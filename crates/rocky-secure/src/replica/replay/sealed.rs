@@ -36,13 +36,37 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Scope `id`'s outcomes at a seal through applied position `through`,
-    /// just finalized: the current base's, every drop sealed since, and
-    /// each member the seal covers but leaves open.
+    /// Whether the seal at `depth` covers a member of scope `id`, or of a
+    /// scope linked to it, that it leaves open: one awaiting another
+    /// member's outcome record. The scope's rows there are undecided, so
+    /// no rows are taken and no base is written at that seal.
+    pub(in crate::replica) async fn leaves_open(&self, id: i64, depth: i64) -> Result<bool, Error> {
+        let mut scopes = self.linked_scopes(id).await?;
+        scopes.push(id);
+        for scope in scopes {
+            if !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_replayed r JOIN secure_applied a ON a.hash=r.hash JOIN secure_seal_bounds b ON b.scope=r.scope AND b.depth=?2 WHERE r.scope=?1 AND r.sealed=0 AND a.position<=b.position LIMIT 1",
+                        [scope, depth],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Scope `id`'s drops at a seal, just finalized, which leaves none of
+    /// its covered members open: the current base's and every drop sealed
+    /// since.
     pub(in crate::replica) async fn sealed_outcomes(
         &self,
         id: i64,
-        through: i64,
     ) -> Result<SealedOutcomes, Error> {
         let corrupt = || Error::Corrupt("sealed outcome".into());
         let base = self
@@ -56,14 +80,13 @@ impl<A: RowApplication> Inner<A> {
         let mut listed: BTreeMap<Stamp, SealedTransaction> = base
             .listed
             .into_iter()
-            .filter(|listed| matches!(listed.outcome, SealedOutcome::Dropped { .. }))
             .map(|listed| (listed.stamp.clone(), listed))
             .collect();
         for row in collect_rows(
             self.conn
                 .query(
-                    "SELECT clock,author,sequence,txn,dropped,violated,sealed FROM secure_replayed WHERE scope=?1 AND ((sealed=1 AND dropped IS NOT NULL) OR (sealed=0 AND hash IN(SELECT hash FROM secure_applied WHERE scope=?1 AND position<=?2)))",
-                    [id, through],
+                    "SELECT clock,author,sequence,txn,dropped,violated FROM secure_replayed WHERE scope=? AND sealed=1 AND dropped IS NOT NULL",
+                    [id],
                 )
                 .await?,
         )
@@ -74,9 +97,8 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Integer(author),
                 SqlValue::Integer(sequence),
                 SqlValue::Blob(txn),
-                dropped,
+                SqlValue::Text(reason),
                 violated,
-                SqlValue::Integer(sealed),
             ] = row.as_slice()
             else {
                 return Err(corrupt());
@@ -86,16 +108,12 @@ impl<A: RowApplication> Inner<A> {
                 author: *author as u32,
                 sequence: *sequence as u64,
             };
-            let outcome = match (*sealed != 0, dropped) {
-                (false, _) => SealedOutcome::Open,
-                (true, SqlValue::Text(reason)) => SealedOutcome::Dropped {
-                    reason: reason_named(reason)?,
-                    violation: match violated {
-                        SqlValue::Text(violation) => Some(bounded(violation)),
-                        _ => None,
-                    },
+            let outcome = SealedOutcome::Dropped {
+                reason: reason_named(reason)?,
+                violation: match violated {
+                    SqlValue::Text(violation) => Some(bounded(violation)),
+                    _ => None,
                 },
-                _ => return Err(corrupt()),
             };
             listed.insert(
                 stamp.clone(),
@@ -119,8 +137,8 @@ impl<A: RowApplication> Inner<A> {
 
     /// Records how base `outcomes` says this node's member `hash` of scope
     /// `id`, whose frame the base covers, ended. A listed drop or an
-    /// unlisted member is final; an open one keeps what its record said; one
-    /// past the list's horizon reads as unknown. Records never overwrite it.
+    /// unlisted member is final; one past the list's horizon reads as
+    /// unknown. Records never overwrite it.
     pub(in crate::replica) async fn keep_covered(
         &self,
         id: i64,
@@ -172,22 +190,13 @@ impl<A: RowApplication> Inner<A> {
             let stated = match listed {
                 Some(Some(SealedOutcome::Dropped { reason, .. })) => Some(Some(*reason)),
                 Some(None) => Some(None),
-                Some(Some(SealedOutcome::Open)) | None => None,
+                None => None,
             };
             if stated.is_some_and(|stated| stated != recorded) {
                 return Err(denied("checkpoint outcomes contradict a sealed outcome"));
             }
         }
         let (dropped, sealed, violated) = match listed {
-            Some(Some(SealedOutcome::Open)) => {
-                self.conn
-                    .execute(
-                        "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,dropped,sealed,violated,0 FROM secure_replayed WHERE hash=? ON CONFLICT(hash) DO NOTHING",
-                        [hash.to_vec()],
-                    )
-                    .await?;
-                return Ok(());
-            }
             Some(Some(SealedOutcome::Dropped { reason, violation })) => (
                 SqlValue::Text(reason_name(*reason).into()),
                 1,
@@ -196,6 +205,9 @@ impl<A: RowApplication> Inner<A> {
             Some(None) => (SqlValue::Null, 1, SqlValue::Null),
             None => (SqlValue::Null, 0, SqlValue::Null),
         };
+        if sealed == 1 {
+            self.touch_sealed(transaction);
+        }
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO secure_kept_outcomes VALUES(?,?,?,?,?,?,?,1)",

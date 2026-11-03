@@ -162,9 +162,6 @@ pub enum SealedOutcome {
         reason: rocky_core::replay::DropReason,
         violation: Option<String>,
     },
-    /// The frontier covers it, but the seal left it open while it awaits
-    /// outcome records; the rows hold none of its effects.
-    Open,
 }
 /// One listed transaction, by the stamp of its member in the scope.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,12 +174,14 @@ pub struct SealedTransaction {
 /// What the seal decided for the replayed scope's transactions, for a
 /// replica that takes its rows as a base without their frames. Every
 /// transaction it covers that is not listed applied, unless its stamp is at
-/// or before `horizon`. Replicas at one seal state the same list.
+/// or before `horizon`. Replicas at one seal state the same list. Only a
+/// replica that decided every covered transaction of the scope and its
+/// linked scopes writes a base at a seal.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SealedOutcomes {
-    /// Every drop through the seal and the transactions it left open, the
-    /// newest `MAX_SEALED_OUTCOMES` by stamp, in stamp order.
+    /// Every drop through the seal, the newest `MAX_SEALED_OUTCOMES` by
+    /// stamp, in stamp order.
     pub listed: Vec<SealedTransaction>,
     /// The newest stamp left out to keep the bound.
     pub horizon: Option<Stamp>,
@@ -213,7 +212,6 @@ impl SealedOutcomes {
                             )
                     })
                 }
-                SealedOutcome::Open => false,
             })
         {
             return Err("sealed outcomes");
@@ -248,7 +246,7 @@ impl SealedOutcomes {
     }
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 18;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 19;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,

@@ -1024,7 +1024,7 @@ impl Simulation {
         let dropped = reference
             .outcomes
             .values()
-            .filter(|outcome| **outcome != TransactionOutcome::Applied)
+            .filter(|outcome| !matches!(outcome, TransactionOutcome::Applied { .. }))
             .count();
         let applied = reference.outcomes.len() - dropped;
         let included: Vec<Authored> = included.into_iter().cloned().collect();

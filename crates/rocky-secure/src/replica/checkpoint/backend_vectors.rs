@@ -135,7 +135,10 @@ fn signed() -> SignedCheckpoint {
                             sequence: 2,
                         },
                         transaction: [17; 32],
-                        outcome: SealedOutcome::Open,
+                        outcome: SealedOutcome::Dropped {
+                            reason: rocky_core::replay::DropReason::Admission,
+                            violation: None,
+                        },
                     },
                 ],
                 horizon: None,

@@ -335,7 +335,7 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     assert_eq!(stored, token);
     assert_eq!(
         db.transaction_outcome(stored).await?,
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     assert_eq!(db.transaction_outcome(abandoned).await?, None);
     db.close().await
@@ -368,7 +368,7 @@ async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() ->
     for token in tokens {
         assert_eq!(
             db.transaction_outcome(token).await?,
-            Some(TransactionOutcome::Applied)
+            Some(TransactionOutcome::Applied { sealed: false })
         );
     }
     assert!(db.flush().await.is_ok());

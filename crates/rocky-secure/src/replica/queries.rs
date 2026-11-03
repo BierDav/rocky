@@ -13,8 +13,9 @@ use crate::{
 pub(crate) struct Touched {
     tables: BTreeSet<String>,
     causes: BTreeSet<Cause>,
-    /// Replayed transactions the open write transaction records as dropped.
-    dropped: BTreeSet<Commitment>,
+    /// Replayed transactions the open write transaction records as dropped,
+    /// and own ones whose outcome it may make final.
+    outcomes: crate::observe::Outcomes,
 }
 /// Query state shared by a replica's handles.
 pub(crate) struct Queries {
@@ -225,7 +226,13 @@ impl<A: RowApplication> Inner<A> {
     /// The open write transaction records `transaction` as dropped.
     pub(super) fn touch_dropped(&self, transaction: Commitment) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
-            touched.dropped.insert(transaction);
+            touched.outcomes.dropped.insert(transaction);
+        }
+    }
+    /// The open write transaction may make own `transaction` final.
+    pub(super) fn touch_sealed(&self, transaction: Commitment) {
+        if let Ok(mut touched) = self.workspace.queries.touched.lock() {
+            touched.outcomes.sealed.insert(transaction);
         }
     }
     /// Why the open write transaction changes typed tables.
@@ -255,12 +262,12 @@ impl<A: RowApplication> Inner<A> {
         let Touched {
             tables,
             mut causes,
-            dropped,
+            outcomes,
         } = std::mem::take(&mut *touched);
         let Some(events) = &self.workspace.queries.events else {
             return;
         };
-        events.publish_drops(self.revision, &dropped);
+        events.publish_outcomes(self.revision, &outcomes);
         if tables.is_empty() {
             return;
         }

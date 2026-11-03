@@ -505,7 +505,7 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
             .transaction_outcome(transaction(&earlier))
             .await
             .unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     assert_eq!(
         carol
@@ -520,7 +520,7 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
     // Bob's own replay of his transaction applied; Carol's ordering dropped it.
     assert_eq!(
         bob.transaction_outcome(transaction(&later)).await.unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
 }
 
@@ -891,7 +891,7 @@ async fn an_update_to_equal_values_needs_no_right() {
         bob.transaction_outcome(transaction(&t, &same))
             .await
             .unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Applied)
+        Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
     );
     assert_eq!(undo_records(&bob).await, 1);
 }

@@ -108,7 +108,12 @@ pub enum DropReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionOutcome {
-    Applied,
+    /// `final` once a seal covers the transaction; until then a later
+    /// arrival ordered before it may still drop it.
+    Applied {
+        #[serde(rename = "final")]
+        sealed: bool,
+    },
     /// `final` once a seal covers the transaction; until then a later
     /// arrival ordered before it may still change the decision.
     Dropped {
@@ -203,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn outcomes_name_final_drops() {
+    fn outcomes_name_finality() {
         let dropped = TransactionOutcome::Dropped {
             reason: DropReason::Constraint,
             sealed: true,
@@ -211,6 +216,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&dropped).unwrap(),
             r#"{"dropped":{"reason":"constraint","final":true}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&TransactionOutcome::Applied { sealed: false }).unwrap(),
+            r#"{"applied":{"final":false}}"#
         );
     }
 }

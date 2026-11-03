@@ -422,7 +422,7 @@ pub(super) fn replay(
                     reason: rocky_core::replay::DropReason::Constraint,
                     sealed: true,
                 },
-                false => TransactionOutcome::Applied,
+                false => TransactionOutcome::Applied { sealed: true },
             },
         );
     }

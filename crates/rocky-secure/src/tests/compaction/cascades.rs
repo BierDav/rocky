@@ -107,10 +107,11 @@ async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     replica.replay_at_seals(tag_scope, false).await.unwrap();
     replica.replay_at_seals(items, true).await.unwrap();
     assert_eq!(tags(&replica).await, before);
+    // The rival seal that won is not finalized here yet.
     for transaction in [first, second] {
         assert_eq!(
             replica.transaction_outcome(transaction).await.unwrap(),
-            Some(rocky_core::replay::TransactionOutcome::Applied)
+            Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
         );
     }
     replica.audit(items).await.unwrap();
@@ -153,7 +154,7 @@ async fn an_imported_parent_base_keeps_children_of_rows_applied_over_it() {
     assert_eq!(tags(&b).await, expected);
     assert_eq!(
         b.transaction_outcome(late).await.unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Applied)
+        Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
     );
     // Both hold every frame now and agree on rows and drops.
     for scope in [items, tag_scope] {
@@ -197,7 +198,7 @@ async fn an_authored_outcome_survives_imports_and_restarts_after_compaction() {
     .await
     .unwrap();
     let authored = transaction(&a, rows).await;
-    let applied = Some(rocky_core::replay::TransactionOutcome::Applied);
+    let applied = Some(rocky_core::replay::TransactionOutcome::Applied { sealed: true });
     seal(&lineage, &a).await;
     a.compact(lineage.domain, 0).await.unwrap();
     let a = reopen(&lineage, &dir, a, &keys[0]).await;
@@ -485,7 +486,7 @@ async fn children_return_when_a_frame_that_waited_through_an_import_arrives() {
     );
     assert_eq!(
         b.transaction_outcome(late).await.unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Applied)
+        Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
     );
     b.audit(lineage.scope("tags")).await.unwrap();
 }
@@ -552,13 +553,16 @@ async fn tagged_before_a_seal_drops_one(
     delete(&a, "p").await;
     let late = tag(&b, "t", "p").await;
     let kept = tag(&b, "u", "q").await;
-    let applied = Some(TransactionOutcome::Applied);
+    let applied = Some(TransactionOutcome::Applied { sealed: false });
     assert_eq!(b.transaction_outcome(late).await.unwrap(), applied);
     sync_scope(lineage, &b, &a, &keys[0], tag_scope).await;
     seal(lineage, &a).await;
     a.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(a.transaction_outcome(late).await.unwrap(), sealed_drop());
-    assert_eq!(a.transaction_outcome(kept).await.unwrap(), applied);
+    assert_eq!(
+        a.transaction_outcome(kept).await.unwrap(),
+        Some(TransactionOutcome::Applied { sealed: true })
+    );
     (a, b, keys, late, kept)
 }
 fn sealed_drop() -> Option<TransactionOutcome> {
@@ -615,7 +619,7 @@ async fn an_applied_outcome_a_base_covers_is_final() {
     import_both(&lineage, &a, &b, &keys[1]).await;
     assert_eq!(
         b.transaction_outcome(kept).await.unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: true })
     );
     assert_eq!(b.transaction_violation(kept).await.unwrap(), None);
     assert_eq!(
@@ -859,7 +863,8 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
     replica.replay_at_seals(tag_scope, false).await.unwrap();
     replica.replay_at_seals(items, true).await.unwrap();
-    let applied = Some(rocky_core::replay::TransactionOutcome::Applied);
+    // Provisional: the rival seal that won is not finalized here yet.
+    let applied = Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false });
     assert_eq!(replica.transaction_outcome(first).await.unwrap(), applied);
     let replica = reopen(&lineage, &dir, replica, &key).await;
     assert_eq!(replica.transaction_outcome(first).await.unwrap(), applied);

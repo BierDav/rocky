@@ -314,22 +314,25 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Takes the rows of every replayed scope of `scopes` at `seal`, just
-    /// finalized through each applied position: the live rows with every
-    /// open member undone, and the seal's outcomes.
+    /// finalized at `depth`: the live rows with every member after the seal
+    /// undone, and the seal's outcomes. A scope the seal leaves undecided
+    /// (`leaves_open`) takes none.
     pub(in crate::replica) async fn take_seal_rows(
         &self,
         seal: Commitment,
-        scopes: &[(ResourceScope, i64, i64)],
+        depth: i64,
+        scopes: &[(ResourceScope, i64)],
     ) -> Result<(), Error> {
-        let throughs: BTreeMap<i64, i64> = scopes
-            .iter()
-            .map(|(_, id, through)| (*id, *through))
-            .collect();
-        let scopes: Vec<_> = scopes
-            .iter()
-            .map(|(scope, id, _)| (*scope, *id))
-            .filter(|(scope, _)| self.replayed_scope(*scope) && self.has_scope_key(*scope))
-            .collect();
+        let mut decided = Vec::new();
+        for (scope, id) in scopes {
+            if self.replayed_scope(*scope)
+                && self.has_scope_key(*scope)
+                && !self.leaves_open(*id, depth).await?
+            {
+                decided.push((*scope, *id));
+            }
+        }
+        let scopes = decided;
         if scopes.is_empty() {
             return Ok(());
         }
@@ -341,10 +344,7 @@ impl<A: RowApplication> Inner<A> {
         )?;
         let ordinals = self.field_ordinals(fields).await?;
         for (id, images) in taken {
-            let through = *throughs
-                .get(&id)
-                .ok_or_else(|| Error::Corrupt("replayed scope".into()))?;
-            let outcomes = self.sealed_outcomes(id, through).await?;
+            let outcomes = self.sealed_outcomes(id).await?;
             self.conn
                 .execute(
                     "INSERT OR REPLACE INTO secure_replayed_seals VALUES(?,?,?)",
@@ -379,7 +379,8 @@ impl<A: RowApplication> Inner<A> {
     }
     /// The rows of each of `scopes` with every open member undone, one
     /// scan per table. A row an open member changed takes its image before
-    /// the earliest of them; no row is written.
+    /// the earliest of them; no row is written. The seal leaves none of the
+    /// members it covers open, so these all follow it.
     #[allow(clippy::type_complexity)]
     async fn images_at_seal(
         &self,

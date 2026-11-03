@@ -235,7 +235,9 @@ fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> C
                     sealed: era_of[&transaction] < sealed,
                 }
             } else {
-                TransactionOutcome::Applied
+                TransactionOutcome::Applied {
+                    sealed: era_of[&transaction] < sealed,
+                }
             },
         );
     }
@@ -477,7 +479,7 @@ fn exhaustive(transactions: usize) {
     let dropped: Vec<_> = expected
         .outcomes
         .values()
-        .filter(|outcome| **outcome != TransactionOutcome::Applied)
+        .filter(|outcome| !matches!(outcome, TransactionOutcome::Applied { .. }))
         .collect();
     assert_eq!(dropped.len(), 1);
     let schedules = schedules(&units);

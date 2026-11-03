@@ -909,6 +909,9 @@ pub struct TableChange {
     /// Committed transactions a replay here dropped since the last change.
     /// Their writes are gone; `Database::transaction_outcome` says why.
     pub dropped: Vec<rocky_core::TransactionToken>,
+    /// This installation's transactions a seal or checkpoint may have made
+    /// final since the last change; `Database::transaction_outcome` says.
+    pub sealed: Vec<rocky_core::TransactionToken>,
 }
 impl TableEvents {
     pub(crate) fn new(observer: TableObserver) -> Self {
@@ -928,6 +931,11 @@ impl TableEvents {
                 .collect(),
             dropped: change
                 .dropped
+                .into_iter()
+                .map(rocky_core::TransactionToken)
+                .collect(),
+            sealed: change
+                .sealed
                 .into_iter()
                 .map(rocky_core::TransactionToken)
                 .collect(),

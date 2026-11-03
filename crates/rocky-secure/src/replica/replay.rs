@@ -257,7 +257,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 
     /// How a transaction with replayed writes stands here: `None` until a
-    /// member of it has replayed. A drop is final once a seal covers it.
+    /// member of it has replayed. An outcome is final once a seal covers it.
     pub async fn transaction_outcome(
         &self,
         transaction: Commitment,
@@ -309,11 +309,11 @@ impl<A: RowApplication> Inner<A> {
             let drop = |reason, sealed| Some(TransactionOutcome::Dropped { reason, sealed });
             let (rank, outcome) = match (reason, *sealed != 0, *based != 0) {
                 (Some(reason), true, _) => (0, drop(reason, true)),
-                (None, true, _) => (1, Some(TransactionOutcome::Applied)),
+                (None, true, _) => (1, Some(TransactionOutcome::Applied { sealed: true })),
                 // Past the base's horizon: final there, unknown here.
                 (None, false, true) => (2, None),
                 (Some(reason), false, _) => (3, drop(reason, false)),
-                (None, false, false) => (4, Some(TransactionOutcome::Applied)),
+                (None, false, false) => (4, Some(TransactionOutcome::Applied { sealed: false })),
             };
             if decided.as_ref().is_none_or(|(best, ..)| rank < *best) {
                 let violated = matches!(outcome, Some(TransactionOutcome::Dropped { .. }))
@@ -1048,10 +1048,34 @@ impl<A: RowApplication> Inner<A> {
     /// records go. One of several members stays open until a record names
     /// each of them.
     pub(super) async fn seal_replayed(&self, scope: i64, through: i64) -> Result<(), Error> {
+        const SEALING: &str = "scope=?1 AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=?1 AND position<=?2) AND (members=1 OR members=(SELECT COUNT(*) FROM secure_outcome_members m WHERE m.txn=secure_replayed.txn))";
+        if let Some(author) = self.node_author.as_ref().map(|author| author.number) {
+            for row in collect_rows(
+                self.conn
+                    .query(
+                        format!(
+                            "SELECT DISTINCT txn FROM secure_replayed WHERE {SEALING} AND author=?3"
+                        ),
+                        [scope, through, i64::from(author)],
+                    )
+                    .await?,
+            )
+            .await?
+            {
+                let [SqlValue::Blob(txn)] = row.as_slice() else {
+                    return Err(Error::Corrupt("replayed transaction".into()));
+                };
+                self.touch_sealed(
+                    txn.as_slice()
+                        .try_into()
+                        .map_err(|_| Error::Corrupt("replayed transaction".into()))?,
+                );
+            }
+        }
         self.conn
             .execute(
-                "UPDATE secure_replayed SET sealed=1,undo=NULL WHERE scope=? AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=? AND position<=?) AND (members=1 OR members=(SELECT COUNT(*) FROM secure_outcome_members m WHERE m.txn=secure_replayed.txn))",
-                [scope, scope, through],
+                format!("UPDATE secure_replayed SET sealed=1,undo=NULL WHERE {SEALING}"),
+                [scope, through],
             )
             .await?;
         self.prune_shadowed_outcomes(Some(scope)).await?;

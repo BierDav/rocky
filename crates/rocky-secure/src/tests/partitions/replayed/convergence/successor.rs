@@ -126,7 +126,7 @@ impl Offline {
 
 fn outcome(dropped: Option<DropReason>, sealed: bool) -> TransactionOutcome {
     match dropped {
-        None => TransactionOutcome::Applied,
+        None => TransactionOutcome::Applied { sealed },
         Some(reason) => TransactionOutcome::Dropped { reason, sealed },
     }
 }

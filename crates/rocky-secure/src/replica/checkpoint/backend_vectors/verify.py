@@ -57,8 +57,8 @@ for field,items,count in [('rows',[row],1),('creations',[creation],1),('handles'
     assert bytes(statement[field]['digest'])==commitment('rocky.checkpoint-set.v1',lanes(items))
     assert statement[field]['count']==count
 assert bytes(statement['state']['Keyed']['key_epoch']['secret_hash'])==commitment('rocky.key-epoch.v1',bytes([3])*32)
-assert statement['format']==18
-assert statement['outcomes']=={'listed':[{'stamp':[5,7,1],'transaction':list(bytes([16])*32),'outcome':{'dropped':{'reason':'constraint','violation':'UNIQUE constraint failed: items.name'}}},{'stamp':[6,7,2],'transaction':list(bytes([17])*32),'outcome':'open'}],'horizon':None}
+assert statement['format']==19
+assert statement['outcomes']=={'listed':[{'stamp':[5,7,1],'transaction':list(bytes([16])*32),'outcome':{'dropped':{'reason':'constraint','violation':'UNIQUE constraint failed: items.name'}}},{'stamp':[6,7,2],'transaction':list(bytes([17])*32),'outcome':{'dropped':{'reason':'admission','violation':None}}}],'horizon':None}
 assert bytes(signed['signature'])==(out/'signature.bin').read_bytes()
 assert (out/'checkpoint-id.bin').read_bytes()==commitment('rocky.encrypted-checkpoint.id.v3',(out/'signed.cbor').read_bytes())
 hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(out.iterdir()) if p.is_file()}

@@ -474,7 +474,7 @@ impl Canonical {
     fn dropped(&self) -> usize {
         self.outcomes
             .values()
-            .filter(|outcome| **outcome != TransactionOutcome::Applied)
+            .filter(|outcome| !matches!(outcome, TransactionOutcome::Applied { .. }))
             .count()
     }
 }
@@ -592,7 +592,7 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
                     sealed: false,
                 }
             } else {
-                TransactionOutcome::Applied
+                TransactionOutcome::Applied { sealed: false }
             },
         );
     }
@@ -770,7 +770,7 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
     assert_eq!(expected.dropped(), 2);
     let mut violations = Vec::new();
     for (transaction, outcome) in &expected.outcomes {
-        if *outcome != TransactionOutcome::Applied {
+        if !matches!(outcome, TransactionOutcome::Applied { .. }) {
             violations.push(
                 receiver
                     .replica
@@ -1076,7 +1076,7 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
     let rewind = crate::sqlite::statements() - before;
     assert_eq!(
         receiver.replica.transaction_outcome(late).await.unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     assert_eq!(
         receiver.replica.transaction_violation(late).await.unwrap(),

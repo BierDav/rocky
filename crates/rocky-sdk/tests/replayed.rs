@@ -95,7 +95,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
     }
     assert_eq!(
         a.database.transaction_outcome(created).await?,
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
 
     // Both create `k`; the later one drops wherever it replays, and its
@@ -105,7 +105,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
     let later = create(&b.database, "k", 2).await?;
     assert_eq!(
         b.database.transaction_outcome(later).await?,
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     sync().await?;
     let dropped = Some(TransactionOutcome::Dropped {
@@ -157,6 +157,64 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
         device.sync().await.map_err(|error| error.to_string())?;
     }
     assert_eq!(counters(&a.database).await?, [("c".into(), 2)]);
+    a.close().await;
+    b.close().await;
+    Ok(())
+}
+
+/// An applied transaction stays provisional until a seal covers it, then
+/// reports final to its author, whose observers name it, and after a
+/// restart: what an outbox dispatcher waits for before an irreversible
+/// effect.
+#[tokio::test]
+async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::new(Database::create(
+        open(&root.path().join("a"), &hub, "a"),
+        None,
+    )?)?;
+    a.follow_main().await;
+    let invitation = a
+        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
+        .await;
+    let directory = root.path().join("b");
+    let b = Device::new(Database::join(open(&directory, &hub, "b"), &invitation)?)?;
+    b.sync().await.map_err(|error| error.to_string())?;
+    introduce(&a, &b).await;
+    let sync = || async {
+        for device in [&a, &b, &a, &b] {
+            device.sync().await.map_err(|error| error.to_string())?;
+        }
+        Ok::<_, Failure>(())
+    };
+    let events = b.database.observe_tables(None).await?;
+    let token = create(&b.database, "k", 1).await?;
+    let provisional = Some(TransactionOutcome::Applied { sealed: false });
+    assert_eq!(b.database.transaction_outcome(token).await?, provisional);
+    sync().await?;
+    for device in [&a, &b] {
+        assert_eq!(
+            device.database.transaction_outcome(token).await?,
+            provisional
+        );
+    }
+    a.database.session().seal(false).await?;
+    sync().await?;
+    let sealed = Some(TransactionOutcome::Applied { sealed: true });
+    for device in [&a, &b] {
+        assert_eq!(device.database.transaction_outcome(token).await?, sealed);
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while !events.next().await?.sealed.contains(&token) {}
+        Ok::<_, Failure>(())
+    })
+    .await??;
+    drop(events);
+    b.close().await;
+    drop(b);
+    let b = Device::new(Database::open(open(&directory, &hub, "b"))?)?;
+    assert_eq!(b.database.transaction_outcome(token).await?, sealed);
     a.close().await;
     b.close().await;
     Ok(())

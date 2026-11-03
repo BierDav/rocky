@@ -159,7 +159,7 @@ async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() 
     assert_eq!(keys(&f, &partial, &["A"]).await.len(), 1);
     assert_eq!(
         partial.transaction_outcome(txn).await.unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     // X's record in A's log names B, which R does not hold: R drops too.
     let [record] = records(&f, &full, &x, "A").await.try_into().unwrap();
@@ -393,7 +393,7 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
     // The refused record changes nothing.
     assert_eq!(
         reader.transaction_outcome(txn).await.unwrap(),
-        Some(TransactionOutcome::Applied)
+        Some(TransactionOutcome::Applied { sealed: false })
     );
     assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 2);
 }

@@ -18,8 +18,42 @@ pub enum Error {
     Unsupported(String),
     /// A shared group commit failed; the original error went to one waiter.
     Group(String),
+    /// The linked SQLite is not the build Rocky bundles.
+    Build(String),
     Sqlite(rusqlite::Error),
     Type(String),
+}
+/// The source of the SQLite Rocky bundles on every target
+/// (`rocky_core::BUNDLED_SQLITE_VERSION`), natively through `rusqlite` and in
+/// a browser through `vendor/sqlite-wasm-rs`.
+pub const SQLITE_SOURCE_ID: &str =
+    "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
+/// Replay results depend on the SQLite build, so another one is refused at
+/// open instead of diverging. A wasm32 application that misses Rocky's
+/// `[patch.crates-io]` entry links upstream's SQLite and fails here.
+fn check_build(raw: &rusqlite::Connection) -> Result<()> {
+    static CHECKED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+    CHECKED
+        .get_or_init(|| {
+            let source: String = raw
+                .query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            bundled(rusqlite::version(), &source)
+        })
+        .clone()
+        .map_err(Error::Build)
+}
+fn bundled(version: &str, source: &str) -> std::result::Result<(), String> {
+    let bundled = rocky_core::BUNDLED_SQLITE_VERSION;
+    if version == bundled && source == SQLITE_SOURCE_ID {
+        return Ok(());
+    }
+    Err(format!(
+        "SQLite {version} ({source}) is linked, but the engine identity names \
+         {bundled} ({SQLITE_SOURCE_ID}); on wasm32 apply Rocky's [patch.crates-io] \
+         entry for sqlite-wasm-rs"
+    ))
 }
 /// The SQLite library this build runs, as replicas report it.
 pub fn engine() -> String {
@@ -48,6 +82,7 @@ impl std::fmt::Display for Error {
             Self::Denied => write!(f, "statement is not authorized"),
             Self::Unsupported(reason) => write!(f, "unsupported statement: {reason}"),
             Self::Group(message) => write!(f, "group commit failed: {message}"),
+            Self::Build(message) => f.write_str(message),
             Self::Sqlite(error) => error.fmt(f),
             Self::Type(message) => write!(f, "unexpected column value: {message}"),
         }
@@ -460,13 +495,7 @@ impl Connection {
     }
     fn configure(raw: rusqlite::Connection) -> Result<Self> {
         // Tips commit the engine identity, which names the bundled SQLite.
-        if rusqlite::version() != rocky_core::BUNDLED_SQLITE_VERSION {
-            return Err(Error::Unsupported(format!(
-                "SQLite {} is linked, but the engine identity names {}",
-                rusqlite::version(),
-                rocky_core::BUNDLED_SQLITE_VERSION
-            )));
-        }
+        check_build(&raw)?;
         raw.set_prepared_statement_cache_capacity(512);
         // Busy files are retried by whole transactions with bounded backoff.
         raw.busy_timeout(std::time::Duration::ZERO)?;
@@ -1067,8 +1096,6 @@ mod tests {
     /// refuses `load_extension`).
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn every_target_links_the_same_sqlite() {
-        const SOURCE: &str = "2026-06-03 19:12:13 \
-            d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
         const TARGET_ONLY: &[&str] = &[
             "ATOMIC_INTRINSICS",
             "COMPILER",
@@ -1100,11 +1127,11 @@ mod tests {
             SOUNDEX USE_URI";
         let connection = Connection::open_in_memory().unwrap();
         let raw = connection.raw().unwrap();
-        assert_eq!(rusqlite::version(), "3.53.2");
+        assert_eq!(rusqlite::version(), rocky_core::BUNDLED_SQLITE_VERSION);
         let source: String = raw
             .query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(source, SOURCE);
+        assert_eq!(source, SQLITE_SOURCE_ID);
         let mut statement = raw.prepare("PRAGMA compile_options").unwrap();
         let options = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -1116,6 +1143,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(options.join(" "), SHARED);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn another_sqlite_build_is_refused() {
+        assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, SQLITE_SOURCE_ID).is_ok());
+        // Upstream sqlite-wasm-rs 0.5, which an unpatched wasm32 build links.
+        let upstream = bundled("3.53.0", "2026-04-09 11:41:38 other").unwrap_err();
+        assert!(upstream.contains("[patch.crates-io]"));
+        assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, "another source").is_err());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

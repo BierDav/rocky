@@ -14,6 +14,9 @@ use std::{
     sync::Arc,
 };
 
+/// Wall time between two steps.
+const STEP_TIME: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// How one seed ended.
 pub(super) struct Report {
     pub(super) seed: u64,
@@ -28,8 +31,19 @@ pub(super) struct Report {
     /// What the run reached: fired crash points, imports, rebootstraps,
     /// evictions, drops, by name.
     pub(super) coverage: BTreeMap<String, usize>,
+    /// Each open member's final state: its node key, and per granted scope
+    /// its frontier, rows and replayed positions, digested.
+    pub(super) states: Vec<String>,
 }
 impl Report {
+    /// The steps, outcomes, coverage and member states, digested.
+    pub(super) fn digest(&self) -> String {
+        let text = format!("{}{:?}{:?}", self.dump(), self.coverage, self.states);
+        data_encoding::HEXLOWER.encode(&rocky_core::commitment(
+            "rocky.simulation.replay",
+            text.as_bytes(),
+        ))
+    }
     /// The seed, its steps and what failed, for a failure message.
     pub(super) fn dump(&self) -> String {
         let mut text = format!("seed {}\n", self.seed);
@@ -76,12 +90,39 @@ struct Simulation {
 pub(super) async fn run(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
     run_steps(seed, scenario, plan(seed, scenario)).await
 }
+/// Runs a given schedule on a current-thread runtime of its own, with a
+/// paused clock. Built with `--cfg tokio_unstable`, the runtime's own
+/// randomness, which picks among ready `select!` branches, follows the
+/// seed too; otherwise it is the one source a replay does not fix.
+pub(super) async fn run_isolated(
+    seed: u64,
+    scenario: Scenario,
+    steps: Vec<Action>,
+) -> Result<Report, Failure> {
+    let thread = std::thread::Builder::new()
+        .name(format!("simulation-{seed}"))
+        .spawn(move || -> Result<Report, Failure> {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all().start_paused(true);
+            #[cfg(tokio_unstable)]
+            builder.rng_seed(tokio::runtime::RngSeed::from_bytes(&seed.to_le_bytes()));
+            let runtime = builder.build()?;
+            tokio::task::LocalSet::new().block_on(&runtime, run_steps(seed, scenario, steps))
+        })?;
+    match tokio::task::spawn_blocking(move || thread.join()).await? {
+        Ok(report) => report,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
 /// Runs a given schedule; the seed still draws the hub's faults.
 pub(super) async fn run_steps(
     seed: u64,
     scenario: Scenario,
     steps: Vec<Action>,
 ) -> Result<Report, Failure> {
+    // Keys, nonces, lineages and the wall clock follow the seed on this
+    // thread, so one seed replays the same hashes and orders.
+    let _seeded = rocky_platform::entropy::simulation::seed(seed);
     let root = tempfile::tempdir()?;
     let fixture = scenario.fixture;
     let mut simulation = Simulation {
@@ -107,10 +148,13 @@ pub(super) async fn run_steps(
         liveness: None,
         scope_local: 0,
         coverage: BTreeMap::new(),
+        states: Vec::new(),
     };
     simulation.setup().await?;
     for (index, action) in steps.into_iter().enumerate() {
         let started = std::time::Instant::now();
+        // A step is a later user action: its writes are stamped later.
+        rocky_platform::entropy::simulation::pass(STEP_TIME);
         if std::env::var_os("ROCKY_SIM_TRACE").is_some() {
             eprintln!("    > {action}");
         }
@@ -143,6 +187,7 @@ pub(super) async fn run_steps(
     }
     report.scope_local = simulation.scope_local;
     report.coverage = std::mem::take(&mut simulation.coverage);
+    report.states = simulation.states().await;
     simulation.stop().await;
     Ok(report)
 }
@@ -583,6 +628,55 @@ impl Simulation {
         let hub = self.hub.clone();
         self.members[node].open(&hub).await?;
         Ok("reopened".into())
+    }
+    /// Each open member's state digest, for replay comparison.
+    async fn states(&self) -> Vec<String> {
+        let mut states = Vec::new();
+        for member in &self.members {
+            let Some(node) = member
+                .running
+                .as_ref()
+                .and_then(|running| running.node.upgrade())
+            else {
+                states.push(format!("{}: closed", member.name));
+                continue;
+            };
+            let mut scopes = node.scopes();
+            scopes.sort();
+            let mut text = format!("{:?}", member.node_key);
+            for scope in scopes {
+                let _ = write!(
+                    text,
+                    "\n{scope:?} {:?} {:?}",
+                    node.replica
+                        .frontier(scope)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    node.replica
+                        .snapshot(scope)
+                        .await
+                        .map(|snapshot| snapshot.rows)
+                        .map_err(|error| error.to_string()),
+                );
+            }
+            let _ = write!(
+                text,
+                "\n{:?}",
+                node.replica
+                    .replayed_positions()
+                    .await
+                    .map_err(|error| error.to_string())
+            );
+            states.push(format!(
+                "{}: {}",
+                member.name,
+                data_encoding::HEXLOWER.encode(&rocky_core::commitment(
+                    "rocky.simulation.state",
+                    text.as_bytes()
+                ))
+            ));
+        }
+        states
     }
     async fn stop(&mut self) {
         for member in &mut self.members {

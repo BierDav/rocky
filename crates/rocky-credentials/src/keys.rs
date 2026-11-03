@@ -140,8 +140,7 @@ impl Vault {
     /// A fresh random secret that replaces whatever `role` held. Only for
     /// secrets nothing else was sealed or signed under.
     pub fn replace(&self, role: &str) -> Result<[u8; 32], Error> {
-        let mut secret = [0; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        let secret: [u8; 32] = rocky_platform::entropy::random();
         self.put(role, &secret)?;
         Ok(secret)
     }

@@ -379,7 +379,7 @@ impl Node {
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
-            retry_seed: rand::random(),
+            retry_seed: rocky_platform::entropy::random_u64(),
             retries: std::sync::Mutex::new(BTreeMap::new()),
             backoff_tip: std::sync::Mutex::new(None),
             resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
@@ -518,7 +518,7 @@ impl Node {
         }
         let client = Arc::new(Client {
             reader: Mutex::new(None),
-            cursor_key: rand::random(),
+            cursor_key: rocky_platform::entropy::random(),
             subscriptions: std::sync::Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(1),
             closing: watch::channel(false).0,

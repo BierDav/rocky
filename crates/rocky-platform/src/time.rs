@@ -8,3 +8,13 @@ pub(crate) mod platform;
 pub use platform::*;
 pub use std::time::Duration;
 pub use web_time::{SystemTime, UNIX_EPOCH};
+
+/// Time since the Unix epoch on the wall clock, or the simulated clock of
+/// a thread that installed one (`entropy::simulation`).
+pub fn since_epoch() -> Result<Duration, web_time::SystemTimeError> {
+    #[cfg(feature = "simulation")]
+    if let Some(time) = crate::entropy::simulation::since_epoch() {
+        return Ok(time);
+    }
+    SystemTime::now().duration_since(UNIX_EPOCH)
+}

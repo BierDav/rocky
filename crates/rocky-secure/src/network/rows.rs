@@ -51,6 +51,15 @@ pub(super) enum RowMessage {
     ReadRows {
         package: EncryptedPackage,
     },
+    /// Heads the asker's pending frames wait on and it lacks.
+    RevokedHeadsQuery {
+        scope: ResourceScope,
+        heads: Vec<Hash>,
+    },
+    /// The signed header and chain of those whose author is revoked.
+    RevokedHeads {
+        heads: Vec<crate::wire::RevokedHead>,
+    },
 }
 
 /// What one catch-up pass of a scope did.
@@ -260,9 +269,29 @@ impl NativeSession {
             after = page.next;
             if after.is_none() {
                 replica.restored(scope).await?;
+                self.resolve_revoked_heads(replica, scope).await?;
                 return Ok(report);
             }
         }
+    }
+    /// Asks the peer for evidence of the heads `scope`'s pending frames wait
+    /// on: revoked frames are never served, so one never received stays
+    /// unknown until a peer shows its author revoked.
+    async fn resolve_revoked_heads<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        let heads = replica.missing_heads(scope).await?;
+        if heads.is_empty() {
+            return Ok(());
+        }
+        self.send(RowMessage::RevokedHeadsQuery { scope, heads })
+            .await?;
+        let RowMessage::RevokedHeads { heads } = self.reply::<RowMessage>().await? else {
+            return Err(denied("unexpected revoked heads response"));
+        };
+        replica.receive_revoked_heads(scope, heads).await
     }
     /// Sends the peer every frame of `scope` it lacks, in bounded pages; the
     /// peer answers each page with its frontier, recorded as acknowledgment.
@@ -488,6 +517,12 @@ impl NativeSession {
                     .remote_read(self.peer, &self.credentials, scope, after, max_rows)
                     .await?;
                 self.send(RowMessage::ReadRows { package }).await
+            }
+            RowMessage::RevokedHeadsQuery { scope, heads } => {
+                let heads = replica
+                    .revoked_heads(self.peer, &self.credentials, scope, &heads)
+                    .await?;
+                self.send(RowMessage::RevokedHeads { heads }).await
             }
             _ => Err(denied("unexpected native request")),
         }

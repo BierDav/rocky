@@ -154,6 +154,11 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
         }
         .into(),
         RowMessage::FrontierQuery { scope }.into(),
+        RowMessage::RevokedHeadsQuery {
+            scope,
+            heads: Vec::new(),
+        }
+        .into(),
         CheckpointMessage::Pruned { scope, after: None }.into(),
         CheckpointMessage::CheckpointOffer { scope }.into(),
         CheckpointMessage::SealOffer {

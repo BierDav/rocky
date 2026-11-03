@@ -502,7 +502,7 @@ impl State {
             return Err(failure(code::READONLY, "a reader connection cannot write").into());
         }
         self.write("BEGIN", Vec::new()).await?;
-        let handle: rocky_core::Commitment = rand::random();
+        let handle: rocky_core::Commitment = rocky_platform::entropy::random();
         let token = rocky_core::TransactionToken(self.node.replica.transaction_of(handle));
         self.handle = Some(handle);
         Ok(token)

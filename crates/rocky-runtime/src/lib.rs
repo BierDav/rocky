@@ -391,11 +391,7 @@ where
                 thread: Mutex::new(Some(thread)),
                 nonce: rocky_core::commitment(
                     "rocky.submission.session",
-                    &web_time::SystemTime::now()
-                        .duration_since(web_time::UNIX_EPOCH)
-                        .map_err(|e| Error::Incompatible(e.to_string()))?
-                        .as_nanos()
-                        .to_le_bytes(),
+                    &rocky_platform::entropy::random::<32>(),
                 ),
                 submissions: std::sync::atomic::AtomicU64::new(0),
                 observers: Arc::new(tokio::sync::Semaphore::new(MAX_OBSERVERS)),

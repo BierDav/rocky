@@ -1224,11 +1224,7 @@ impl<A: RowApplication> SecureSql<A> {
             }
             Target::Bundle(handle) => handle,
         };
-        let handle = handle.unwrap_or_else(|| {
-            let mut handle = [0; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);
-            handle
-        });
+        let handle = handle.unwrap_or_else(rocky_platform::entropy::random);
         if intents.is_empty() {
             return Ok(Sealed::Commit(SecureCommit {
                 handle,

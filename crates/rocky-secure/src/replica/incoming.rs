@@ -725,6 +725,9 @@ impl<A: RowApplication> Inner<A> {
                     {
                         continue;
                     }
+                    // A head refused for its revoked author at the peer
+                    // that sent this frame, shown by the evidence it carried.
+                    None if self.revoked_evidence(&operation.header, *id).await? => continue,
                     None => match self.voided_dependency(&operation.header, *id).await? {
                         Some(true) => continue,
                         Some(false) | None
@@ -755,12 +758,7 @@ impl<A: RowApplication> Inner<A> {
                     // never applies; the reader's write does without it.
                     ReceiveStatus::Rejected
                         if operation.header.backlink != Some(*id)
-                            && self
-                                .config
-                                .revocations
-                                .revoking(dependency.chain()?.credentials())
-                                .map_err(credential)?
-                                .is_some() => {}
+                            && self.revoked_chain(dependency.chain()?)? => {}
                     _ => return Ok(false),
                 }
             }

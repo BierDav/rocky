@@ -5,7 +5,6 @@
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use tokio::sync::watch;
-use web_time::SystemTime;
 
 /// Events kept; an observer further behind misses the oldest.
 const KEPT: usize = 512;
@@ -32,8 +31,7 @@ impl Activity {
     }
     /// Appends `kind` with `detail`'s fields, a sequence and a time.
     pub fn record(&self, kind: &str, detail: Value) -> u64 {
-        let at = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+        let at = rocky_platform::time::since_epoch()
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or_default();
         let mut sequence = 0;

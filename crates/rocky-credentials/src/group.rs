@@ -7,7 +7,6 @@ use crate::{
     signing_bytes,
 };
 use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint};
-use rand::RngCore;
 use rocky_core::{Commitment, Scope, commitment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
@@ -76,8 +75,7 @@ pub(crate) fn agree(recipient: PublicKey) -> Result<([u8; 32], [u8; 32]), Error>
         .filter(|point| point.is_torsion_free() && !point.is_small_order())
         .ok_or_else(|| denied("invalid envelope recipient"))?
         .to_montgomery();
-    let mut ephemeral = [0; 32];
-    rand::rngs::OsRng.fill_bytes(&mut ephemeral);
+    let ephemeral: [u8; 32] = rocky_platform::entropy::random();
     Ok((
         MontgomeryPoint::mul_base_clamped(ephemeral).to_bytes(),
         point.mul_clamped(ephemeral).to_bytes(),

@@ -114,8 +114,7 @@ fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error>
 }
 /// Microseconds since the epoch: the wall part of hybrid stamp clocks.
 fn micros() -> Result<u64, Error> {
-    let time = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
+    let time = rocky_platform::time::since_epoch()
         .map(|time| u64::try_from(time.as_micros()).unwrap_or(u64::MAX))
         .map_err(|_| denied("clock before epoch"))?;
     #[cfg(test)]
@@ -127,8 +126,7 @@ fn micros() -> Result<u64, Error> {
     Ok(time)
 }
 fn now() -> Result<u64, Error> {
-    let time = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
+    let time = rocky_platform::time::since_epoch()
         .map(|time| time.as_secs())
         .map_err(|_| denied("clock before epoch"))?;
     #[cfg(test)]

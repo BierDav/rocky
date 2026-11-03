@@ -11,16 +11,22 @@ license-file.workspace = true
 [features]
 # Scratch directories for tests, on every target.
 test-support = ["dep:tempfile"]
+# A seeded randomness source and simulated wall clock a test thread may
+# install for deterministic simulations; never enabled by a release build.
+simulation = []
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 # `std::time` natively; the browser clock on wasm32.
 web-time = "1"
+rand = "=0.8.8"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tempfile = { version = "3", optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+# Browsers supply randomness through `crypto.getRandomValues`.
+getrandom = { version = "0.2", features = ["js"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"

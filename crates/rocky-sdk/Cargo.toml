@@ -42,7 +42,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
 
 [dev-dependencies]
 p2panda-core = "=0.5.2"
-rocky-platform = { workspace = true, features = ["test-support"] }
+rocky-platform = { workspace = true, features = ["test-support", "simulation"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 # The simulation crashes replicas at named points.
 rocky-secure = { path = "../rocky-secure", features = ["qualification"] }

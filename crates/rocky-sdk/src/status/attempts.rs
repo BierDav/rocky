@@ -8,8 +8,7 @@ use std::sync::{
 use tokio::sync::watch;
 
 pub(crate) fn epoch_millis() -> Option<u64> {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
+    rocky_platform::time::since_epoch()
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
 }

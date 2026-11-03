@@ -9,7 +9,7 @@ pub(crate) struct Retry {
 }
 impl Default for Retry {
     fn default() -> Self {
-        Self::seeded(rand::random(), &[])
+        Self::seeded(rocky_platform::entropy::random_u64(), &[])
     }
 }
 impl Retry {

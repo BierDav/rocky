@@ -8,7 +8,6 @@
 //! that send them and the answers that serve them.
 use super::*;
 use p2panda_core::Signature;
-use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowApplication};
 use rocky_platform::time::timeout;
 use serde::{Deserialize, Serialize};
@@ -309,7 +308,7 @@ struct ResolvedPeer {
 /// request carrying it. The answer proves the key without opening a session.
 fn peer_resolution_request() -> Result<(Vec<u8>, Commitment), Error> {
     let mut challenge = [0; 32];
-    OsRng.fill_bytes(&mut challenge);
+    rocky_platform::entropy::fill(&mut challenge);
     let request = encode(&ResolvePeer {
         version: RESOLUTION_VERSION,
         challenge,
@@ -397,7 +396,7 @@ impl NativeSession {
         }
         let own = local.public_key();
         let mut challenge = [0; 32];
-        OsRng.fill_bytes(&mut challenge);
+        rocky_platform::entropy::fill(&mut challenge);
         let (exchange_secret, exchange) = rocky_credentials::Exchange::new();
         let hello = Hello {
             version,

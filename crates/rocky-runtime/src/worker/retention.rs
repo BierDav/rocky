@@ -26,9 +26,7 @@ pub(crate) fn initial_checkpoint() -> Result<Vec<crate::sqlite::Value>, Error> {
 }
 /// Milliseconds since the Unix epoch on this replica's clock.
 pub(super) fn now_millis() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+    rocky_platform::time::since_epoch().map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 /// Operations one requested step replays into the checkpoint copy. A step
 /// beside a group replays twice the group's writes, within these bounds, so

@@ -9,7 +9,7 @@ use super::{
 };
 pub use faults::{Draws, LinkFaults};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     pin::Pin,
     sync::{
         Arc, Mutex, PoisonError,
@@ -57,7 +57,8 @@ pub struct Hub {
     /// Whether nodes started from now on can discover.
     pub discovery: AtomicBool,
     /// Who announces under which topics, and where each node hears of it.
-    announced: Mutex<HashMap<String, Announcement>>,
+    /// Ordered: hints go out in one order every run.
+    announced: Mutex<BTreeMap<String, Announcement>>,
     /// Where every fault draw starts.
     seed: u64,
     /// Faults by the sorted names of a link's two nodes.

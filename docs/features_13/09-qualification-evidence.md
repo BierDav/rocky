@@ -735,20 +735,101 @@ points, and the `board_cap` assertion bounds a board's points.
     A rejected non-backlink head whose author is revoked now counts as
     satisfied: the reader's write does without it.
   - Formats: none changed (`rocky.encrypted-replica.v48`).
-- **Open: a revoked head at a peer that never saw it** (20276). Peers
-  never send a revoked author's frames (range serving stops at them), so
-  a, which never received b's frame, cannot tell that c's missing head is
-  revoked and waits for good ("missing frames of author 1026", pending
-  `Dependencies`). Resolving it needs a protocol rule, e.g. carrying a
-  revoked head as evidence with the frame that names it (the receiver
-  currently refuses such a frame's chain as revoked), or a signed
-  revocation frontier per author. Repro (soak size): `Invite(0,2)`,
-  `Share(l0,2)`, `Sync(0)`, `Restart(2)`, `Change(2, Pair{l0,1,0,4})`,
-  `Sever(0,2)`, `Sync(2)`, `Revoke(1)`, `Change(2, Board{l0,2,4})`.
-- **Nondeterminism.** Steps replay identically, but node keys, nonces and
-  lineages are unseeded, so hashes, seal ids and hash orders differ per
-  run; bugs that depend on such an order (20229, 20245, 20290) show in
-  some runs only. Not changed here.
+- **Open: a revoked head at a peer that never saw it** (20276). Closed
+  below under "Revoked heads and deterministic simulation".
+- **Nondeterminism.** Steps replayed identically, but node keys, nonces
+  and lineages were unseeded (20229, 20245, 20290 showed in some runs
+  only). Closed below.
 - Soak after these fixes (same seeds, chunks and host, three full runs,
   the last on the final code): **299/300** each time; the only failure is 20276 (above). Each chunk of
   100 took about 280 s.
+
+## Revoked heads and deterministic simulation
+
+- **Revoked heads resolve by evidence** (20276, `rocky-secure`). Every
+  frame of a revoked author is refused, and lane L let a write that read
+  one do without it. A peer that never received the head could not tell
+  it from a frame still on its way: revoked frames are never served, so a
+  waited for good. Lane L's attempt to serve the revoked frame failed the
+  page on its refused chain.
+  - Rule: after a catch-up, a replica names the unknown non-backlink
+    heads its pending frames in the scope wait on
+    (`RowMessage::RevokedHeadsQuery`, at most 64, only once its own
+    revocation set is not empty). The peer answers with the signed
+    header and credential chain of each it holds, as a frame or as kept
+    evidence, whose chain its revocation set ends (`RevokedHeads`); never
+    a body. The receiver keeps evidence that verifies (header signature,
+    chain digest named by the header, the requested scope, a head its
+    pending frames name) in `secure_revoked_heads`. `dependencies_ready`
+    counts a missing head with kept evidence as satisfied while the
+    receiver's own revocation set ends the chain, the same predicate as
+    for a held frame, earlier than the dependent and of its scope. A
+    backlink never resolves so.
+  - Why not alternatives: evidence carried with the dependent frame
+    misses a frame that arrived before the revocation (a pending frame
+    counts in the frontier and is never sent again); a signed per-author
+    frontier in the revocation would change what a revocation refuses
+    (today every frame of the author) and the revoker cannot know which
+    heads others read. The decision is the revocation's: no timeout.
+  - Every holder decides alike: a holder of the head (applied or
+    refused) and a holder of evidence both satisfy it once they know the
+    revocation; before that both wait. The relational oracle checks the
+    write's outcome on every holder.
+  - Privacy: the query is a row message gated like `Range` (proved
+    holding, `authorize_peer`, the server holds the scope); answers are
+    headers of that scope only, which a holder would have received
+    anyway; no partition tuple travels (headers name blinded scopes).
+  - Tests: `relational_tests::regressions::a_head_whose_author_is_revoked_resolves_at_a_peer_that_never_saw_it`
+    (the 20276 repro; fails without the rule: "missing frames of author
+    1026", pending `Dependencies`) and
+    `tests::revocations::a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it`
+    (unrevoked chains, evidence for unnamed heads and receivers without
+    the revocation change nothing).
+  - Formats: `rocky.encrypted-replica.v49` (`secure_revoked_heads`),
+    link handshake `rocky.link.v20` (row messages). Frames, checkpoints
+    and vectors unchanged.
+- **Deterministic simulation** (`rocky-platform` feature `simulation`,
+  enabled only by `rocky-sdk`'s dev-dependency). `driver::run_steps`
+  installs `entropy::simulation::seed(seed)` on its thread. There, and
+  only there:
+  - `rocky_platform::entropy::{fill, random}` draw from the seed (a
+    SplitMix64 stream). Node keys, identity and tip keys, AEAD and
+    enrollment nonces, envelope ephemerals, challenges, lineages,
+    transaction handles and retry seeds now call it; every other thread
+    and every build without the feature use `OsRng`.
+  - `rocky_platform::time::since_epoch` is 2026-01-01 plus the paused
+    task clock's elapsed time plus 1 ms the driver adds per step (the
+    replica's stamps, credential times, activity times).
+  - `spawn_blocking` runs in place, `dedicated` tasks are local tasks
+    and `Held::wait_released` returns at once, as in a browser Worker.
+  - The memory hub sends discovery hints in name order (`BTreeMap`).
+  - Each relational seed runs on its own current-thread runtime
+    (`driver::run_isolated`); built with `--cfg tokio_unstable` its
+    `RngSeed` follows the seed too.
+  - Production changes: the runtime's session and placement nonces were
+    clock-derived and are now 32 random bytes (unique under a paused
+    clock); no API takes caller randomness.
+  - Test: `relational_tests::one_seed_replays_identically` (seeds 3 and
+    20245 twice: same steps, outcomes, coverage and per-member digests
+    of frontier, rows and replayed positions). The soak prints
+    `seed N replay <digest>` per seed.
+  - Not fixed by the seam: tokio picks among ready `select!` branches
+    with a per-runtime random seed that stable tokio cannot set. On a
+    stable build 1 in 6 replays of 20003 differed in one healing-time
+    stamp; with `RUSTFLAGS="--cfg tokio_unstable"` 16 of 16 replays were
+    identical. 19 of 20 sampled soak seeds replayed identically on a
+    stable build.
+- Release soak (seeds 20000..20299, 100-seed chunks, this Mac, stable
+  tokio), run twice: 300/300 and 300/300 (chunks 203/197/191 s and
+  205/200/191 s). The runs agree on every outcome; 295 of 300 replay
+  digests are byte-identical. 20048, 20090, 20154, 20279 and 20295
+  passed both times with different digests, from the `select!` seed
+  above.
+- **Open: a reference does not advance the hybrid clock.** With a wall
+  clock that stands still (the first seam), seed 20135's regression
+  failed its audit: a's card pinned to b's board got the board's clock,
+  as the stamp only passes the rows a write changes. A full rebuild then
+  replays the card before its board and drops it while the projection
+  kept it. Real clocks behind the writer's by more than the delay, or
+  coarse ones (a browser's millisecond clock), give the same tie or
+  inversion. Not fixed here; the simulated clock moves between steps.

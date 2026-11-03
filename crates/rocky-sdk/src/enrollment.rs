@@ -16,7 +16,6 @@ use crate::{
     transport::{Protocol, Stream, Transport},
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
-use rand::RngCore;
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
     Admission, AuthorRange, Authority, Credentials, IdentityProvider, Invitation,
@@ -35,7 +34,6 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
@@ -616,12 +614,10 @@ pub struct Renewed {
 }
 
 pub fn now() -> Result<u64, Failure> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+    Ok(rocky_platform::time::since_epoch()?.as_secs())
 }
 pub(crate) fn random<const N: usize>() -> [u8; N] {
-    let mut bytes = [0; N];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes
+    rocky_platform::entropy::random()
 }
 pub(crate) fn hex32(text: &str) -> Result<[u8; 32], Failure> {
     HEXLOWER

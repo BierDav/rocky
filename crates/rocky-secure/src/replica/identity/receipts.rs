@@ -609,7 +609,7 @@ impl<A: RowApplication> Inner<A> {
     /// In the transaction that creates the file: a fresh lineage, an empty
     /// signed journal.
     pub(in crate::replica) async fn create_admission_context(&self) -> Result<(), Error> {
-        let lineage: Commitment = rand::random();
+        let lineage: Commitment = rocky_platform::entropy::random();
         let context = AdmissionContext {
             version: VERSION,
             lineage,
@@ -1598,7 +1598,7 @@ pub(in crate::replica) async fn adopt_admission(
         revision: head.revision,
         head_signature,
     });
-    context.lineage = rand::random();
+    context.lineage = rocky_platform::entropy::random();
     context.node = node.public_key();
     let head = AdmissionHead {
         lineage: context.lineage,

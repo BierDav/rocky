@@ -41,9 +41,7 @@ fn soak_size(seed: u64) -> Scenario {
 }
 
 async fn simulate(seed: u64, scenario: Scenario, steps: Vec<Action>) -> Result<Report, Failure> {
-    tokio::task::LocalSet::new()
-        .run_until(driver::run_steps(seed, scenario, steps))
-        .await
+    driver::run_isolated(seed, scenario, steps).await
 }
 /// A failure's text, without where it happened: what shrinking keeps.
 fn failure(report: &Report) -> Option<String> {
@@ -76,6 +74,23 @@ macro_rules! seeds {
     )*};
 }
 seeds!(seed_1 = 1, seed_2 = 2, seed_3 = 3, seed_4 = 4);
+
+/// One seed run twice ends in the same steps, outcomes, coverage and
+/// per-member state digests: keys, nonces, lineages and the wall clock
+/// follow the seed. Seed 20245 once failed only in some runs.
+#[tokio::test(start_paused = true)]
+async fn one_seed_replays_identically() -> Result<(), Failure> {
+    for (seed, scenario) in [(3, INTEGRATION), (20245, soak_size(20245))] {
+        let first = simulate(seed, scenario, plan(seed, scenario)).await?;
+        let second = simulate(seed, scenario, plan(seed, scenario)).await?;
+        assert!(!first.states.is_empty());
+        assert_eq!(first.dump(), second.dump());
+        assert_eq!(first.coverage, second.coverage);
+        assert_eq!(first.states, second.states, "seed {seed}");
+        assert_eq!(first.digest(), second.digest());
+    }
+    Ok(())
+}
 
 #[tokio::test(start_paused = true)]
 #[ignore = "replays one seed on request"]
@@ -116,7 +131,8 @@ async fn shrink() -> Result<(), Failure> {
 }
 
 /// `ROCKY_SIM_SEEDS` seeds from `ROCKY_SIM_FIRST` (default 20_000):
-/// prints every failure with its steps and the summed coverage.
+/// prints every seed's replay digest, every failure with its steps and the
+/// summed coverage.
 #[tokio::test(start_paused = true)]
 #[ignore = "the relational soak"]
 async fn relational_soak() -> Result<(), Failure> {
@@ -137,6 +153,8 @@ async fn relational_soak() -> Result<(), Failure> {
         for (what, times) in &report.coverage {
             *coverage.entry(what.clone()).or_default() += times;
         }
+        // Two soaks of one build compare by these lines.
+        println!("seed {seed} replay {}", report.digest());
         if let Some(failure) = failure(&report) {
             println!("{}", report.dump());
             failed.entry(failure).or_default().push(seed);
@@ -727,6 +745,46 @@ mod regressions {
                     },
                 ),
                 Evict(1, "l0".into()),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20276: c read b's frame, then b was revoked while a and c were
+    /// severed, and c's next board names b's frame as a head. a never
+    /// received b's frame, and revoked frames are never served, so a could
+    /// not tell the missing head is revoked and its seal waited for good.
+    #[tokio::test(start_paused = true)]
+    async fn a_head_whose_author_is_revoked_resolves_at_a_peer_that_never_saw_it()
+    -> Result<(), Failure> {
+        holds_at(
+            20276,
+            soak_size(20276),
+            vec![
+                Invite(0, 2),
+                Share("l0".into(), 2),
+                Sync(0),
+                Restart(2),
+                Change(
+                    2,
+                    Change::Pair {
+                        list: "l0".into(),
+                        code: 1,
+                        name: 0,
+                        points: 4,
+                    },
+                ),
+                Sever(0, 2),
+                Sync(2),
+                Revoke(1),
+                Change(
+                    2,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 2,
+                        cap: 4,
+                    },
+                ),
             ],
         )
         .await

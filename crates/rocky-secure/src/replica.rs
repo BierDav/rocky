@@ -69,6 +69,7 @@ pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
 pub use replay::outcomes::OutcomeDivergence;
 mod restore;
+mod revoked_heads;
 pub(super) mod roles;
 mod session;
 mod sql;
@@ -723,6 +724,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         rebuild::SCHEMA,
         removal::SCHEMA,
         held::SCHEMA,
+        revoked_heads::SCHEMA,
         placements::SCHEMA,
         history::SCHEMA,
         coordinated::statements::SCHEMA,

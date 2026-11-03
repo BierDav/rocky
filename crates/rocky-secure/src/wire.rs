@@ -5,7 +5,6 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use p2panda_core::{Body, Header, Operation, validate_operation};
-use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowChange, RowFields, RowWrite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -250,6 +249,35 @@ impl EncryptedFrame {
     }
 }
 
+/// A dependency's signed header and its author's chain: what proves to a
+/// peer that never received the frame that its author is revoked. Revoked
+/// frames are never served, so without it an unknown head looks missing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevokedHead {
+    #[serde(with = "serde_bytes")]
+    header: Vec<u8>,
+    chain: Chain,
+}
+impl RevokedHead {
+    pub(crate) fn new(header: Vec<u8>, chain: Chain) -> Self {
+        Self { header, chain }
+    }
+    pub(crate) fn header_bytes(&self) -> &[u8] {
+        &self.header
+    }
+    pub(crate) fn chain(&self) -> &Chain {
+        &self.chain
+    }
+    /// The signed header, once it verifies and names this chain.
+    pub(crate) fn verify(&self) -> Result<Header<Extensions>, Error> {
+        let header = verified_header(&self.header)?;
+        if header.extensions.chain != self.chain.digest() {
+            return Err(denied("revoked head names another chain"));
+        }
+        Ok(header)
+    }
+}
+
 /// A row frame's signed header without its body: what a placement shows.
 pub(crate) fn verified_header(bytes: &[u8]) -> Result<Header<Extensions>, Error> {
     let header: Header<Extensions> = decode(bytes)?;
@@ -285,7 +313,7 @@ fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
 
 pub(crate) fn encrypt(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
     let mut nonce = [0; 24];
-    OsRng.fill_bytes(&mut nonce);
+    rocky_platform::entropy::fill(&mut nonce);
     let ciphertext = XChaCha20Poly1305::new(key.into())
         .encrypt(
             XNonce::from_slice(&nonce),

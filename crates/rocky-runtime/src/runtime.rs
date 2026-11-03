@@ -248,11 +248,7 @@ where
                 "rocky.runtime.session",
                 &[
                     binding.as_slice(),
-                    &web_time::SystemTime::now()
-                        .duration_since(web_time::UNIX_EPOCH)
-                        .map_err(|error| Error::Incompatible(error.to_string()))?
-                        .as_nanos()
-                        .to_le_bytes(),
+                    &rocky_platform::entropy::random::<32>(),
                     &scope.domain.0,
                 ]
                 .concat(),

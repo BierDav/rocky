@@ -58,13 +58,10 @@ async fn prepare<A: StoredApplication>(
         .collect();
     let mut recorded = BTreeMap::new();
     let id = if fresh {
-        let nonce = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_err(|error| Error::Incompatible(error.to_string()))?
-            .as_nanos();
+        let nonce: [u8; 32] = rocky_platform::entropy::random();
         rocky_core::commitment(
             "rocky.placement.catalog.v1",
-            &[path.to_string_lossy().as_bytes(), &nonce.to_le_bytes()].concat(),
+            &[path.to_string_lossy().as_bytes(), &nonce].concat(),
         )
         .to_vec()
     } else {

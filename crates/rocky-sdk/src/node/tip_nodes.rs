@@ -169,7 +169,7 @@ impl Node {
         } else {
             identity.reserve_author(settings.node_numbers(range))?
         };
-        let key = PrivateKey::new();
+        let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
         let credentials = settings.certify_node(
             &*identity,
             settings.identity_links(),

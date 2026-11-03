@@ -12,7 +12,6 @@ use chacha20poly1305::{
 };
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use p2panda_core::Signature;
-use rand::RngCore;
 use rocky_core::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +24,7 @@ fn equal(left: &[u8], right: &[u8]) -> bool {
 /// Bytes `seal` adds to its plaintext: the nonce and the AEAD tag.
 pub(crate) const SEAL_OVERHEAD: usize = 12 + 16;
 pub(crate) fn seal(key: Commitment, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut nonce = [0; 12];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce: [u8; 12] = rocky_platform::entropy::random();
     let sealed = ChaCha20Poly1305::new(&key.into())
         .encrypt(
             &nonce.into(),
@@ -228,8 +226,7 @@ pub fn open_enrollment(
 pub struct Exchange([u8; 32]);
 impl Exchange {
     pub fn new() -> (Self, [u8; 32]) {
-        let mut secret = [0; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
+        let secret: [u8; 32] = rocky_platform::entropy::random();
         (
             Self(secret),
             MontgomeryPoint::mul_base_clamped(secret).to_bytes(),

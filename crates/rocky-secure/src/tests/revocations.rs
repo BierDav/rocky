@@ -142,3 +142,97 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
     pulled.unwrap();
     assert_eq!(names(&y, &f).await, [b"after".to_vec()]);
 }
+
+/// Carol read Alice's frame and names it as a head; Alice is revoked.
+/// Revoked frames are never served, so Dave, who never received Alice's
+/// frame, names the head his pending frame waits on, and Carol answers with
+/// its signed header and chain. Dave then decides as Carol does, once his
+/// own revocation set ends that chain.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (alice, carol, dave, erin) = (
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+    );
+    let a = open(&f, &dir, "alice.db", &alice).await;
+    let c = open(&f, &dir, "carol.db", &carol).await;
+    let d = open(&f, &dir, "dave.db", &dave).await;
+    let e = open(&f, &dir, "erin.db", &erin).await;
+    let read = insert(&a, &f, 1, "alice").await;
+    let unnamed = insert(&a, &f, 3, "alice later").await;
+    for frame in [&read, &unnamed] {
+        assert_eq!(
+            c.receive(frame.clone()).await.unwrap(),
+            ReceiveStatus::Applied
+        );
+    }
+    let head = read.id().unwrap();
+    let write = c
+        .author(
+            [2; 32],
+            vec![change(f.public, 2, None, Some(f.app().name("carol")))],
+            vec![head],
+        )
+        .await
+        .unwrap();
+    let revoked = revoking(
+        &f.publisher,
+        f.app().definition().app,
+        &[alice.public_key()],
+        &[],
+    );
+    let ask = |key: &PrivateKey, heads: Vec<Hash>| {
+        let credentials = f.credentials(key, f.full());
+        let (c, key) = (&c, key.public_key());
+        async move {
+            c.revoked_heads(key, &credentials, f.public, &heads)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Carol knows of no revocation yet: she shows nothing.
+    assert_eq!(
+        d.receive(write.clone()).await.unwrap(),
+        ReceiveStatus::PendingDependencies
+    );
+    assert!(ask(&dave, vec![head]).await.is_empty());
+    c.learn_revocations(&revoked).await.unwrap();
+    // Dave asks only once he knows of a revocation himself.
+    assert!(d.missing_heads(f.public).await.unwrap().is_empty());
+    d.learn_revocations(&revoked).await.unwrap();
+    let missing = d.missing_heads(f.public).await.unwrap();
+    assert_eq!(missing, [head]);
+
+    // Evidence for a head Dave does not wait on changes nothing.
+    let other = ask(&dave, vec![unnamed.id().unwrap()]).await;
+    assert_eq!(other.len(), 1);
+    d.receive_revoked_heads(f.public, other).await.unwrap();
+    assert!(names(&d, &f).await.is_empty());
+
+    let shown = ask(&dave, missing.clone()).await;
+    assert_eq!(shown.len(), 1);
+    d.receive_revoked_heads(f.public, shown.clone())
+        .await
+        .unwrap();
+    assert_eq!(names(&d, &f).await, [b"carol".to_vec()]);
+    assert!(d.missing_heads(f.public).await.unwrap().is_empty());
+
+    // Erin keeps nothing while her revocation set ends no chain, and asks
+    // nothing; once it does, the same evidence decides as for Dave.
+    assert_eq!(
+        e.receive(write).await.unwrap(),
+        ReceiveStatus::PendingDependencies
+    );
+    e.receive_revoked_heads(f.public, shown.clone())
+        .await
+        .unwrap();
+    assert!(names(&e, &f).await.is_empty());
+    e.learn_revocations(&revoked).await.unwrap();
+    e.receive_revoked_heads(f.public, shown).await.unwrap();
+    assert_eq!(names(&e, &f).await, [b"carol".to_vec()]);
+}

@@ -117,7 +117,7 @@ impl FileIdentityProvider {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_private_dir_all(directory.join("authors")).map_err(provider)?;
-                let key = PrivateKey::new();
+                let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
                 // Two processes creating at once: the first file wins.
                 match fs::create_new(&path, key.as_bytes()) {
                     Ok(()) => key,

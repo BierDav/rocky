@@ -6082,7 +6082,9 @@ name = "rocky-platform"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "getrandom 0.2.17",
  "js-sys",
+ "rand 0.8.8",
  "rocky-platform",
  "rocky-sqlite-opfs",
  "rusqlite",

@@ -29,6 +29,8 @@ tracing-subscriber = { version = "0.3.22", default-features = false, features = 
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# The simulation seeds tokio's own randomness when built with it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

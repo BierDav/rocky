@@ -37,7 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 24;
+pub const VERSION: u32 = 25;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -195,6 +195,10 @@ pub struct Settings {
     /// This identity's counter claim right, which its node presents to the
     /// coordination service.
     pub claims: Option<crate::claims::Holding>,
+    /// The digest of the live revocations the coordination service last
+    /// acknowledged holding. Until it matches the held set's, any node
+    /// holding them pushes them again.
+    pub revocations_pushed: Option<Commitment>,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -763,13 +767,28 @@ impl Settings {
         }
         Ok(added)
     }
-    /// The digest and live count of the held revocations, as status shows them.
+    /// The digest and live count of the held revocations, and whether the
+    /// coordination service has yet to acknowledge them, as status shows them.
     pub(crate) fn revocation_status(&self) -> Result<serde_json::Value, Failure> {
         let time = now()?;
         Ok(serde_json::json!({
             "digest": HEXLOWER.encode(&self.revocations.digest(time)?),
             "statements": self.revocations.live(time),
+            "unpushed": self.unpushed_revocations(time)?.is_some(),
         }))
+    }
+    /// The held revocations and their digest at `time` while the
+    /// coordination service has not acknowledged that digest.
+    pub(crate) fn unpushed_revocations(
+        &self,
+        time: u64,
+    ) -> Result<Option<(RevocationSet, Commitment)>, Failure> {
+        if self.revocations.live(time) == 0 {
+            return Ok(None);
+        }
+        let digest = self.revocations.digest(time)?;
+        Ok((self.revocations_pushed != Some(digest))
+            .then(|| (self.revocations.pruned(time), digest)))
     }
     /// Whether `set` holds a live statement this identity lacks.
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
@@ -1285,6 +1304,7 @@ impl Settings {
             deliveries: BTreeMap::new(),
             trusted: None,
             claims: None,
+            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -1339,6 +1359,7 @@ impl Settings {
             deliveries: BTreeMap::new(),
             trusted: None,
             claims: None,
+            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
@@ -2485,6 +2506,7 @@ impl Settings {
             deliveries: BTreeMap::new(),
             trusted: None,
             claims: None,
+            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2673,6 +2695,7 @@ impl Joining {
             deliveries: BTreeMap::new(),
             trusted: None,
             claims: None,
+            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -4114,6 +4137,7 @@ impl Settings {
             deliveries,
             trusted,
             claims,
+            revocations_pushed,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -4144,6 +4168,7 @@ impl Settings {
             && *deliveries == other.deliveries
             && *trusted == other.trusted
             && *claims == other.claims
+            && *revocations_pushed == other.revocations_pushed
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

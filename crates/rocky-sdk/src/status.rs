@@ -110,6 +110,10 @@ pub struct Route {
 pub struct RevocationStatus {
     pub digest: String,
     pub statements: u64,
+    /// Held statements the coordination service has not acknowledged; a
+    /// node pushes them at its next sync or claim. Only meaningful on a
+    /// database composed with a coordination service.
+    pub unpushed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusGrant {

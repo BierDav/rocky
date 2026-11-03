@@ -334,6 +334,11 @@ pub(crate) struct Node {
     /// When this member last asked an issuer for a claim link it lacked.
     #[cfg(feature = "iroh")]
     claims_asked: std::sync::Mutex<u64>,
+    /// Held while revocations are pushed to the coordination service.
+    #[cfg(feature = "iroh")]
+    revocations_pushing: Mutex<()>,
+    #[cfg(feature = "iroh")]
+    push_retry: std::sync::Mutex<claims::PushRetry>,
 }
 
 impl Node {
@@ -413,6 +418,10 @@ impl Node {
             widened: Default::default(),
             #[cfg(feature = "iroh")]
             claims_asked: Default::default(),
+            #[cfg(feature = "iroh")]
+            revocations_pushing: Mutex::new(()),
+            #[cfg(feature = "iroh")]
+            push_retry: Default::default(),
         }
     }
     /// Lets the owner control its domain on this coordination service.
@@ -1676,7 +1685,10 @@ impl Node {
         // the earlier epoch's; a checkpoint at a seal after them carries
         // those rows instead.
         #[cfg(feature = "iroh")]
-        self.push_revocations().await;
+        if let Err(error) = self.push_revocations().await {
+            self.activity
+                .record("revocations_unpushed", json!({"error": error.to_string()}));
+        }
         if !matches!(
             target,
             crate::enrollment::Revoke::Trust(_) | crate::enrollment::Revoke::Claims(_)

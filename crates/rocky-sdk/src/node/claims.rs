@@ -8,6 +8,42 @@ use std::collections::BTreeSet;
 /// passed half its lifetime.
 #[cfg(feature = "iroh")]
 const ASK_INTERVAL: u64 = 60;
+/// Seconds before a failed revocation push is retried, doubling per
+/// failure up to `PUSH_RETRY_MAX`. A newly learned statement retries at once.
+#[cfg(feature = "iroh")]
+const PUSH_RETRY: u64 = 5;
+#[cfg(feature = "iroh")]
+const PUSH_RETRY_MAX: u64 = 300;
+
+/// When this process next pushes a revocation set the coordination service
+/// refused or did not answer: kept in memory, so a restart pushes at once.
+#[cfg(feature = "iroh")]
+#[derive(Default)]
+pub(super) struct PushRetry {
+    digest: Option<rocky_core::Commitment>,
+    failures: u32,
+    next: u64,
+}
+#[cfg(feature = "iroh")]
+impl PushRetry {
+    fn due(&self, digest: rocky_core::Commitment, time: u64) -> bool {
+        self.digest != Some(digest) || self.next <= time
+    }
+    fn failed(&mut self, digest: rocky_core::Commitment, time: u64) -> u64 {
+        if self.digest != Some(digest) {
+            *self = Self {
+                digest: Some(digest),
+                ..Self::default()
+            };
+        }
+        let delay = PUSH_RETRY
+            .saturating_mul(1 << self.failures.min(6))
+            .min(PUSH_RETRY_MAX);
+        self.failures = self.failures.saturating_add(1);
+        self.next = time.saturating_add(delay);
+        self.next
+    }
+}
 
 impl Node {
     /// `grant` a claim right to an identity, `install` one granted to this
@@ -118,21 +154,63 @@ impl Node {
 
 #[cfg(feature = "iroh")]
 impl Node {
-    /// Pushes this node's revocations to its coordination service: the
-    /// claim rights they end are refused from then on. A failure is only
-    /// recorded; the revoked links still lapse within their lifetime.
-    pub(super) async fn push_revocations(&self) {
+    /// Pushes the revocations this node holds to its coordination service
+    /// until it acknowledges their digest: the claim rights they end are
+    /// refused from that commit on. Any node holding a statement pushes it,
+    /// at a revocation, a sync pass or a claim; a failed push is retried
+    /// with backoff and the acknowledgment persists across restarts.
+    pub(super) async fn push_revocations(&self) -> Result<(), Failure> {
         let Some(client) = self.service.as_ref().and_then(|service| service.client()) else {
-            return;
+            return Ok(());
         };
-        let revocations = self.settings.lock().await.revocations.clone();
-        if revocations.is_empty() {
-            return;
+        let time = now()?;
+        let Some((revocations, digest)) = self.settings.lock().await.unpushed_revocations(time)?
+        else {
+            return Ok(());
+        };
+        // One push at a time; a concurrent caller leaves it to the first.
+        let Ok(_pushing) = self.revocations_pushing.try_lock() else {
+            return Ok(());
+        };
+        if !self
+            .push_retry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .due(digest, time)
+        {
+            return Ok(());
         }
-        if let Err(error) = client.revoke(self.domain().scope, revocations).await {
-            self.activity
-                .record("revocations_unpushed", json!({"error": error.to_string()}));
+        match client.revoke(self.domain().scope, revocations).await {
+            Ok(_) => {
+                *self
+                    .push_retry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = PushRetry::default();
+                // Statements learned meanwhile change the held digest and
+                // stay unpushed.
+                self.configure(|settings| {
+                    settings.revocations_pushed = Some(digest);
+                    Ok(())
+                })
+                .await?;
+                self.activity.record(
+                    "revocations_pushed",
+                    json!({"digest": HEXLOWER.encode(&digest)}),
+                );
+            }
+            Err(error) => {
+                let retry = self
+                    .push_retry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .failed(digest, time);
+                self.activity.record(
+                    "revocations_unpushed",
+                    json!({"error": error.to_string(), "retry": retry}),
+                );
+            }
         }
+        Ok(())
     }
     /// Presents this node's claim chain with its counter requests. A member
     /// whose claim link is missing or past half its lifetime first renews
@@ -141,6 +219,10 @@ impl Node {
         &self,
         client: &rocky_coordinator::service::NetworkCoordinator,
     ) -> Result<(), Failure> {
+        if let Err(error) = self.push_revocations().await {
+            self.activity
+                .record("revocations_unpushed", json!({"error": error.to_string()}));
+        }
         let (due, issuer) = {
             let settings = self.settings.lock().await;
             (
@@ -168,4 +250,20 @@ impl Node {
         client.present_claims(chain);
         Ok(())
     }
+}
+
+#[cfg(all(test, feature = "iroh"))]
+#[test]
+fn a_failed_push_backs_off_and_a_new_statement_pushes_at_once() {
+    let mut retry = PushRetry::default();
+    let (held, learned) = ([1; 32], [2; 32]);
+    assert!(retry.due(held, 100));
+    let delays: Vec<u64> = (0..8)
+        .map(|_| retry.failed(held, 100).saturating_sub(100))
+        .collect();
+    assert_eq!(delays, [5, 10, 20, 40, 80, 160, 300, 300]);
+    assert!(!retry.due(held, 399));
+    assert!(retry.due(held, 400));
+    assert!(retry.due(learned, 101));
+    assert_eq!(retry.failed(learned, 101), 106);
 }

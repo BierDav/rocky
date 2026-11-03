@@ -14,6 +14,64 @@ pub(super) fn starter() -> TransportOptions {
 pub(super) async fn service(
     dir: &std::path::Path,
 ) -> Result<(TrustBundle, NetworkCoordinator), Failure> {
+    let (bundle, admin, _) = gated_service(dir).await?;
+    Ok((bundle, admin))
+}
+
+/// The voters' client transport: while the gate is closed every client
+/// stream is dropped unanswered, as when the service is unreachable.
+struct Gate {
+    inner: Arc<dyn rocky_core::net::Transport>,
+    open: Arc<std::sync::atomic::AtomicBool>,
+}
+impl rocky_core::net::Transport for Gate {
+    fn kind(&self) -> &str {
+        self.inner.kind()
+    }
+    fn address(&self) -> rocky_core::net::BoxFuture<'_, Result<String, rocky_core::net::Failure>> {
+        self.inner.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+    ) -> rocky_core::net::BoxFuture<'a, Result<rocky_core::net::Stream, rocky_core::net::Failure>>
+    {
+        self.inner.connect(address, protocol)
+    }
+    fn accept(
+        &self,
+    ) -> rocky_core::net::BoxFuture<'_, Option<(Protocol, rocky_core::net::Stream)>> {
+        Box::pin(async move {
+            loop {
+                let next = self.inner.accept().await?;
+                if self.open.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Some(next);
+                }
+            }
+        })
+    }
+    fn listen(&self, listening: bool) {
+        self.inner.listen(listening);
+    }
+    fn close(&self) -> rocky_core::net::BoxFuture<'_, ()> {
+        self.inner.close()
+    }
+}
+
+/// `service` with a gate that takes the voters off the clients' network
+/// while it is closed.
+pub(super) async fn gated_service(
+    dir: &std::path::Path,
+) -> Result<
+    (
+        TrustBundle,
+        NetworkCoordinator,
+        Arc<std::sync::atomic::AtomicBool>,
+    ),
+    Failure,
+> {
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let root = PrivateKey::new();
     let admin = PrivateKey::new();
     let keys: Vec<_> = (0..3).map(|_| PrivateKey::new()).collect();
@@ -84,7 +142,11 @@ pub(super) async fn service(
         }
         .start_serving(secrets[index], vec![Protocol::Coordinate])
         .await?;
-        tokio::spawn(voter.clone().serve_clients(lane.transport()));
+        let clients = Arc::new(Gate {
+            inner: lane.transport(),
+            open: gate.clone(),
+        });
+        tokio::spawn(voter.clone().serve_clients(clients));
         tokio::spawn(voter.serve());
     }
     let admin = NetworkCoordinator::open(
@@ -105,5 +167,5 @@ pub(super) async fn service(
         assert!(tokio::time::Instant::now() < deadline, "no leader");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok((TrustBundle::new(&genesis)?, admin))
+    Ok((TrustBundle::new(&genesis)?, admin, gate))
 }

@@ -30,7 +30,7 @@ mod prerequisites;
 mod rollback;
 #[path = "service/voters.rs"]
 mod voters;
-use voters::{service, starter};
+use voters::{gated_service, service, starter};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 

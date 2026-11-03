@@ -537,6 +537,13 @@ impl Node {
                 peers.lock().unwrap_or_else(PoisonError::into_inner).len() as u64,
             );
             span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+            // Statements held or learned in this pass reach the coordination
+            // service, whatever became of the peers.
+            #[cfg(feature = "iroh")]
+            if let Err(error) = self.push_revocations().await {
+                self.activity
+                    .record("revocations_unpushed", json!({"error": error.to_string()}));
+            }
             result
         };
         // A received move may have switched this device to another line.

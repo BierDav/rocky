@@ -166,7 +166,7 @@ impl Fixture {
         self.state.apply_at(time, &request)
     }
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn competing_appends_retries_and_exact_signed_acknowledgments() {
     let mut f = Fixture::new(1, Limits::default());
     let head = f.state.log_head(tip_log(f.scope)).unwrap();
@@ -230,7 +230,7 @@ fn competing_appends_retries_and_exact_signed_acknowledgments() {
         Err(CoordinationError::RequestConflict)
     );
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
     for minimum in [1, 2] {
         let mut f = Fixture::new(minimum, Limits::default());
@@ -279,7 +279,7 @@ fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
         }
     }
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
     let mut f = Fixture::new(1, Limits::default());
     let pending = f.append(0, 2, 6);
@@ -314,7 +314,7 @@ fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
     );
     assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().hashes.len(), 1);
 }
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
     let mut f = Fixture::new(1, Limits::default());
     let h = f.state.log_head(tip_log(f.scope)).unwrap();
@@ -419,7 +419,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn hash_window_is_bounded_and_encoded_domain_footprint_is_measured() {
     let f = Fixture::new(1, Limits::default());
     let domain = f.state.state.find(f.scope).unwrap();
@@ -469,7 +469,7 @@ fn hash_window_is_bounded_and_encoded_domain_footprint_is_measured() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn deadline_resolution_uses_authority_at_the_signed_storage_acknowledgment() {
     let mut f = Fixture::new(1, Limits::default());
     let mut control = f.state.controls[0].control.clone();
@@ -488,7 +488,7 @@ fn deadline_resolution_uses_authority_at_the_signed_storage_acknowledgment() {
     assert_eq!(f.state.read(&request), Err(CoordinationError::Denied));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     let mut f = Fixture::new(1, Limits::default());
     let head = f.request(&f.owner, Action::Head, T);
@@ -607,7 +607,7 @@ fn certificate(identity: &PrivateKey, node: &PrivateKey) -> rocky_credentials::S
     .unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     let mut f = Fixture::new(1, Limits::default());
     let (genesis, owner, scope) = (f.state.genesis.id().unwrap(), f.owner.clone(), f.scope);
@@ -685,7 +685,7 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn duration_uses_authority_time_and_retry_never_extends_assignment() {
     let mut f = Fixture::new(2, Limits::default());
     let head = f.state.log_head(tip_log(f.scope)).unwrap();
@@ -705,7 +705,7 @@ fn duration_uses_authority_time_and_retry_never_extends_assignment() {
     assert_eq!(f.state.apply_at(T + 15, &request).unwrap(), assigned);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn compact_status_omits_the_entire_hash_window() {
     let mut f = Fixture::new(2, Limits::default());
     let pending = f.append(0, 2, 17);
@@ -727,7 +727,7 @@ fn compact_status_omits_the_entire_hash_window() {
     assert!(full_bytes - status_bytes >= crate::coordinated::HASH_WINDOW * 32);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn sixty_second_clock_skew_is_explicit_and_correction_reuses_the_append() {
     let mut f = Fixture::new(2, Limits::default());
     let now = now().unwrap();

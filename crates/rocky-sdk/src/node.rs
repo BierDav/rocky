@@ -3374,7 +3374,7 @@ impl Node {
         ))
     }
 
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     async fn service_call(
         &self,
         service: &crate::owner::Service,
@@ -3417,7 +3417,7 @@ impl Node {
         );
         result
     }
-    #[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
+    #[cfg(not(feature = "iroh"))]
     async fn service_call(
         &self,
         service: &crate::owner::Service,

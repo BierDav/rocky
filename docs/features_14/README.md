@@ -311,7 +311,8 @@ interactive latency for transitions that have not been qualified.
   UDP). Native behavior does not change.
 
 Status (2026-11-03): a browser node opens, writes, reopens and syncs with a
-native node over a local relay; the crates build, lint and test in a browser.
+native node over a local relay, and claims counter values from a coordination
+service as a trusted node; the crates build, lint and test in a browser.
 
 - SQLite: the browser links native's 3.53.2 amalgamation with native's flags
   (`vendor/sqlite-wasm-rs`); only threading, OS layer, extension loading and
@@ -346,10 +347,21 @@ native node over a local relay; the crates build, lint and test in a browser.
   browser installation at a time.
 - Browser API: `Configuration::create`, `open` and `join` (async), which no
   longer need a Tokio runtime natively either. The blocking `Database`
-  constructors, `Engine`, `CustodyPeer`, backups and restores, and the
-  coordination service (`Coordination::Service`; `rocky-coordinator` couples
-  its client with the openraft voter, its file store and tokio's sockets)
-  are native-only.
+  constructors, `Engine`, `CustodyPeer`, backups and restores are
+  native-only.
+- Coordination: `rocky-coordinator`'s wire protocol, authority state machine
+  and client (`NetworkCoordinator`, `TrustBundle`, counters) build on both
+  targets, so `Coordination::Service`, `Database::claim` and
+  `Database::counter` work in a browser through its iroh transport to a
+  public service's client lanes. The voter (openraft, which needs tokio's
+  multi-threaded runtime, its file store and TCP) is native-only, as are the
+  client's direct voter-TCP calls (`NetworkCoordinator::open`, `status`,
+  `initialize`, `snapshot`) used by operators. A browser node claims as any
+  node does: its identity must be one the domain's control trusts.
+  Evidence: `rocky-coordinator` `client::tests` (the client against the state
+  machine through an in-memory transport: retries, `Expired`, trusted-only,
+  answers of an uncertified key refused) and `machine::*_tests` on both
+  targets.
 - Evidence: `./scripts/check --wasm` (part of the full check; CI's `wasm`
   job) runs clippy for wasm32 and the tests in a dedicated Worker of
   headless Firefox, the SDK's `tests/application.rs` among them (create,
@@ -358,7 +370,12 @@ native node over a local relay; the crates build, lint and test in a browser.
   (`rocky-sdk` example `browser_peer`) invites a browser node
   (`tests/browser_sync.rs`), which joins, pulls the native write, writes,
   syncs, reopens and reads both; the native node then checks that the
-  browser's write arrived. Native-only tests say why: threads, child
+  browser's write arrived. The native side also runs three voters whose
+  client lanes the browser reaches through the relay; the owner trusts the
+  browser's identity when it asks, the browser claims invoice 1, a retry
+  with the same claim answers 1, the next claim takes 2, and after a reopen
+  the counter still reports its claim; the native node reads the same
+  counter and its own claim takes 3. Native-only tests say why: threads, child
   processes, sockets, tokio's paused clock, exhaustive schedules across
   threads, or the SDK's blocking constructors (its multi-node suites).
 - Not yet: persistence across a page reload (each test run starts on an

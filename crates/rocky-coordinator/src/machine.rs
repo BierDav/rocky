@@ -11,6 +11,82 @@ const TENANT_BYTES: usize = 64;
 /// Domains of a public service, open and closed.
 pub const MAX_PUBLIC_DOMAINS: usize = 4096;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Domain {
+    scope: Scope,
+    coordinated: coordinated::Logs,
+    counters: counters::Counters,
+    /// Closed by its owner: the identity never reopens.
+    closed: bool,
+}
+impl Domain {
+    fn new(scope: Scope, configuration: Configuration) -> Self {
+        Self {
+            scope,
+            coordinated: coordinated::Logs::new(scope, configuration),
+            counters: counters::Counters::default(),
+            closed: false,
+        }
+    }
+    fn open(&self) -> bool {
+        !self.closed
+    }
+    fn bytes(&self) -> usize {
+        self.coordinated.bytes() + self.counters.bytes()
+    }
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct State {
+    domains: Vec<Domain>,
+    limits: Limits,
+    /// Authority time in seconds; it never moves backwards.
+    time: u64,
+}
+impl State {
+    fn new(limits: Limits) -> Self {
+        Self {
+            domains: Vec::new(),
+            limits,
+            time: 0,
+        }
+    }
+    /// Advances authority time, clamping a backward clock.
+    fn advance(&mut self, time: u64) {
+        self.time = self.time.max(time);
+    }
+    fn retention(&self) -> Retention {
+        Retention {
+            domains: self.domains.len(),
+            bytes: self.bytes(),
+        }
+    }
+    fn bytes(&self) -> usize {
+        self.domains.iter().map(Domain::bytes).sum()
+    }
+    fn domain(&mut self, scope: Scope) -> Result<&mut Domain, CoordinationError> {
+        self.domains
+            .iter_mut()
+            .find(|d| d.scope == scope)
+            .ok_or(CoordinationError::UnknownDomain)
+    }
+    fn find(&self, scope: Scope) -> Result<&Domain, CoordinationError> {
+        self.domains
+            .iter()
+            .find(|d| d.scope == scope)
+            .ok_or(CoordinationError::UnknownDomain)
+    }
+    /// Owner-initiated closure. A closed identity never reopens; an entry
+    /// still pending must be decided first.
+    fn close(&mut self, scope: Scope) -> Result<(), CoordinationError> {
+        let domain = self.domain(scope)?;
+        if domain.coordinated.pending().next().is_some() {
+            return Err(CoordinationError::Denied);
+        }
+        domain.closed = true;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Operation {
     Control(ControlCertificate),

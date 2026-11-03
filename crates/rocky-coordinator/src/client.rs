@@ -1,7 +1,7 @@
 use crate::{
     certified::*,
     machine::Request,
-    service::{Operation, Outcome, Registration, Reply, Status},
+    service::{Operation, Outcome, Registration, Reply},
     transport::*,
 };
 use p2panda_core::{PrivateKey, PublicKey};
@@ -10,7 +10,11 @@ use rocky_core::{
     *,
 };
 use rocky_credentials::{SignedCapability, SignedCoordinationGrant, SignedTenantAdmission};
+use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
+/// A client of the coordination service. Natively it also reaches voters
+/// over their TCP addresses; a browser has no sockets and reaches a public
+/// service only through a transport (`connect`).
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
     key: PrivateKey,
@@ -22,18 +26,30 @@ pub struct NetworkCoordinator {
     preferred: Mutex<(Option<u64>, Option<u64>)>,
 }
 impl NetworkCoordinator {
+    /// A client of the voters' TCP addresses, such as the membership
+    /// authority's.
+    #[cfg(not(target_family = "wasm"))]
     pub fn open(
         genesis: CertifiedGenesis,
         root: PublicKey,
         mesh: MeshId,
         key: PrivateKey,
     ) -> Result<Self, CoordinationError> {
+        Self::new(genesis, root, mesh, key, None)
+    }
+    fn new(
+        genesis: CertifiedGenesis,
+        root: PublicKey,
+        mesh: MeshId,
+        key: PrivateKey,
+        route: Option<Arc<dyn Transport>>,
+    ) -> Result<Self, CoordinationError> {
         genesis.verify(root, mesh)?;
         Ok(Self {
             genesis,
             key,
             certificate: Mutex::new(None),
-            route: None,
+            route,
             preferred: Mutex::new((None, None)),
         })
     }
@@ -62,9 +78,7 @@ impl NetworkCoordinator {
         if !public.endpoints.iter().any(|e| e.kind == transport.kind()) {
             return Err(CoordinationError::Configuration);
         }
-        let mut client = Self::open(genesis, bundle.root, bundle.mesh, key)?;
-        client.route = Some(transport);
-        Ok(client)
+        Self::new(genesis, bundle.root, bundle.mesh, key, Some(transport))
     }
     /// Tries the hinted leader and the last responsive voter before the rest.
     async fn attempt(&self, request: &Request) -> Vec<Result<Reply, CoordinationError>> {
@@ -107,7 +121,7 @@ impl NetworkCoordinator {
                         .iter()
                         .filter(|e| e.voter == id && e.kind == transport.kind())
                     {
-                        reply = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        reply = timeout(Duration::from_secs(3), async {
                             let mut stream = transport
                                 .connect(&endpoint.address, Protocol::Coordinate)
                                 .await
@@ -123,7 +137,11 @@ impl NetworkCoordinator {
                     }
                     reply
                 }
+                #[cfg(not(target_family = "wasm"))]
                 _ => exchange(voter, genesis, &self.key, message()).await,
+                // `connect` is the only constructor here, and it requires both.
+                #[cfg(target_family = "wasm")]
+                _ => Err(CoordinationError::Configuration),
             };
             let done = if let Ok(reply) = &reply {
                 *self
@@ -162,7 +180,7 @@ impl NetworkCoordinator {
             (&self.key, certificate),
             now()?,
         )?;
-        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        timeout(Duration::from_secs(12), async {
             for _ in 0..3 {
                 for response in self.attempt(&request).await {
                     match response {
@@ -172,7 +190,7 @@ impl NetworkCoordinator {
                         _ => continue,
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(100)).await;
             }
             Err(CoordinationError::Unavailable)
         })
@@ -356,7 +374,8 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    pub async fn status(&self, voter: u64) -> Result<Status, CoordinationError> {
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn status(&self, voter: u64) -> Result<crate::service::Status, CoordinationError> {
         exchange(
             self.voter(voter)?,
             self.genesis.id()?,
@@ -373,6 +392,7 @@ impl NetworkCoordinator {
             .find(|v| v.id == id)
             .ok_or(CoordinationError::Denied)
     }
+    #[cfg(not(target_family = "wasm"))]
     pub async fn initialize(&self, voter: u64) -> Result<(), CoordinationError> {
         exchange(
             self.voter(voter)?,
@@ -382,6 +402,7 @@ impl NetworkCoordinator {
         )
         .await?
     }
+    #[cfg(not(target_family = "wasm"))]
     pub async fn snapshot(&self, voter: u64) -> Result<(), CoordinationError> {
         exchange(
             self.voter(voter)?,
@@ -503,3 +524,5 @@ impl DomainLog for NetworkCoordinator {
         })
     }
 }
+#[cfg(test)]
+mod tests;

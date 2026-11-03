@@ -2,21 +2,20 @@
 //! the domain under a tenant key and sign later control revisions. Only
 //! identities and generations leave the device. See
 //! `docs/runtime/public-coordination.md`.
-#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+#[cfg(feature = "iroh")]
 pub(crate) use service::{Domain, Service};
 
-/// Never constructed without iroh, or in a browser, where the coordination
-/// service client does not build: no coordination service is reachable.
-#[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
+/// Never constructed without iroh: no coordination service is reachable.
+#[cfg(not(feature = "iroh"))]
 pub(crate) enum Service {}
-#[cfg(not(all(feature = "iroh", not(target_family = "wasm"))))]
+#[cfg(not(feature = "iroh"))]
 impl Service {
     pub(crate) fn certify(&self, _: &rocky_credentials::CredentialChain) {
         match *self {}
     }
 }
 
-#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+#[cfg(feature = "iroh")]
 mod service {
     use crate::{Failure, enrollment::now, node::Refused, transport::Transport};
     use data_encoding::HEXLOWER;

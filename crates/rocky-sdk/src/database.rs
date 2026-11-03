@@ -40,7 +40,7 @@ pub struct Open<'a> {
 #[derive(Clone)]
 pub enum Coordination {
     Composed(Arc<dyn rocky_core::DomainLog>),
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     Service(Box<crate::TrustBundle>),
 }
 /// An open database and the network service it opened with, if any.
@@ -134,13 +134,13 @@ enum Command {
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     Claim(
         crate::counters::Name,
         crate::counters::Claim,
         oneshot::Sender<Result<u64, Failure>>,
     ),
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     Counter(
         crate::counters::Name,
         Option<crate::counters::Claim>,
@@ -552,7 +552,7 @@ impl Database {
     /// `counters::CLAIM_WINDOW` of its issue time and the counter's latest
     /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
     /// never takes a second value. Only the domain's trusted nodes claim.
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     pub async fn claim(
         &self,
         counter: crate::counters::Name,
@@ -564,7 +564,7 @@ impl Database {
     }
     /// `counter`'s last claimed value and, for `claim`, what it took: a
     /// linearizable read for reconciliation after a restart.
-    #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+    #[cfg(feature = "iroh")]
     pub async fn counter(
         &self,
         counter: crate::counters::Name,
@@ -1617,15 +1617,12 @@ async fn run_inner(
             .await?;
         settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
-        #[cfg_attr(
-            not(all(feature = "iroh", not(target_family = "wasm"))),
-            allow(unused_mut)
-        )]
+        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
         let mut service: Option<crate::owner::Service> = None;
         let log: Option<Arc<dyn rocky_core::DomainLog>> = match &setup.coordination {
             None => None,
             Some(Coordination::Composed(log)) => Some(log.clone()),
-            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+            #[cfg(feature = "iroh")]
             Some(Coordination::Service(bundle)) => {
                 let transport = link
                     .as_ref()
@@ -1896,13 +1893,13 @@ async fn run_inner(
                     let _ = reply.send(flushed);
                 });
             }
-            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+            #[cfg(feature = "iroh")]
             Command::Claim(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "claim", async move {
                     let _ = reply.send(node.claim(counter, claim).await);
                 });
             }
-            #[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+            #[cfg(feature = "iroh")]
             Command::Counter(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "counter", async move {
                     let _ = reply.send(node.counter(counter, claim).await);

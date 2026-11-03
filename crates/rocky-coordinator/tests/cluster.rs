@@ -1,4 +1,6 @@
 //! Persistent voters: controls, logs, counter claims, crashes and restarts.
+// Voters are native: Raft, file stores and sockets.
+#![cfg(not(target_family = "wasm"))]
 mod support;
 use rocky_coordinator::{
     coordinated::{Action, Result as LogResult},

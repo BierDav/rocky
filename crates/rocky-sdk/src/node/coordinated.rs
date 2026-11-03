@@ -14,7 +14,7 @@ impl Node {
 }
 /// Counter claims through the composed coordination service. A claim never
 /// runs inside a database transaction.
-#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+#[cfg(feature = "iroh")]
 impl Node {
     fn counters(&self) -> Result<&rocky_coordinator::service::NetworkCoordinator, Failure> {
         self.service

@@ -982,8 +982,8 @@ impl MemoryLog {
         if state.unavailable {
             return Err(CoordinationError::Unavailable);
         }
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let time = rocky_platform::time::SystemTime::now()
+            .duration_since(rocky_platform::time::UNIX_EPOCH)
             .map_err(|_| CoordinationError::Corrupt)?
             .as_secs()
             + state.skew;

@@ -1,5 +1,3 @@
-//! A coordinator voter and its setup commands. See
-//! `docs/runtime/coordinator-operations.md`.
 use p2panda_core::{PrivateKey, PublicKey};
 use rocky_coordinator::{
     certified::CertifiedGenesis,
@@ -9,7 +7,7 @@ use rocky_core::MeshId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-type Failure = Box<dyn std::error::Error>;
+pub(super) type Failure = Box<dyn std::error::Error>;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,7 +50,7 @@ const USAGE: &str = "usage:
   rocky-voter admin ADMIN.json membership EXPECTED_REVISION EXPECTED_VOTERS VOTERS";
 
 #[tokio::main]
-async fn main() -> Result<(), Failure> {
+pub(super) async fn main() -> Result<(), Failure> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {

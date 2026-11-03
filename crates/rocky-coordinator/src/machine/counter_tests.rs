@@ -82,7 +82,7 @@ impl Fixture {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     let mut fixture = Fixture::new(1, Limits::default());
     let retry_records = fixture.state.retry_records();
@@ -138,7 +138,7 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     assert_eq!(fixture.state.retry_records(), retry_records);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn snapshot_round_trip_keeps_values_and_claim_identities() {
     let mut fixture = Fixture::new(1, Limits::default());
     for n in 0..5 {
@@ -150,7 +150,7 @@ fn snapshot_round_trip_keeps_values_and_claim_identities() {
     assert_eq!(fixture.claim(1, "invoices", claim(9, T), T + 1), Ok(6));
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     let mut fixture = Fixture::new(1, Limits::default());
     let stranger = PrivateKey::new();
@@ -229,7 +229,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
 }
 
 /// The window outlasts the fixture's control, so it runs on the counters alone.
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn claims_outside_the_window_are_expired_never_given_a_second_value() {
     let mut counters = Counters::default();
     let invoices = name("invoices");
@@ -265,7 +265,7 @@ fn claims_outside_the_window_are_expired_never_given_a_second_value() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
     let mut fixture = Fixture::new(1, Limits::default());
     let records = u64::try_from(CLAIM_RECORDS).unwrap();
@@ -313,7 +313,7 @@ fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
     assert_eq!(bytes, 128 + "invoices".len() + CLAIM_RECORDS * 64);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn counter_name_count_and_byte_budgets_fail_closed() {
     assert_eq!(Name::new(""), Err(CoordinationError::Configuration));
     assert_eq!(

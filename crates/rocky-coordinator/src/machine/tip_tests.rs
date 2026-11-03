@@ -60,7 +60,7 @@ fn join(f: &mut Fixture, key: &PrivateKey, log: TipLog) -> Result<Outcome, Coord
     )
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_tips_writes_commit_through_its_own_log_and_followers() {
     let mut f = Fixture::new(2, Limits::default());
     let main = tip_log(f.scope);
@@ -129,7 +129,7 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
     assert_eq!(f.state.log_head(dev).unwrap().minimum, 1);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
     let mut f = Fixture::new(1, Limits::default());
     let main = tip_log(f.scope);
@@ -171,7 +171,7 @@ fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded() {
     let mut f = Fixture::new(1, Limits::default());
     let nodes = f.nodes.clone();
@@ -228,7 +228,7 @@ fn sealing(digest: u8, continuation: Option<TipId>) -> Action {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
     let mut f = Fixture::new(1, Limits::default());
     let main = tip_log(f.scope);
@@ -304,7 +304,7 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
     join(&mut f, &nodes[0], next).unwrap();
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn ended_logs_are_retained_up_to_their_bound_and_open_none() {
     let mut f = Fixture::new(1, Limits::default());
     let (owner, scope) = (f.owner.clone(), f.scope);
@@ -352,7 +352,7 @@ fn terminal_ack(
     .unwrap()
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
     let mut f = Fixture::new(1, Limits::default());
     let main = tip_log(f.scope);

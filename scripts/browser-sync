@@ -1,10 +1,11 @@
 #!/bin/sh
-# A browser node syncs with a native node over a local iroh relay.
+# A browser node syncs with a native node over a local iroh relay and claims
+# invoice numbers from the coordination service the native side runs.
 #
 #   scripts/browser-sync    start the native side (rocky-sdk example browser_peer),
 #                           run rocky-sdk's browser_sync test in headless Firefox
-#                           with its relay and invitation, then let the native
-#                           side check that the browser's write arrived
+#                           with its relay, invitation and service bundle, then let
+#                           the native side check the browser's write and claims
 #
 # scripts/check --wasm runs it after the wasm32 tests.
 set -eu

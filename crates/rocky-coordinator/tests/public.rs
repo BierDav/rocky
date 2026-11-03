@@ -1,6 +1,8 @@
 //! A public coordination service: three voter processes with iroh client
 //! lanes, two independent application owners, quotas, fairness, outages
 //! and fenced restore. See `docs/runtime/public-coordination.md`.
+// Voters are native: Raft, file stores and sockets.
+#![cfg(not(target_family = "wasm"))]
 #![cfg(feature = "iroh")]
 #[allow(dead_code)]
 mod support;

@@ -76,7 +76,7 @@ fi
 # processes, sockets or a paused clock are native-only. Clippy for wasm32 also
 # refuses calls that panic or fail in a browser (scripts/clippy-wasm).
 wasm_packages="rocky-platform rocky-sqlite-opfs rocky-core rocky-credentials rocky-storage
-    rocky-runtime rocky-secure rocky-iroh rocky-sdk"
+    rocky-runtime rocky-secure rocky-iroh rocky-coordinator rocky-sdk"
 run_wasm() {
     PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
     set --

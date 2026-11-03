@@ -6012,6 +6012,7 @@ dependencies = [
  "rocky-core",
  "rocky-credentials",
  "rocky-iroh",
+ "rocky-platform",
  "rocky-runtime",
  "rocky-secure",
  "serde",
@@ -6019,6 +6020,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

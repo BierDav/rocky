@@ -197,11 +197,11 @@ pub use enrollment::{DeviceKeys, Supplied, route_enrollment};
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// Named domain counters whose idempotent claims hand out unique,
 /// increasing values; see [`Database::claim`]. Claims go through the
-/// coordination service, which is native-only.
-#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+/// coordination service.
+#[cfg(feature = "iroh")]
 pub use rocky_coordinator::counters;
 /// The client of a coordination service and the bundle that pins it.
-#[cfg(all(feature = "iroh", not(target_family = "wasm")))]
+#[cfg(feature = "iroh")]
 pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};
 /// Coordinator refusals, such as `Unavailable` (uncertain: retry the same
 /// claim) and `Expired`, inside a claim's [`Failure`].

@@ -268,8 +268,8 @@ pub(crate) fn bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Coo
     encode(&(label, value))
 }
 pub(crate) fn now() -> Result<u64, CoordinationError> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    rocky_platform::time::SystemTime::now()
+        .duration_since(rocky_platform::time::UNIX_EPOCH)
         .map(|t| t.as_secs())
         .map_err(|_| CoordinationError::Corrupt)
 }

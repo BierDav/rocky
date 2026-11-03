@@ -56,7 +56,7 @@ impl Fixture {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn the_owners_recovery_ends_the_exact_head_without_the_in_sync_set_and_retries_identically() {
     let mut f = Fixture::new(1, Limits::default());
     for n in 1..=3 {
@@ -117,7 +117,7 @@ fn before_point(head: &crate::coordinated::Head, position: u64) -> LogPoint {
     point(position, running(head, position))
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_recovery_names_the_exact_head_and_a_prefix_that_chains_to_it() {
     let mut f = Fixture::new(1, Limits::default());
     for n in 1..=3 {
@@ -160,7 +160,7 @@ fn a_recovery_names_the_exact_head_and_a_prefix_that_chains_to_it() {
     assert!(f.resolve(&pending, &[0, 1], T + 4).is_err());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_prefix_before_the_window_is_endorsed_by_the_owner_alone() {
     let scope = Scope {
         mesh: MeshId([1; 16]),
@@ -221,7 +221,7 @@ fn a_prefix_before_the_window_is_endorsed_by_the_owner_alone() {
     assert_eq!(probe.head.hashes.len(), HASH_WINDOW);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_a_node_of_the_in_sync_set_ends_a_log_with_an_ordinary_seal() {
     let scope = Scope {
         mesh: MeshId([1; 16]),

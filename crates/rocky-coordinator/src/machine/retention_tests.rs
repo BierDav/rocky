@@ -141,7 +141,7 @@ fn nonce() -> Commitment {
     )
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
     let mesh = Mesh::new(1);
     let mut metadata = mesh.open(Limits::default());
@@ -172,7 +172,7 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
     let mesh = Mesh::new(2);
     let mut metadata = mesh.open(Limits::default());
@@ -228,7 +228,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
     assert_eq!(metadata.retention().domains, 1);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
     let mesh = Mesh::new(3);
     let limits = Limits {

@@ -1,100 +1,33 @@
 //! Trusted metadata coordination: a certified persistent Raft service and
 //! the coordinated log. Application payloads and policy remain outside it.
+//! The protocol, the state machine and the client build on every target;
+//! the voter (openraft, its file store and sockets) is native only.
 pub use retention::Limits;
 use rocky_core::*;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct Domain {
-    scope: Scope,
-    coordinated: coordinated::Logs,
-    counters: counters::Counters,
-    /// Closed by its owner: the identity never reopens.
-    closed: bool,
-}
-impl Domain {
-    fn new(scope: Scope, configuration: Configuration) -> Self {
-        Self {
-            scope,
-            coordinated: coordinated::Logs::new(scope, configuration),
-            counters: counters::Counters::default(),
-            closed: false,
-        }
-    }
-    fn open(&self) -> bool {
-        !self.closed
-    }
-    fn bytes(&self) -> usize {
-        self.coordinated.bytes() + self.counters.bytes()
-    }
-}
 /// Retained state of one coordinator, by count and accounted bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Retention {
     pub domains: usize,
     pub bytes: usize,
 }
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct State {
-    domains: Vec<Domain>,
-    limits: Limits,
-    /// Authority time in seconds; it never moves backwards.
-    time: u64,
-}
-impl State {
-    fn new(limits: Limits) -> Self {
-        Self {
-            domains: Vec::new(),
-            limits,
-            time: 0,
-        }
-    }
-    /// Advances authority time, clamping a backward clock.
-    fn advance(&mut self, time: u64) {
-        self.time = self.time.max(time);
-    }
-    fn retention(&self) -> Retention {
-        Retention {
-            domains: self.domains.len(),
-            bytes: self.bytes(),
-        }
-    }
-    fn bytes(&self) -> usize {
-        self.domains.iter().map(Domain::bytes).sum()
-    }
-    fn domain(&mut self, scope: Scope) -> Result<&mut Domain, CoordinationError> {
-        self.domains
-            .iter_mut()
-            .find(|d| d.scope == scope)
-            .ok_or(CoordinationError::UnknownDomain)
-    }
-    fn find(&self, scope: Scope) -> Result<&Domain, CoordinationError> {
-        self.domains
-            .iter()
-            .find(|d| d.scope == scope)
-            .ok_or(CoordinationError::UnknownDomain)
-    }
-    /// Owner-initiated closure. A closed identity never reopens; an entry
-    /// still pending must be decided first.
-    fn close(&mut self, scope: Scope) -> Result<(), CoordinationError> {
-        let domain = self.domain(scope)?;
-        if domain.coordinated.pending().next().is_some() {
-            return Err(CoordinationError::Denied);
-        }
-        domain.closed = true;
-        Ok(())
-    }
-}
 
 /// Certified bootstrap and authenticated durable service.
 pub mod certified;
 mod client;
+// The authority state machine is the voter's. It builds on every target so
+// its tests also run in a browser, where nothing applies it yet.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 mod machine;
+#[cfg(not(target_family = "wasm"))]
 mod raft_store;
 mod retention;
 pub mod service;
 mod transport;
 
 /// Ordered metadata for coordinated ordinary writes.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub mod coordinated;
 /// Named counters with idempotent claims.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub mod counters;

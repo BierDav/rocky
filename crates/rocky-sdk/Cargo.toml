@@ -34,12 +34,11 @@ data-encoding = "2"
 futures-util = "0.3"
 sha2 = "0.10"
 rocky-iroh = { workspace = true, optional = true }
+rocky-coordinator = { workspace = true, optional = true }
 
 # A database's own thread, its network workers and the peer binary's signals.
-# The coordination service client and its voter build natively only.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
-rocky-coordinator = { workspace = true, optional = true }
 
 [dev-dependencies]
 p2panda-core = "=0.5.2"
@@ -66,6 +65,11 @@ tokio = { version = "1", features = ["test-util"] }
 [[test]]
 name = "browser_sync"
 test = false
+
+# Runs a coordination service and claims through it.
+[[example]]
+name = "browser_peer"
+required-features = ["iroh"]
 
 [lints]
 workspace = true

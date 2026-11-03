@@ -257,7 +257,7 @@ impl Service {
     }
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn tenants_register_isolated_domains_without_reaching_each_other() {
     let service = Service::with(false, log_limits());
     let mut m = service.open();
@@ -373,7 +373,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn owners_change_trusted_nodes_and_keep_the_log() {
     let service = Service::with(false, log_limits());
     let mut m = service.open();
@@ -421,7 +421,7 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn admission_quotas_and_churn_bound_every_tenant() {
     let service = Service::new(true);
     let mut m = service.open();
@@ -520,7 +520,7 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     assert_eq!(encode(&roundtrip).unwrap(), encode(&m).unwrap());
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn retained_outcomes_are_bounded_per_tenant() {
     let service = Service::new(false);
     let mut m = service.open();
@@ -549,7 +549,7 @@ fn retained_outcomes_are_bounded_per_tenant() {
     assert_eq!(m.retry_records(), limits().retry_records);
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_public_genesis_needs_disjoint_budgets() {
     let service = Service::new(false);
     let mut genesis = service.genesis.genesis.clone();
@@ -568,7 +568,7 @@ fn a_public_genesis_needs_disjoint_budgets() {
     );
 }
 
-#[test]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
     let service = Service::new(false);
     let mut m = service.open();

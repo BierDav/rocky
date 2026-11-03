@@ -1,3 +1,5 @@
+// Voters are native: Raft, file stores and sockets.
+#![cfg(not(target_family = "wasm"))]
 #[allow(dead_code)]
 mod support;
 use rocky_coordinator::{

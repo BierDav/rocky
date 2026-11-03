@@ -13,19 +13,30 @@ default = ["iroh"]
 # The voter's iroh client lane and the setup commands that certify it.
 iroh = ["dep:rocky-iroh"]
 
+# The protocol, the state machine and the client, on every target.
 [dependencies]
 tracing.workspace = true
 rocky-core.workspace = true
 rocky-iroh = { workspace = true, optional = true }
 rocky-credentials.workspace = true
-openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
+rocky-platform.workspace = true
 p2panda-core = "=0.5.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "sync"] }
+
+# The voter: Raft, its file store and sockets.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 fs2 = "0.4"
 
 [dev-dependencies]
+# Each pure test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
+wasm-bindgen-test = "0.3"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tempfile = "3"
 rocky-runtime = { path = "../rocky-runtime" }
 rocky-secure = { path = "../rocky-secure" }

@@ -86,3 +86,76 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     m.close().await?;
     a.close().await
 }
+
+/// The issuer that granted a right goes away for good; another issuer
+/// renews the holder's link from the replicated registry and it claims on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let (bundle, _admin) = service(root.path()).await?;
+    let a = Peer::start(&root.path().join("a"), SCHEMA, Some(&bundle), None, true).await?;
+    let owner = a.call(json!({"type":"session"})).await?["principal"].clone();
+    let tenant = PrivateKey::new();
+    a.call(
+        json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
+        "trusted":[owner],"lifetime":3600}),
+    )
+    .await?;
+    let b = Peer::start(
+        &root.path().join("b"),
+        SCHEMA,
+        Some(&bundle),
+        Some(a.invite("issuer").await?),
+        false,
+    )
+    .await?;
+    introduce(&a, &b).await?;
+    let m = Peer::start(
+        &root.path().join("m"),
+        SCHEMA,
+        Some(&bundle),
+        Some(a.invite("writer").await?),
+        false,
+    )
+    .await?;
+    introduce(&a, &m).await?;
+    introduce(&b, &m).await?;
+    let member = m.call(json!({"type":"session"})).await?["principal"]
+        .as_str()
+        .ok_or("principal")?
+        .to_owned();
+    let b_node = b.call(json!({"type":"session"})).await?["node"].clone();
+    let invoices = counters::Name::new("invoices")?;
+
+    let grant = a
+        .session
+        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .await?;
+    m.session.install_claims(&grant).await?;
+    assert_eq!(
+        m.opened
+            .database
+            .claim(invoices.clone(), counters::Claim::fresh()?)
+            .await?,
+        1
+    );
+    // B receives the grant's registry row; the member learns B as an issuer.
+    b.sync().await?;
+    m.call(json!({"type":"renew"})).await?;
+    a.close().await?;
+
+    m.call(json!({"type":"renew"})).await?;
+    let held = m.session.held_claims().await?.ok_or("a held right")?;
+    assert_eq!(Some(json!(held.issuer)), Some(b_node));
+    assert!(held.expires >= grant.expires);
+    assert_eq!(held.counters, grant.counters);
+    assert_eq!(
+        m.opened
+            .database
+            .claim(invoices, counters::Claim::fresh()?)
+            .await?,
+        2
+    );
+    m.close().await?;
+    b.close().await
+}

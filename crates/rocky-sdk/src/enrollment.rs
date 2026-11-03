@@ -37,7 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 23;
+pub const VERSION: u32 = 24;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -254,8 +254,6 @@ pub struct Issuing {
     /// Every node and identity a statement this issuer learned revoked.
     /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
-    /// Counter claim rights this issuer granted and renews, by identity.
-    pub claim_rights: BTreeMap<PublicKey, crate::claims::Granted>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -287,7 +285,7 @@ pub enum Revoke {
     Identity(PublicKey),
     /// One trusted grant, by its capability id; the identity keeps its others.
     Trust(Commitment),
-    /// One claim link this issuer signed, by its capability id.
+    /// A claim right, by its grant id: every link of it, whoever signed it.
     Claims(Commitment),
 }
 /// What the registry recorded of a device a revocation acts on.
@@ -1449,7 +1447,7 @@ impl Settings {
             self.validity()?,
         )?)
     }
-    pub(crate) fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
+    fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
         self.authority
             .as_mut()
             .ok_or_else(|| format!("only an issuer {action}").into())

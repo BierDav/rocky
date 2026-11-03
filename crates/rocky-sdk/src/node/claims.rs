@@ -11,7 +11,7 @@ const ASK_INTERVAL: u64 = 60;
 
 impl Node {
     /// `grant` a claim right to an identity, `install` one granted to this
-    /// identity, or `revoke` one this issuer granted.
+    /// identity, read the `held` one, or `revoke` one an issuer granted.
     pub(super) async fn claims(&self, request: &Value) -> Result<Value, Failure> {
         let identity = || -> Result<PublicKey, Failure> {
             request["identity"]
@@ -44,11 +44,16 @@ impl Node {
                         .ok_or_else(|| refused("delegations must be 1 to 7"))?
                         as u8,
                 };
-                let grant = self
-                    .configure(|settings| {
-                        settings.grant_claims(&self.vault, identity, counters, delegations)
-                    })
-                    .await?;
+                let (grant, changes) = self.settings.lock().await.grant_claims(
+                    &self.vault,
+                    identity,
+                    counters,
+                    delegations,
+                )?;
+                // Recorded before the grant leaves, so every issuer renews it.
+                if !changes.is_empty() {
+                    self.commit(changes).await?;
+                }
                 self.activity.record(
                     "claims_granted",
                     json!({"identity": identity.to_hex(), "counters": grant.counters}),
@@ -83,22 +88,30 @@ impl Node {
             }
             Some("revoke") => {
                 let identity = identity()?;
-                let links = self
-                    .configure(|settings| settings.revoke_claims(identity))
+                let registry = self.registry().await?;
+                let (grant, changes) = self
+                    .settings
+                    .lock()
                     .await
+                    .revoke_claims(identity, &registry)
                     .map_err(refused)?;
-                // Each live link it signed is revoked and pushed.
-                for link in &links {
-                    self.revoke(crate::enrollment::Revoke::Claims(*link))
-                        .await?;
-                }
+                // The statement ends every live link of the grant, whichever
+                // issuer signed it; the row's removal ends the renewals.
+                self.revoke(crate::enrollment::Revoke::Claims(grant))
+                    .await?;
+                self.commit(changes).await?;
                 self.activity.record(
                     "claims_revoked",
-                    json!({"identity": identity.to_hex(), "links": links.len()}),
+                    json!({"identity": identity.to_hex(), "grant": HEXLOWER.encode(&grant)}),
                 );
-                Ok(json!({"links": links.len()}))
+                Ok(json!({"grant": HEXLOWER.encode(&grant)}))
             }
-            _ => Err(refused("claims action must be grant, install or revoke")),
+            Some("held") => Ok(serde_json::to_value(
+                self.settings.lock().await.held_claims()?,
+            )?),
+            _ => Err(refused(
+                "claims action must be grant, install, held or revoke",
+            )),
         }
     }
 }

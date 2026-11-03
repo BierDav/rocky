@@ -15,7 +15,7 @@ impl Node {
     }
 
     /// Commits `changes` with this issuer's own record in one transaction.
-    async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
+    pub(super) async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
         let registry = self.registry().await?;
         let own = self
             .settings
@@ -81,11 +81,8 @@ impl Node {
     /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
         let registry = self.registry().await?;
-        // A claim link it renews is recorded before the reply leaves.
-        let claims = self
-            .configure(|settings| settings.renew_claims(&self.vault, request))
-            .await?;
         let settings = self.settings.lock().await.clone();
+        let claims = settings.renew_claims(&self.vault, request, &registry, now()?)?;
         let (reply, changes) = settings.renew(&self.vault, request, &registry, claims)?;
         self.commit(changes).await?;
         Ok(reply)

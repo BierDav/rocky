@@ -968,11 +968,12 @@ impl Session {
     /// Grants `identity` the right to claim and read `counters` of this
     /// domain on its coordination service, or every counter when `None`,
     /// without being one of the control's trusted identities. An issuer
-    /// grants and renews it; a holder of a right granted with
-    /// `delegations` above 1 delegates within its own. The right reaches
-    /// only counters: never the coordinated log, seals or the control.
-    /// It lives on a link of at most `credentials::CLAIM_LIFETIME`, which
-    /// the holder's node renews with its issuer as it claims.
+    /// grants it and records it in the issuer registry, so every issuer
+    /// renews it; a holder of a right granted with `delegations` above 1
+    /// delegates within its own. The right reaches only counters: never
+    /// the coordinated log, seals or the control. It lives on a link of at
+    /// most `credentials::CLAIM_LIFETIME`, which the holder's node renews
+    /// with any reachable issuer as it claims.
     pub async fn grant_claims(
         &self,
         identity: &str,
@@ -992,16 +993,25 @@ impl Session {
         )?)
     }
     /// Installs a claim right granted to this device's identity. A member
-    /// also receives one from its issuer at a renewal, as `claim` asks.
+    /// also receives one from an issuer at a renewal, as `claim` asks.
     pub async fn install_claims(&self, grant: &crate::ClaimGrant) -> Result<(), Failure> {
         self.request(json!({"type":"claims","action":"install","grant":grant}))
             .await?;
         Ok(())
     }
-    /// Ends the claim right this issuer granted `identity`: it renews it
-    /// no more and revokes each live link, which the coordination service
-    /// refuses once the revocation reaches it and in any case once the
-    /// link expires (`credentials::CLAIM_LIFETIME`).
+    /// This identity's claim right as last installed or renewed: its link's
+    /// expiry and the issuer node it asks first. `None` without one.
+    pub async fn held_claims(&self) -> Result<Option<crate::ClaimGrant>, Failure> {
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"claims","action":"held"}))
+                .await?,
+        )?)
+    }
+    /// Ends the claim right an issuer granted `identity`: no issuer renews
+    /// it any more and a revocation names its grant, which ends every live
+    /// link of it. The coordination service refuses them once the
+    /// revocation reaches it (see `Database::claim`) and in any case once
+    /// a link expires (`credentials::CLAIM_LIFETIME`).
     pub async fn revoke_claims(&self, identity: &str) -> Result<(), Failure> {
         self.request(json!({"type":"claims","action":"revoke","identity":identity}))
             .await?;

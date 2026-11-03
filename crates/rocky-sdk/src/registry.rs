@@ -16,6 +16,8 @@ pub const MAX_DEVICES: usize = 256;
 pub const MAX_LABEL: usize = 256;
 /// Partition grants recorded per device.
 const MAX_GRANTS: usize = 256;
+/// Identities holding a recorded claim right.
+pub const MAX_CLAIM_RIGHTS: usize = 256;
 
 /// The named refusal of a write that would add the 257th device.
 #[derive(Debug)]
@@ -69,6 +71,17 @@ pub struct Grant {
     pub grant: PartitionGrant,
     pub delegations: u8,
 }
+/// A counter claim right an issuer granted an identity: any issuer renews
+/// its short-lived link while the row stands and its grant is unrevoked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimRecord {
+    pub right: rocky_credentials::ClaimRight,
+    pub delegations: u8,
+    /// The issuer that granted it.
+    pub issuer: PublicKey,
+    pub granted: u64,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Label {
@@ -103,10 +116,12 @@ impl Record {
     }
 }
 
-/// Every record an issuer has received, by node key.
+/// Every record an issuer has received, by node key, and the claim
+/// rights it holds, by holder identity.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     pub records: BTreeMap<PublicKey, Record>,
+    pub claims: BTreeMap<PublicKey, ClaimRecord>,
 }
 impl Registry {
     pub fn get(&self, node: &PublicKey) -> Option<&Record> {
@@ -139,6 +154,11 @@ impl Registry {
 
     fn apply(&mut self, node: &str, entry: &str, value: &str) -> Result<(), Failure> {
         let node: PublicKey = node.parse()?;
+        // A claim row is keyed by the holder identity, not a node.
+        if entry == CLAIMS {
+            self.claims.insert(node, parse(value)?);
+            return Ok(());
+        }
         let record = self.records.entry(node).or_default();
         match entry.split_once('/').unwrap_or((entry, "")) {
             ("device", "") => record.device = Some(parse(value)?),
@@ -289,6 +309,14 @@ impl Changes {
         )
     }
 
+    /// `identity`'s claim right, replacing an earlier grant.
+    pub fn claims(&mut self, identity: &PublicKey, record: &ClaimRecord) -> Result<(), Failure> {
+        self.push(identity, CLAIMS.into(), record, Mode::Replace)
+    }
+    /// Ends the renewals of `identity`'s claim right.
+    pub fn unclaim(&mut self, identity: &PublicKey) -> Result<(), Failure> {
+        self.push(identity, CLAIMS.into(), &Tombstone {}, Mode::Delete)
+    }
     pub fn label(&mut self, node: &PublicKey, label: &[u8]) -> Result<(), Failure> {
         if label.len() > MAX_LABEL {
             return Err(format!("a device label holds at most {MAX_LABEL} bytes").into());
@@ -299,6 +327,7 @@ impl Changes {
         self.push(node, "label".into(), &label, Mode::Replace)
     }
 }
+const CLAIMS: &str = "claims";
 fn capability_entry(capability: &Capability) -> String {
     format!("capability/{}", HEXLOWER.encode(&capability.id))
 }
@@ -309,11 +338,11 @@ fn text(value: &SqlValue) -> Result<&str, Failure> {
         _ => Err("registry rows hold text".into()),
     }
 }
-/// Records with a `device` entry, inside the writing transaction.
-async fn devices(sql: &SecureSql<TypedRows>) -> Result<usize, Failure> {
-    let count = format!("SELECT COUNT(*) FROM {REGISTRY} WHERE entry = 'device'");
+/// Rows of `entry`, inside the writing transaction.
+async fn count(sql: &SecureSql<TypedRows>, entry: &str) -> Result<usize, Failure> {
+    let count = format!("SELECT COUNT(*) FROM {REGISTRY} WHERE entry = ?");
     match sql
-        .run(&count, Vec::new())
+        .run(&count, vec![SqlValue::Text(entry.into())])
         .await?
         .rows
         .first()
@@ -385,8 +414,14 @@ pub async fn write(
                     }
                 }
                 (None, Mode::Keep | Mode::Replace) => {
-                    if change.entry == "device" && devices(&sql).await? >= MAX_DEVICES {
+                    if change.entry == "device" && count(&sql, "device").await? >= MAX_DEVICES {
                         return Err(Box::new(RegistryFull) as Failure);
+                    }
+                    if change.entry == CLAIMS && count(&sql, CLAIMS).await? >= MAX_CLAIM_RIGHTS {
+                        return Err(format!(
+                            "the issuer registry holds {MAX_CLAIM_RIGHTS} claim rights"
+                        )
+                        .into());
                     }
                     let id = sql.next_id(REGISTRY).await?;
                     let mut values = key;

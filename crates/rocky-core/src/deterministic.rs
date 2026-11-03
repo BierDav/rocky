@@ -45,11 +45,6 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "unlikely",
     "upper",
     "zeroblob",
-    // Exact math; transcendental functions use the platform's libm.
-    "ceil",
-    "ceiling",
-    "floor",
-    "trunc",
     // Arithmetic that fails on `i64` overflow; Rocky registers these.
     "checked_add",
     "checked_div",

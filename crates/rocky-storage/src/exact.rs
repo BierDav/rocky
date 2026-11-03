@@ -162,6 +162,20 @@ mod tests {
     }
 
     #[test]
+    fn every_allowed_function_exists_in_this_sqlite_build() {
+        let connection = connection();
+        for function in rocky_core::DETERMINISTIC_FUNCTIONS {
+            // Arity and window misuse fail too; only a missing function matters.
+            if let Err(error) = connection.prepare(&format!("SELECT {function}()")) {
+                assert!(
+                    !error.to_string().contains("no such function"),
+                    "{function}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn checked_functions_match_sqlite_except_on_overflow() {
         let connection = connection();
         let max = i64::MAX;

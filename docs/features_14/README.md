@@ -91,6 +91,89 @@ the contract is in the `rocky-sdk` crate docs ("Exact values").
 No cross-partition assertion engine, automatic partition selection or
 application trigger support is required. Application authors choose the layout.
 
+Status (2026-11-03): the fourth bullet's distinction of tenancy, partition
+and grant is stated below from the implementation. Partition groups appear
+under partitions. Coordination is R3's. The other bullets, including
+cross-partition checks and references to identity data, are not assessed
+here.
+
+- **Tenant = domain.** `Database::create` makes a domain with a random
+  `MeshId` and `DomainId`; its `AppId` derives from the owner's identity
+  key (the publisher) and the application name (`rocky_core::Scope`). The
+  domain has its own collection keys, partition naming key and credential
+  chain rooted in that publisher. Every `ResourceScope` and derived key
+  binds the scope, so nothing is shared across domains. An installation
+  holds one domain. A tenant column (`company_id`) is plain data: it neither
+  separates keys nor authorizes. A coordinator's tenant is a separate thing:
+  a `CoordinatorControl` key a provider admits (`TenantAdmission`), which
+  owns quotas and touches no rows.
+- **Partition = tuple + naming secret.** `partition_by` columns make each
+  distinct value tuple (`PartitionTuple`, 1–16 columns, ≤1 KiB) its own
+  encryption and log boundary. Tables with one `partition_group` share one
+  partition per tuple. The partition's scope id is an HMAC of
+  domain, table and tuple under the partition's naming secret
+  (`PartitionTuple::scope`). That secret travels only to holders and
+  custodians, so others cannot compute or recognize the id from a guessed
+  tuple. A replica that has not registered the partition sees only that a
+  header's author may write some partition of the table
+  (`placement_authority`). A request for an unknown scope is answered as for
+  a missing one. The group secret (`GroupSecretEnvelope`) has one epoch per
+  revocation. It seals the naming secret, and each member table's key is
+  derived from it (`derive_table_key`). An envelope installs only if the
+  recipient reads every member table; it confers no right itself.
+- **Holding.** A `Full` replica holds every scope it is authorized for and
+  never evicts. A `Partial` one (`partition_role`) holds what it subscribes:
+  `partition_subscribe`, or `partition_bootstrap` to start from a peer's
+  checkpoint. Holding needs whole-row `Read` or `Custody`; `omit` leaves out
+  member tables explicitly. `partition_unsubscribe` stops following but
+  keeps the rows. `partition_evict` drops rows and history only after the
+  configured full nodes (`custody` ≥ 1) applied everything this node wrote
+  there. Resubscribing refills the partition from peers.
+- **Grant = rights × rows × fields on a scope.** `ResourceGrant` pairs
+  rights (`Read`, `Insert`, `Update`, `Delete`, `Custody`) with
+  `RowSelection` and `FieldSelection`; pairs never form a cross product. A
+  collection grant names a reader scope (`grant`, or the `reader`, `writer`,
+  `custody` and `issuer` profiles). A partition grant (`PartitionGrant`,
+  issued by `partition_grant`, or `partition_delegate` within one's own) adds
+  a selector. The selector names every partition column with `Any` or
+  `Only` (≤256 values). It becomes a concrete grant only on a partition the
+  replica has registered (`resolve`). Delegation never exceeds the delegator.
+  `Custody` holds ciphertext without keys. Writes outside the author's grants
+  fail at commit and are dropped with `DropReason::Admission` on replay.
+- **Revocation** (`revoke`) names a node, an identity with all its nodes,
+  or an issuer trust, not a single grant. It joins a grow-only set, refuses
+  the revoked device at sync and refuses later grants to it. It also moves
+  every collection and group partition the device could read to a new key
+  epoch, sealed to the remaining holders the registry records. Members stop
+  accepting the revoked author's frames. Rocky cannot erase what the device
+  already holds.
+
+Example: a business app for accounting firms.
+
+1. Each client company is a domain (its own installation directory per
+   device): Acme and Globex share no key, credential or scope id.
+2. Customers are partitions: `customers`, `invoices` and `invoice_lines`
+   declare `partition_by: ["customer"]` and `partition_group: "customer"`.
+   Acme's issuer creates customer `C-17` (`partition_create`). A clerk holds
+   a partition grant of `Read`, `Insert`, `Update` and `Delete` on `Any`
+   customer, receives `C-17` by `partition_share` and writes its invoices.
+3. An accountant reviews Acme's customers C-17 and C-42 read-only. Acme's
+   issuer issues one `PartitionGrant` per group table, with
+   `"rights": ["Read"]`, `"rows": "All"` and a selector `Only` of those two
+   values. Column ids and values come from `partition_address`. It then
+   `partition_share`s both partitions to the accountant's device. The
+   accountant's `Partial` replica bootstraps the two partitions. Its writes
+   to them fail at commit. C-99 stays unrecognizable to it, though it is in
+   the same domain.
+4. When the engagement ends, `revoke` the accountant's identity. C-17 and
+   C-42 rotate; later invoices are unreadable to the accountant, and earlier
+   ones stay on their device.
+
+Evidence: `rocky-sdk` `tests/group_secrets.rs` (envelopes, read on every
+member table, rotation on revocation, holding rule, partition-only writers),
+`tests/partitions.rs`, `tests/grants.rs` (raw grants, delegation bounds) and
+`rocky-secure` `network::holdings::tests` (a guessed tuple learns nothing).
+
 ## R3. Observable finality
 
 - Local visibility, durable storage, provisional replay outcome and seal-final

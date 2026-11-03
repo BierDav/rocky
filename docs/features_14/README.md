@@ -205,12 +205,12 @@ application.
   coordinator's Raft log (`Operation::Claim`), so values are unique and
   strictly increasing across every voter, starting at 1. A claimed value is
   consumed: an abandoned one is a gap; sequences are not gapless.
-- A claim answers the same value to every retry, from any trusted node,
-  within 7 days of `issued` (`CLAIM_WINDOW`) and the counter's latest 1,024
+- A claim answers the same value to every retry, from any node allowed to
+  claim it, within 7 days of `issued` (`CLAIM_WINDOW`) and the counter's latest 1,024
   claims (`CLAIM_RECORDS`). Beyond that a retry, or any claim issued no later
   than an evicted one, is refused with `Expired`; it never takes a second
   value. An issue time more than 30 s ahead of authority time is `ClockSkew`.
-- Only trusted nodes of the domain (its control's identities) claim or read
+- Trusted nodes of the domain (its control's identities) claim or read
   (`Operation::Counter`, linearizable); a closed domain takes no claim.
   Counters count against the tenant's byte budget (128 bytes per counter
   plus its name, 64 per kept claim) and refuse with `Backpressure` without
@@ -221,6 +221,58 @@ application.
   pending row, claim, use the value in an ordinary transaction that settles
   the row, and after `Unavailable` or a restart claim again with the same claim.
 - The coordinator store format moved to 11.
+
+Claim rights (2026-11-03): ordinary users claim without joining the trusted
+list, which stays the at most 32 identities that join coordinated logs and
+acknowledge seals.
+
+- **The right.** A claim link (`rocky_credentials::ClaimRight`, capability
+  extension 6) names a domain and its counters, or every counter. It is a
+  dedicated user link: no grants, issuer or trusted authority, at most
+  `CLAIM_LIFETIME` (one day) plus 300 s, and its node certificate carries
+  nothing of its own. It sits on the domain's credential chain rather than
+  on `Right`/`ResourceGrant`, whose rights are per-table and whose links
+  live up to 366 days: the coordinator verifies it from the publisher
+  alone, and its lifetime is what bounds revocation. The owner or an issuer
+  signs it (`Authority::issue_claims`); a holder whose link allows a
+  delegation delegates within its own (`delegate_claims`). Every verifier
+  refuses wider counters, another domain or a longer link.
+- **Verification.** A control names the domain's publisher
+  (`DomainControl::publisher`, fixed for the domain; a registration must
+  name its coordination grant's). A node that is not trusted presents its
+  claim chain with `Claim` and `Counter` (`Request::claims`); the
+  coordinator checks every link from that publisher, the node certificate
+  and the counter (`CredentialChain::claimant`). It holds no domain data,
+  keys or registry. The right authorizes nothing else: logs, seal
+  acknowledgments, controls, closure and other domains still need trust
+  or authority.
+- **Revocation bound.** A holder stops claiming at the earlier of: the
+  commit of a revocation that ends its link, which any node pushes
+  (`Operation::Revoke`; statements verify themselves against the publisher
+  and count against the tenant's budget; the SDK pushes after each
+  `revoke`), or its link's expiry, at most one day and 300 s after its
+  issuer last renewed it, since issuers renew no revoked identity and no
+  revoked right. A revoked issuer's links end only with the push: until it
+  reaches the coordinator, links that issuer keeps signing keep working.
+- **SDK.** `Session::grant_claims(identity, counters, delegations)` on an
+  issuer records and signs the right (`ClaimGrant`);
+  `Session::install_claims` installs it, and a member's renewal also
+  delivers it. `Database::claim` and `counter` present the chain and renew
+  the link with the granting issuer when it is missing or past half its
+  life, at most once a minute. `Session::revoke_claims(identity)` ends
+  renewals and revokes every live link the issuer signed.
+- Formats: capability extension 6, control `rocky.control.v4`, request
+  `rocky.coordination-request.v7`, coordinator store 12, settings 23.
+- Evidence: `rocky-credentials` `claims::tests` (scope, lifetime,
+  revocation, delegation bounds); `rocky-coordinator`
+  `machine::claim_tests` (a holder claims gap-free beside trusted nodes,
+  retries and `Expired` unchanged, non-holders and other counters
+  `Denied`, no log join, acknowledgment, control or closure, a pushed or
+  expired right refused, delegation bounded, no publisher no right),
+  `public_tests` (a registration names its grant's publisher) and
+  `client::tests` (through the client and a pushed revocation);
+  `rocky-sdk` `tests/service.rs` `claims` (a member claims through an
+  installed right over real voters until the owner revokes it).
 - Evidence: `rocky-coordinator` `machine::counter_tests` (values, retries,
   snapshot encoding, authorization, window, eviction, budgets) and
   `tests/cluster.rs`
@@ -312,7 +364,8 @@ interactive latency for transitions that have not been qualified.
 
 Status (2026-11-03): a browser node opens, writes, reopens and syncs with a
 native node over a local relay, and claims counter values from a coordination
-service as a trusted node; the crates build, lint and test in a browser.
+service through a claim right, never trusted; the crates build, lint and test
+in a browser.
 
 - SQLite: the browser links native's 3.53.2 amalgamation with native's flags
   (`vendor/sqlite-wasm-rs`); only threading, OS layer, extension loading and
@@ -357,7 +410,8 @@ service as a trusted node; the crates build, lint and test in a browser.
   multi-threaded runtime, its file store and TCP) is native-only, as are the
   client's direct voter-TCP calls (`NetworkCoordinator::open`, `status`,
   `initialize`, `snapshot`) used by operators. A browser node claims as any
-  node does: its identity must be one the domain's control trusts.
+  node does: as a trusted identity or through a claim right (R3), whose
+  link it renews with its issuer over the relay.
   Evidence: `rocky-coordinator` `client::tests` (the client against the state
   machine through an in-memory transport: retries, `Expired`, trusted-only,
   answers of an uncertified key refused) and `machine::*_tests` on both
@@ -371,11 +425,13 @@ service as a trusted node; the crates build, lint and test in a browser.
   (`tests/browser_sync.rs`), which joins, pulls the native write, writes,
   syncs, reopens and reads both; the native node then checks that the
   browser's write arrived. The native side also runs three voters whose
-  client lanes the browser reaches through the relay; the owner trusts the
-  browser's identity when it asks, the browser claims invoice 1, a retry
-  with the same claim answers 1, the next claim takes 2, and after a reopen
-  the counter still reports its claim; the native node reads the same
-  counter and its own claim takes 3. Native-only tests say why: threads, child
+  client lanes the browser reaches through the relay; the owner, the
+  control's only trusted identity, grants the browser's identity a claim
+  right for invoices when it asks, the browser's first claim fetches the
+  link from the owner and takes invoice 1, a retry with the same claim
+  answers 1, the next claim takes 2, a claim on another counter is
+  `Denied`, and after a reopen the counter still reports its claim; the
+  native node reads the same counter and its own claim takes 3. Native-only tests say why: threads, child
   processes, sockets, tokio's paused clock, exhaustive schedules across
   threads, or the SDK's blocking constructors (its multi-node suites).
 - Not yet: persistence across a page reload (each test run starts on an

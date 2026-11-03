@@ -351,6 +351,11 @@ impl NativeSession {
         self.ensure_holding(replica, scopes).await?;
         let mut offered = Vec::with_capacity(scopes.len());
         for scope in scopes {
+            // An evicted scope imports nothing until it is held again.
+            if replica.evicted(*scope).await? {
+                offered.push(None);
+                continue;
+            }
             offered.push(match self.checkpoint_offer(*scope).await? {
                 Some(signed)
                     if signed.statement.seal.is_some()
@@ -533,6 +538,9 @@ impl NativeSession {
             }));
         }
         self.ensure_holding(replica, &[scope]).await?;
+        if replica.evicted(scope).await? {
+            return Ok(None);
+        }
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };

@@ -933,12 +933,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
         transaction!(inner, |inner| inner.set_holding(scope, Holding::Held).await)
     }
     /// Stops holding new frames of the scope. Rows already held stay; they
-    /// are neither deleted nor reported complete.
+    /// are neither deleted nor reported complete. A partial replica that
+    /// wrote there leaves only once enough full nodes applied every frame
+    /// it wrote, as eviction requires: a left scope no longer syncs, so
+    /// they would reach no one.
     pub async fn unsubscribe(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         match inner.holding(scope).await? {
-            Some(Holding::Evicting | Holding::Evicted) => Ok(()),
-            _ => transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await),
+            Some(Holding::Evicting | Holding::Evicted | Holding::Left) => Ok(()),
+            _ => {
+                let role = inner.role().await?;
+                let me = inner.config.node.public_key();
+                let wrote = match inner.find_scope_id(scope).await? {
+                    Some(id) => inner.log(id, me).await?.is_some(),
+                    None => false,
+                };
+                if role.role == ReplicaRole::Partial && wrote {
+                    let needed = role.custody.max(1);
+                    let covering = inner.custody_coverage(scope, &role.full_nodes).await?;
+                    if covering < needed {
+                        return Err(denied(&format!(
+                            "leaving needs {needed} full nodes to have applied every local operation; {covering} have"
+                        )));
+                    }
+                }
+                transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await)
+            }
         }
     }
     /// Test access: merges a restoration endpoint and returns the stored one.
@@ -1286,6 +1306,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }));
         }
         Ok(replies)
+    }
+    /// Whether this replica evicts or evicted `scope`: no checkpoint
+    /// installs there until it holds the scope again.
+    pub(crate) async fn evicted(&self, scope: ResourceScope) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        Ok(matches!(
+            inner.holding(scope).await?,
+            Some(Holding::Evicting | Holding::Evicted)
+        ))
     }
     /// The members of `scopes` this replica holds, in order.
     pub(crate) async fn held_of(

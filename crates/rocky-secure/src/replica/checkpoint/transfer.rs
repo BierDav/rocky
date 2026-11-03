@@ -1662,6 +1662,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verify_import_statement(&signed).await?;
         let statement = &signed.statement;
         let scope = statement.scope;
+        // An evicted scope keeps no base: holding it again imports one.
+        if matches!(
+            inner.holding(scope).await?,
+            Some(
+                crate::replica::roles::Holding::Evicting | crate::replica::roles::Holding::Evicted
+            )
+        ) {
+            return Err(denied("scope is not held by this replica"));
+        }
         if signed.signer() == inner.config.node.public_key() {
             return Err(denied(
                 "checkpoint definition/generation/key epoch mismatch",
@@ -2783,6 +2792,10 @@ impl<A: RowApplication> Inner<A> {
         let mut reapply = Vec::new();
         let mut cursor = Vec::new();
         let mut bytes = 0;
+        // Frames the checkpoint covers, with their clocks, and those that
+        // retained frames name: a retained frame's dependency needs a stub.
+        let mut covered = BTreeMap::new();
+        let mut named = BTreeSet::new();
         loop {
             let records = collect_rows(self.conn.query(
                 "SELECT o.hash,o.header,o.status,LENGTH(o.header)+LENGTH(o.body),(SELECT position FROM secure_applied a WHERE a.hash=o.hash) FROM secure_operations o WHERE o.scope=? AND o.hash>? ORDER BY o.hash LIMIT 32",
@@ -2812,6 +2825,7 @@ impl<A: RowApplication> Inner<A> {
                     if header.seq_num == log.sequence && log.hash.as_bytes().as_slice() != hash {
                         return Err(denied("checkpoint frontier forks a retained log"));
                     }
+                    covered.insert(hash_of(hash)?, header.timestamp);
                     self.place_superseded(&header, encoded).await?;
                     self.keep_covered(id, hash, &statement.outcomes).await?;
                     for sql in [
@@ -2826,7 +2840,16 @@ impl<A: RowApplication> Inner<A> {
                     }
                     bytes += *size;
                     report.superseded += 1;
-                } else if status == "applied" {
+                    continue;
+                }
+                named.extend(
+                    header
+                        .previous
+                        .iter()
+                        .chain(header.backlink.iter())
+                        .copied(),
+                );
+                if status == "applied" {
                     let SqlValue::Integer(position) = position else {
                         return Err(Error::Corrupt("applied position".into()));
                     };
@@ -2849,6 +2872,11 @@ impl<A: RowApplication> Inner<A> {
                 [report.superseded as i64, bytes],
             )
             .await?;
+        for (hash, clock) in covered {
+            if named.contains(&hash) {
+                self.put_stub(hash, id, clock, false).await?;
+            }
+        }
         if report.superseded > 0 {
             self.sweep_chains().await?;
         }

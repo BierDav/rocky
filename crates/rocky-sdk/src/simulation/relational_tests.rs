@@ -600,4 +600,135 @@ mod regressions {
         .await
         .map(drop)
     }
+
+    /// Seed 20080: b evicts `l0`, a writes a board there and revokes c.
+    /// The learned revocation asks b to bootstrap every granted scope, and
+    /// b imported a checkpoint into the evicted one, whose identity marks
+    /// then reached its rebuild but not its stored ledger.
+    #[tokio::test(start_paused = true)]
+    async fn a_revocation_imports_no_checkpoint_into_an_evicted_list() -> Result<(), Failure> {
+        holds_at(
+            20080,
+            soak_size(20080),
+            vec![
+                Evict(1, "l0".into()),
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 1,
+                        cap: 6,
+                    },
+                ),
+                Invite(0, 2),
+                Revoke(2),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20229: c joins after a recoded b's board and sealed. Importing
+    /// a's base superseded a frame that c's own outcome record names as a
+    /// head, with no stub, so the record waited for good and blocked the
+    /// rederive after the board's clear cascaded its card away.
+    #[tokio::test(start_paused = true)]
+    async fn a_superseded_head_of_a_retained_frame_leaves_a_stub() -> Result<(), Failure> {
+        holds_at(
+            20229,
+            soak_size(20229),
+            vec![
+                Change(
+                    1,
+                    Change::Pair {
+                        list: "l0".into(),
+                        code: 0,
+                        name: 4,
+                        points: 6,
+                    },
+                ),
+                Sync(1),
+                Change(
+                    0,
+                    Change::Recode {
+                        list: "l0".into(),
+                        board: 5,
+                        code: 1,
+                    },
+                ),
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 0,
+                        cap: 12,
+                    },
+                ),
+                Seal(0),
+                Invite(0, 2),
+                Share("l0".into(), 2),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20290: c writes a board and its card in `l1` while its own
+    /// earlier frames wait to apply again after a checkpoint switch. An
+    /// outcome record appended behind them forked c's log in a rebuild.
+    #[tokio::test(start_paused = true)]
+    async fn an_outcome_waits_for_its_authors_pending_frames() -> Result<(), Failure> {
+        holds_at(
+            20290,
+            soak_size(20290),
+            vec![
+                Invite(0, 2),
+                Share("l1".into(), 2),
+                Sync(0),
+                Seal(0),
+                Change(
+                    2,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 3,
+                        name: 1,
+                        points: 5,
+                    },
+                ),
+            ],
+        )
+        .await
+    }
+
+    /// Seed 20074: partial b writes a board in `l0` while a is offline, and
+    /// evicts `l0`. The eviction waits for custody, but the driver's leave
+    /// went through and stranded b's unsynced frame, so a's seal waited for
+    /// good. Leaving needs the same custody as evicting.
+    #[tokio::test(start_paused = true)]
+    async fn leaving_a_list_waits_for_custody_of_own_frames() -> Result<(), Failure> {
+        holds_at(
+            20074,
+            soak_size(20074),
+            vec![
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 1,
+                        name: 2,
+                        points: 6,
+                    },
+                ),
+                Offline(0),
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 0,
+                        cap: 10,
+                    },
+                ),
+                Evict(1, "l0".into()),
+            ],
+        )
+        .await
+    }
 }

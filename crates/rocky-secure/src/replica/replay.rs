@@ -1335,10 +1335,44 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if members > 1 {
-            let held: Vec<_> = intents
+            // The record names every member this replica replayed, also
+            // those an earlier pass replayed, as a full rebuild does.
+            let mut others = Vec::new();
+            for record in collect_rows(
+                self.conn
+                    .query(
+                        "SELECT hash,member FROM secure_replayed WHERE txn=? ORDER BY member",
+                        [transaction.to_vec()],
+                    )
+                    .await?,
+            )
+            .await?
+            {
+                let [SqlValue::Blob(hash), SqlValue::Integer(member)] = record.as_slice() else {
+                    return Err(Error::Corrupt("replayed member".into()));
+                };
+                let hash = super::checkpoint::hash_of(hash)?;
+                if intents
+                    .iter()
+                    .all(|(frame, ..)| frame.operation_ref().map(|o| o.hash).ok() != Some(hash))
+                    && let Some(frame) = self.frame(hash).await?
+                {
+                    let member = u16::try_from(*member)
+                        .map_err(|_| Error::Corrupt("replayed member".into()))?;
+                    others.push((frame, member));
+                }
+            }
+            let mut held: Vec<_> = intents
                 .iter()
                 .map(|(frame, .., member)| (*frame, *member))
+                .chain(others.iter().map(|(frame, member)| (frame, *member)))
                 .collect();
+            held.sort_by_key(|(frame, _)| {
+                frame
+                    .operation_ref()
+                    .map(|operation| stamp(&operation.header))
+                    .ok()
+            });
             self.publish_outcome(
                 transaction,
                 &held,
@@ -1373,8 +1407,67 @@ impl<A: RowApplication> Inner<A> {
             };
             starts.push((self.scope_id(scope).await?, (era, stamp(header))));
         }
-        let redo = self.rewind(starts).await?;
-        self.replay_transaction(transaction, intents, era, time)
+        let mut redo = self.rewind(starts).await?;
+        // Members of this transaction the rewind took back, as one held
+        // before the arrival's partition was replaced, replay with it: its
+        // references between members settle only together.
+        let Some(own) = redo
+            .iter()
+            .position(|redo| redo.transaction == transaction.0)
+            .map(|index| redo.remove(index))
+        else {
+            self.replay_transaction(transaction, intents, era, time)
+                .await?;
+            return self.redo(redo, time).await;
+        };
+        let mut opened = Vec::with_capacity(own.members.len());
+        for (hash, member) in own.members {
+            let frame = self
+                .frame(hash)
+                .await?
+                .ok_or_else(|| Error::Corrupt("rewound frame is missing".into()))?;
+            let extension = &frame.operation_ref()?.header.extensions;
+            if self
+                .opening_key(extension.scope, extension.generation)
+                .is_none()
+            {
+                return Err(Error::Rejected(KEY_WAITS.into()));
+            }
+            let payload = self.row_payload(&frame)?;
+            let grants = self.verify_frame(&frame, time).ok();
+            opened.push((frame, payload, grants, member));
+        }
+        let mut joined: Vec<Replaying<'_>> = intents.to_vec();
+        let admitted = opened.iter().all(|(.., grants, _)| grants.is_some());
+        for (frame, payload, grants, member) in &opened {
+            let intent = payload
+                .intent()
+                .ok_or_else(|| Error::Corrupt("rewound frame carries no intent".into()))?;
+            joined.push((frame, intent, grants.as_deref().unwrap_or(&[]), *member));
+        }
+        if !admitted {
+            // A rewound member's admission no longer holds: the transaction
+            // drops whole, as a redo records it.
+            for (frame, .., member) in &joined {
+                self.record_replayed(
+                    frame,
+                    (transaction.0, *member, transaction.1),
+                    Some(&DropReason::Admission.into()),
+                    &[],
+                    era,
+                )
+                .await?;
+            }
+            return self.redo(redo, time).await;
+        }
+        // In the order a full replay runs them.
+        joined.sort_by_key(|(frame, ..)| {
+            frame
+                .operation_ref()
+                .map(|operation| stamp(&operation.header))
+                .ok()
+        });
+        self.replay_transaction(transaction, &joined, era, time)
             .await?;
         self.redo(redo, time).await
     }

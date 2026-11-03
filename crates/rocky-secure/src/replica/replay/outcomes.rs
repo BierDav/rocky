@@ -236,8 +236,10 @@ impl<A: RowApplication> Inner<A> {
                         .iter()
                         .any(|right| grant.rights.contains(right))
             });
-            // Only a held scope's log takes frames from this node.
-            if writes && self.holds(scope).await? {
+            // Only a held scope's log takes frames from this node, and only
+            // after its own frames there that wait to apply again, as a
+            // checkpoint switch leaves them: a log's frames apply in order.
+            if writes && self.holds(scope).await? && !self.own_pending(scope, node).await? {
                 logs.push((scope, id));
             }
         }
@@ -274,6 +276,19 @@ impl<A: RowApplication> Inner<A> {
         self.sign_outcome(&record, &logs, node, time).await
     }
 
+    /// Whether `node` has frames in `scope`'s log that wait to apply.
+    async fn own_pending(&self, scope: ResourceScope, node: PublicKey) -> Result<bool, Error> {
+        Ok(!collect_rows(
+            self.conn
+                .query(
+                    "SELECT 1 FROM secure_operations WHERE scope=? AND author=? AND status='pending' LIMIT 1",
+                    [encode(&scope)?, node.as_bytes().to_vec()],
+                )
+                .await?,
+        )
+        .await?
+        .is_empty())
+    }
     /// Appends `record` to each of `logs` as this node and stores it.
     async fn sign_outcome(
         &self,

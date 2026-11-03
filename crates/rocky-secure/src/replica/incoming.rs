@@ -751,6 +751,16 @@ impl<A: RowApplication> Inner<A> {
                 match self.status(*id).await? {
                     ReceiveStatus::Applied => {}
                     ReceiveStatus::Held if self.visible_held_in_workspace(predecessor)? => {}
+                    // A head read before its author's revocation arrived
+                    // never applies; the reader's write does without it.
+                    ReceiveStatus::Rejected
+                        if operation.header.backlink != Some(*id)
+                            && self
+                                .config
+                                .revocations
+                                .revoking(dependency.chain()?.credentials())
+                                .map_err(credential)?
+                                .is_some() => {}
                     _ => return Ok(false),
                 }
             }

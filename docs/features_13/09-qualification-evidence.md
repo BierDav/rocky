@@ -649,20 +649,8 @@ points, and the `board_cap` assertion bounds a board's points.
     (`keeps_outcomes`), not only finalization.
   - Formats: `secure_kept_outcomes.sequence`,
     `rocky.encrypted-replica.v48`. No wire or checkpoint change.
-- **Open:**
-  - Audits (5 seeds): identity ledger differs from its rebuild or
-    history (20080, 20127, 20159; repro of 20080: `Evict(1,l0)`,
-    `Change(0, Board{l0,1,6})`, `Invite(0,2)`, `Revoke(2)`), and
-    `secure_applied`/scope digests (20245 with `cards`, 20290). Not
-    triaged.
-  - `PendingFrames` on dependencies with `cards` unreadable (20083,
-    20088, 20120) and 20276 ("missing frames of author 1026" with pending
-    dependencies). Not traced.
-  - 20074: "missing frames of author 2" after `invite c by a` is refused
-    with "unexpected end of file"; that refusal predates blinded scopes
-    (also at `ffa4afcb`, with 20053).
-  - 20229 was nondeterministic once (a `cards` audit on one of two
-    identical replays) before the base fix; it passes now.
+- **Open:** the 10 seeds this soak left failing are traced under "Fixes
+  from the last soak seeds" below; all but 20276 are fixed.
   - Readers of a non-author replica lose other authors' outcomes on
     every checkpoint restore, the revocation restore of every scope
     included. That is the kept-outcome design, not checked further.
@@ -692,3 +680,75 @@ points, and the `board_cap` assertion bounds a board's points.
   - Audits: 5 (was 10). Liveness: 5 (was 5): 3 pending dependencies
     (20083, 20088, 20120), 2 missing positions (20074; 20276, with
     pending dependencies). No seal rebootstrap wait (was 1).
+- **Fixes from the last soak seeds** (`rocky-secure`). Each named
+  regression in `relational_tests::regressions` fails without its fix
+  (checked by reverting each fix alone, three runs each; the 20290 one
+  fails two of three, as below).
+  - **A revocation imported a checkpoint into an evicted scope** (20080,
+    20127, 20159: identity ledger audits). A learned revocation sets the
+    bootstrap intent for every granted scope, evicted ones included; the
+    import's identity marks reached the rebuild but not the stored
+    ledger. `begin_rebootstrap` refuses an evicting or evicted scope, and
+    sync offers and advises no checkpoint for one: holding it again
+    imports a base. `a_revocation_imports_no_checkpoint_into_an_evicted_list`.
+  - **A superseded head of a retained frame left no stub** (20229, also
+    20120). `supersede` deleted a covered frame that c's own outcome
+    record names as `previous`; the record waited on dependencies for
+    good and blocked the rederive after the board's clear cascaded the
+    card away. It now stubs each covered frame a retained frame names.
+    This was 20229's earlier nondeterminism.
+    `a_superseded_head_of_a_retained_frame_leaves_a_stub`.
+  - **An outcome record forked its author's log** (20290, 20083, 20088).
+    After a checkpoint switch, the node's own frames in a log wait to
+    apply again; an outcome record appended there applied first, and the
+    rebuild refused the next pending frame as an author log fork. No
+    outcome is appended to a log holding the node's own pending frames.
+    `an_outcome_waits_for_its_authors_pending_frames` (fails two of three
+    runs without the fix: which member reaches the log first varies).
+  - **A rewind split a transaction** (20290, second cause). An arrival
+    whose transaction's other member was rewound replayed alone, so the
+    card dropped for a missing board while the board replayed after it.
+    `replay_arrival` takes the rewound members of the arrival's
+    transaction out of the redo and replays them with it, in stamp order;
+    if one has no grant, all drop for admission as a whole replay would.
+    No deterministic regression: the split needs a rewind order that
+    depends on random keys; the seed passes 12 of 12 debug and 3 of 3
+    release replays with it.
+  - **An outcome record named only the replayed members** (20245:
+    `secure_applied` and scope digest audit). A checkpoint reapply
+    replayed only the card member of a's pair; c's record named that one
+    member, so the full rebuild, replaying both, published another. The
+    record now also names the transaction's members already replayed
+    here, in stamp order. No deterministic regression (fails about one
+    run in four without it); the seed passes 8 of 8 replays with it.
+  - **Leaving a scope stranded own frames** (20074: "missing frames of
+    author 2"). Partial b wrote a board while a was offline, evicted
+    `l0` (refused until custody) and the driver's `unsubscribe` went
+    through, so b's frame never synced and a's seal waited for good.
+    `unsubscribe` on a partial replica that wrote in the scope now needs
+    the same custody coverage as eviction; one that never wrote there
+    leaves as before, and leaving twice is a no-op.
+    `leaving_a_list_waits_for_custody_of_own_frames`.
+  - **A head whose author is revoked** (20276, holder side). c read b's
+    frame, then b was revoked while c was severed; c's next write names
+    b's frame as `previous`, and the revocation rejects every frame of b.
+    A rejected non-backlink head whose author is revoked now counts as
+    satisfied: the reader's write does without it.
+  - Formats: none changed (`rocky.encrypted-replica.v48`).
+- **Open: a revoked head at a peer that never saw it** (20276). Peers
+  never send a revoked author's frames (range serving stops at them), so
+  a, which never received b's frame, cannot tell that c's missing head is
+  revoked and waits for good ("missing frames of author 1026", pending
+  `Dependencies`). Resolving it needs a protocol rule, e.g. carrying a
+  revoked head as evidence with the frame that names it (the receiver
+  currently refuses such a frame's chain as revoked), or a signed
+  revocation frontier per author. Repro (soak size): `Invite(0,2)`,
+  `Share(l0,2)`, `Sync(0)`, `Restart(2)`, `Change(2, Pair{l0,1,0,4})`,
+  `Sever(0,2)`, `Sync(2)`, `Revoke(1)`, `Change(2, Board{l0,2,4})`.
+- **Nondeterminism.** Steps replay identically, but node keys, nonces and
+  lineages are unseeded, so hashes, seal ids and hash orders differ per
+  run; bugs that depend on such an order (20229, 20245, 20290) show in
+  some runs only. Not changed here.
+- Soak after these fixes (same seeds, chunks and host, three full runs,
+  the last on the final code): **299/300** each time; the only failure is 20276 (above). Each chunk of
+  100 took about 280 s.

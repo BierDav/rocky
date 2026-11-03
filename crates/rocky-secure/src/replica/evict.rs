@@ -72,7 +72,7 @@ impl<A: RowApplication> Inner<A> {
         self.publish_revision().await
     }
     /// Full nodes that applied every operation this node authored in the scope.
-    async fn custody_coverage(
+    pub(super) async fn custody_coverage(
         &self,
         scope: ResourceScope,
         full_nodes: &BTreeSet<rocky_credentials::PeerId>,

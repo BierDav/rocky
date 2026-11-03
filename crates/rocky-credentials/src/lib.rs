@@ -5,6 +5,7 @@
 //! what these verify. See `docs/runtime/credentials.md`.
 mod author_binding;
 mod checkpoint_record;
+mod claims;
 mod coordination;
 mod delivery;
 mod discovery;
@@ -27,6 +28,9 @@ mod tips;
 pub use author_binding::AuthorBinding;
 pub use checkpoint_record::{
     CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement, SignedCheckpointRecord,
+};
+pub use claims::{
+    CLAIM_LIFETIME, CLAIM_SKEW, ClaimRight, MAX_CLAIM_COUNTER_NAME, MAX_CLAIM_COUNTERS,
 };
 pub use coordination::{
     CoordinationGrant, MAX_APPLICATION_NAME, SignedCoordinationGrant, SignedTenantAdmission,

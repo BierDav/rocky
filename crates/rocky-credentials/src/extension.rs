@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
-const EXTENSION_VERSION: u32 = 5;
+const EXTENSION_VERSION: u32 = 6;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -55,6 +55,7 @@ struct Body {
     partitions: Vec<crate::PartitionGrant>,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
+    claims: Option<crate::ClaimRight>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -74,6 +75,9 @@ pub struct Extended {
     pub issues: bool,
     /// Owner-granted whole-domain tip and bookmark control; never delegated.
     pub trusted: Option<rocky_core::Scope>,
+    /// Counter claims on the domain's coordinator (extension version 6);
+    /// only on a short-lived link of its own.
+    pub claims: Option<crate::ClaimRight>,
 }
 impl Extension {
     pub fn new(extended: Extended) -> Result<Self, Error> {
@@ -84,6 +88,7 @@ impl Extension {
             node: extended.node,
             issues: extended.issues,
             trusted: extended.trusted,
+            claims: extended.claims,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -109,12 +114,16 @@ impl Extension {
         for grant in &body.partitions {
             grant.validate()?;
         }
+        if let Some(claims) = &body.claims {
+            claims.validate()?;
+        }
         Ok(Extended {
             partitions: body.partitions,
             authors: body.authors,
             node: body.node,
             issues: body.issues,
             trusted: body.trusted,
+            claims: body.claims,
         })
     }
 }
@@ -129,7 +138,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 7, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -138,6 +147,7 @@ mod tests {
                     partitions: Vec::new(),
                     issues: false,
                     trusted: None,
+                    claims: None,
                 })
                 .unwrap(),
             );

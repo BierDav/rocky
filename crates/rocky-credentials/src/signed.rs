@@ -483,17 +483,30 @@ impl CredentialChain {
                 None => false,
             };
             let held = capability.grants.len() + extended.partitions.len();
-            let trusted_node = capability.kind == PrincipalKind::Node
+            // A node certificate under a trusted or claim link holds no
+            // grants: its parent's authority is what it certifies.
+            let authorized_node = capability.kind == PrincipalKind::Node
                 && parent
                     .as_ref()
-                    .is_some_and(|(_, held)| held.trusted.is_some());
+                    .is_some_and(|(_, held)| held.trusted.is_some() || held.claims.is_some());
             if signed.issuer != issuer
                 || stale
                 || capability.not_before >= capability.expires
                 || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || (held == 0 && !extended.issues && extended.trusted.is_none() && !trusted_node)
+                || (held == 0
+                    && !extended.issues
+                    && extended.trusted.is_none()
+                    && extended.claims.is_none()
+                    && !authorized_node)
                 || held > 64
+                || (extended.claims.is_some()
+                    && (held != 0
+                        || extended.authors.is_some()
+                        || extended.issues
+                        || extended.trusted.is_some()
+                        || capability.expires - capability.not_before
+                            > crate::CLAIM_LIFETIME + crate::CLAIM_SKEW))
                 || !signed.issuer.verify(
                     &signing_bytes(CAPABILITY_LABEL, capability)?,
                     &signed.signature,
@@ -529,6 +542,15 @@ impl CredentialChain {
                                 .any(|allowed| allowed.includes(grant))
                         }))
                     || (!authority
+                        && extended.claims.as_ref().is_some_and(|right| {
+                            !parent_extended
+                                .claims
+                                .as_ref()
+                                .is_some_and(|held| held.includes(right))
+                        }))
+                    // A node under a claim link writes nothing under it.
+                    || (!authority
+                        && parent_extended.claims.is_none()
                         && extended.authors.is_some_and(|range| {
                             !parent_extended
                                 .authors
@@ -559,10 +581,14 @@ impl CredentialChain {
                     && extended.node == Some(crate::PeerId::of(capability.subject))
                     && !extended.issues
                     && extended.trusted.is_none()
+                    && extended.claims.is_none()
             }
             PrincipalKind::User => extended.node.is_none(),
             PrincipalKind::Deployment => {
-                extended.node.is_none() && !extended.issues && extended.trusted.is_none()
+                extended.node.is_none()
+                    && !extended.issues
+                    && extended.trusted.is_none()
+                    && extended.claims.is_none()
             }
         };
         if valid {

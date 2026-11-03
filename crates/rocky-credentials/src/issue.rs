@@ -443,6 +443,13 @@ impl<'a> Authority<'a> {
         if ttl > MAX_CHAIN_LIFETIME || skew > crate::LIFETIME_SKEW {
             return Err(denied("a credential lives at most 366 days"));
         }
+        if extended.claims.is_some()
+            && (ttl > crate::CLAIM_LIFETIME || skew > crate::CLAIM_SKEW || !grants.is_empty())
+        {
+            return Err(denied(
+                "a claim link holds no grants and lives at most a day",
+            ));
+        }
         let (mut not_before, mut expires) = (time.saturating_sub(skew), time.saturating_add(ttl));
         if let Some(parent) = self.chain.0.last() {
             let parent = &parent.capability;
@@ -504,6 +511,7 @@ impl<'a> Authority<'a> {
                 partitions: extended.partitions,
                 issues: extended.issues,
                 trusted: extended.trusted,
+                claims: extended.claims,
                 ..Extended::default()
             },
             prior.delegations,

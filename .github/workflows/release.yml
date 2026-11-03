@@ -391,12 +391,20 @@ jobs:
           else
             set -- --prerelease --latest=false
           fi
-          gh release create "v${VERSION}" "$@" \
+          mapfile -t assets < <(
+            find dist -type f -print | sort | awk '/^dist\/rocky-[^/]+\//{print}'
+          )
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No release assets found under dist/rocky-*/. Check downloaded artifact patterns." >&2
+            echo "::debug::dist tree:" >&2
+            find dist -maxdepth 4 -print >&2 || true
+            exit 1
+          fi
+          gh release create "v${VERSION}" "${assets[@]}" "$@" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "v${VERSION}" \
-            --notes-file dist/notes/notes.md \
-            dist/rocky-*/**
+            --notes-file dist/notes/notes.md
 
       # Nightly releases and tags are kept for two weeks of builds; their
       # package versions stay in the package registry.

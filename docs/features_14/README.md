@@ -227,7 +227,8 @@ list, which stays the at most 32 identities that join coordinated logs and
 acknowledge seals.
 
 - **The right.** A claim link (`rocky_credentials::ClaimRight`, capability
-  extension 6) names a domain and its counters, or every counter. It is a
+  extension 7) names a domain, its counters, or every counter, and a
+  random grant ID that stays the same across renewals. It is a
   dedicated user link: no grants, issuer or trusted authority, at most
   `CLAIM_LIFETIME` (one day) plus 300 s, and its node certificate carries
   nothing of its own. It sits on the domain's credential chain rather than
@@ -246,23 +247,54 @@ acknowledge seals.
   keys or registry. The right authorizes nothing else: logs, seal
   acknowledgments, controls, closure and other domains still need trust
   or authority.
-- **Revocation bound.** A holder stops claiming at the earlier of: the
-  commit of a revocation that ends its link, which any node pushes
-  (`Operation::Revoke`; statements verify themselves against the publisher
-  and count against the tenant's budget; the SDK pushes after each
-  `revoke`), or its link's expiry, at most one day and 300 s after its
-  issuer last renewed it, since issuers renew no revoked identity and no
-  revoked right. A revoked issuer's links end only with the push: until it
-  reaches the coordinator, links that issuer keeps signing keep working.
+- **Grants and renewal.** An issuer records each right it grants as a
+  `claims` row of the replicated issuer registry, keyed by the holder
+  identity (`registry::ClaimRecord`: right, delegations, granting issuer;
+  at most 256). Every current issuer renews the holder's link from that
+  row when the holder's node renews its credentials, so a right does not
+  depend on the issuer that granted it: an always-on issuer, such as a
+  server, renews for everyone. The holder asks the issuer that last
+  renewed it first, then every other issuer it knows. No issuer renews a
+  revoked identity, a right whose grant a held statement revokes, or a
+  right whose row was removed. The coordinator sees only the link and
+  revocations, never the registry, partitions or payloads.
+- **Revocation.** Revoking a right revokes its grant ID: one statement ends
+  every live link of it, whichever issuer signed it. Any node pushes
+  statements (`Operation::Revoke`; they verify themselves against the
+  publisher and count against the tenant's budget). Each node persists the
+  digest of the live set the coordinator last acknowledged
+  (`Outcome::Revoked`; settings `revocations_pushed`). While the held
+  set's digest differs, every node holding it pushes it after a
+  revocation, at the end of each sync pass and before each claim or
+  counter read. A failed push is retried after 5 s, doubling to at most
+  300 s per process; a newly learned statement, or a restart, pushes at
+  once. Status shows the pending state (`RevocationStatus::unpushed`).
+- **Revocation bound.** A holder stops claiming at the earlier of:
+  - the commit of a revocation that ends its link or its grant;
+  - its link's expiry, at most one day and 300 s after an issuer last
+    renewed it, since issuers renew no revoked identity and no revoked
+    right.
+
+  The commit happens at the first sync pass, claim or counter read of any
+  node that holds the statement and reaches the coordinator, or for its
+  own earlier failure at most 300 s later. A revoked issuer's links,
+  which it can keep re-signing, end only with that commit. It happens
+  once any node that learned the statement, from the revoking issuer or
+  from a peer, has synced with the coordinator reachable. No one needs to
+  retry by hand. Until then, links the issuer keeps signing keep working.
+  A statement only its revoking node holds waits for that node.
 - **SDK.** `Session::grant_claims(identity, counters, delegations)` on an
-  issuer records and signs the right (`ClaimGrant`);
+  issuer signs the right and records it in the registry (`ClaimGrant`);
   `Session::install_claims` installs it, and a member's renewal also
-  delivers it. `Database::claim` and `counter` present the chain and renew
-  the link with the granting issuer when it is missing or past half its
-  life, at most once a minute. `Session::revoke_claims(identity)` ends
-  renewals and revokes every live link the issuer signed.
-- Formats: capability extension 6, control `rocky.control.v4`, request
-  `rocky.coordination-request.v7`, coordinator store 12, settings 23.
+  delivers it; `Session::held_claims` reads the held right, its expiry and
+  the issuer asked first. `Database::claim` and `counter` present the
+  chain and renew the link with any reachable issuer when it is missing
+  or past half its life, at most once a minute.
+  `Session::revoke_claims(identity)` on any issuer revokes the right's
+  grant and removes its row. A right a holder delegated is renewed only
+  by its delegator granting it again.
+- Formats: capability extension 7, control `rocky.control.v4`, request
+  `rocky.coordination-request.v7`, coordinator store 12, settings 25.
 - Evidence: `rocky-credentials` `claims::tests` (scope, lifetime,
   revocation, delegation bounds); `rocky-coordinator`
   `machine::claim_tests` (a holder claims gap-free beside trusted nodes,
@@ -272,7 +304,17 @@ acknowledge seals.
   `public_tests` (a registration names its grant's publisher) and
   `client::tests` (through the client and a pushed revocation);
   `rocky-sdk` `tests/service.rs` `claims` (a member claims through an
-  installed right over real voters until the owner revokes it).
+  installed right over real voters until the owner revokes it; a second
+  issuer renews the link after the granting issuer closed for good and
+  the member claims on; a dismissed issuer's freshly signed link is
+  refused after the coordinator, down at the revocation, comes back and
+  another node syncs; an unacknowledged revocation survives the revoking
+  node's restart and its first sync pushes it), `enrollment::tests`
+  (an issuer that granted nothing renews a recorded right after the first
+  link lapsed, at a controlled time; no issuer renews a revoked identity,
+  a revoked grant or a removed row), `node::claims` (push backoff) and
+  `rocky-credentials` `claims::tests` (a grant revocation ends both
+  issuers' links of it and no other grant).
 - Evidence: `rocky-coordinator` `machine::counter_tests` (values, retries,
   snapshot encoding, authorization, window, eviction, budgets) and
   `tests/cluster.rs`

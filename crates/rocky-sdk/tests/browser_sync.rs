@@ -1,9 +1,10 @@
 //! A browser node syncs with a native node over a local iroh relay, which is
 //! the only path a browser has, and claims invoice numbers from the
-//! coordination service the native side runs. `scripts/browser-sync` starts
-//! the native side (`examples/browser_peer.rs`) and passes its relay,
-//! invitation and service bundle here at build time; the native side then
-//! checks that this node's write and claims reached it.
+//! coordination service the native side runs, through a claim right the
+//! owner grants: the browser is never one of the control's trusted nodes.
+//! `scripts/browser-sync` starts the native side (`examples/browser_peer.rs`)
+//! and passes its relay, invitation and service bundle here at build time;
+//! the native side then checks that this node's write and claims reached it.
 #![cfg(target_family = "wasm")]
 use rocky_platform::{fs::Scratch, time};
 use rocky_sdk::{
@@ -70,7 +71,8 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
     session.sync_once().await?;
     assert_eq!(bodies(&db, "from %").await?, ["from native"]);
 
-    // The owner trusts this node's identity on the service once it asks.
+    // The owner grants this node's identity a claim right for invoices once
+    // it asks; the node fetches the claim link from it when it claims.
     let scope: serde_json::Value = serde_json::from_str(&db.scope())?;
     let reply: serde_json::Value = serde_json::from_str(
         &session
@@ -85,7 +87,7 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
     let deadline = time::Instant::now() + time::Duration::from_secs(60);
     loop {
         session.sync_once().await?;
-        if !bodies(&db, &format!("trusted {principal}"))
+        if !bodies(&db, &format!("granted {principal}"))
             .await?
             .is_empty()
         {
@@ -93,7 +95,7 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         }
         assert!(
             time::Instant::now() < deadline,
-            "the owner never trusted this node"
+            "the owner never granted this node a claim right"
         );
         time::sleep(time::Duration::from_millis(200)).await;
     }
@@ -110,6 +112,16 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
             .await?,
         2
     );
+    // The right names only invoices; another counter is refused.
+    let refused = db
+        .claim(counters::Name::new("credits")?, counters::Claim::fresh()?)
+        .await
+        .err()
+        .ok_or("a claim outside the right succeeded")?;
+    assert_eq!(
+        refused.downcast_ref::<rocky_sdk::CoordinationError>(),
+        Some(&rocky_sdk::CoordinationError::Denied)
+    );
     let mut tx = db.transaction().await?;
     let id = tx.next_id("invoices", vec![]).await?;
     tx.execute(
@@ -122,7 +134,8 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
     session.sync_once().await?;
     db.close().await?;
 
-    // Reopened from OPFS, the node still holds both writes and its claim.
+    // Reopened from OPFS, the node still holds both writes, its claim and
+    // its claim right.
     let db = configuration.open().await?.database;
     assert_eq!(
         bodies(&db, "from %").await?,

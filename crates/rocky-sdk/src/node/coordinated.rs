@@ -12,8 +12,9 @@ impl Node {
         self.replica.set_domain_log(log);
     }
 }
-/// Counter claims through the composed coordination service. A claim never
-/// runs inside a database transaction.
+/// Counter claims through the composed coordination service, as a trusted
+/// node or a holder of a claim right. A claim never runs inside a database
+/// transaction.
 #[cfg(feature = "iroh")]
 impl Node {
     fn counters(&self) -> Result<&rocky_coordinator::service::NetworkCoordinator, Failure> {
@@ -31,7 +32,9 @@ impl Node {
         claim: crate::counters::Claim,
     ) -> Result<u64, Failure> {
         let scope = self.domain().scope;
-        Ok(self.counters()?.claim(scope, counter, claim).await?)
+        let client = self.counters()?;
+        self.present_claims(client).await?;
+        Ok(client.claim(scope, counter, claim).await?)
     }
     pub(crate) async fn counter(
         &self,
@@ -39,7 +42,9 @@ impl Node {
         claim: Option<crate::counters::Claim>,
     ) -> Result<crate::counters::Reading, Failure> {
         let scope = self.domain().scope;
-        Ok(self.counters()?.counter(scope, counter, claim).await?)
+        let client = self.counters()?;
+        self.present_claims(client).await?;
+        Ok(client.counter(scope, counter, claim).await?)
     }
 }
 impl Node {

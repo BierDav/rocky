@@ -81,8 +81,12 @@ impl Node {
     /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
         let registry = self.registry().await?;
+        // A claim link it renews is recorded before the reply leaves.
+        let claims = self
+            .configure(|settings| settings.renew_claims(&self.vault, request))
+            .await?;
         let settings = self.settings.lock().await.clone();
-        let (reply, changes) = settings.renew(&self.vault, request, &registry)?;
+        let (reply, changes) = settings.renew(&self.vault, request, &registry, claims)?;
         self.commit(changes).await?;
         Ok(reply)
     }

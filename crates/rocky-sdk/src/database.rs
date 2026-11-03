@@ -551,7 +551,8 @@ impl Database {
     /// with the stored claim: it answers the same value within
     /// `counters::CLAIM_WINDOW` of its issue time and the counter's latest
     /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
-    /// never takes a second value. Only the domain's trusted nodes claim.
+    /// never takes a second value. The domain's trusted nodes claim, and so
+    /// do holders of a claim right (`grant_claims`) for that counter.
     #[cfg(feature = "iroh")]
     pub async fn claim(
         &self,
@@ -963,6 +964,48 @@ impl Session {
     pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"install_trust","grant":grant}))
             .await
+    }
+    /// Grants `identity` the right to claim and read `counters` of this
+    /// domain on its coordination service, or every counter when `None`,
+    /// without being one of the control's trusted identities. An issuer
+    /// grants and renews it; a holder of a right granted with
+    /// `delegations` above 1 delegates within its own. The right reaches
+    /// only counters: never the coordinated log, seals or the control.
+    /// It lives on a link of at most `credentials::CLAIM_LIFETIME`, which
+    /// the holder's node renews with its issuer as it claims.
+    pub async fn grant_claims(
+        &self,
+        identity: &str,
+        counters: Option<&[&[u8]]>,
+        delegations: u8,
+    ) -> Result<crate::ClaimGrant, Failure> {
+        let counters = counters.map(|names| {
+            names
+                .iter()
+                .map(|name| data_encoding::HEXLOWER.encode(name))
+                .collect::<Vec<_>>()
+        });
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"claims","action":"grant","identity":identity,
+                "counters":counters,"delegations":delegations}))
+                .await?,
+        )?)
+    }
+    /// Installs a claim right granted to this device's identity. A member
+    /// also receives one from its issuer at a renewal, as `claim` asks.
+    pub async fn install_claims(&self, grant: &crate::ClaimGrant) -> Result<(), Failure> {
+        self.request(json!({"type":"claims","action":"install","grant":grant}))
+            .await?;
+        Ok(())
+    }
+    /// Ends the claim right this issuer granted `identity`: it renews it
+    /// no more and revokes each live link, which the coordination service
+    /// refuses once the revocation reaches it and in any case once the
+    /// link expires (`credentials::CLAIM_LIFETIME`).
+    pub async fn revoke_claims(&self, identity: &str) -> Result<(), Failure> {
+        self.request(json!({"type":"claims","action":"revoke","identity":identity}))
+            .await?;
+        Ok(())
     }
     /// Drops the local frames of a tip this device no longer follows.
     pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {

@@ -140,6 +140,7 @@
 //! for a complete executable application.
 mod activity;
 mod backup;
+mod claims;
 mod configuration;
 mod connection;
 // The always-on peer drives its own runtime.
@@ -183,6 +184,7 @@ mod tips;
 pub mod transport;
 
 pub use backup::{Entry as BackupEntry, Inventory as BackupInventory};
+pub use claims::ClaimGrant;
 pub use configuration::Configuration;
 pub use connection::{
     Binding, ConnectionOptions, Durability, Page, Profile, SqlFailure, TableChange, TableEvents,

@@ -64,7 +64,9 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
                 .first,
         )?;
         let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
-        Ok(issuer.renew(&vault, &request.to_bytes()?, &registry)?.0)
+        Ok(issuer
+            .renew(&vault, &request.to_bytes()?, &registry, None)?
+            .0)
     };
     // Before revocation the same request renews, also under a new node key.
     renew(&issuer, &node)?;
@@ -497,7 +499,9 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
                 .first,
         )?;
         let (request, _) = RenewRequest::sign(&fresh, me, chain, now()?)?;
-        Ok(issuer.renew(&vault, &request.to_bytes()?, registry)?.0)
+        Ok(issuer
+            .renew(&vault, &request.to_bytes()?, registry, None)?
+            .0)
     };
     for (issuer, registry) in [(&a, &registry), (&b, &Registry::default())] {
         assert!(renew(issuer, registry, &revoked_user, &revoked_root).is_err());
@@ -683,6 +687,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                     epoch_statements: sealed.epoch_statements,
                     profile: None,
                     issuers: Vec::new(),
+                    claims: None,
                 },
             )?;
             assert!(!target.begin_exposure_rotation(&registry)?, "round {round}");
@@ -826,7 +831,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     for bytes in [
         issuer.answer_epochs(&vault, &request.to_bytes()?, &Registry::default())?,
         issuer
-            .renew(&vault, &request.to_bytes()?, &Registry::default())?
+            .renew(&vault, &request.to_bytes()?, &Registry::default(), None)?
             .0,
     ] {
         let renewal = Renewal::from_bytes(&bytes)?;

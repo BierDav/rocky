@@ -1,6 +1,7 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod claims;
 mod coordinated;
 mod delivery;
 mod discovery;
@@ -330,6 +331,9 @@ pub(crate) struct Node {
     /// Generations whose wider profile grants this process asked an issuer
     /// for once.
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// When this member last asked an issuer for a claim link it lacked.
+    #[cfg(feature = "iroh")]
+    claims_asked: std::sync::Mutex<u64>,
 }
 
 impl Node {
@@ -407,6 +411,8 @@ impl Node {
             schema_fetch: Mutex::new(()),
             schema_acquisition: Default::default(),
             widened: Default::default(),
+            #[cfg(feature = "iroh")]
+            claims_asked: Default::default(),
         }
     }
     /// Lets the owner control its domain on this coordination service.
@@ -894,6 +900,7 @@ impl Node {
             }
             "generation" => self.generation().await,
             "tips" => self.tips(request).await,
+            "claims" => self.claims(request).await,
             "held_changes" => self.held_changes().await,
             "coordinated" => self.coordinated_status().await,
             "drop_held" => self.drop_held(request).await,
@@ -1166,6 +1173,9 @@ impl Node {
                         }
                         crate::enrollment::Revoke::Trust(trust) => {
                             json!({"trust": HEXLOWER.encode(&trust)})
+                        }
+                        crate::enrollment::Revoke::Claims(link) => {
+                            json!({"claims": HEXLOWER.encode(&link)})
                         }
                     },
                 );
@@ -1665,8 +1675,12 @@ impl Node {
         // Members no longer accept the revoked author's frames, nor open
         // the earlier epoch's; a checkpoint at a seal after them carries
         // those rows instead.
-        if !matches!(target, crate::enrollment::Revoke::Trust(_))
-            && let Err(error) = self.seal_for_members().await
+        #[cfg(feature = "iroh")]
+        self.push_revocations().await;
+        if !matches!(
+            target,
+            crate::enrollment::Revoke::Trust(_) | crate::enrollment::Revoke::Claims(_)
+        ) && let Err(error) = self.seal_for_members().await
         {
             self.activity.record(
                 "revocation_seal_failed",

@@ -16,6 +16,8 @@ use rocky_sdk::{
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+#[path = "service/claims.rs"]
+mod claims;
 #[path = "service/fixture.rs"]
 mod fixture;
 #[path = "service/inspection.rs"]

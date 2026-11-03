@@ -39,7 +39,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 22;
+pub const VERSION: u32 = 23;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -194,6 +194,9 @@ pub struct Settings {
     /// The owner's trusted grant to this identity for its domain, through
     /// which it signs tip statements. See `docs/runtime/tips-and-bookmarks.md`.
     pub trusted: Option<SignedCapability>,
+    /// This identity's counter claim right, which its node presents to the
+    /// coordination service.
+    pub claims: Option<crate::claims::Holding>,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -253,6 +256,8 @@ pub struct Issuing {
     /// Every node and identity a statement this issuer learned revoked.
     /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
+    /// Counter claim rights this issuer granted and renews, by identity.
+    pub claim_rights: BTreeMap<PublicKey, crate::claims::Granted>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,6 +289,8 @@ pub enum Revoke {
     Identity(PublicKey),
     /// One trusted grant, by its capability id; the identity keeps its others.
     Trust(Commitment),
+    /// One claim link this issuer signed, by its capability id.
+    Claims(Commitment),
 }
 /// What the registry recorded of a device a revocation acts on.
 struct Revoking {
@@ -450,6 +457,9 @@ struct Sealed {
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
+    /// A fresh claim link, when the answering issuer renews a claim right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claims: Option<CredentialChain>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -601,6 +611,8 @@ pub struct Renewed {
     pub profile: Option<Profile>,
     /// Contacts of further issuers the answering issuer reaches.
     pub issuers: Vec<String>,
+    /// A renewed claim link from the answering issuer.
+    pub claims: Option<CredentialChain>,
 }
 
 pub fn now() -> Result<u64, Failure> {
@@ -1278,6 +1290,7 @@ impl Settings {
             author_high_water: 0,
             deliveries: BTreeMap::new(),
             trusted: None,
+            claims: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -1331,6 +1344,7 @@ impl Settings {
             author_high_water: 0,
             deliveries: BTreeMap::new(),
             trusted: None,
+            claims: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
@@ -1439,7 +1453,7 @@ impl Settings {
             self.validity()?,
         )?)
     }
-    fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
+    pub(crate) fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
         self.authority
             .as_mut()
             .ok_or_else(|| format!("only an issuer {action}").into())
@@ -2167,6 +2181,7 @@ impl Settings {
             keys,
             profile: Some(profile_of(&grants, &domain)),
             issuers: Vec::new(),
+            claims: None,
         })
     }
     pub(crate) fn reserve_authors(
@@ -2475,6 +2490,7 @@ impl Settings {
             author_high_water: 0,
             deliveries: BTreeMap::new(),
             trusted: None,
+            claims: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2662,6 +2678,7 @@ impl Joining {
             author_high_water: 0,
             deliveries: BTreeMap::new(),
             trusted: None,
+            claims: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2768,6 +2785,7 @@ impl Settings {
             keys,
             groups: self.groups_for(vault, request.node, prior, all)?,
             issuers: self.issuer_contacts(&[request.node])?,
+            claims: None,
         };
         let identity = self.identity(vault)?;
         let links = self.issuer_links();
@@ -2841,6 +2859,7 @@ impl Settings {
                 groups,
                 epoch_statements,
                 issuers,
+                claims: _,
             } = Sealed::parse(&payload)?;
             let mut keys = Vec::new();
             let domain = self.domain()?;
@@ -2872,6 +2891,7 @@ impl Settings {
                 epoch_statements,
                 profile: None,
                 issuers,
+                claims: None,
             });
         }
         Err(failure)
@@ -2907,6 +2927,7 @@ impl Settings {
                 groups: Vec::new(),
                 profile: None,
                 issuers: Vec::new(),
+                claims: None,
             });
         }
         let transport = transport.ok_or(ServiceError::NetworkRequired("renew"))?;
@@ -2985,6 +3006,7 @@ impl Settings {
             groups,
             epoch_statements,
             issuers,
+            claims,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -3007,6 +3029,7 @@ impl Settings {
             keys,
             profile: None,
             issuers,
+            claims,
         })
     }
     /// Whether this device's profile over the current generation grants
@@ -3092,6 +3115,9 @@ impl Settings {
         }
         draft.learn_revocations(&renewed.revocations)?;
         draft.credentials = renewed.chain.clone();
+        if let Some(claims) = &renewed.claims {
+            draft.hold_claims(claims.clone(), renewed.contacted)?;
+        }
         draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
@@ -3120,11 +3146,13 @@ impl Settings {
     /// and profile count wherever the device enrolled; without a record the
     /// presented chain is renewed and recorded. A node or user a statement
     /// revoked is refused, also after the statement left the set.
+    /// `claims` is the fresh claim link `renew_claims` signed for it.
     pub fn renew(
         &self,
         vault: &Vault,
         request: &[u8],
         registry: &Registry,
+        claims: Option<CredentialChain>,
     ) -> Result<(Vec<u8>, Changes), Failure> {
         if !self.issuer() {
             return Err("only an issuer renews devices".into());
@@ -3177,6 +3205,7 @@ impl Settings {
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
             keys: self.keys_for(vault, &domain, &granted)?,
             issuers: self.issuer_contacts(&[request.node])?,
+            claims,
         };
         let renewal = Renewal::seal(
             &authority,
@@ -3219,7 +3248,7 @@ impl Settings {
     }
     /// Whether a key is revoked for good here: by a held statement or, on
     /// an issuer, a tombstone.
-    fn tombstoned(&self, key: &PublicKey) -> bool {
+    pub(crate) fn tombstoned(&self, key: &PublicKey) -> bool {
         self.revocations.revokes(key)
             || self.authority.as_ref().is_some_and(|authority| {
                 authority
@@ -3344,6 +3373,7 @@ impl Settings {
                 }
                 Vec::new()
             }
+            Revoke::Claims(_) => Vec::new(),
         };
         if self.issuing("revokes devices")?.rotation.is_some() {
             return Err("another revocation is unfinished".into());
@@ -3382,7 +3412,7 @@ impl Settings {
                     .filter_map(|record| record.capability)
                     .collect(),
             },
-            Revoke::Trust(capability) => Revocation {
+            Revoke::Trust(capability) | Revoke::Claims(capability) => Revocation {
                 app: domain.manifest().app,
                 issuer: own,
                 time,
@@ -3391,8 +3421,8 @@ impl Settings {
                 capabilities: [capability].into(),
             },
         };
-        // A trusted grant reads nothing: no key rotates.
-        let trust = matches!(target, Revoke::Trust(_));
+        // A trusted grant or claim right reads nothing: no key rotates.
+        let trust = matches!(target, Revoke::Trust(_) | Revoke::Claims(_));
         // Only nodes without any record use the full-rotation fallback.
         let recorded = !records.is_empty();
         let readable: Vec<Profile> = records
@@ -4089,6 +4119,7 @@ impl Settings {
             author_high_water,
             deliveries,
             trusted,
+            claims,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -4118,6 +4149,7 @@ impl Settings {
             && *author_high_water == other.author_high_water
             && *deliveries == other.deliveries
             && *trusted == other.trusted
+            && *claims == other.claims
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

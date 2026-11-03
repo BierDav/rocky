@@ -2,9 +2,10 @@
 //! loopback, which a browser reaches without a trusted certificate, a public
 //! coordination service of three voters whose client lanes it reaches through
 //! that relay, and the domain owner's native node behind it. It prints the
-//! relay, an invitation and the service's bundle as one JSON line, trusts the
-//! browser node on the service once it asks, serves until a line arrives on
-//! stdin, then checks that the browser node's writes and claims reached it.
+//! relay, an invitation and the service's bundle as one JSON line, grants the
+//! browser's identity a claim right for the `invoices` counter once it asks,
+//! never trusting it on the service, serves until a line arrives on stdin,
+//! then checks that the browser node's writes and claims reached it.
 #[cfg(target_family = "wasm")]
 fn main() {}
 
@@ -62,7 +63,7 @@ mod native {
             .create()
             .await?
             .database;
-        let owner = Owner::register(&db).await?;
+        register(&db).await?;
         let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -82,15 +83,15 @@ mod native {
             json!({ "relay": url, "invitation": invitation.uri, "bundle": bundle })
         );
 
-        // The browser node joins, syncs, asks for trust, claims and writes,
-        // syncing each time, before the script sends the line.
-        let trusting = tokio::spawn(owner.trust_members(db.clone()));
+        // The browser node joins, syncs, asks for a claim right, claims and
+        // writes, syncing each time, before the script sends the line.
+        let granting = tokio::spawn(grant_members(db.clone()));
         tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;
         // It only ends early on a failure.
-        if trusting.is_finished() {
-            trusting.await??;
+        if granting.is_finished() {
+            granting.await??;
         } else {
-            trusting.abort();
+            granting.abort();
         }
         let checked = check(&db).await;
         db.close().await?;
@@ -99,66 +100,54 @@ mod native {
         Ok(())
     }
 
-    /// The domain owner's calls on the coordination service.
-    struct Owner {
-        tenant: PrivateKey,
-        principal: Value,
+    /// Registers the domain with the owner's identity as its one trusted
+    /// one; no later control revision trusts another.
+    async fn register(db: &Database) -> Result<(), Failure> {
+        let tenant = PrivateKey::new();
+        let principal = call(db, json!({"type": "session"})).await?["principal"].clone();
+        call(
+            db,
+            json!({"type": "coordination_register", "tenant": tenant.to_hex(),
+                "registration": vec![1u8; 32], "trusted": [principal], "lifetime": 3600}),
+        )
+        .await?;
+        Ok(())
     }
-    impl Owner {
-        /// Registers the domain with this node's identity as its one trusted one.
-        async fn register(db: &Database) -> Result<Self, Failure> {
-            let tenant = PrivateKey::new();
-            let principal = call(db, json!({"type": "session"})).await?["principal"].clone();
-            call(
-                db,
-                json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-                    "registration": vec![1u8; 32], "trusted": [principal], "lifetime": 3600}),
-            )
-            .await?;
-            Ok(Self { tenant, principal })
-        }
-        /// Trusts each identity that writes `member <principal>` with a new
-        /// control revision, and answers `trusted <principal>`.
-        async fn trust_members(self, db: Arc<Database>) -> Result<(), Failure> {
-            let mut trusted = vec![self.principal.clone()];
-            loop {
-                let rows = db
-                    .query(
-                        "SELECT body FROM notes WHERE body LIKE 'member %'",
-                        params![],
-                    )
-                    .await?
-                    .collect()
-                    .await?;
-                for row in rows {
-                    let body = row.get::<String>("body")?;
-                    let member = Value::from(body.trim_start_matches("member "));
-                    if trusted.contains(&member) {
-                        continue;
-                    }
-                    trusted.push(member.clone());
-                    let revision = trusted.len();
-                    call(
-                        &db,
-                        json!({"type": "coordination_control", "tenant": self.tenant.to_hex(),
-                            "revision": revision, "id": vec![revision as u8; 32],
-                            "trusted": trusted, "lifetime": 3600}),
-                    )
-                    .await?;
-                    let mut tx = db.transaction().await?;
-                    let id = tx.next_id("notes", vec![]).await?;
-                    tx.execute(
-                        "INSERT INTO notes(id,body) VALUES(?,?)",
-                        params![
-                            id,
-                            format!("trusted {}", member.as_str().unwrap_or_default())
-                        ],
-                    )
-                    .await?;
-                    tx.commit().await?;
+
+    /// Grants each identity that writes `member <principal>` a claim right
+    /// for `invoices`, and answers `granted <principal>`.
+    async fn grant_members(db: Arc<Database>) -> Result<(), Failure> {
+        let mut granted = Vec::new();
+        let session = db.session();
+        loop {
+            let rows = db
+                .query(
+                    "SELECT body FROM notes WHERE body LIKE 'member %'",
+                    params![],
+                )
+                .await?
+                .collect()
+                .await?;
+            for row in rows {
+                let body = row.get::<String>("body")?;
+                let member = body.trim_start_matches("member ").to_owned();
+                if granted.contains(&member) {
+                    continue;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                session
+                    .grant_claims(&member, Some(&[b"invoices"]), 1)
+                    .await?;
+                let mut tx = db.transaction().await?;
+                let id = tx.next_id("notes", vec![]).await?;
+                tx.execute(
+                    "INSERT INTO notes(id,body) VALUES(?,?)",
+                    params![id, format!("granted {member}")],
+                )
+                .await?;
+                tx.commit().await?;
+                granted.push(member);
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 

@@ -374,6 +374,12 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    // Only the explicit syncs below exchange: a failed background attempt
+    // would put the peer in backoff, which an explicit sync skips.
+    for peer in [&issuer, &writer] {
+        peer.call(json!({"type":"sync_start","enabled":false}))
+            .await?;
+    }
 
     let prepared = issuer
         .call(json!({"type":"partition_next","table":"lists"}))

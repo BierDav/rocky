@@ -462,6 +462,9 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     };
     let other = mesh_member("other").await?;
     let removed = mesh_member("removed").await?;
+    // Only the issuer's explicit syncs deliver: a failed background attempt
+    // would put custody in backoff, which an explicit sync skips.
+    a.ok(json!({"type":"sync_start","enabled":false})).await?;
     let node = b.node().await?;
     b.online(false).await?;
     a.ok(share(&[&node])).await?;
@@ -483,14 +486,19 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
             Ok(())
         })
         .await?;
+    let before = a.events("envelopes_delivered").await?.len();
     a.ok(json!({"type":"revoke","node":removed.node().await?}))
         .await?;
+    // Every round refuses the rotation alike while custody is full.
     relay(&a, &b).await?;
-    assert_eq!(
-        delivered(&a, "refused").await?,
-        1,
-        "no room for B's rotation"
-    );
+    a.ok(json!({"type":"sync"})).await?;
+    let mailbox = custody.node().await?;
+    let mut rounds = a.events("envelopes_delivered").await?.split_off(before);
+    rounds.retain(|round| round["peer"] == mailbox.as_str());
+    assert!(rounds.len() >= 2, "both syncs delivered: {rounds:?}");
+    for round in &rounds {
+        assert_eq!(round["refused"], 1, "no room for B's rotation: {round}");
+    }
     let status = a
         .ok(json!({"type":"partition_status","group":"list","values":values()}))
         .await?;
@@ -780,6 +788,13 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     .await?;
     introduce(&mesh.a, &mailbox).await?;
     introduce(&mesh.b, &mailbox).await?;
+    // Only the explicit syncs below exchange: a failed background attempt
+    // would put the mailbox in backoff, which an explicit sync skips.
+    for device in [&mesh.a, &mesh.b, &mailbox] {
+        device
+            .ok(json!({"type":"sync_start","enabled":false}))
+            .await?;
+    }
     mesh.custody.online(false).await?;
     let recipient = mesh.b.node().await?;
     mesh.b.online(false).await?;

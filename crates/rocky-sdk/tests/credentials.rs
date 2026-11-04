@@ -155,6 +155,15 @@ async fn items(device: &Device) -> Result<Vec<String>, Failure> {
 async fn session(device: &Device) -> Value {
     device.ok(json!({"type": "session"})).await
 }
+/// Stops each device's automatic sync, so that only the test's explicit
+/// syncs reach peers.
+async fn manual(devices: &[&Device]) {
+    for device in devices {
+        device
+            .ok(json!({"type": "sync_start", "enabled": false}))
+            .await;
+    }
+}
 async fn synced(device: &Device) -> Result<(), Failure> {
     device
         .sync()
@@ -253,6 +262,9 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
         "i",
         &a.invite_as(json!({"kind": "issuer"})).await,
     )?;
+    // Only the explicit syncs below exchange: a failed background attempt
+    // would put the peer in backoff, which an explicit sync skips.
+    manual(&[&a, &i]).await;
     item(&a, 1, "Milk").await?;
     synced(&i).await?;
     let (creator, issuer) = (session(&a).await, session(&i).await);
@@ -279,6 +291,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     a.close().await;
 
     let m = join(root, &hub, "m", &i.invite().await)?;
+    manual(&[&m]).await;
     assert_eq!(m.database.scope(), scope);
     synced(&m).await?;
     assert_eq!(m.titles().await, ["Milk"]);

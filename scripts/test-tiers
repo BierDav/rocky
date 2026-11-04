@@ -12,6 +12,10 @@ Unit tests run in process with libtest, so their times exclude process start.
 Integration tests run in bounded batches; isolated tests and e2e use nextest.
 Timing is diagnostic only;
 assertion failures and hang timeouts fail the run.
+
+Test processes keep their storage (TMPDIR) on a RAM-backed volume
+(scripts/test-volume), or in ROCKY_TEST_TMPDIR when the caller made one, so
+the flushes of the real durability path do not queue on the host's disk.
 """
 
 import argparse
@@ -38,6 +42,25 @@ CPUS = os.cpu_count() or 1
 BATCH_WORKERS = int(os.environ.get("ROCKY_TEST_BATCHES", max(1, CPUS // 4)))
 # A test that took this long before runs in a batch of its own.
 SOLO = 5.0
+VOLUME = ROOT / "scripts" / "test-volume"
+# The environment test processes get on top of this one's.
+TEST_ENV = {}
+
+
+def test_storage():
+    """Points test processes' TMPDIR at a RAM-backed directory; returns its cleanup."""
+    given = os.environ.get("ROCKY_TEST_TMPDIR")
+    if given:
+        TEST_ENV["TMPDIR"] = given
+        return lambda: None
+    owner = str(os.getpid())
+    made = subprocess.run([str(VOLUME), "up", owner], stdout=subprocess.PIPE, text=True)
+    directory = made.stdout.strip()
+    if made.returncode != 0 or not directory:
+        print("test-tiers: no test storage directory; tests use the default TMPDIR", file=sys.stderr)
+        return lambda: None
+    TEST_ENV["TMPDIR"] = directory
+    return lambda: subprocess.run([str(VOLUME), "down", directory, owner])
 
 
 def fail(message):
@@ -125,7 +148,7 @@ def libtest(suite, names, threads=None):
         cmd += ["--test-threads", str(threads)]
     # libtest's JSON format is unstable; RUSTC_BOOTSTRAP enables it at run time
     # only, so it never reaches rustc or cargo's fingerprints.
-    env = dict(os.environ, RUSTC_BOOTSTRAP="1", CARGO_MANIFEST_DIR=suite["cwd"])
+    env = dict(os.environ, RUSTC_BOOTSTRAP="1", CARGO_MANIFEST_DIR=suite["cwd"], **TEST_ENV)
     env.update(suite.get("non-test-environment", {}))
     try:
         proc = subprocess.run(cmd, cwd=suite["cwd"], env=env, capture_output=True,
@@ -248,7 +271,7 @@ def run_nextest(source, tier, expr, tests):
     junit = ROOT / "target" / "nextest" / tier / "junit.xml"
     junit.unlink(missing_ok=True)
     start = time.monotonic()
-    code = subprocess.run(cmd, cwd=ROOT).returncode
+    code = subprocess.run(cmd, cwd=ROOT, env=dict(os.environ, **TEST_ENV)).returncode
     wall = time.monotonic() - start
     if not junit.exists():
         fail(f"nextest wrote no {junit}; exit {code}")
@@ -309,26 +332,30 @@ def main():
     REPORTS.mkdir(parents=True, exist_ok=True)
     states = {tier: {"problems": [], "timed": [], "wall": 0.0}
               for tier in dict.fromkeys(args.tier)}
-    # Finish all tiers before changing Cargo's feature configuration.
-    for source in sources:
-        for tier, state in states.items():
-            expr = f"({config.filters[tier]}) & ({args.filter})"
-            tests = source.list(expr, ignored="all" if tier == "e2e" else "default")
-            if args.list:
-                for suite, name in tests:
-                    print(f"{suite['binary-id']} {name}")
-                continue
-            print(f"test-tiers: {tier}: {len(tests)} tests from {source.name}, "
-                  f"{CPUS} host cores", flush=True)
-            if not tests:
-                continue
-            timed, failed, wall = run_tier(source, config, tier, expr, tests)
-            state["problems"] += [f"failed: {f}" for f in failed]
-            state["timed"] += timed
-            state["wall"] += wall
-            with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
-                for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
-                    report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
+    cleanup = (lambda: None) if args.list else test_storage()
+    try:
+        # Finish all tiers before changing Cargo's feature configuration.
+        for source in sources:
+            for tier, state in states.items():
+                expr = f"({config.filters[tier]}) & ({args.filter})"
+                tests = source.list(expr, ignored="all" if tier == "e2e" else "default")
+                if args.list:
+                    for suite, name in tests:
+                        print(f"{suite['binary-id']} {name}")
+                    continue
+                print(f"test-tiers: {tier}: {len(tests)} tests from {source.name}, "
+                      f"{CPUS} host cores", flush=True)
+                if not tests:
+                    continue
+                timed, failed, wall = run_tier(source, config, tier, expr, tests)
+                state["problems"] += [f"failed: {f}" for f in failed]
+                state["timed"] += timed
+                state["wall"] += wall
+                with open(REPORTS / f"{tier}-{source.name}.tsv", "w") as report:
+                    for _, suite, name, took in sorted(timed, key=lambda t: -t[3]):
+                        report.write(f"{took:.4f}\t{suite['binary-id']}\t{name}\n")
+    finally:
+        cleanup()
     if args.list:
         return
     failed = False

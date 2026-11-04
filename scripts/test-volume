@@ -1,0 +1,113 @@
+#!/bin/sh
+# A RAM-backed directory for test storage, so device flushes the tests make
+# through the real durability path (F_FULLFSYNC, fsync) do not queue on the
+# host's disk.
+#
+#   scripts/test-volume up OWNER
+#                               print a fresh directory on a RAM-backed volume,
+#                               or on disk, with a note on stderr, when there is none
+#   scripts/test-volume down DIR OWNER
+#                               remove DIR, and the volume OWNER's `up` created
+#
+# OWNER is the process id of the run that uses the volume; a later `up`
+# ejects volumes whose owner has ended.
+#
+# macOS: an APFS RAM disk per run (hdiutil), the same file system as the
+# disk's. ROCKY_TEST_VOLUME_MB sizes it (default 2048; the integration tier
+# peaks near 230 MB); its memory is taken as tests write, and returned when
+# the volume is ejected. Linux: a directory on /dev/shm when it is tmpfs
+# with that much room. scripts/check and scripts/test-tiers
+# use it for the test processes' TMPDIR; ROCKY_TEST_VOLUME=0 keeps the disk.
+set -eu
+
+note() { echo "test-volume: $*" >&2; }
+size_mb=${ROCKY_TEST_VOLUME_MB:-2048}
+prefix=rocky-tests
+
+on_disk() {
+    note "$1; test storage stays on disk"
+    mktemp -d "${TMPDIR:-/tmp}/rocky-tests.XXXXXX"
+}
+
+# Ejects volumes of runs that ended without cleaning up.
+sweep_darwin() {
+    for volume in /Volumes/"$prefix"-*; do
+        [ -d "$volume" ] || continue
+        pid=${volume##*-}
+        case "$pid" in '' | *[!0-9]*) continue ;; esac
+        kill -0 "$pid" 2>/dev/null || diskutil eject "$volume" >/dev/null 2>&1 || true
+    done
+}
+
+up() {
+    case "$owner" in '' | *[!0-9]*) usage ;; esac
+    if [ "${ROCKY_TEST_VOLUME:-1}" = 0 ]; then
+        on_disk "ROCKY_TEST_VOLUME=0"
+        return
+    fi
+    case "$(uname -s)" in
+    Darwin)
+        sweep_darwin
+        # One volume per run, named for the process that owns it.
+        name="$prefix-$owner"
+        if [ ! -d "/Volumes/$name" ]; then
+            device=$(hdiutil attach -nobrowse -nomount "ram://$((size_mb * 2048))" 2>/dev/null |
+                awk 'NR == 1 { print $1 }') || device=
+            if [ -z "$device" ]; then
+                on_disk "hdiutil could not attach a ${size_mb} MB RAM disk"
+                return
+            fi
+            if ! diskutil erasevolume APFS "$name" "$device" >/dev/null 2>&1; then
+                hdiutil detach "$device" -force >/dev/null 2>&1 || true
+                on_disk "could not format the RAM disk"
+                return
+            fi
+        fi
+        mktemp -d "/Volumes/$name/tests.XXXXXX"
+        ;;
+    Linux)
+        if [ "$(stat -f -c %T /dev/shm 2>/dev/null || true)" != tmpfs ]; then
+            on_disk "/dev/shm is not tmpfs"
+            return
+        fi
+        free_mb=$(df -Pm /dev/shm | awk 'NR == 2 { print $4 }')
+        if [ "${free_mb:-0}" -lt "$size_mb" ]; then
+            on_disk "/dev/shm has ${free_mb:-0} MB free, under ${size_mb} MB"
+            return
+        fi
+        mktemp -d /dev/shm/rocky-tests.XXXXXX
+        ;;
+    *)
+        on_disk "no RAM-backed volume on $(uname -s)"
+        ;;
+    esac
+}
+
+down() {
+    directory=$1
+    [ -n "$directory" ] && [ -d "$directory" ] || return 0
+    rm -rf "$directory"
+    case "$directory" in
+    /Volumes/"$prefix"-*/*)
+        volume=${directory%/*}
+        # Only the run that made the volume ejects it.
+        [ "${volume##*-}" = "$owner" ] && diskutil eject "$volume" >/dev/null 2>&1 || true
+        ;;
+    esac
+}
+
+usage() {
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+case "${1:-}" in
+up)
+    owner=${2:-}
+    up
+    ;;
+down)
+    owner=${3:-}
+    down "${2:-}"
+    ;;
+*) usage ;;
+esac

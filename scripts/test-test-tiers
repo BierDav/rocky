@@ -103,12 +103,37 @@ class ArchivedExecutables(unittest.TestCase):
                     "rust-suites": {"public": suite}}
         listing = SimpleNamespace(returncode=0, stdout=json.dumps(metadata))
         execution = SimpleNamespace(stdout='', stderr='', returncode=0)
-        with patch.object(tiers.subprocess, "run", side_effect=[listing, execution]) as run:
+        with patch.object(tiers.subprocess, "run", side_effect=[listing, execution]) as run, \
+                patch.dict(tiers.TEST_ENV, {"TMPDIR": "/ram/tests"}):
             [(record, name)] = source.list("all()")
             tiers.libtest(record, [name], threads=1)
         environment = run.call_args.kwargs["env"]
         self.assertEqual(environment["CARGO_BIN_EXE_rocky-voter"], str(source.target_dir / "debug/rocky-voter"))
+        self.assertEqual(environment["TMPDIR"], "/ram/tests")
         self.assertNotIn("CARGO_BIN_EXE_other", environment)
+
+
+class TestStorage(unittest.TestCase):
+    def test_a_caller_directory_is_used_without_making_a_volume(self):
+        with patch.dict(tiers.os.environ, {"ROCKY_TEST_TMPDIR": "/ram/check"}), \
+                patch.dict(tiers.TEST_ENV, clear=True), \
+                patch.object(tiers.subprocess, "run") as run:
+            tiers.test_storage()()
+            self.assertEqual(tiers.TEST_ENV["TMPDIR"], "/ram/check")
+        run.assert_not_called()
+
+    def test_a_made_directory_is_removed_by_its_owner(self):
+        made = SimpleNamespace(returncode=0, stdout="/ram/tests\n")
+        environment = {k: v for k, v in tiers.os.environ.items() if k != "ROCKY_TEST_TMPDIR"}
+        with patch.dict(tiers.os.environ, environment, clear=True), \
+                patch.dict(tiers.TEST_ENV, clear=True), \
+                patch.object(tiers.subprocess, "run", return_value=made) as run:
+            cleanup = tiers.test_storage()
+            self.assertEqual(tiers.TEST_ENV["TMPDIR"], "/ram/tests")
+            cleanup()
+        owner = str(tiers.os.getpid())
+        self.assertEqual(run.call_args_list[0].args[0][1:], ["up", owner])
+        self.assertEqual(run.call_args_list[1].args[0][1:], ["down", "/ram/tests", owner])
 
 
 class MultiTier(unittest.TestCase):
@@ -136,6 +161,7 @@ class MultiTier(unittest.TestCase):
                 patch.object(tiers, "Source", side_effect=source), \
                 patch.object(tiers, "run_tier", side_effect=run), \
                 patch.object(tiers, "finish_tier", side_effect=finish), \
+                patch.object(tiers, "test_storage", return_value=lambda: None), \
                 patch.object(tiers.sys, "argv", ["test-tiers", "unit", "integration",
                                                    "--build=default", "--build=without-defaults",
                                                    "--filter", "package(=app)"]), \

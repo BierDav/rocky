@@ -185,6 +185,14 @@ if [ -z "$tiers" ] || $all; then
         cargo clippy --workspace --all-targets --locked -- -D warnings
     fi
 fi
+# The tiers share one RAM-backed directory for test storage
+# (scripts/test-volume), removed when the check ends.
+if [ -n "$tiers" ] && [ -z "${ROCKY_TEST_TMPDIR:-}" ]; then
+    ROCKY_TEST_TMPDIR=$(scripts/test-volume up $$)
+    export ROCKY_TEST_TMPDIR
+    trap 'scripts/test-volume down "$ROCKY_TEST_TMPDIR" $$' EXIT
+    trap 'exit 130' INT TERM
+fi
 # Every tier runs, so one failure does not hide another's.
 status=0
 # shellcheck disable=SC2086 # tiers are fixed names, not shell expressions

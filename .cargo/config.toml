@@ -13,10 +13,11 @@ opt-level = 3
 [profile.test.package.rocky-sdk]
 opt-level = 3
 
-# wasm32 is the browser: its tests run in headless Firefox (scripts/tools
-# installs the runner and geckodriver into local/bin).
+# wasm32 is the browser: its tests run in a headless browser through the
+# pinned wasm-bindgen-test-runner, never one first on PATH; scripts/wasm-runner
+# picks Firefox or Playwright's Chromium.
 [target.wasm32-unknown-unknown]
-runner = "wasm-bindgen-test-runner"
+runner = "scripts/wasm-runner"
 
 [env]
 # C dependencies of wasm32 (SQLite, ring) archive with the toolchain's llvm-ar.

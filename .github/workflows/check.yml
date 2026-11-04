@@ -180,6 +180,9 @@ jobs:
       - name: Run clippy and the tests for wasm32
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
+        env:
+          # The runner image's Firefox; scripts/wasm-runner fails without it.
+          ROCKY_BROWSER: firefox
         run: ./scripts/check --wasm
 
       - name: Build the SDK for wasm32 as an application outside the workspace

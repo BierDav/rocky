@@ -35,3 +35,8 @@ wasm-bindgen-test-runner 0.2.129 Linux-x86_64 82d12bb940e2d4e72e0d5605387fc1b8ca
 geckodriver 0.37.1 Darwin-arm64 d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz geckodriver
 geckodriver 0.37.1 Linux-aarch64 8fd90b951422fbad5b56539fb344dff66eb3f986d615d8d6fde9f1f62dad610c https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux-aarch64.tar.gz geckodriver
 geckodriver 0.37.1 Linux-x86_64 e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz geckodriver
+# Chromium's driver, for hosts without Firefox (scripts/wasm-runner): it must
+# match the Chromium build, such as Playwright's headless shell of the same version.
+chromedriver 156.0.8078.4 Darwin-arm64 979e8b931c87894c5fed0e708f481666a30950531115c261b80bd906fcab7397 https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/mac-arm64/chromedriver-mac-arm64.zip chromedriver-mac-arm64/chromedriver
+chromedriver 156.0.8078.4 Darwin-x86_64 c20a872f83c9dba838607a1665abeae1e9e9b6c25419048bb0297e098dc8539a https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/mac-x64/chromedriver-mac-x64.zip chromedriver-mac-x64/chromedriver
+chromedriver 156.0.8078.4 Linux-x86_64 ae36d1b2391e6852594d7dd1be963f818ca05f117cfc5fdcb41c33f3074afa8b https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux64/chromedriver-linux64.zip chromedriver-linux64/chromedriver

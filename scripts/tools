@@ -29,11 +29,14 @@ trap 'rm -rf "$work"' EXIT
 
 # Pinned tool names, in lock-file order.
 tools=$(grep -Ev '^[[:space:]]*(#|$)' "$lock" | awk '!seen[$1]++ { print $1 }')
-[ "$#" -gt 0 ] && tools="$*"
+named=false
+[ "$#" -gt 0 ] && tools="$*" && named=true
 
 for tool in $tools; do
     pin=$(grep -Ev '^[[:space:]]*(#|$)' "$lock" | awk -v t="$tool" -v p="$platform" \
         '$1 == t && ($3 == p || $3 == "any") { print; exit }')
+    # Installing everything skips a tool this platform has no build of.
+    [ -n "$pin" ] || $named || continue
     [ -n "$pin" ] || {
         echo "tools: $tool has no pin for $platform in scripts/tools.lock" >&2
         exit 1

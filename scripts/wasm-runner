@@ -1,0 +1,84 @@
+#!/bin/sh
+# Cargo's runner for wasm32 (see .cargo/config.toml): the pinned
+# wasm-bindgen-test-runner, which must match Cargo.lock's wasm-bindgen, in a
+# headless browser. A newer runner first on PATH fails every binary.
+#
+#   ROCKY_BROWSER=firefox   headless Firefox through the pinned geckodriver
+#   ROCKY_BROWSER=chrome    Playwright's Chromium headless shell (or the
+#                           binary ROCKY_CHROME names) through the pinned
+#                           chromedriver, whose major version must match
+#
+# Without ROCKY_BROWSER, Firefox when the host has it (as CI does), else
+# Playwright's Chromium. Both run OPFS and the dedicated Worker alike.
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+bin="$repo_root/local/bin"
+tools() { "$repo_root/scripts/tools" "$@" >/dev/null; }
+
+[ -x "$bin/wasm-bindgen-test-runner" ] || tools wasm-bindgen-test-runner
+
+has_firefox() {
+    command -v firefox >/dev/null 2>&1 || [ -x /Applications/Firefox.app/Contents/MacOS/firefox ]
+}
+playwright_chrome() {
+    cache=${PLAYWRIGHT_BROWSERS_PATH:-}
+    if [ -z "$cache" ]; then
+        case "$(uname -s)" in
+        Darwin) cache="$HOME/Library/Caches/ms-playwright" ;;
+        *) cache="$HOME/.cache/ms-playwright" ;;
+        esac
+    fi
+    # The newest installed build.
+    for shell in "$cache"/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell; do
+        [ -x "$shell" ] && found=$shell
+    done
+    echo "${found:-}"
+}
+
+browser=${ROCKY_BROWSER:-}
+if [ -z "$browser" ]; then
+    if has_firefox; then
+        browser=firefox
+    elif [ -n "${ROCKY_CHROME:-}$(playwright_chrome)" ]; then
+        browser=chrome
+    else
+        echo "wasm-runner: no Firefox, and no Chromium in Playwright's cache or ROCKY_CHROME" >&2
+        exit 1
+    fi
+fi
+
+case "$browser" in
+firefox)
+    [ -x "$bin/geckodriver" ] || tools geckodriver
+    unset CHROMEDRIVER SAFARIDRIVER WASM_BINDGEN_TEST_WEBDRIVER_JSON
+    GECKODRIVER="$bin/geckodriver"
+    export GECKODRIVER
+    ;;
+chrome)
+    chrome=${ROCKY_CHROME:-$(playwright_chrome)}
+    [ -x "$chrome" ] || { echo "wasm-runner: no Chromium at '$chrome'" >&2; exit 1; }
+    [ -x "$bin/chromedriver" ] || tools chromedriver
+    major() { "$1" --version | sed -n 's/.* \([0-9][0-9]*\)\.[0-9.]*.*/\1/p'; }
+    if [ "$(major "$chrome")" != "$(major "$bin/chromedriver")" ]; then
+        echo "wasm-runner: $("$chrome" --version) needs a chromedriver of its major version," \
+            "not $("$bin/chromedriver" --version | cut -d' ' -f1-2); pin it in scripts/tools.lock" >&2
+        exit 1
+    fi
+    # One file per Chromium, written whole, so concurrent runners share it.
+    capabilities="$repo_root/local/webdriver-$(printf '%s' "$chrome" | cksum | cut -d' ' -f1).json"
+    if [ ! -f "$capabilities" ]; then
+        printf '{"goog:chromeOptions":{"binary":"%s"}}\n' "$chrome" >"$capabilities.$$"
+        mv "$capabilities.$$" "$capabilities"
+    fi
+    unset GECKODRIVER SAFARIDRIVER
+    CHROMEDRIVER="$bin/chromedriver"
+    WASM_BINDGEN_TEST_WEBDRIVER_JSON=$capabilities
+    export CHROMEDRIVER WASM_BINDGEN_TEST_WEBDRIVER_JSON
+    ;;
+*)
+    echo "wasm-runner: ROCKY_BROWSER must be firefox or chrome, not $browser" >&2
+    exit 2
+    ;;
+esac
+exec "$bin/wasm-bindgen-test-runner" "$@"

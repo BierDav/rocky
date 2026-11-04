@@ -34,6 +34,10 @@ TIERS = ("unit", "integration", "e2e")
 # A unit test binary that runs longer than this has hung.
 UNIT_BINARY_TIMEOUT = 120
 CPUS = os.cpu_count() or 1
+# Integration batches that run at once, each with up to four test threads.
+BATCH_WORKERS = int(os.environ.get("ROCKY_TEST_BATCHES", max(1, CPUS // 4)))
+# A test that took this long before runs in a batch of its own.
+SOLO = 5.0
 
 
 def fail(message):
@@ -71,6 +75,13 @@ class Source:
             self.target_dir = extract / "target"
             self.run_args = ["--archive-file", archive, "--workspace-remap", str(ROOT)]
             self.list_args = self.run_args + ["--extract-to", str(extract), "--extract-overwrite"]
+            # After the first listing extracts it, every command reuses the
+            # extracted build instead of unpacking the archive again.
+            metadata = self.target_dir / "nextest"
+            self.reuse_args = ["--binaries-metadata", str(metadata / "binaries-metadata.json"),
+                               "--cargo-metadata", str(metadata / "cargo-metadata.json"),
+                               "--target-dir-remap", str(self.target_dir),
+                               "--workspace-remap", str(ROOT)]
         else:
             self.name = re.sub(r"[^a-z0-9]+", "-", build.lower()).strip("-") or "default"
             if cranelift:
@@ -87,6 +98,8 @@ class Source:
         )
         if listing.returncode != 0:
             fail(f"listing the tests of {self.name} failed with exit {listing.returncode}")
+        if hasattr(self, "reuse_args"):
+            self.run_args = self.list_args = self.reuse_args
         out = listing.stdout
         listed = json.loads(out)
         meta = listed["rust-build-meta"]
@@ -164,17 +177,43 @@ def run_unit(source, tests):
     return timed, failed, wall
 
 
-def batches(tests, size=32):
+def batches(tests, size=32, durations=None):
+    """Groups each binary's tests in batches of `size`. A test that took at
+    least SOLO seconds in an earlier run gets a batch of its own."""
+    durations = durations or {}
     by_binary = {}
     for suite, name in tests:
         by_binary.setdefault(suite["binary-path"], (suite, []))[1].append(name)
-    return [(suite, names[first:first + size]) for suite, names in by_binary.values()
-            for first in range(0, len(names), size)]
+    groups = []
+    for suite, names in by_binary.values():
+        took = lambda name: durations.get((suite["binary-id"], name), 0.0)
+        solo = [name for name in names if took(name) >= SOLO]
+        rest = [name for name in names if took(name) < SOLO]
+        groups += [(suite, [name]) for name in solo]
+        groups += [(suite, rest[first:first + size]) for first in range(0, len(rest), size)]
+    return groups
 
 
-def run_batches(source, tests):
+def earlier_durations(tier):
+    """Seconds each test took in this checkout's earlier runs of `tier`; they
+    only order the work."""
+    durations = {}
+    for report in REPORTS.glob(f"{tier}-*.tsv"):
+        for line in report.read_text().splitlines():
+            took, binary, name = line.split("\t", 2)
+            key = (binary, name)
+            durations[key] = max(durations.get(key, 0.0), float(took))
+    return durations
+
+
+def run_batches(source, tests, durations=None):
     start = time.monotonic()
-    groups = sorted(batches(tests), key=lambda group: -len(group[1]))
+    durations = durations or {}
+    # Longest first, so the slowest batches do not start last.
+    def predicted(group):
+        suite, names = group
+        return sum(durations.get((suite["binary-id"], name), 1.0) for name in names)
+    groups = sorted(batches(tests, durations=durations), key=lambda group: -predicted(group))
     def run(group):
         suite, names = group
         events, stderr, code = libtest(suite, names, threads=min(4, CPUS))
@@ -192,7 +231,7 @@ def run_batches(source, tests):
             print(stderr, file=sys.stderr)
         return timed, failed
     timed, failed = [], []
-    with ThreadPoolExecutor(max_workers=min(4, max(1, CPUS // 4))) as pool:
+    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
         for completed, problems in pool.map(run, groups):
             timed.extend(completed)
             failed.extend(problems)
@@ -243,7 +282,7 @@ def run_tier(source, config, tier, expr, tests):
         if selected:
             timed, failed, wall = run_nextest(source, tier, isolated_expr, selected)
     if tests:
-        extra_timed, extra_failed, extra_wall = run_batches(source, tests)
+        extra_timed, extra_failed, extra_wall = run_batches(source, tests, earlier_durations(tier))
         timed.extend(extra_timed)
         failed.extend(extra_failed)
         wall += extra_wall

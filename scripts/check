@@ -8,7 +8,8 @@
 #   scripts/check --package NAME    package and transitive workspace consumers
 #   scripts/check --changed         scope to jj's current change; unknown inputs run everything
 #   scripts/check --integration     only the integration tier
-#   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
+#   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included,
+#                                   and every tier of the SDK built without iroh
 #   scripts/check --doc             also the doc tests
 #   scripts/check --wasm            only wasm32: clippy, then the tests in headless Firefox
 #                                   and scripts/browser-sync; the full check includes it
@@ -100,7 +101,9 @@ cargo nextest --version >/dev/null 2>&1 || {
 }
 
 # The two builds of the tests: the workspace, and the SDK without iroh, since
-# the database, sessions and other transports must not need it.
+# the database, sessions and other transports must not need it. Only the
+# iroh branches differ between them, so the gate compiles every target of
+# the second; the e2e tier, which CI runs on each push to main, runs its tests.
 archive_args() { # name
     case "$1" in
     workspace) echo --workspace ;;
@@ -109,17 +112,32 @@ archive_args() { # name
 }
 
 run_tiers() { # tiers...
+    e2e=false
+    case " $* " in *' e2e '*) e2e=true ;; esac
     if [ -n "$archives" ]; then
-        scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst" \
-            --archive "$archives/sdk-without-defaults.tar.zst"
-    else
-        case "$selection" in
-        'all()' | *'package(=rocky-sdk)'*)
-            scripts/test-tiers "$@" --filter "$selection" --build=--workspace \
-                "--build=$(archive_args sdk-without-defaults)" ;;
-        *) scripts/test-tiers "$@" --filter "$selection" --build=--workspace ;;
-        esac
+        result=0
+        scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst" || result=1
+        if $e2e; then
+            scripts/test-tiers unit integration e2e \
+                --archive "$archives/sdk-without-defaults.tar.zst" || result=1
+        fi
+        return $result
     fi
+    sdk=false
+    case "$selection" in
+    'all()' | *'package(=rocky-sdk)'*) sdk=true ;;
+    esac
+    if $sdk && ! $e2e; then
+        # shellcheck disable=SC2046 # the build arguments are words
+        cargo check --locked --all-targets $(archive_args sdk-without-defaults) || return
+    fi
+    result=0
+    scripts/test-tiers "$@" --filter "$selection" --build=--workspace || result=1
+    if $sdk && $e2e; then
+        scripts/test-tiers unit integration e2e --filter "$selection" \
+            "--build=$(archive_args sdk-without-defaults)" || result=1
+    fi
+    return $result
 }
 
 if [ -n "$build" ]; then

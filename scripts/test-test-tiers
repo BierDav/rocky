@@ -46,6 +46,25 @@ class BatchedExecution(unittest.TestCase):
         self.assertEqual([name for _, _, name, _ in timed], ["ok"])
         self.assertEqual(set(failed), {"binary exited 101", "binary bad: failed", "binary missing: missing"})
 
+    def test_slow_cases_run_alone_and_the_longest_batches_start_first(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        tests = [(suite, f"case_{i}") for i in range(40)]
+        durations = {("binary", "case_7"): 60.0, ("binary", "case_9"): 6.0}
+        groups = tiers.batches(tests, durations=durations)
+        self.assertIn((suite, ["case_7"]), groups)
+        self.assertIn((suite, ["case_9"]), groups)
+        self.assertEqual(sorted(name for _, names in groups for name in names),
+                         sorted(name for _, name in tests))
+        started = []
+        def libtest(suite, names, threads=None):
+            started.append(names)
+            return {name: ("ok", 0.0, "") for name in names}, "", 0
+        with patch.object(tiers, "libtest", side_effect=libtest), \
+                patch.object(tiers, "BATCH_WORKERS", 1):
+            timed, failed, _ = tiers.run_batches(None, tests, durations)
+        self.assertEqual(started[0], ["case_7"])
+        self.assertEqual((len(timed), failed), (40, []))
+
     def test_a_failed_case_output_is_printed_under_its_name(self):
         suite = {"binary-id": "binary", "binary-path": "/binary"}
         events = {"returns_error": ("failed", 0.0, "Error: Denied\n")}
@@ -64,7 +83,8 @@ class BatchedExecution(unittest.TestCase):
         with patch.object(tiers, "run_nextest", return_value=([isolated], ["isolated failed"], 1.0)), \
                 patch.object(tiers, "run_batches", return_value=([shared], [], 2.0)) as batch:
             timed, failed, wall = tiers.run_tier(source, config, "integration", "all()", [isolated, shared])
-        batch.assert_called_once_with(source, [shared])
+        batch.assert_called_once()
+        self.assertEqual(batch.call_args.args[:2], (source, [shared]))
         self.assertEqual(timed, [isolated, shared])
         self.assertEqual(failed, ["isolated failed"])
         self.assertEqual(wall, 3.0)

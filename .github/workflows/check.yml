@@ -361,15 +361,15 @@ jobs:
           job: check
           tree: ${{ steps.source.outputs.tree }}
           workspace-archive: true
-          sdk-archive: true
+          # The SDK without iroh: the build job compiled it, e2e runs it.
+          sdk-archive: false
           dependencies: fallback
 
       - name: Run formatting and the unit and integration tiers
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
-          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ] \
-              && [ -f "$RUNNER_TEMP/build/sdk-without-defaults.tar.zst" ]; then
+          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
             # The build job already ran clippy; only its archives are missing.
@@ -384,8 +384,9 @@ jobs:
           tree: ${{ steps.source.outputs.tree }}
 
   e2e:
-    # The end-to-end tier, soak tests included; it runs only in CI. On pushes to
-    # the default branch; releases do not wait for it.
+    # The end-to-end tier, soak tests included, and every tier of the SDK
+    # built without iroh; it runs only in CI. On pushes to the default
+    # branch; releases do not wait for it.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

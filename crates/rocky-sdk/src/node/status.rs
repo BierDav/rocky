@@ -239,9 +239,16 @@ impl Node {
                 verified_revocation: settings
                     .revocation(&self.path)?
                     .map(|notice| {
+                        let node = self
+                            .node_identity
+                            .as_ref()
+                            .ok()
+                            .and_then(|node| node.parse::<PublicKey>().ok())
+                            .map(rocky_credentials::PeerId::of);
                         Ok::<_, Failure>(VerifiedRevocation {
                             id: HEXLOWER.encode(&notice.id()?),
                             statement: serde_json::to_vec(&notice)?,
+                            reason: settings.revocation_reason(&notice, node)?,
                         })
                     })
                     .transpose()?,

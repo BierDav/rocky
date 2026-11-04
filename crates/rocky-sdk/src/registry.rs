@@ -169,13 +169,15 @@ impl Registry {
     }
     /// The identities the trusted identity `origin` first enrolled, itself
     /// or through issuers below it: what the root's revocation of `origin`
-    /// ends, wherever they renewed since.
+    /// ends, wherever they renewed since. A trusted identity is the root's
+    /// own enrollment, whoever enrolled it first.
     pub fn enrolled_by(&self, origin: PublicKey) -> std::collections::BTreeSet<PublicKey> {
         self.records
             .values()
             .filter_map(|record| record.device.as_ref())
             .filter(|device| device.origin == Some(origin))
             .map(|device| device.user)
+            .filter(|user| !self.trusted.contains_key(user))
             .collect()
     }
     /// The live trusted identities: granted by the root, not revoked by it.

@@ -756,6 +756,29 @@ impl Settings {
         Ok(Some(notice.statement))
     }
 
+    /// Why `statement`, which ends this device, does.
+    pub(crate) fn revocation_reason(
+        &self,
+        statement: &SignedRevocation,
+        node: Option<rocky_credentials::PeerId>,
+    ) -> Result<crate::RevocationReason, Failure> {
+        let revoked = &statement.statement;
+        Ok(if node.is_some_and(|node| revoked.nodes.contains(&node)) {
+            crate::RevocationReason::Node
+        } else if revoked.identities.contains(&self.identity) {
+            crate::RevocationReason::Identity
+        } else if let Some(origin) = self
+            .link_origin()?
+            .filter(|origin| statement.root() && revoked.identities.contains(origin))
+        {
+            crate::RevocationReason::Origin {
+                trusted: origin.to_hex(),
+            }
+        } else {
+            crate::RevocationReason::Capability
+        })
+    }
+
     pub(crate) fn record_revocation(
         &self,
         path: &Path,

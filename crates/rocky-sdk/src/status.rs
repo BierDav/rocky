@@ -131,6 +131,22 @@ pub struct AuthorityProfile {
 pub struct VerifiedRevocation {
     pub id: String,
     pub statement: Vec<u8>,
+    pub reason: RevocationReason,
+}
+/// Why a verified revocation ends this device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RevocationReason {
+    /// This device's node.
+    Node,
+    /// This device's identity.
+    Identity,
+    /// The root revoked the trusted identity `trusted` that first enrolled
+    /// this identity: this device did nothing wrong and may enroll again
+    /// through another trusted node.
+    Origin { trusted: String },
+    /// A capability or an issuer above it.
+    Capability,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewalRoute {

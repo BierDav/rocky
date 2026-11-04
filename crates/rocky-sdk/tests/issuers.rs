@@ -79,6 +79,19 @@ fn reconciled_with(report: &Value, node: &str) -> bool {
         })
     })
 }
+/// Syncs until `device` reads its rows: a fresh member first renews with
+/// the keys, then fetches the rows. Bounded; never a sleep.
+async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
+    let read = json!({"type": "read", "query": {"max_rows": 1, "sql": "SELECT title FROM items", "values": []}});
+    for _ in 0..4 {
+        synced(device).await?;
+        match device.call(read.clone()).await {
+            Ok(_) => return Ok(device.titles().await),
+            Err(_) => continue,
+        }
+    }
+    Err("the rows never became readable".into())
+}
 async fn session(device: &Device) -> Value {
     device.ok(json!({"type": "session"})).await
 }
@@ -306,6 +319,85 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
     let report = synced(&g).await?;
     assert_eq!(b.titles().await, ["Milk"], "{report}");
     for device in [&b, &g] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+/// The root revokes a second trusted node's identity: every identity it
+/// first enrolled loses access, even one the creator renewed since, and its
+/// status says why; a device the creator enrolled keeps working, and the
+/// cut-off user enrolls again through the honest trusted node. The second
+/// node signed no tip statement, which its revocation would drop.
+#[tokio::test]
+async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let root = root.path();
+    let hub = Arc::new(Hub::default());
+    let a = create(root, &hub, "a")?;
+    a.follow_main().await;
+    let t = join(
+        root,
+        &hub,
+        "t",
+        &a.invite_as(json!({"kind": "issuer"})).await,
+    )?;
+    let t_identity = session(&t).await["principal"].clone();
+    let grant = a
+        .ok(json!({"type":"tips","action":"trust","identity":t_identity,"root":a.root()}))
+        .await;
+    t.ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    let (a_node, t_node) = (a.node().await, t.node().await);
+    a.add(1, "Milk").await;
+    synced(&t).await?;
+    // `d` is the second trusted node's enrollment, `e` the creator's.
+    let d = join(root, &hub, "d", &t.invite().await)?;
+    assert_eq!(synced_titles(&d).await?, ["Milk"]);
+    let e = join(root, &hub, "e", &a.invite().await)?;
+    assert_eq!(synced_titles(&e).await?, ["Milk"]);
+    // `d` learned both trusted nodes when it synced.
+    assert_issuers(root, "d", &[&a_node, &t_node])?;
+
+    // The second trusted node goes away; `d` renews through the creator,
+    // which never enrolled it.
+    t.close().await;
+    drop(t);
+    d.ok(json!({"type": "renew"})).await;
+
+    // Only the root revokes a trusted identity.
+    let error = a
+        .call(json!({"type": "revoke", "identity": t_identity}))
+        .await
+        .err()
+        .ok_or("revoked a trusted identity without the root")?;
+    assert_eq!(error["code"], "publisher_required", "{error}");
+    a.ok(json!({"type": "revoke", "identity": t_identity, "root": a.root()}))
+        .await;
+
+    // `d` learns it is cut off, and that the revoked trusted node is why.
+    let _ = d.sync().await;
+    let _ = d.call(json!({"type": "renew"})).await;
+    let status = d.ok(json!({"type": "status"})).await;
+    assert_eq!(
+        status["authority"]["verified_revocation"]["reason"],
+        json!({"type": "origin", "trusted": t_identity}),
+        "{status}"
+    );
+    assert!(d.call(json!({"type": "renew"})).await.is_err());
+
+    // `e` keeps working with the creator.
+    e.add(2, "Eggs").await;
+    let report = synced(&e).await?;
+    assert!(reconciled_with(&report, &a_node), "{report}");
+    assert_eq!(a.titles().await, ["Eggs", "Milk"]);
+
+    // The cut-off user enrolls again through the honest trusted node; the
+    // rows before the rotation reach it through a base at a seal.
+    a.seal_and_compact().await;
+    let again = join(root, &hub, "d2", &a.invite().await)?;
+    assert_eq!(synced_titles(&again).await?, ["Eggs", "Milk"]);
+    for device in [&a, &d, &e, &again] {
         device.close().await;
     }
     Ok(())

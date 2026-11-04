@@ -86,8 +86,8 @@ Implementation starts only if one of these holds:
 
 - Phase 9 shows a transition or rewind overlapping interactive writes,
   with a write above the README's max targets. This counts in the
-  shopping app scenario, in a recorded real workload, or in the
-  relational workloads of [features_14 R6](../features_14/README.md#r6-qualification-for-relational-applications).
+  shopping app scenario, in a recorded real workload, or in a relational
+  application's workload.
 - The product decides that bootstrap, rebootstrap, compaction or rewinds
   must never stall local writes.
 

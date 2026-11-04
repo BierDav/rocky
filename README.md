@@ -4,10 +4,9 @@ Rocky provides local-first SQLite storage, encrypted peer replication,
 credentials, seal coordination and optional iroh networking.
 
 Implementation follows [features_13](docs/features_13/README.md), including its
-remaining prerequisites. [features_14](docs/features_14/README.md) records
-additional application-facing requirements, not an implementation plan.
-See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests,
-module declarations and tests to navigate the implementation.
+remaining prerequisites. See [AGENTS.md](AGENTS.md) for contribution
+rules. Use Cargo manifests, module declarations and tests to navigate the
+implementation.
 
 ```sh
 ./scripts/setup
@@ -44,7 +43,7 @@ cargo run -p todo-desktop -- --device --data-dir ./local/todo --lan
 
 wasm32 (a browser, in a dedicated Worker) is a supported target of the same
 crates; `./scripts/check --wasm` runs clippy for it and the tests in headless
-Firefox. Status and limits are in features_14 R7.
+Firefox.
 
 An application uses one `rocky-sdk` dependency for native nodes and the
 browser; native-only networking and files are selected per target, not by

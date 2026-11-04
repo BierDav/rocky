@@ -689,9 +689,12 @@ async fn seeded(seed: u64) {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn seeded_schedules_of_thirty_two_transactions_over_four_authors_converge() {
-    for seed in 0..2 {
-        seeded(seed).await;
-    }
+    seeded(0).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_second_seeded_schedule_of_thirty_two_transactions_converges() {
+    seeded(1).await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

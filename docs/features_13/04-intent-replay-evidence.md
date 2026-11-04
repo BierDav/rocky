@@ -354,7 +354,8 @@ outcome (`transaction_outcome`).
   (e2e): adds a fifth unit. W1 receives W2's transactions, rewinds,
   publishes its records and recreates `y` in B. 5!·2⁴ = 1,920 schedules.
 - `seeded_schedules_of_thirty_two_transactions_over_four_authors_converge`
-  (integration, seeds 0–1) and `seeded_schedule_sweep_converges` (e2e, seeds
+  and `a_second_seeded_schedule_of_thirty_two_transactions_converges`
+  (integration, seeds 0 and 1) and `seeded_schedule_sweep_converges` (e2e, seeds
   2–15): four authors commit 32 random transactions: creates (some
   across both partitions, some colliding), increments in one or every
   partition, assignments, doublings and deletes. Before each commit the
@@ -536,10 +537,11 @@ Tests:
   receives B's original frames from A twice (B never reconnects) and agrees;
   A agrees after a restart. The owner's next seal makes the drop final, and
   B, back at last, converges after finalizing both seals without authoring.
-- `…::every_order_around_the_successor_converges_to_the_sealed_replay`:
+- `…::every_order_around_the_successor_converges_to_the_sealed_replay_{0..5}`:
   every order of the owner's and the three offline transactions, with the
   successor learned before, between or after them (24 · 5 = 120 fresh
-  receivers), equals the reference after finalization.
+  receivers, in six shards that run at once), equals the reference after
+  finalization.
 - `…::a_crash_while_a_seal_{deletes_undo_records,rewinds_its_late_transactions,redoes_its_late_transactions}_reopens_and_converges`:
   the receive completing the seal's members finalizes it in the maintenance
   step after its group commit; the armed point fires there. Reopened, the

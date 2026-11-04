@@ -2,8 +2,7 @@
 //! heal phase that checks the system recovers. `fuzz <seed> <steps>`.
 use crate::cluster::{Node, mesh};
 use crate::scenarios::{
-    Failure, ITEMS, LISTS, NOTES, Slot, author_all, finding, integrity, root, short, status_data,
-    writer_all,
+    Failure, ITEMS, LISTS, NOTES, Slot, finding, integrity, root, short, status_data, writer_all,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde_json::{Value, json};
@@ -81,7 +80,6 @@ async fn join(world: &mut World, name: &str, kind: Kind) -> Result<(), Failure> 
         let a = issuer.node_id().await;
         let _ = node.call(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[a],"custody":1}})).await;
     }
-    author_all(&node, &issuer).await;
     let id = node.node_id().await;
     let mut lists = BTreeSet::new();
     if kind != Kind::Partial {
@@ -114,7 +112,6 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
     let root = root(&format!("fuzz-{seed}"));
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let a_id = a.n().node_id().await;
     let mut world = World {
         rng: StdRng::seed_from_u64(seed),
@@ -132,10 +129,13 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
     };
     // Seed data, so later joins bootstrap something.
     let issuer = world.members[0].slot.n().clone();
-    issuer
-        .add_notes_batch("seed", 0, 300, 400)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Within one transaction's statement and frame byte quotas.
+    for start in (0..300).step_by(50) {
+        issuer
+            .add_notes_batch("seed", start, 50, 400)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     for i in 0..300 {
         world.acked.insert(format!("seed{i}"));
     }
@@ -499,13 +499,21 @@ async fn op_prune(world: &mut World) -> Result<String, String> {
 async fn op_seal(world: &mut World) -> Result<String, String> {
     let issuer = world.issuer().ok_or("no live issuer")?;
     let r = issuer.call(json!({"type":"tips","action":"seal"})).await;
-    Ok(format!("{} seal: {}", issuer.name, short(&r.map(|s| s["tip"].clone()))))
+    Ok(format!(
+        "{} seal: {}",
+        issuer.name,
+        short(&r.map(|s| s["tip"].clone()))
+    ))
 }
 
 async fn op_compact(world: &mut World) -> Result<String, String> {
     let issuer = world.issuer().ok_or("no live issuer")?;
     let r = issuer.call(json!({"type":"tips","action":"compact"})).await;
-    Ok(format!("{} compact: {}", issuer.name, short(&r.map(|s| s["pruned"].clone()))))
+    Ok(format!(
+        "{} compact: {}",
+        issuer.name,
+        short(&r.map(|s| s["pruned"].clone()))
+    ))
 }
 
 /// Opens a tip at the newest seal and follows a new bookmark there.
@@ -513,7 +521,9 @@ async fn op_branch(world: &mut World, step: usize) -> Result<String, String> {
     let issuer = world.issuer().ok_or("no live issuer")?;
     let name = format!("dev{step}");
     let r = async {
-        let inspection = issuer.call(json!({"type":"tips","action":"inspect"})).await?;
+        let inspection = issuer
+            .call(json!({"type":"tips","action":"inspect"}))
+            .await?;
         let seal = inspection["seals"]
             .as_array()
             .into_iter()
@@ -525,11 +535,19 @@ async fn op_branch(world: &mut World, step: usize) -> Result<String, String> {
             .call(json!({"type":"tips","action":"open","seal":seal,"minimum_in_sync":1}))
             .await?["tip"]
             .clone();
-        issuer.call(json!({"type":"tips","action":"create","name":name,"tip":tip})).await?;
-        issuer.call(json!({"type":"tips","action":"follow","name":name})).await
+        issuer
+            .call(json!({"type":"tips","action":"create","name":name,"tip":tip}))
+            .await?;
+        issuer
+            .call(json!({"type":"tips","action":"follow","name":name}))
+            .await
     }
     .await;
-    Ok(format!("{} branch {name}: {}", issuer.name, short(&r.err())))
+    Ok(format!(
+        "{} branch {name}: {}",
+        issuer.name,
+        short(&r.err())
+    ))
 }
 
 /// Follows `main` or the newest branch on any live node: leaving or
@@ -551,7 +569,9 @@ async fn op_follow(world: &mut World) -> Result<String, String> {
             .unwrap_or_else(|| "main".into()),
         _ => "main".into(),
     };
-    let r = node.call(json!({"type":"tips","action":"follow","name":name})).await;
+    let r = node
+        .call(json!({"type":"tips","action":"follow","name":name}))
+        .await;
     Ok(format!("{} follow {name}: {}", node.name, short(&r.err())))
 }
 

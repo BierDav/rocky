@@ -1,12 +1,25 @@
 name: Chaos
 
-# The multi-process fault fuzzer over its stored seed range, nightly; see
-# benchmarks/chaos/README.md. It is its own workspace, outside the baseline.
+# Long randomized runs, nightly or on dispatch; never a push gate. Each
+# correctness property they exercise also has a test in the baseline tiers.
+# - fuzz: the multi-process fault fuzzer over its stored seed range; see
+#   benchmarks/chaos/README.md. It is its own workspace, outside the baseline.
+# - soak: the in-process relational simulation over a fresh seed range per
+#   run, with the wall clock running and frozen.
 
 on:
   schedule:
     - cron: "41 3 * * *"
   workflow_dispatch:
+    inputs:
+      first:
+        description: First relational soak seed (default advances with each run)
+        type: string
+        default: ""
+      seeds:
+        description: Relational soak seeds per wall clock
+        type: string
+        default: "300"
 
 permissions:
   contents: read
@@ -31,6 +44,8 @@ jobs:
         working-directory: source
         run: ./scripts/ci/install-rustup
       - uses: dtolnay/rust-toolchain@1.99.0
+      # .cargo/config.toml names sccache as rustc-wrapper.
+      - uses: ./source/.github/actions/setup-sccache
       - name: Run the stored seed range
         working-directory: source
         run: benchmarks/chaos/nightly "$RUNNER_TEMP/chaos"
@@ -42,3 +57,36 @@ jobs:
           path: |
             ${{ runner.temp }}/chaos/*.log
             ${{ runner.temp }}/chaos/*/schedule.log
+
+  soak:
+    name: Relational soak (${{ matrix.wall }} wall clock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        wall: [running, frozen]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - name: Install the system build dependencies
+        working-directory: source
+        run: ./scripts/ci/install-system-deps
+      - name: Bootstrap Rustup and register its tool paths
+        working-directory: source
+        run: ./scripts/ci/install-rustup
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./source/.github/actions/setup-sccache
+      # Each run covers new seeds; a failure prints its seed for
+      # `simulation::relational_tests::replay`.
+      - name: Run the relational soak
+        working-directory: source
+        env:
+          ROCKY_SIM_FIRST: ${{ inputs.first || format('{0}', 100000 + github.run_number * 1000) }}
+          ROCKY_SIM_SEEDS: ${{ inputs.seeds || '300' }}
+          ROCKY_SIM_WALL: ${{ matrix.wall == 'frozen' && 'frozen' || '' }}
+        run: |
+          echo "seeds $ROCKY_SIM_SEEDS from $ROCKY_SIM_FIRST, wall ${ROCKY_SIM_WALL:-running}"
+          cargo test --locked --release -p rocky-sdk --lib \
+            simulation::relational_tests::relational_soak -- --ignored --nocapture

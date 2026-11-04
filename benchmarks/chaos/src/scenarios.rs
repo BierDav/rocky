@@ -85,13 +85,6 @@ impl Slot {
     }
 }
 
-pub async fn author_all(node: &Node, issuer: &Node) {
-    for table in TABLES {
-        if let Err(error) = node.author(issuer, table).await {
-            println!("  author {} {table}: {error}", node.name);
-        }
-    }
-}
 /// `notes` rows of `len` bytes and `lists` lists of `items` items on `a`.
 pub async fn populate(
     a: &Node,
@@ -127,7 +120,6 @@ pub async fn join_full(a: &Node, slot: &mut Slot, lists: &[String]) -> Result<Ar
     let node = slot
         .start(json!({"mode":"join","invitation": a.invite(writer_all()).await}))
         .await?;
-    author_all(&node, a).await;
     let id = node.node_id().await;
     for list in lists {
         let _ = a.share(list, std::slice::from_ref(&id)).await;
@@ -315,7 +307,6 @@ pub async fn run(names: &[String]) -> Result<(), Failure> {
 async fn seeded(root: &Path, notes: usize) -> Result<(Slot, Vec<String>), Failure> {
     let mut a = Slot::new("a", root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", notes, 2000, 3, 20).await;
     Ok((a, lists))
 }
@@ -421,16 +412,10 @@ async fn writes_during_bootstrap() -> Result<(), Failure> {
     // Both sides write while B imports: B into notes and into a list whose
     // key it may not hold yet, A into the scopes being imported.
     let bn = b.n().clone();
-    let an = a.n().clone();
     let list = lists[0].clone();
     let writer_b = tokio::spawn(async move {
         let mut log = Vec::new();
         for i in 0..60 {
-            if i == 0 {
-                for t in TABLES {
-                    log.push(format!("author {t}: {:?}", bn.author(&an, t).await.is_ok()));
-                }
-            }
             let r = bn.add_note(&format!("b-during{i}"), "during").await;
             let r2 = bn.add_item(&list, &format!("b-item{i}")).await;
             log.push(format!("{i}: note {} item {}", r.is_ok(), short(&r2.err())));

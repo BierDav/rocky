@@ -232,17 +232,6 @@ impl Node {
         out.sort();
         Ok(out)
     }
-    /// Installs this node's author pseudonym for `table`, assigned by `issuer`.
-    pub async fn author(&self, issuer: &Node, table: &str) -> Reply {
-        let asked = self
-            .call(json!({"type":"pseudonym_request","collection":table}))
-            .await?;
-        let assigned = issuer
-            .call(json!({"type":"pseudonym_assign","request":asked["request"]}))
-            .await?;
-        self.call(json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}))
-            .await
-    }
     pub async fn sql(&self, sql: &str, values: Value) -> Reply {
         self.call(json!({"type":"sql","sql":sql,"values":values}))
             .await

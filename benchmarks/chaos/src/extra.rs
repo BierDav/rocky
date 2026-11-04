@@ -1,6 +1,6 @@
 //! Niche topologies, local file damage and request fuzzing.
 use crate::scenarios::{
-    Failure, ITEMS, LISTS, NOTES, Slot, author_all, finding, heal, integrity, join_full, populate,
+    Failure, ITEMS, LISTS, NOTES, Slot, finding, heal, integrity, join_full, populate,
     report_divergence, root, short, status_data, writer_all,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -13,14 +13,12 @@ pub async fn bootstrap_from_partial() -> Result<(), Failure> {
     let root = root("from-partial");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 200, 100, 3, 20).await;
     let mut p = Slot::new("p", &root);
     p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
     let a_node = a.n().node_id().await;
     p.n().call(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[a_node],"custody":1}})).await.ok();
-    author_all(p.n(), a.n()).await;
     let _ = a.n().share(&lists[0], &[p.n().node_id().await]).await;
     crate::cluster::mesh(&[a.n(), p.n()]).await;
     for _ in 0..2 {
@@ -74,7 +72,6 @@ pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
     let root = root("revoked-stale");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 20, 10, 1, 5).await;
     let mut b = Slot::new("b", &root);
     let mut c = Slot::new("c", &root);
@@ -323,7 +320,6 @@ pub async fn double_open() -> Result<(), Failure> {
     let root = root("double-open");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     populate(a.n(), "a", 10, 10, 0, 0).await;
     let mut twin = Slot::new("a", &root);
     let second = twin.resume().await;
@@ -356,7 +352,6 @@ pub async fn file_damage() -> Result<(), Failure> {
     let root = root("damage");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 100, 100, 2, 10).await;
     let mut b = Slot::new("b", &root);
     join_full(a.n(), &mut b, &lists).await?;
@@ -440,7 +435,6 @@ pub async fn request_fuzz() -> Result<(), Failure> {
     let root = root("request-fuzz");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 20, 10, 1, 5).await;
     let mut b = Slot::new("b", &root);
     join_full(a.n(), &mut b, &lists).await?;
@@ -655,7 +649,6 @@ pub async fn half_bootstrapped_source() -> Result<(), Failure> {
     let root = root("half-source");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 1500, 2000, 2, 30).await;
     let mut t = Slot::new("t", &root);
     t.start(json!({"mode":"join","invitation": a.n().invite(json!({"kind":"issuer"})).await}))
@@ -669,7 +662,6 @@ pub async fn half_bootstrapped_source() -> Result<(), Failure> {
     t.kill().await;
     a.kill().await;
     t.resume().await?;
-    author_all(t.n(), t.n()).await;
     let held = t.n().dump(NOTES).await.map(|r| r.len());
     println!(
         "  t (issuer offline) holds notes {held:?}, pending={}",
@@ -694,7 +686,6 @@ pub async fn half_bootstrapped_source() -> Result<(), Failure> {
         let _ = a.close().await;
         return Ok(());
     }
-    author_all(n.n(), t.n()).await;
     let nid = n.n().node_id().await;
     for list in &lists {
         let r = t.n().share(list, std::slice::from_ref(&nid)).await;
@@ -731,11 +722,9 @@ pub async fn cross_issuer_share() -> Result<(), Failure> {
     let root = root("cross-issuer");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let mut t = Slot::new("t", &root);
     t.start(json!({"mode":"join","invitation": a.n().invite(json!({"kind":"issuer"})).await}))
         .await?;
-    author_all(t.n(), a.n()).await;
     crate::cluster::mesh(&[a.n(), t.n()]).await;
     let _ = t.n().sync().await;
     let list = t.n().add_list("by-t").await.map_err(|e| e.to_string())?;
@@ -796,11 +785,9 @@ pub async fn envelope_kill() -> Result<(), Failure> {
     let root = root("envelope-kill");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let mut t = Slot::new("t", &root);
     t.start(json!({"mode":"join","invitation": a.n().invite(json!({"kind":"issuer"})).await}))
         .await?;
-    author_all(t.n(), a.n()).await;
     let mut f = Slot::new("f", &root);
     f.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
@@ -870,7 +857,6 @@ pub async fn orphaned_second_issuer() -> Result<(), Failure> {
     let root = root("orphan-issuer");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 1500, 2000, 2, 20).await;
     let mut f = Slot::new("f", &root);
     join_full(a.n(), &mut f, &lists).await?;

@@ -1,6 +1,6 @@
 //! Misbehaving local application code and lifecycle abuse.
 use crate::scenarios::{
-    Failure, ITEMS, LISTS, NOTES, OPEN, Slot, author_all, finding, heal, integrity, populate,
+    Failure, ITEMS, LISTS, NOTES, OPEN, Slot, finding, heal, integrity, populate,
     report_divergence, root, short, status_data, writer_all,
 };
 use serde_json::{Value, json};
@@ -52,12 +52,10 @@ pub async fn app_sql_abuse() -> Result<(), Failure> {
     let root = root("sql-abuse");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 30, 50, 2, 5).await;
     let mut b = Slot::new("b", &root);
     b.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
-    author_all(b.n(), a.n()).await;
     let bid = b.n().node_id().await;
     for list in &lists {
         let _ = a.n().share(list, std::slice::from_ref(&bid)).await;
@@ -122,12 +120,10 @@ pub async fn kill_in_transaction() -> Result<(), Failure> {
     let root = root("kill-tx");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 10, 10, 1, 3).await;
     let mut b = Slot::new("b", &root);
     b.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
-    author_all(b.n(), a.n()).await;
     let _ = a.n().share(&lists[0], &[b.n().node_id().await]).await;
     let _ = b.n().sync().await;
 
@@ -235,13 +231,11 @@ pub async fn evict_kill() -> Result<(), Failure> {
     let root = root("evict-kill");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 5, 10, 2, 300).await;
     let mut p = Slot::new("p", &root);
     p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
     println!("  role: {}", short(&p.n().role(true).await));
-    author_all(p.n(), a.n()).await;
     let pid = p.n().node_id().await;
     let _ = a.n().share(&lists[0], std::slice::from_ref(&pid)).await;
     crate::cluster::mesh(&[a.n(), p.n()]).await;
@@ -348,7 +342,6 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
     let root = root("prune");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 200, 100, 2, 50).await;
     let mut f = Slot::new("f", &root);
     let mut c = Slot::new("c", &root);
@@ -356,8 +349,6 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
         .await?;
     c.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
-    author_all(f.n(), a.n()).await;
-    author_all(c.n(), a.n()).await;
     for node in [f.n(), c.n()] {
         let id = node.node_id().await;
         for list in &lists {
@@ -462,14 +453,12 @@ pub async fn close_during_sync() -> Result<(), Failure> {
     let root = root("close-sync");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let _ = populate(a.n(), "a", 800, 1000, 1, 10).await;
     for round in 0..5 {
         let name = format!("b{round}");
         let mut b = Slot::new(&name, &root);
         b.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
             .await?;
-        author_all(b.n(), a.n()).await;
         let n = b.n().clone();
         let busy = tokio::spawn(async move {
             let s = n.call(json!({"type":"subscribe","query":{"sql":"SELECT count(*) FROM notes","values":[],"max_rows":1}})).await;

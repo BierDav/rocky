@@ -1,7 +1,6 @@
 //! Focused reproductions of individual findings.
 use crate::scenarios::{
-    Failure, LISTS, NOTES, Slot, author_all, finding, populate, root, short, status_data,
-    writer_all,
+    Failure, LISTS, NOTES, Slot, finding, populate, root, short, status_data, writer_all,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -26,7 +25,6 @@ async fn rebind_once(ephemeral: bool) -> Result<(), Failure> {
     let root = root(if ephemeral { "rebind-eph" } else { "rebind" });
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     populate(a.n(), "a", 20, 10, 0, 0).await;
     let mut b = Slot::new("b", &root);
     if ephemeral {
@@ -34,7 +32,6 @@ async fn rebind_once(ephemeral: bool) -> Result<(), Failure> {
     }
     b.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
-    author_all(b.n(), a.n()).await;
     crate::cluster::mesh(&[a.n(), b.n()]).await;
     let _ = b.n().sync().await;
     for (label, calls) in [
@@ -119,7 +116,6 @@ pub async fn enrollment_window() -> Result<(), Failure> {
     let root = root("enroll-window");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     populate(a.n(), "a", 50, 10, 0, 0).await;
     let mut stuck = Vec::new();
     for attempt in 0..30u64 {
@@ -244,7 +240,6 @@ pub async fn partial_holds_shared() -> Result<(), Failure> {
     let root = root("partial-shared");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 5, 10, 3, 5).await;
     let mut p = Slot::new("p", &root);
     p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
@@ -308,7 +303,6 @@ pub async fn pending_forever() -> Result<(), Failure> {
     let root = root("pending");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 20, 10, 2, 3).await;
     for (label, share) in [
         ("no list shared", 0usize),
@@ -370,7 +364,6 @@ pub async fn evict_with_full_node() -> Result<(), Failure> {
     let root = root("evict-full");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 5, 10, 2, 200).await;
     let a_node = a.n().node_id().await;
     let key: PublicKey = a_node.parse().map_err(|e| format!("{e:?}"))?;
@@ -381,7 +374,6 @@ pub async fn evict_with_full_node() -> Result<(), Failure> {
         p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
             .await?;
         let role = p.n().call(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[reference],"custody":1}})).await;
-        author_all(p.n(), a.n()).await;
         let _ = a.n().share(&lists[0], &[p.n().node_id().await]).await;
         crate::cluster::mesh(&[a.n(), p.n()]).await;
         for _ in 0..2 {
@@ -470,7 +462,6 @@ pub async fn evict_resubscribe() -> Result<(), Failure> {
     let root = root("evict-resub");
     let mut a = Slot::new("a", &root);
     a.start(json!({"mode":"create"})).await?;
-    author_all(a.n(), a.n()).await;
     let lists = populate(a.n(), "a", 5, 10, 1, 200).await;
     let a_node = a.n().node_id().await;
     for (name, kill, own_writes, how) in [
@@ -484,7 +475,6 @@ pub async fn evict_resubscribe() -> Result<(), Failure> {
         p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
             .await?;
         p.n().call(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[a_node],"custody":1}})).await.ok();
-        author_all(p.n(), a.n()).await;
         let _ = a.n().share(&lists[0], &[p.n().node_id().await]).await;
         crate::cluster::mesh(&[a.n(), p.n()]).await;
         for _ in 0..2 {

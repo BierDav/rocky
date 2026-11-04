@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Exercise version reservation and retries without publishing or creating tags."""
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+import urllib.error
+
+
+RELEASE = runpy.run_path(str(Path(__file__).resolve().parent / "release/reserve"))
+PREFIX = RELEASE["RESERVATIONS"]
+
+
+class ReservationTest(unittest.TestCase):
+    def setUp(self):
+        self.refs = []
+        self.releases = []
+        self.posts = []
+        self.published = []
+        self.tagged_revision = "original"
+        self.conflict = False
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        binary = Path(directory.name)
+        for name, body in (("git-cliff", 'echo "${CLIFF_VERSION}"'),
+                           ("date", "echo 20261104")):
+            path = binary / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o755)
+        environment = patch.dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                                 CLIFF_VERSION="v0.1.0")
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.globals = RELEASE["reserve"].__globals__
+        dependencies = patch.dict(self.globals, gh_api=self.api,
+                                  published_versions=lambda: self.published)
+        dependencies.start()
+        self.addCleanup(dependencies.stop)
+
+    def add_ref(self, version, revision="original", reserved=True):
+        self.refs.append({"ref": (PREFIX if reserved else "refs/tags/v") + version,
+                          "object": {"type": "commit", "sha": revision}})
+
+    def api(self, repository, endpoint, *args):
+        self.assertEqual(repository, "owner/repo")
+        if endpoint == "git/matching-refs/tags/":
+            # More than one page must participate in allocation and retry selection.
+            return [self.refs[:1], self.refs[1:]]
+        if endpoint == "releases":
+            return [[], self.releases]
+        if endpoint.startswith("commits/"):
+            return {"sha": self.tagged_revision}
+        self.assertEqual(endpoint, "git/refs")
+        self.assertEqual(args[:2], ("--method", "POST"))
+        fields = dict(field.split("=", 1) for field in args[3::2])
+        if self.conflict or any(ref["ref"] == fields["ref"] for ref in self.refs):
+            raise subprocess.CalledProcessError(1, "gh api: reference already exists")
+        self.posts.append(fields)
+        self.refs.append({"ref": fields["ref"],
+                          "object": {"type": "commit", "sha": fields["sha"]}})
+        return self.refs[-1]
+
+    def reserve(self, channel="alpha", revision="current", retry=False):
+        return RELEASE["reserve"]("owner/repo", revision, channel, retry)
+
+    def test_published_package_without_a_github_tag_is_not_reallocated(self):
+        self.published = ["0.1.0-alpha.1", "0.1.0-nightly.20261103"]
+        self.assertEqual(self.reserve(), ("0.1.0-alpha.2", "current"))
+        self.assertEqual(self.posts, [{"ref": PREFIX + "0.1.0-alpha.2", "sha": "current"}])
+
+    def test_failed_release_reservations_advance_even_on_the_same_commit(self):
+        for channel in ("alpha", "beta", "rc"):
+            with self.subTest(channel=channel):
+                self.refs.clear()
+                self.assertEqual(self.reserve(channel), (f"0.1.0-{channel}.1", "current"))
+                self.assertEqual(self.reserve(channel), (f"0.1.0-{channel}.2", "current"))
+                self.assertEqual(self.reserve(channel, revision="later"),
+                                 (f"0.1.0-{channel}.3", "later"))
+
+    def test_published_tags_and_reservations_on_all_pages_are_considered(self):
+        self.add_ref("0.1.0-alpha.9", reserved=False)
+        self.add_ref("0.1.0-alpha.10")
+        self.assertEqual(self.reserve(), ("0.1.0-alpha.11", "current"))
+
+    def test_stable_reservations_can_skip_multiple_unpublished_versions(self):
+        versions = [self.reserve("stable")[0] for _ in range(3)]
+        self.assertEqual(versions, ["0.1.0", "0.1.1", "0.1.2"])
+
+    def test_nightly_reservations_keep_unique_suffixes_after_pruning_release_tags(self):
+        self.published = ["0.1.0-nightly.20261104"]
+        self.assertEqual(self.reserve("nightly")[0], "0.1.0-nightly.20261104.2")
+        self.assertEqual(self.reserve("nightly")[0], "0.1.0-nightly.20261104.3")
+
+    def test_retry_keeps_the_highest_reserved_version_and_original_commit(self):
+        self.add_ref("0.1.0-alpha.9", "older")
+        self.add_ref("0.1.0-alpha.10", "original")
+        self.add_ref("0.1.0-beta.1", "other-channel")
+        self.assertEqual(self.reserve(retry=True), ("0.1.0-alpha.10", "original"))
+        self.assertEqual(self.posts, [])
+
+    def test_retry_can_reuse_a_stable_version_after_a_later_breaking_change(self):
+        self.add_ref("1.0.0")
+        with patch.dict(os.environ, CLIFF_VERSION="v2.0.0"):
+            self.assertEqual(self.reserve("stable", retry=True), ("1.0.0", "original"))
+        self.assertEqual(self.posts, [])
+
+    def test_retry_without_a_reservation_does_not_silently_allocate(self):
+        self.add_ref("0.1.0-beta.1")
+        with self.assertRaisesRegex(SystemExit, "No reserved alpha release"):
+            self.reserve(retry=True)
+        self.assertEqual(self.posts, [])
+
+    def test_retry_refuses_a_completed_release_instead_of_falling_back(self):
+        self.add_ref("0.1.0-alpha.1")
+        self.add_ref("0.1.0-alpha.2")
+        self.releases = [{"tag_name": "v0.1.0-alpha.2"}]
+        with self.assertRaisesRegex(SystemExit, "already has a GitHub release"):
+            self.reserve(retry=True)
+        self.assertEqual(self.posts, [])
+
+    def test_retry_refuses_a_release_tag_pointing_to_different_source(self):
+        self.add_ref("0.1.0-alpha.1")
+        self.add_ref("0.1.0-alpha.1", "different", reserved=False)
+        self.tagged_revision = "different"
+        with self.assertRaisesRegex(SystemExit, "different commit"):
+            self.reserve(retry=True)
+
+    def test_retry_accepts_a_matching_tag_left_by_an_unfinished_release(self):
+        self.add_ref("0.1.0-alpha.1")
+        self.add_ref("0.1.0-alpha.1", reserved=False)
+        self.assertEqual(self.reserve(retry=True), ("0.1.0-alpha.1", "original"))
+
+    def test_registry_failure_does_not_allocate_an_unchecked_version(self):
+        with patch.dict(self.globals, published_versions=Mock(
+                side_effect=urllib.error.URLError("unavailable"))):
+            with self.assertRaises(urllib.error.URLError):
+                self.reserve()
+        self.assertEqual(self.posts, [])
+
+    def test_atomic_reservation_failure_stops_allocation(self):
+        self.conflict = True
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.reserve()
+        self.assertEqual(self.posts, [])
+
+
+class RegistryTest(unittest.TestCase):
+    def test_absent_package_is_distinct_from_a_registry_failure(self):
+        for status in (404, 429, 503):
+            error = urllib.error.HTTPError("registry", status, "error", None, None)
+            with self.subTest(status=status), patch("urllib.request.urlopen", side_effect=error):
+                if status == 404:
+                    self.assertEqual(RELEASE["published_versions"](), [])
+                else:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        RELEASE["published_versions"]()
+
+
+if __name__ == "__main__":
+    unittest.main()

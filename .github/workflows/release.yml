@@ -23,11 +23,15 @@ on:
         description: Skip waiting for push checks and running the release check suite
         type: boolean
         default: false
+      retry_last_release:
+        description: Retry the last reserved version for this channel, using its original source commit
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-# Version numbers are allocated from existing tags, so releases never overlap.
+# Version numbers are reserved in tags before any checks or publication.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -42,17 +46,19 @@ jobs:
     # Includes waiting for the commit's push checks.
     timeout-minutes: 120
     permissions:
-      contents: read
+      contents: write
       # Waiting reads the core check job of this commit.
       actions: read
     outputs:
       release: ${{ steps.changes.outputs.release }}
       version: ${{ steps.version.outputs.version }}
       channel: ${{ steps.version.outputs.channel }}
+      revision: ${{ steps.version.outputs.revision }}
     env:
       CHANNEL: ${{ inputs.channel || 'nightly' }}
       GH_TOKEN: ${{ github.token }}
       GH_API_URL: ${{ github.api_url }}
+      RETRY_LAST_RELEASE: ${{ inputs.retry_last_release || false }}
     steps:
       - name: Require the default branch
         if: github.ref_name != github.event.repository.default_branch
@@ -70,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           release=true
-          if [ "${CHANNEL}" = nightly ]; then
+          if [ "${CHANNEL}" = nightly ] && [ "${RETRY_LAST_RELEASE}" != true ]; then
             latest="$(curl --fail --silent --show-error --location \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
@@ -85,9 +91,40 @@ jobs:
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
 
+      - uses: taiki-e/install-action@v2
+        if: steps.changes.outputs.release == 'true'
+        with:
+          tool: git-cliff@2.14.2
+
+      - name: Reserve the version
+        id: version
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          set --
+          if [ "${RETRY_LAST_RELEASE}" = true ]; then set -- --retry-last; fi
+          reservation="$(scripts/release/reserve "${CHANNEL}" "$@")"
+          version="$(jq -er .version <<< "$reservation")"
+          revision="$(jq -er .revision <<< "$reservation")"
+          {
+            echo "version=${version}"
+            echo "revision=${revision}"
+            if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi
+          } >> "$GITHUB_OUTPUT"
+          echo "Reserved v${version} at ${revision}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Use the reserved source revision
+        if: steps.changes.outputs.release == 'true' && inputs.retry_last_release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.version.outputs.revision }}
+          fetch-depth: 0
+
       # Only the core check job gates versioning; auxiliary jobs may keep running.
       - name: Wait for the checks of this commit
         if: steps.changes.outputs.release == 'true' && !inputs.skip_checks
+        env:
+          RELEASE_REVISION: ${{ steps.version.outputs.revision }}
         run: |
           set -euo pipefail
           api() {
@@ -97,8 +134,8 @@ jobs:
               "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/$1"
           }
           while :; do
-            run="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
-              | jq -r --arg sha "${GITHUB_SHA}" '
+            run="$(api "actions/runs?head_sha=${RELEASE_REVISION}&per_page=50" \
+              | jq -r --arg sha "${RELEASE_REVISION}" '
                 [.workflow_runs[] | select(.head_sha == $sha and
                   (.path | test("(^|/)check\\.yml(@|$)")) and .event == "push")]
                 | max_by(.id) | .id // ""')"
@@ -111,44 +148,38 @@ jobs:
                 else "failed" end')"
             fi
             if [ "${state}" = failed ]; then
-              echo "::error::The check job failed for ${GITHUB_SHA} in run ${run}."
+              echo "::error::The check job failed for ${RELEASE_REVISION} in run ${run}."
               exit 1
             fi
             [ "${state}" = passed ] && break
-            echo "Waiting for the check job of ${GITHUB_SHA}"
+            echo "Waiting for the check job of ${RELEASE_REVISION}"
             sleep 30
           done
 
-      - uses: taiki-e/install-action@v2
+      - name: Compute the notes
         if: steps.changes.outputs.release == 'true'
-        with:
-          tool: git-cliff@2.14.2
-
-      - name: Compute the version and notes
-        id: version
-        if: steps.changes.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="$(git tag --list 'v*' | scripts/release/version "${CHANNEL}")"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
           registry=ghcr.io
-          if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/notes"
           {
-            git-cliff --unreleased --tag "v${version}" --strip all
+            git-cliff --unreleased --tag "v${VERSION}" --strip all
             echo
             echo "### Packages"
             echo
-            echo "- Rust: \`rocky-sdk = \"=${version}\"\` ([crates.io](https://crates.io/crates/rocky-sdk/${version}))"
-            echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
+            echo "- Rust: \`rocky-sdk = \"=${VERSION}\"\` ([crates.io](https://crates.io/crates/rocky-sdk/${VERSION}))"
+            echo "- \`${registry}/bierdav/rocky-db-coordinator:${VERSION}\`"
           } > "$RUNNER_TEMP/notes/notes.md"
-          { echo "## v${version}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## v${VERSION}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: steps.changes.outputs.release == 'true'
         with:
           name: notes
           path: ${{ runner.temp }}/notes
+          overwrite: true
 
   check:
     name: Checks
@@ -157,6 +188,7 @@ jobs:
     uses: ./.github/workflows/check.yml
     with:
       release: true
+      revision: ${{ needs.version.outputs.revision }}
 
   image:
     name: Image ${{ matrix.image }} ${{ matrix.arch }}
@@ -201,7 +233,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ github.sha }}
+          GH_REVISION: ${{ needs.version.outputs.revision }}
         run: |
           curl --fail --silent --show-error --location \
             --header "Authorization: Bearer ${GH_TOKEN}" \
@@ -233,12 +265,12 @@ jobs:
           file: source/${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          tags: ${{ env.IMAGE }}:${{ needs.version.outputs.revision }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }},ignore-error=true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.version.outputs.revision }}
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
 
@@ -286,21 +318,23 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
           CHANNEL: ${{ needs.version.outputs.channel }}
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: |
           set -euo pipefail
           docker buildx imagetools create \
             --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${CHANNEL}" \
-            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
-            "${IMAGE}:${GITHUB_SHA}-amd64" \
-            "${IMAGE}:${GITHUB_SHA}-arm64"
+            --tag "${IMAGE}:sha-${RELEASE_REVISION}" \
+            "${IMAGE}:${RELEASE_REVISION}-amd64" \
+            "${IMAGE}:${RELEASE_REVISION}-arm64"
 
       - name: Report the manifest digest
         env:
           VERSION: ${{ needs.version.outputs.version }}
           HEADING: ${{ matrix.heading }}
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: |
           set -euo pipefail
-          tag="${IMAGE}:sha-${GITHUB_SHA}"
+          tag="${IMAGE}:sha-${RELEASE_REVISION}"
           docker buildx imagetools inspect "${tag}"
           digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${tag}" | tr -d '"')"
           {
@@ -328,6 +362,7 @@ jobs:
       actions: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_REVISION: ${{ needs.version.outputs.revision }}
       CHANNEL: ${{ needs.version.outputs.channel }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -335,7 +370,7 @@ jobs:
         env:
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ github.sha }}
+          GH_REVISION: ${{ needs.version.outputs.revision }}
         run: |
           curl --fail --silent --show-error --location \
             --header "Authorization: Bearer ${GH_TOKEN}" \
@@ -390,7 +425,7 @@ jobs:
           fi
           gh release create "v${VERSION}" "$@" \
             --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
+            --target "${RELEASE_REVISION}" \
             --title "v${VERSION}" \
             --notes-file dist/notes/notes.md
 

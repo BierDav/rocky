@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Reserve a release version before publishing, or resume its original revision."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import urllib.error
+import urllib.request
+
+
+RESERVATIONS = "refs/tags/release-reservations/v"
+VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc|nightly)\.(\d+)(?:\.(\d+))?)?")
+
+
+def version_key(version, channel):
+    match = VERSION.fullmatch(version)
+    if match is None or (match[4] or "stable") != channel:
+        return None
+    return tuple(int(match[i] or 0) for i in (1, 2, 3, 5, 6))
+
+
+def gh_api(repository, endpoint, *args):
+    return json.loads(subprocess.check_output(
+        ["gh", "api", f"repos/{repository}/{endpoint}", *args], text=True))
+
+
+def published_versions():
+    request = urllib.request.Request(
+        "https://crates.io/api/v1/crates/rocky-sdk",
+        headers={"User-Agent": "Rocky releases (https://github.com/BierDav/rocky)"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return [version["num"] for version in json.load(response)["versions"]]
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        return []
+
+
+def reserve(repository, revision, channel, retry_last=False):
+    pages = gh_api(repository, "git/matching-refs/tags/", "--paginate", "--slurp")
+    refs = {ref["ref"]: ref["object"] for page in pages for ref in page}
+    if retry_last:
+        candidates = {key: ref for ref in refs if ref.startswith(RESERVATIONS)
+                      and (key := version_key(ref.removeprefix(RESERVATIONS), channel)) is not None}
+        if not candidates:
+            raise SystemExit(f"No reserved {channel} release to retry")
+        ref = candidates[max(candidates)]
+        version = ref.removeprefix(RESERVATIONS)
+        # Completed releases cannot be retried, even if they used another commit.
+        pages = gh_api(repository, "releases", "--paginate", "--slurp")
+        if any(release["tag_name"] == f"v{version}" for page in pages for release in page):
+            raise SystemExit(f"v{version} already has a GitHub release")
+        if refs[ref]["type"] != "commit":
+            raise SystemExit(f"Reservation {ref} does not point to a commit")
+        if f"refs/tags/v{version}" in refs:
+            tagged = gh_api(repository, f"commits/v{version}")
+            if tagged["sha"] != refs[ref]["sha"]:
+                raise SystemExit(f"v{version} points to a different commit than its reservation")
+        return version, refs[ref]["sha"]
+
+    # Registry versions also cover packages published before GitHub release creation.
+    tags = {"v" + version for version in published_versions()}
+    tags.update(ref.removeprefix("refs/tags/") for ref in refs if ref.startswith("refs/tags/v"))
+    tags.update("v" + ref.removeprefix(RESERVATIONS) for ref in refs if ref.startswith(RESERVATIONS))
+    allocator = Path(__file__).with_name("version")
+    version = subprocess.check_output([str(allocator), channel],
+                                      input="\n".join(sorted(tags)), text=True).strip()
+    if version_key(version, channel) is None or f"v{version}" in tags:
+        raise SystemExit(f"Allocator returned an invalid or occupied version: {version}")
+    # Ref creation is atomic: a collision or API failure stops all downstream jobs.
+    gh_api(repository, "git/refs", "--method", "POST",
+           "-f", f"ref={RESERVATIONS}{version}", "-f", f"sha={revision}")
+    return version, revision
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("channel", choices=("nightly", "alpha", "beta", "rc", "stable"))
+    parser.add_argument("--retry-last", action="store_true")
+    args = parser.parse_args()
+    version, revision = reserve(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"],
+                                args.channel, args.retry_last)
+    print(json.dumps({"version": version, "revision": revision}))
+
+
+if __name__ == "__main__":
+    main()

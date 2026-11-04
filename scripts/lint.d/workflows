@@ -12,4 +12,5 @@ check() {
     actionlint "$@"
     scripts/test-test-tiers
     scripts/test-rust-publish
+    scripts/test-release-version
 }

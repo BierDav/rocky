@@ -1,5 +1,5 @@
 #!/bin/sh
-# Prints the next version of a release channel; see docs/releasing.md.
+# Prints the next version of a release channel from occupied tag names.
 #
 #   scripts/release/version nightly|alpha|beta|rc|stable < existing-tag-names
 #
@@ -15,10 +15,10 @@ has_tag() { printf '%s\n' "$tags" | grep -qxF "v$1"; }
 base=$(git-cliff --config "$repo_root/cliff.toml" --repository "$repo_root" --bumped-version)
 base=${base#v}
 printf '%s\n' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "version: git-cliff proposed '$base'" >&2; exit 1; }
-# git-cliff repeats the last stable version when no commit since it bumps anything.
-if has_tag "$base"; then
+# Skip every occupied stable version, including unfinished reservations.
+while has_tag "$base"; do
     base=$(printf '%s\n' "$base" | awk -F. '{ print $1 "." $2 "." $3 + 1 }')
-fi
+done
 pattern=$(printf '%s' "$base" | sed 's/\./\\./g')
 
 # The highest N of v<base>-<label>.N, or nothing.

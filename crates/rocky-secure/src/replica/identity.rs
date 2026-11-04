@@ -598,6 +598,10 @@ impl<A: RowApplication> Inner<A> {
                 "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? ORDER BY a.position LIMIT 256",
                 [id, after],
             ).await?).await?;
+            #[cfg(any(test, feature = "qualification"))]
+            self.flusher
+                .measurements
+                .work(lock::WorkUnit::TransitionLedgerRecord, records.len() as u64);
             for record in &records {
                 let [
                     SqlValue::Integer(position),
@@ -863,6 +867,11 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
             )
             .await?;
+            #[cfg(any(test, feature = "qualification"))]
+            self.flusher.measurements.work(
+                lock::WorkUnit::TransitionIdentityRecord,
+                records.len() as u64,
+            );
             for record in &records {
                 let (position, header, body) = match record.as_slice() {
                     [

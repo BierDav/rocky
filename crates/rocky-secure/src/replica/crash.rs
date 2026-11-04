@@ -14,6 +14,16 @@ pub enum CrashPoint {
     Prune,
     /// Compacting at a seal.
     Compact,
+    /// A base digest step, before its cursor commits.
+    BasePrepare,
+    /// A base digest step, after its cursor committed.
+    BasePrepared,
+    /// After the checkpoint and base selector committed.
+    BasePublished,
+    /// A retired base cleanup step, before commit.
+    BaseCleanup,
+    /// After a retired base cleanup step committed.
+    BaseCleaned,
     /// Settling a seal rebootstrap.
     Settle,
     /// Evicting a scope.
@@ -32,11 +42,16 @@ pub enum CrashPoint {
     UndoDeletion,
 }
 impl CrashPoint {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 17] = [
         Self::Import,
         Self::Switch,
         Self::Prune,
         Self::Compact,
+        Self::BasePrepare,
+        Self::BasePrepared,
+        Self::BasePublished,
+        Self::BaseCleanup,
+        Self::BaseCleaned,
         Self::Settle,
         Self::Evict,
         Self::GroupBeforeCommit,
@@ -55,9 +70,14 @@ impl CrashPoint {
             Self::Switch => Stage::Switch,
             Self::Prune => Stage::Prune,
             Self::Compact => Stage::Compact,
+            Self::BasePrepare => Stage::BasePrepare,
+            Self::BaseCleanup => Stage::BaseCleanup,
             Self::Settle => Stage::Settle,
             Self::Evict => Stage::Evict,
-            Self::GroupBeforeCommit
+            Self::BasePrepared
+            | Self::BasePublished
+            | Self::BaseCleaned
+            | Self::GroupBeforeCommit
             | Self::GroupAfterCommit
             | Self::Apply
             | Self::Rewind

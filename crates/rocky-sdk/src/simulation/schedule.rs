@@ -482,7 +482,7 @@ enum Lifecycle {
     Online,
 }
 /// Every crash point; those a step does not reach report so.
-const RELATIONAL_POINTS: [CrashPoint; 12] = CrashPoint::ALL;
+const RELATIONAL_POINTS: [CrashPoint; CrashPoint::ALL.len()] = CrashPoint::ALL;
 
 fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
     let mut draws = Draws::new(seed);

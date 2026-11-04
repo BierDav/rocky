@@ -228,7 +228,11 @@ impl<A: RowApplication> Inner<A> {
                         // one has no rows to start from.
                         "secure_replayed_seals",
                         "secure_replayed_seal_rows",
-                        "secure_replayed_base",
+                        "secure_replayed_snapshots",
+                        "secure_replayed_base_source",
+                        "secure_replayed_base_rows",
+                        "secure_base_transition",
+                        "secure_base_cleanup",
                         "secure_replayed_staged",
                     ] {
                         inner

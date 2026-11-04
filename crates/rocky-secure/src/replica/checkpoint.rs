@@ -538,6 +538,8 @@ pub(crate) enum Stage {
     #[cfg(test)]
     AuditStaged,
     Compact,
+    BasePrepare,
+    BaseCleanup,
     Prune,
     Import,
     Switch,

@@ -839,7 +839,8 @@ impl Simulation {
         replica.arm_crash(Some(point)).await;
         let member = &self.members[node];
         let _ = match point {
-            Prune | Compact => member
+            Prune | Compact | BasePrepare | BasePrepared | BasePublished | BaseCleanup
+            | BaseCleaned => member
                 .call(json!({"type": "tips", "action": "compact"}))
                 .await
                 .map(drop),

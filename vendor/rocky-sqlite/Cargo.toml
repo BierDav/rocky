@@ -1,0 +1,42 @@
+[package]
+name = "rocky-sqlite"
+description = "Rocky's SQLite: native's 3.53.2 build for wasm32 browsers, and a preupdate hook without bindgen"
+version.workspace = true
+# Upstream sqlite-wasm-rs's edition and license; Rocky's changes are under the same license.
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+readme = "README.md"
+# One copy of this SQLite per link.
+links = "rocky-sqlite"
+include = ["src/**/*.rs", "build.rs", "sqlite3/*.c", "sqlite3/*.h", "shim/**/*.h", "shim/**/*.c", "README.md", "LICENSE"]
+
+# Upstream code: SQLite's C ABI needs `unsafe`, so the workspace lints do not
+# apply.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[dependencies]
+rusqlite = { workspace = true, features = ["modern_sqlite"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+# Not `ffi-sqlite-wasm-rs`: libsqlite3-sys without `bundled` links
+# `-lsqlite3`, this crate's archive.
+rusqlite = { workspace = true, features = ["libsqlite3-sys"] }
+js-sys = { version = "0.3.81", default-features = false }
+rsqlite-vfs = "0.1"
+wasm-bindgen = { version = "0.2.104", default-features = false }
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+# Natively libsqlite3-sys compiles the same amalgamation; the preupdate hook
+# is a compile option there too.
+rusqlite = { workspace = true, features = ["bundled"] }
+libsqlite3-sys = { version = "=0.38.2", features = ["bundled", "preupdate_hook"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[build-dependencies]
+cc = "1"

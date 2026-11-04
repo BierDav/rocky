@@ -19,7 +19,8 @@ rocky-core.workspace = true
 rocky-platform.workspace = true
 # Application statements are analyzed as a SQLite-dialect syntax tree.
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
-rusqlite = { version = "=0.40.2", features = ["bundled", "column_decltype", "functions", "hooks", "preupdate_hook"] }
+rocky-sqlite.workspace = true
+rusqlite = { workspace = true, features = ["column_decltype", "functions", "hooks"] }
 tokio = { version = "1", features = ["sync", "time"] }
 # `std::time::Instant` on native; the browser clock on wasm32.
 web-time = "1"

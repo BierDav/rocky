@@ -6,8 +6,8 @@ use core::time::Duration;
 
 use js_sys::{Date, Math, Number};
 use rsqlite_vfs::OsCallback;
-use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::wasm_bindgen;
 
 pub struct WasmOsCallback;
 
@@ -81,7 +81,7 @@ fn yday_from_date(date: &Date) -> u32 {
         [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
     let year = date.get_full_year();
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
 
     let month_days_cumulative = if leap {
         MONTH_DAYS_LEAP_CUMULATIVE
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn rust_sqlite_wasm_calloc(num: c_size_t, size: c_size_t) 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_os_init() -> core::ffi::c_int {
     rsqlite_vfs::memvfs::install::<WasmOsCallback>();
-    crate::bindings::SQLITE_OK
+    rusqlite::ffi::SQLITE_OK
 }
 
 /// SQLite OS shutdown entry point.
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn sqlite3_os_init() -> core::ffi::c_int {
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_os_end() -> core::ffi::c_int {
     rsqlite_vfs::memvfs::uninstall();
-    crate::bindings::SQLITE_OK
+    rusqlite::ffi::SQLITE_OK
 }
 
 #[cfg(test)]
@@ -281,10 +281,10 @@ mod tests {
     use super::*;
     use core::ffi::CStr;
 
-    use crate::{
-        sqlite3_column_count, sqlite3_column_name, sqlite3_column_text, sqlite3_column_type,
-        sqlite3_initialize, sqlite3_open, sqlite3_prepare_v3, sqlite3_shutdown, sqlite3_step,
-        SQLITE_OK, SQLITE_ROW, SQLITE_TEXT,
+    use rusqlite::ffi::{
+        SQLITE_OK, SQLITE_ROW, SQLITE_TEXT, sqlite3_column_count, sqlite3_column_name,
+        sqlite3_column_text, sqlite3_column_type, sqlite3_initialize, sqlite3_open,
+        sqlite3_prepare_v3, sqlite3_shutdown, sqlite3_step,
     };
 
     use wasm_bindgen_test::{console_log, wasm_bindgen_test};

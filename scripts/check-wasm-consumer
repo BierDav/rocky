@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds rocky-sdk for wasm32 as an application outside this workspace does:
 # without this repository's .cargo/config.toml, with only the setup the README
-# asks of an application (an llvm-ar for C dependencies).
+# asks of an application (an llvm-ar for C dependencies), and checks that the
+# browser's SQLite is Rocky's.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,3 +30,10 @@ cd "$consumer"
 AR_wasm32_unknown_unknown="$repo_root/scripts/llvm-ar" \
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/wasm-consumer}" \
     cargo build --target wasm32-unknown-unknown
+# The browser's SQLite is Rocky's, not rusqlite's default sqlite-wasm-rs.
+# The wasm32 tests prove the linked engine; this proves no [patch] is needed.
+if cargo tree --target wasm32-unknown-unknown -i sqlite-wasm-rs >/dev/null 2>&1; then
+    echo "check-wasm-consumer: sqlite-wasm-rs is in the application's graph" >&2
+    exit 1
+fi
+cargo tree --target wasm32-unknown-unknown -i rocky-sqlite --depth 0 >/dev/null

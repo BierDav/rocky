@@ -2,13 +2,13 @@
 //!
 //! See [`opfs-sahpool`](https://sqlite.org/wasm/doc/trunk/persistence.md#vfs-opfs-sahpool) for details.
 //!
-//! ```rust
-//! use sqlite_wasm_rs as ffi;
-//! use sqlite_wasm_vfs::sahpool::{install as install_opfs_sahpool, OpfsSAHPoolCfg};
+//! ```rust,ignore
+//! use rocky_sqlite_opfs::sahpool::{install as install_opfs_sahpool, OpfsSAHPoolCfg};
+//! use rusqlite::ffi;
 //!
 //! async fn open_db() {
 //!     // install opfs-sahpool persistent vfs and set as default vfs
-//!     install_opfs_sahpool::<ffi::WasmOsCallback>(&OpfsSAHPoolCfg::default(), true)
+//!     install_opfs_sahpool::<rocky_sqlite::WasmOsCallback>(&OpfsSAHPoolCfg::default(), true)
 //!         .await
 //!         .unwrap();
 //!
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_opfs_vfs_store() {
-        let data = OpfsSAHPool::new::<sqlite_wasm_rs::WasmOsCallback>(
+        let data = OpfsSAHPool::new::<rocky_sqlite::WasmOsCallback>(
             &OpfsSAHPoolCfgBuilder::new()
                 .directory("test_opfs_suite")
                 .build(),

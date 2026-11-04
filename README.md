@@ -58,6 +58,11 @@ host):
 AR_wasm32_unknown_unknown = "<rustc --print sysroot>/lib/rustlib/<host>/bin/llvm-ar"
 ```
 
+Rocky links its own SQLite build in the browser (`rocky-sqlite`, see
+[vendor/README.md](vendor/README.md)); an application that uses rusqlite
+itself depends on it with `default-features = false`, since rusqlite's default
+`ffi-sqlite-wasm-rs` links another SQLite and the wasm32 link fails.
+
 Rust crates live in `crates/`, applications in `examples/` and performance
 probes in `benchmarks/`.
 

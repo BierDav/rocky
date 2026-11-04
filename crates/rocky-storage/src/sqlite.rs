@@ -25,12 +25,13 @@ pub enum Error {
 }
 /// The source of the SQLite Rocky bundles on every target
 /// (`rocky_core::BUNDLED_SQLITE_VERSION`), natively through `rusqlite` and in
-/// a browser through `vendor/sqlite-wasm-rs`.
+/// a browser through `rocky-sqlite`.
 pub const SQLITE_SOURCE_ID: &str =
     "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
 /// Replay results depend on the SQLite build, so another one is refused at
-/// open instead of diverging. A wasm32 application that misses Rocky's
-/// `[patch.crates-io]` entry links upstream's SQLite and fails here.
+/// open instead of diverging. A wasm32 application whose own rusqlite enables
+/// `ffi-sqlite-wasm-rs` (a default feature) links upstream's SQLite and fails
+/// here.
 fn check_build(raw: &rusqlite::Connection) -> Result<()> {
     static CHECKED: std::sync::OnceLock<std::result::Result<(), String>> =
         std::sync::OnceLock::new();
@@ -51,8 +52,8 @@ fn bundled(version: &str, source: &str) -> std::result::Result<(), String> {
     }
     Err(format!(
         "SQLite {version} ({source}) is linked, but the engine identity names \
-         {bundled} ({SQLITE_SOURCE_ID}); on wasm32 apply Rocky's [patch.crates-io] \
-         entry for sqlite-wasm-rs"
+         {bundled} ({SQLITE_SOURCE_ID}); on wasm32 depend on rusqlite with \
+         default-features = false, since its ffi-sqlite-wasm-rs links another SQLite"
     ))
 }
 /// The SQLite library this build runs, as replicas report it.
@@ -357,14 +358,15 @@ impl Writes {
             total.wrapping_add(count)
         })
     }
-    fn observe(&self, table: &str, case: &rusqlite::hooks::PreUpdateCase) {
-        let update = matches!(case, rusqlite::hooks::PreUpdateCase::Update { .. });
+    fn observe(&self, table: &str, row: &rocky_sqlite::PreUpdate) {
+        use rocky_sqlite::Change;
+        let update = row.change() == Change::Update;
         let rows = self
             .rows
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(columns) = rows.get(table) {
-            use rusqlite::{hooks::PreUpdateCase, types::ValueRef};
+            use rusqlite::types::ValueRef;
             let integer = |value: rusqlite::Result<ValueRef<'_>>| {
                 value.map(|value| match value {
                     ValueRef::Integer(value) => Some(value),
@@ -372,25 +374,12 @@ impl Writes {
                 })
             };
             for (column, keys) in columns {
-                let values = match case {
-                    PreUpdateCase::Insert(added) => {
-                        integer(added.get_new_column_value(*column)).map(|new| (None, new))
-                    }
-                    PreUpdateCase::Delete(removed) => {
-                        integer(removed.get_old_column_value(*column)).map(|old| (old, None))
-                    }
-                    PreUpdateCase::Update {
-                        old_value_accessor,
-                        new_value_accessor,
-                    } => {
-                        integer(old_value_accessor.get_old_column_value(*column)).and_then(|old| {
-                            integer(new_value_accessor.get_new_column_value(*column))
-                                .map(|new| (old, new))
-                        })
-                    }
-                    PreUpdateCase::Unknown => {
-                        Err(rusqlite::Error::InvalidColumnIndex(*column as usize))
-                    }
+                let old = || integer(row.before(*column));
+                let new = || integer(row.after(*column));
+                let values = match row.change() {
+                    Change::Insert => new().map(|new| (None, new)),
+                    Change::Delete => old().map(|old| (old, None)),
+                    Change::Update => old().and_then(|old| Ok((old, new()?))),
                 };
                 let Ok((old, new)) = values else {
                     self.row_failures
@@ -578,7 +567,7 @@ impl Connection {
     /// One hook per connection: it reads a changed row once and hands it to
     /// the digest tracker and to the capture sink.
     fn hooks(&self) -> Result<Hooks> {
-        use rusqlite::hooks::PreUpdateCase;
+        use rocky_sqlite::Change;
         if let Some(hooks) = self.1.get() {
             return Ok(hooks.clone());
         }
@@ -588,10 +577,11 @@ impl Connection {
             writes: Default::default(),
         };
         let shared = hooks.clone();
-        self.raw()?.preupdate_hook(Some(
-            move |_, database: &str, table: &str, case: &PreUpdateCase| {
+        rocky_sqlite::preupdate_hook(
+            &*self.raw()?,
+            move |database: &str, table: &str, row: &rocky_sqlite::PreUpdate| {
                 if database == "main" {
-                    shared.writes.observe(table, case);
+                    shared.writes.observe(table, row);
                 }
                 let (Ok(mut tracker), Ok(mut capture)) =
                     (shared.tracker.lock(), shared.capture.lock())
@@ -599,10 +589,7 @@ impl Connection {
                     return;
                 };
                 let main = database == "main";
-                if let PreUpdateCase::Insert(added) = case
-                    && main
-                    && added.get_query_depth() == 0
-                {
+                if row.change() == Change::Insert && main && row.depth() == 0 {
                     capture.inserted(table);
                 }
                 let tracked = tracker
@@ -613,33 +600,27 @@ impl Connection {
                 if tracked.is_none() && !captured {
                     return;
                 }
-                let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
-                    (0..accessor.get_column_count())
-                        .map(|column| value(accessor.get_old_column_value(column)?))
+                let old = || {
+                    (0..row.columns())
+                        .map(|column| value(row.before(column)?))
                         .collect::<Result<Vec<_>>>()
                 };
-                let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
-                    (0..accessor.get_column_count())
-                        .map(|column| value(accessor.get_new_column_value(column)?))
+                let new = || {
+                    (0..row.columns())
+                        .map(|column| value(row.after(column)?))
                         .collect::<Result<Vec<_>>>()
                 };
-                let rows = match case {
-                    PreUpdateCase::Insert(added) => new(added).map(|added| (None, Some(added))),
-                    PreUpdateCase::Delete(removed) => {
-                        old(removed).map(|removed| (Some(removed), None))
-                    }
-                    PreUpdateCase::Update {
-                        old_value_accessor,
-                        new_value_accessor,
-                    } => old(old_value_accessor)
-                        .and_then(|removed| Ok((Some(removed), Some(new(new_value_accessor)?)))),
-                    PreUpdateCase::Unknown => Err(Error::Type("unknown row change".into())),
+                let rows = match row.change() {
+                    Change::Insert => new().map(|added| (None, Some(added))),
+                    Change::Delete => old().map(|removed| (Some(removed), None)),
+                    Change::Update => old().and_then(|removed| Ok((Some(removed), Some(new()?)))),
                 };
                 match rows {
                     Ok((removed, added)) => {
                         if let Some((slot, logical)) = tracked {
-                            let hash =
-                                |row: &Vec<Value>| crate::digest::row_hash(&logical, row.iter());
+                            let hash = |values: &Vec<Value>| {
+                                crate::digest::row_hash(&logical, values.iter())
+                            };
                             tracker.record(
                                 slot,
                                 removed.as_ref().map(hash),
@@ -658,7 +639,7 @@ impl Connection {
                     }
                 }
             },
-        ))?;
+        )?;
         Ok(self.1.get_or_init(|| hooks).clone())
     }
     /// The connection's session state. The first call installs the statement
@@ -1148,9 +1129,9 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn another_sqlite_build_is_refused() {
         assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, SQLITE_SOURCE_ID).is_ok());
-        // Upstream sqlite-wasm-rs 0.5, which an unpatched wasm32 build links.
+        // Upstream sqlite-wasm-rs 0.5, which rusqlite's default features link.
         let upstream = bundled("3.53.0", "2026-04-09 11:41:38 other").unwrap_err();
-        assert!(upstream.contains("[patch.crates-io]"));
+        assert!(upstream.contains("default-features = false"));
         assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, "another source").is_err());
     }
 

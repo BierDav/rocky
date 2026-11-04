@@ -94,7 +94,7 @@ pub async fn prepare(path: &Path) -> io::Result<()> {
         clear_on_init: false,
         initial_capacity: 2 * SPARE,
     };
-    let pool = sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&config, false)
+    let pool = sahpool::install::<rocky_sqlite::WasmOsCallback>(&config, false)
         .await
         .map_err(unavailable)?;
     POOL.with(|cell| cell.get_or_init(|| pool).count());

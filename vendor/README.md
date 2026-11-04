@@ -23,21 +23,32 @@ path.
 
 # The browser's SQLite
 
-`sqlite-wasm-rs` 0.5.5 is the wasm32 SQLite that rusqlite 0.40 links in a
-browser; the workspace patches it. Its `sqlite3/` amalgamation is replaced by
-libsqlite3-sys 0.38.2's, the SQLite 3.53.2 that native Rocky bundles, and
+`rocky-sqlite` is Rocky's fork of `sqlite-wasm-rs` 0.5.5 (MIT, by Spxg), the
+wasm32 SQLite rusqlite 0.40 links by default. It publishes under Rocky's name
+because a `[patch]` does not reach applications. Its `sqlite3/` amalgamation
+is libsqlite3-sys 0.38.2's, the SQLite 3.53.2 that native Rocky bundles, and
 `build.rs` compiles it with libsqlite3-sys's bundled flags. Replay results
 depend on the engine, so the targets must not differ. Only what a browser
 cannot have differs: `SQLITE_OS_OTHER` (the VFS registers at runtime),
 `SQLITE_THREADSAFE=0`, `SQLITE_OMIT_LOAD_EXTENSION` and `SQLITE_TEMP_STORE=3`.
 Upstream's extra features (math functions, `sqlite_offset`, sessions, the
 bytecode and stmt tables) are off, as they are natively. The sqlite3mc variant
-is removed. `build.rs` archives with the toolchain's `llvm-ar` (rustup
+and upstream's bindings are removed.
+
+In a browser rusqlite runs without its `ffi-sqlite-wasm-rs` feature, so
+`rusqlite::ffi` is libsqlite3-sys with its prebuilt 3.53.2 bindings. Without
+`bundled`, libsqlite3-sys links `-lsqlite3` (pkg-config refuses to cross
+compile), and `build.rs` archives the amalgamation and libc shim as
+`libsqlite3.a` on the linker's search path. An application needs no patch or
+variable for it. If an application's own rusqlite keeps its default features,
+upstream's SQLite returns and the link fails with duplicate symbols.
+rusqlite's `preupdate_hook` feature would run bindgen against a system
+`sqlite3.h`, which a wasm32 build lacks, so `rocky-sqlite` also provides the
+preupdate hook on every target; natively it enables libsqlite3-sys's
+`preupdate_hook`. `build.rs` archives with the toolchain's `llvm-ar` (rustup
 component `llvm-tools`), because a host `ar` such as Apple's writes no symbol
-index for wasm objects. The pregenerated bindings are upstream's: 3.53.0 and
-3.53.2 declare the same API except one changeset flag Rocky does not use.
-`rocky-storage`'s `every_target_links_the_same_sqlite` checks the version,
-source id and compile options on every target.
+index for wasm objects. `rocky-storage`'s `every_target_links_the_same_sqlite`
+checks the version, source id and compile options on every target.
 
 `rocky-sqlite-opfs` is Rocky's fork of `sqlite-wasm-vfs` 0.2.0, the OPFS
 sync-access-handle pool (`sahpool`). It is a workspace member and publishes

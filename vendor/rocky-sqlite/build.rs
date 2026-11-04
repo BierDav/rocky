@@ -27,15 +27,24 @@ const FLAGS: &[&str] = &[
     "-DSQLITE_TEMP_STORE=3",
 ];
 
+/// Natively libsqlite3-sys compiles SQLite. In a browser this archive is
+/// named `libsqlite3.a`: libsqlite3-sys, built without `bundled`, links
+/// `-lsqlite3`, and the search path emitted here resolves it, so no consumer
+/// configuration is needed.
 fn main() {
     println!("cargo::rerun-if-changed=shim");
     println!("cargo::rerun-if-changed=sqlite3");
-    compile();
+    let var = |name| std::env::var(name).unwrap_or_default();
+    if var("CARGO_CFG_TARGET_FAMILY") == "wasm" && var("CARGO_CFG_TARGET_OS") == "unknown" {
+        compile();
+    }
 }
 
 /// The toolchain's `llvm-ar` (rustup component `llvm-tools`). A host `ar`
 /// such as Apple's writes no symbol index for wasm objects, and rust-lld then
 /// finds no SQLite symbols. `AR_wasm32_unknown_unknown` still overrides it.
+// The host runs build scripts; wasm32's clippy configuration does not apply.
+#[allow(clippy::disallowed_methods)]
 fn toolchain_archiver() -> Option<std::path::PathBuf> {
     if std::env::var_os("AR_wasm32_unknown_unknown").is_some() {
         return None;
@@ -122,5 +131,5 @@ fn compile() {
         cc.archiver(archiver);
     }
 
-    cc.compile("wsqlite3");
+    cc.compile("sqlite3");
 }

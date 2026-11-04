@@ -6086,9 +6086,9 @@ dependencies = [
  "js-sys",
  "rand 0.8.8",
  "rocky-platform",
+ "rocky-sqlite",
  "rocky-sqlite-opfs",
  "rusqlite",
- "sqlite-wasm-rs",
  "tempfile",
  "tokio",
  "wasm-bindgen",
@@ -6172,12 +6172,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rocky-sqlite"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "js-sys",
+ "libsqlite3-sys",
+ "rsqlite-vfs",
+ "rusqlite",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "rocky-sqlite-opfs"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "rocky-sqlite",
  "rsqlite-vfs",
- "sqlite-wasm-rs",
  "thiserror 2.0.21",
  "tokio",
  "wasm-bindgen",
@@ -6192,6 +6205,7 @@ version = "0.1.0"
 dependencies = [
  "rocky-core",
  "rocky-platform",
+ "rocky-sqlite",
  "rusqlite",
  "sqlparser",
  "tempfile",
@@ -6243,7 +6257,6 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
- "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -6986,16 +6999,6 @@ checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
  "der 0.8.2",
-]
-
-[[package]]
-name = "sqlite-wasm-rs"
-version = "0.5.5"
-dependencies = [
- "cc",
- "js-sys",
- "rsqlite-vfs",
- "wasm-bindgen",
 ]
 
 [[package]]

@@ -46,7 +46,7 @@ rocky-platform = { workspace = true, features = ["test-support", "simulation"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 # The simulation crashes replicas at named points.
 rocky-secure = { path = "../rocky-secure", features = ["qualification"] }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite.workspace = true
 tracing-subscriber.workspace = true
 # Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
 wasm-bindgen-test = "0.3"

@@ -359,7 +359,7 @@ impl Node {
             return;
         }
         let settings = self.settings.lock().await.clone();
-        let targets = self.dialed(&settings);
+        let targets = self.dialed(&settings, true);
         let attempts = stream::iter(targets)
             .map(|(peer, contact)| {
                 let node = self.clone();

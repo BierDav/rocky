@@ -17,6 +17,15 @@ async fn pass(node: &Node) -> Result<Value, Failure> {
     let link = node.network.read().await;
     Ok(node.sync(&*link.as_ref().ok_or("link")?.transport).await?.0)
 }
+/// A background pass, as the scheduler runs one.
+async fn background(node: &Node) -> Result<Value, Failure> {
+    let link = node.network.read().await;
+    let transport = &*link.as_ref().ok_or("link")?.transport;
+    let (report, _, _) = node
+        .reconciliation_pass(Some(transport), true, false)
+        .await?;
+    Ok(serde_json::to_value(report)?)
+}
 fn writer() -> Profile {
     Profile::Writer {
         scopes: ["items".into()].into(),
@@ -129,32 +138,69 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
         })
         .await
 }
+/// A node whose one contact, `gone`, never answers.
+async fn unreachable(root: &std::path::Path, hub: &Arc<Hub>) -> Result<Arc<Node>, Failure> {
+    let a = enrolled(&root.join("a"), hub, "a", None).await?;
+    let key = PrivateKey::new().public_key();
+    a.configure(|settings| {
+        settings.learn_contact(
+            &a.vault,
+            ContactHint {
+                node: key,
+                routes: vec![("memory".into(), "gone".into())],
+                trusted: false,
+            },
+            "handover",
+            now()?,
+        )
+    })
+    .await?;
+    Ok(a)
+}
 #[tokio::test]
 async fn an_unreachable_contact_costs_no_dial_during_its_backoff() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let key = PrivateKey::new().public_key();
-            a.configure(|settings| {
-                settings.learn_contact(
-                    &a.vault,
-                    ContactHint {
-                        node: key,
-                        routes: vec![("memory".into(), "gone".into())],
-                        trusted: false,
-                    },
-                    "handover",
-                    now()?,
-                )
-            })
-            .await?;
-            assert_eq!(completed_peers(&pass(&a).await?), 0);
+            let a = unreachable(root.path(), &hub).await?;
+            assert_eq!(completed_peers(&background(&a).await?), 0);
             let dials = hub.dials_to("gone");
-            assert_eq!(completed_peers(&pass(&a).await?), 0);
+            let report = background(&a).await?;
+            assert_eq!(completed_peers(&report), 0);
+            assert_eq!(report["peers"][0]["skip"], "backoff");
             assert_eq!(hub.dials_to("gone"), dials);
             assert_eq!(a.peers().await[0]["choice"], "backoff");
+            a.detach(None).await;
+            Ok(())
+        })
+        .await
+}
+#[tokio::test]
+async fn a_sync_the_app_asks_for_dials_a_peer_in_backoff_and_reports_its_failure()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = unreachable(root.path(), &hub).await?;
+            background(&a).await?;
+            // Background passes now wait out the failed peer's backoff.
+            assert_eq!(background(&a).await?["peers"][0]["skip"], "backoff");
+            let dials = hub.dials_to("gone");
+            let report = pass(&a).await?;
+            assert!(hub.dials_to("gone") > dials, "the asked-for sync dials now");
+            let attempts = report["peers"][0]["attempts"]
+                .as_array()
+                .ok_or("attempts")?;
+            assert!(
+                attempts
+                    .iter()
+                    .any(|attempt| attempt["outcome"] == "failed"),
+                "{report}"
+            );
+            // The failure grows the backoff the background passes wait out.
+            assert_eq!(background(&a).await?["peers"][0]["skip"], "backoff");
             a.detach(None).await;
             Ok(())
         })

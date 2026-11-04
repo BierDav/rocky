@@ -2319,7 +2319,7 @@ impl Node {
         if automatic
             && retry_only
             && {
-                let targets = self.dialed(&*self.settings.lock().await);
+                let targets = self.dialed(&*self.settings.lock().await, true);
                 let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
                 targets.iter().all(|(peer, _)| retries.contains_key(peer))
                     && !retries
@@ -2354,7 +2354,10 @@ impl Node {
         self.close_migrations().await?;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         let saved = self.settings.lock().await.clone();
-        if !automatic && self.dialed(&saved).is_empty() && !saved.unresolved_contacts().is_empty() {
+        if !automatic
+            && self.dialed(&saved, false).is_empty()
+            && !saved.unresolved_contacts().is_empty()
+        {
             if saved
                 .unresolved_contacts()
                 .iter()
@@ -2417,7 +2420,9 @@ impl Node {
         {
             self.reset_retry(None);
         }
-        let targets = self.dialed(&*self.settings.lock().await);
+        // A sync the app asked for tries every peer now; only automatic
+        // passes wait out a peer's backoff.
+        let targets = self.dialed(&*self.settings.lock().await, automatic);
         self.replica.configure_peers(settings.kept()).await;
         let needs_initial = {
             let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2451,7 +2456,7 @@ impl Node {
                         pending: has_frames,
                         ..self.peer_retry(peer)
                     });
-                    let skip = if !state.retry.ready() {
+                    let skip = if automatic && !state.retry.ready() {
                         Some(crate::SkipReason::Backoff)
                     } else if automatic && retry_only && !state.pending {
                         Some(crate::SkipReason::NoPendingWork)
@@ -2700,8 +2705,9 @@ impl Node {
             _ => Ok((json!({"state": "connected", "peers": connected}), retry)),
         }
     }
-    /// Local routes, observed holdings and trusted contacts, with backed-off peers last.
-    fn dialed(&self, settings: &Settings) -> Vec<(PublicKey, Contact)> {
+    /// Local routes, observed holdings and trusted contacts, with backed-off
+    /// peers last unless `backoff` is false, as for a sync the app asked for.
+    fn dialed(&self, settings: &Settings, backoff: bool) -> Vec<(PublicKey, Contact)> {
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
         let needed: Vec<_> = self
@@ -2710,10 +2716,13 @@ impl Node {
             .filter(|scope| !self.domain().partitioned_table(scope))
             .collect();
         let mut targets = settings.targets();
+        let waiting = |node: &PublicKey| {
+            backoff && retries.get(node).is_some_and(|state| !state.retry.ready())
+        };
         targets.sort_by_key(|(node, _)| {
             let meta = settings.contact_meta.get(node);
             (
-                retries.get(node).is_some_and(|state| !state.retry.ready()),
+                waiting(node),
                 !meta.is_some_and(|meta| meta.local),
                 !reached.get(node).is_some_and(|last| {
                     last.error.is_none() && needed.iter().any(|scope| last.held.contains(scope))
@@ -2726,7 +2735,7 @@ impl Node {
         choices.clear();
         for (index, (node, _)) in targets.iter().enumerate() {
             let meta = settings.contact_meta.get(node);
-            let reason = if retries.get(node).is_some_and(|state| !state.retry.ready()) {
+            let reason = if waiting(node) {
                 "backoff"
             } else if index >= crate::enrollment::MAX_DIALED {
                 "pass_limit"

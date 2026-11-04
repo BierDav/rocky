@@ -69,7 +69,7 @@ impl Node {
         id: rocky_core::NodeId,
     ) -> Result<Value, Failure> {
         let settings = self.settings.lock().await.clone();
-        for (peer, contact) in self.dialed(&settings) {
+        for (peer, contact) in self.dialed(&settings, true) {
             if self
                 .retries
                 .lock()

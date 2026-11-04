@@ -1147,11 +1147,15 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
             };
             until(|| c.current().is_some_and(|s| !s.live.contains(peer)) && backoff().is_some())
                 .await;
-            // Explicit sync fails too; nothing else carries the row.
+            // Explicit sync tries the peer in its backoff and fails too;
+            // nothing else carries the row.
             add(&a, 1).await?;
             let transport = transport(&c).await?;
             assert!(failed_report(&c.sync(&*transport).await?.0));
             assert!(rows(&c).await?.is_empty());
+            // The renewal its failure prompts reached the peer, which clears
+            // the backoff until the next busy refusal.
+            until(|| backoff().is_some()).await;
             drop(full);
             let deadline = backoff().ok_or("back-off")?;
             tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))

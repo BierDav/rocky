@@ -46,6 +46,16 @@ class BatchedExecution(unittest.TestCase):
         self.assertEqual([name for _, _, name, _ in timed], ["ok"])
         self.assertEqual(set(failed), {"binary exited 101", "binary bad: failed", "binary missing: missing"})
 
+    def test_a_failed_case_output_is_printed_under_its_name(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        events = {"returns_error": ("failed", 0.0, "Error: Denied\n")}
+        report = io.StringIO()
+        with patch.object(tiers, "libtest", return_value=(events, "", 101)), \
+                contextlib.redirect_stderr(report):
+            tiers.run_batches(None, [(suite, "returns_error"), (suite, "missing")])
+        self.assertIn("---- binary returns_error: failed ----\nError: Denied\n", report.getvalue())
+        self.assertIn("---- binary missing: missing ----", report.getvalue())
+
     def test_isolated_cases_are_excluded_from_batches_and_all_results_combine(self):
         suite = {"binary-id": "binary", "binary-path": "/binary"}
         isolated, shared = (suite, "isolated"), (suite, "shared")

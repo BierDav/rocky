@@ -132,6 +132,14 @@ def libtest(suite, names, threads=None):
     return results, proc.stderr, proc.returncode
 
 
+def show_output(suite, name, event, stdout):
+    """Prints a failed test's captured output under its name; a test that
+    returns an error prints only `Error: ...`, with no panic line to name it."""
+    print(f"test-tiers: ---- {suite['binary-id']} {name}: {event} ----", file=sys.stderr)
+    if stdout:
+        print(stdout.rstrip("\n"), file=sys.stderr)
+
+
 def run_unit(source, tests):
     """Runs the unit tests binary by binary; returns timings, failures and wall time."""
     by_binary = {}
@@ -150,8 +158,7 @@ def run_unit(source, tests):
                 timed.append((source, suite, name, took))
             else:
                 failed.append(f"{suite['binary-id']} {name}: {event}")
-                if stdout:
-                    print(stdout, file=sys.stderr)
+                show_output(suite, name, event, stdout)
         if not results and stderr:
             print(stderr, file=sys.stderr)
     return timed, failed, wall
@@ -180,8 +187,7 @@ def run_batches(source, tests):
                 timed.append((source, suite, name, took))
             else:
                 failed.append(f"{suite['binary-id']} {name}: {event}")
-                if stdout:
-                    print(stdout, file=sys.stderr)
+                show_output(suite, name, event, stdout)
         if not events and stderr:
             print(stderr, file=sys.stderr)
         return timed, failed

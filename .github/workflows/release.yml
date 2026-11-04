@@ -345,24 +345,21 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
-      # Only what publishing consumes: the notes, the two JVM packages and the
-      # Android repository. The image jobs' Docker build records are not
-      # release inputs, and fetching every artifact once died on one of them
-      # after five retries (run 37939385427); retry the fetch instead of
-      # re-running the whole workflow.
-      - name: Download the release artifacts
+      # Packages are published to crates.io and GHCR; only the release notes
+      # are needed here. Avoid downloading test archives or Docker build records.
+      - name: Download the release notes
         env:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5; do
             rm -rf dist
-            if gh run download "${GITHUB_RUN_ID}" --dir dist \
-                --pattern 'notes' --pattern 'android' --pattern 'ios' --pattern 'jvm-*' &&
+            if gh run download "${GITHUB_RUN_ID}" --dir dist/notes \
+                --name notes &&
               test -f dist/notes/notes.md; then
               exit 0
             fi
-            echo "::warning::Downloading the release artifacts failed (attempt ${attempt})"
+            echo "::warning::Downloading the release notes failed (attempt ${attempt})"
             sleep $((attempt * 15))
           done
           exit 1
@@ -391,16 +388,7 @@ jobs:
           else
             set -- --prerelease --latest=false
           fi
-          mapfile -t assets < <(
-            find dist -type f -print | sort | awk '/^dist\/rocky-[^/]+\//{print}'
-          )
-          if [ "${#assets[@]}" -eq 0 ]; then
-            echo "::error::No release assets found under dist/rocky-*/. Check downloaded artifact patterns." >&2
-            echo "::debug::dist tree:" >&2
-            find dist -maxdepth 4 -print >&2 || true
-            exit 1
-          fi
-          gh release create "v${VERSION}" "${assets[@]}" "$@" \
+          gh release create "v${VERSION}" "$@" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "v${VERSION}" \

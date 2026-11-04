@@ -1,0 +1,31 @@
+#!/bin/sh
+# Builds rocky-sdk for wasm32 as an application outside this workspace does:
+# without this repository's .cargo/config.toml, with only the setup the README
+# asks of an application (an llvm-ar for C dependencies).
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+consumer=$(mktemp -d)
+trap 'rm -rf "$consumer"' EXIT
+
+mkdir "$consumer/src"
+cat >"$consumer/Cargo.toml" <<EOF
+[package]
+name = "rocky-wasm-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rocky-sdk = { path = "$repo_root/crates/rocky-sdk" }
+
+[workspace]
+EOF
+echo 'pub use rocky_sdk;' >"$consumer/src/lib.rs"
+# The workspace's versions, so the check does not follow new releases upstream.
+cp "$repo_root/Cargo.lock" "$consumer/Cargo.lock"
+
+cd "$consumer"
+AR_wasm32_unknown_unknown="$repo_root/scripts/llvm-ar" \
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/wasm-consumer}" \
+    cargo build --target wasm32-unknown-unknown

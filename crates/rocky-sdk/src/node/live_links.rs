@@ -476,6 +476,7 @@ impl Node {
             },
         };
         opened.attach_lanes(lanes)?;
+        self.observe_peer_clock(opened.peer, opened.clock_offset);
         if !self.foreground.load(Ordering::SeqCst)
             || !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open

@@ -290,6 +290,9 @@ pub(crate) struct Node {
     /// Peers whose sessions this device served, with the last time; at
     /// most `MET` are kept.
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
+    /// Peers whose clock the last handshake found more than
+    /// `MAX_CLOCK_AHEAD` apart from this one's, as alerts; at most `MET`.
+    clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
     /// A session brought statements since the last renewal. Rotated keys
     /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
@@ -401,6 +404,7 @@ impl Node {
             backups: Mutex::new(()),
             reached: std::sync::Mutex::new(BTreeMap::new()),
             met: std::sync::Mutex::new(BTreeMap::new()),
+            clocks: std::sync::Mutex::new(BTreeMap::new()),
             learned: AtomicBool::new(false),
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),

@@ -63,6 +63,8 @@ pub(super) struct Member {
     /// Revoked members never open again.
     pub(super) revoked: bool,
     schema: &'static str,
+    /// Seconds this device's wall clock runs ahead, across restarts.
+    pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Member {
@@ -75,6 +77,7 @@ impl Member {
             running: None,
             node_key: None,
             revoked: false,
+            ahead: Arc::default(),
         }
     }
     /// Starts the node: creating, joining or opening its directory.
@@ -90,6 +93,7 @@ impl Member {
                 coordination: None,
             },
             install,
+            self.ahead.clone(),
         )
         .await?;
         let database = hosted.opened.database;

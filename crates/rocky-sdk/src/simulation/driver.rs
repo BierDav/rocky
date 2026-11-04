@@ -83,6 +83,8 @@ struct Simulation {
     /// Lists shared with each member: holding one needs its key.
     shared: BTreeSet<(usize, String)>,
     coverage: BTreeMap<String, usize>,
+    /// Each node's pending `Watch`: the alerts it saw change to.
+    watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
 }
 
 /// Runs `seed` on a current-thread runtime with a paused clock; call it
@@ -143,6 +145,7 @@ pub(super) async fn run_steps(
             .collect(),
         synced: vec![false; scenario.nodes],
         scope_local: 0,
+        watches: BTreeMap::new(),
     };
     let mut report = Report {
         seed,
@@ -262,6 +265,44 @@ impl Simulation {
                     "{frames} ahead, {} keys",
                     member.keys().await?.len()
                 ))
+            }
+            Action::Clock(node, by) => {
+                self.members[*node]
+                    .ahead
+                    .store(by.as_secs(), std::sync::atomic::Ordering::Relaxed);
+                Ok("set".into())
+            }
+            Action::Alerts(node) => {
+                let status = self.running(*node)?.call(json!({"type": "status"})).await?;
+                let alerts: Vec<crate::Alert> = serde_json::from_value(status["alerts"].clone())?;
+                Ok(self.alerts(&alerts))
+            }
+            Action::Watch(node) => {
+                let database = self.running(*node)?.running.as_ref().ok_or("not running")?;
+                let session = database.database.session();
+                let watch = tokio::task::spawn_local(async move {
+                    let mut status = session.status().await?;
+                    let before = status.alerts.clone();
+                    // Every wake is a changed token: bounded, never a hang.
+                    for _ in 0..1000 {
+                        status = session.status_after(status.token).await?;
+                        if status.alerts != before {
+                            return Ok(status.alerts);
+                        }
+                    }
+                    Err("the alerts did not change".into())
+                });
+                self.watches.insert(*node, watch);
+                Ok("watching".into())
+            }
+            Action::Woken(node) => {
+                let watch = self.watches.remove(node).ok_or("no watch")?;
+                // Only stops a hang: a paused clock reaches it once idle.
+                let alerts =
+                    rocky_platform::time::timeout(std::time::Duration::from_secs(600), watch)
+                        .await
+                        .map_err(|_| "not woken")???;
+                Ok(self.alerts(&alerts))
             }
             Action::Probe(node) => {
                 let member = self.running(*node)?;
@@ -503,6 +544,27 @@ impl Simulation {
                         | BlockerKind::StagedImport { sealed: false, .. }
                 )
             })
+    }
+    /// Alerts with node names for keys and whole minutes.
+    fn alerts(&self, alerts: &[crate::Alert]) -> String {
+        let name = |key: &str| {
+            self.members
+                .iter()
+                .find(|member| member.node_key.as_deref() == Some(key))
+                .map_or("?".into(), |member| member.name.clone())
+        };
+        let described: Vec<String> = alerts
+            .iter()
+            .map(|alert| match &alert.kind {
+                crate::AlertKind::ClockAheadOfPeer { node, seconds } => {
+                    format!("ahead of {} {} min", name(node), seconds / 60)
+                }
+                crate::AlertKind::PeerClockAhead { node, seconds } => {
+                    format!("{} ahead {} min", name(node), seconds / 60)
+                }
+            })
+            .collect();
+        format!("alerts {described:?}")
     }
     async fn sync(&mut self, node: usize) -> Result<String, Failure> {
         let report = self.running(node)?.call(json!({"type": "sync"})).await;

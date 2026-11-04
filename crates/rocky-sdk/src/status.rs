@@ -380,6 +380,26 @@ pub struct CoordinationStatus {
     pub mode: CoordinationMode,
     pub attempts: Vec<AttemptObservation>,
 }
+/// A condition that delays or degrades replication but blocks no scope;
+/// blockers stay for scopes. Later conditions add kinds.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Alert {
+    pub kind: AlertKind,
+    /// Epoch seconds since the condition holds, when known.
+    pub since: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AlertKind {
+    /// This device's clock is `seconds` ahead of `node`'s, more than
+    /// `MAX_CLOCK_AHEAD`: this device's changes wait on that device until
+    /// its clock catches up.
+    ClockAheadOfPeer { node: String, seconds: u64 },
+    /// `node`'s clock is `seconds` ahead of this device's, more than
+    /// `MAX_CLOCK_AHEAD`: its changes wait here until this clock catches up
+    /// (a `ClockAhead` blocker once they arrive).
+    PeerClockAhead { node: String, seconds: u64 },
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseStatus {
     pub token: String,
@@ -388,6 +408,8 @@ pub struct DatabaseStatus {
     pub data: DataStatus,
     pub network: NetworkStatus,
     pub coordination: CoordinationStatus,
+    /// Each condition the application should know of that no blocker shows.
+    pub alerts: Vec<Alert>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {

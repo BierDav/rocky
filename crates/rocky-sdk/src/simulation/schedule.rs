@@ -150,6 +150,15 @@ pub(super) enum Action {
     WriteAhead(usize, Duration),
     /// Reports the node's frames waiting for its clock and its item keys.
     Ahead(usize),
+    /// The node's wall clock runs this far ahead from now on.
+    Clock(usize, Duration),
+    /// Reports the node's alerts.
+    Alerts(usize),
+    /// Waits in the background, by `status_after` alone, for the node's
+    /// alerts to change.
+    Watch(usize),
+    /// Reports the alerts the node's watch saw them change to.
+    Woken(usize),
 }
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -182,6 +191,10 @@ impl fmt::Display for Action {
             Self::Online(node) => write!(f, "online {}", name(node)),
             Self::WriteAhead(node, by) => write!(f, "write {} {by:?} ahead", name(node)),
             Self::Ahead(node) => write!(f, "ahead {}", name(node)),
+            Self::Clock(node, by) => write!(f, "clock {} {by:?} ahead", name(node)),
+            Self::Alerts(node) => write!(f, "alerts {}", name(node)),
+            Self::Watch(node) => write!(f, "watch {}", name(node)),
+            Self::Woken(node) => write!(f, "woken {}", name(node)),
         }
     }
 }

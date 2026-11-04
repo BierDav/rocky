@@ -88,6 +88,9 @@ struct Hello {
     tip: rocky_core::TipId,
     credentials: CredentialChain,
     exchange: [u8; 32],
+    /// The sender's wall clock in microseconds, so each side learns the
+    /// other's offset.
+    clock: u64,
 }
 /// The label both sides sign the two hellos under.
 fn session_label(version: u32) -> String {
@@ -379,7 +382,8 @@ impl NativeSession {
     /// The initiator's hello, then the acceptor's once it verified the
     /// initiator's chain, then both signatures; the initiator then verifies
     /// the acceptor's chain. Both exchange the revocation statements the
-    /// other lacks and check the merged set last.
+    /// other lacks and check the merged set last. Returns the session and
+    /// the peer's wall clock less this device's, in microseconds.
     async fn handshake<A: RowApplication>(
         mut stream: Box<dyn SessionStream>,
         replica: &EncryptedReplica<A>,
@@ -387,7 +391,7 @@ impl NativeSession {
         (side, expected): (Side, Option<PublicKey>),
         byte_budget: usize,
         (version, resolve): (u32, bool),
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Option<(Self, i64)>, Error> {
         if replica.private_schema().await? {
             return Err(denied("schema publication is private"));
         }
@@ -405,6 +409,7 @@ impl NativeSession {
             tip: replica.followed_tip().await,
             credentials,
             exchange,
+            clock: micros()?,
         };
         let local_bytes = encode(&hello)?;
         let peer_bytes = match side {
@@ -414,6 +419,7 @@ impl NativeSession {
             }
             Side::Acceptor => read_frame(&mut stream).await?,
         };
+        let received = micros()?;
         if side == Side::Acceptor
             && resolve
             && let Some(proof) = Self::peer_resolution_reply(&peer_bytes, &local)?
@@ -446,6 +452,11 @@ impl NativeSession {
         if !peer.node.verify(&binding, &signature) {
             return Err(denied(AUTHENTICATION_FAILED));
         }
+        // A hello's clock is read before it is sent, the other's on
+        // receipt: the offset is off by the handshake's transit and waits,
+        // bounded by its timeouts and negligible against `MAX_CLOCK_AHEAD`.
+        let offset = i64::try_from(i128::from(peer.clock) - i128::from(received))
+            .map_err(|_| denied("link peer clock"))?;
         if side == Side::Initiator {
             replica
                 .admit_peer(peer.node, &peer.credentials, peer.tip)
@@ -505,7 +516,7 @@ impl NativeSession {
         session
             .exchange_tips(replica, side == Side::Initiator)
             .await?;
-        Ok(Some(session))
+        Ok(Some((session, offset)))
     }
     pub fn peer(&self) -> PublicKey {
         self.peer

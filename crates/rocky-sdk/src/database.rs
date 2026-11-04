@@ -649,8 +649,14 @@ pub(crate) struct Hosted {
 impl Database {
     /// Serves the database on a `LocalSet` of the calling task's thread
     /// instead of its own thread, so a paused clock and one thread drive
-    /// every node of a simulation. Call it inside a `LocalSet`.
-    pub(crate) async fn host(open: Open<'_>, install: Install) -> Result<Hosted, Failure> {
+    /// every node of a simulation. Call it inside a `LocalSet`. While
+    /// `ahead` holds seconds, the database's local tasks see this thread's
+    /// clock that far ahead, as a device whose wall clock runs ahead does.
+    pub(crate) async fn host(
+        open: Open<'_>,
+        install: Install,
+        ahead: Arc<AtomicU64>,
+    ) -> Result<Hosted, Failure> {
         let (mut setup, network) = Self::setup(open, install, None)?;
         let (expose, exposed) = std::sync::mpsc::channel();
         setup.expose = Some(expose);
@@ -660,9 +666,19 @@ impl Database {
         let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
         let task = crate::reactor::spawn_local("host", async move {
             let local = tokio::task::LocalSet::new();
-            let result = local
-                .run_until(run(setup, network, receiver, cleanups, &hello))
-                .await;
+            let mut served =
+                std::pin::pin!(local.run_until(run(setup, network, receiver, cleanups, &hello)));
+            let result = std::future::poll_fn(|cx| {
+                let seconds = ahead.load(Ordering::Relaxed);
+                if seconds == 0 {
+                    return served.as_mut().poll(cx);
+                }
+                let prior = rocky_secure::skew_clock(seconds);
+                let polled = served.as_mut().poll(cx);
+                rocky_secure::skew_clock(prior);
+                polled
+            })
+            .await;
             if let Err(error) = result {
                 let _ = hello.send(Err(error));
             }

@@ -150,10 +150,10 @@ thread_local! {
     static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 /// Runs this thread's clock `seconds` ahead, as a device whose wall clock
-/// is ahead does.
+/// is ahead does; returns the prior skew.
 #[cfg(feature = "qualification")]
-pub fn skew_clock(seconds: u64) {
-    CLOCK_SKEW.with(|skew| skew.set(seconds));
+pub fn skew_clock(seconds: u64) -> u64 {
+    CLOCK_SKEW.with(|skew| skew.replace(seconds))
 }
 #[cfg(test)]
 thread_local! {

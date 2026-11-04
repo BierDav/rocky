@@ -333,3 +333,62 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     assert!(present(&configured).await && present(&full_node).await);
     assert_eq!(a.recorded_peers().await, kept);
 }
+
+/// Polls `future` with this thread's clock `seconds` ahead, as a device
+/// whose wall clock runs ahead does.
+async fn skewed<T>(seconds: u64, future: impl Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let prior = crate::CLOCK_SKEW.with(|skew| skew.replace(seconds));
+        let polled = future.as_mut().poll(cx);
+        crate::CLOCK_SKEW.with(|skew| skew.set(prior));
+        polled
+    })
+    .await
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn each_side_of_a_handshake_learns_the_others_clock_offset() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
+    let a = open(&f, &dir, "a.db", &alice).await;
+    let b = open(&f, &dir, "b.db", &bob).await;
+    // Real time passes during the handshake; seconds of it are far below
+    // `MAX_CLOCK_AHEAD`.
+    let near = |offset: i64, expected: i64| offset.abs_diff(expected) < 5_000_000;
+    for ahead in [0, 3600] {
+        let (near_end, far_end) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+        let (dialed, accepted) = tokio::join!(
+            skewed(
+                ahead,
+                Link::open(
+                    near_end,
+                    &b,
+                    bob.clone(),
+                    f.credentials(&bob, f.full()),
+                    Some(alice.public_key()),
+                ),
+            ),
+            Link::open(
+                far_end,
+                &a,
+                alice.clone(),
+                f.credentials(&alice, f.full()),
+                None
+            ),
+        );
+        let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
+        let expected = ahead as i64 * 1_000_000;
+        assert!(
+            near(dialed.clock_offset, -expected),
+            "{}",
+            dialed.clock_offset
+        );
+        assert!(
+            near(accepted.clock_offset, expected),
+            "{}",
+            accepted.clock_offset
+        );
+    }
+}

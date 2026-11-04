@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 21;
+pub(super) const HANDSHAKE_VERSION: u32 = 22;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -120,6 +120,9 @@ pub struct Link {
     pub offered: Vec<ResourceScope>,
     pub direction: bool,
     pub expires: u64,
+    /// The peer's wall clock less this device's at the handshake, in
+    /// microseconds: positive when the peer's runs ahead.
+    pub clock_offset: i64,
     pub local_states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub channels: channels::Channels,
@@ -296,7 +299,7 @@ impl Link {
             version,
         )
         .await?;
-        let Some(mut session) = session else {
+        let Some((mut session, clock_offset)) = session else {
             return Ok(None);
         };
         #[cfg(test)]
@@ -367,6 +370,7 @@ impl Link {
             offered: session.offered.iter().copied().collect(),
             direction: side == Side::Acceptor,
             expires: credentials.expires().min(session.credentials.expires()),
+            clock_offset,
             reader: Reader::new(FrameReader {
                 stream: read,
                 peer: session.peer,
@@ -815,7 +819,7 @@ mod tests {
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/4"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v21");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v22");
     }
 }
 

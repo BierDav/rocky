@@ -282,7 +282,7 @@ impl<A: RowApplication> Inner<A> {
                     pass.clean = Some(hash);
                     if !pass.examined.contains(&hash) {
                         self.waits.remove(&hash);
-                        self.ahead.remove(&hash);
+                        self.hold_ahead(hash, None);
                     }
                     return Ok(true);
                 }
@@ -371,20 +371,16 @@ impl<A: RowApplication> Inner<A> {
         let held = self.quarantined_frame(id).await?;
         if pass.skipped.contains(&id) || held.is_some_and(|held| !held.due(time, pass.context)) {
             self.waits.insert(id, WaitReason::Quarantined);
-            self.ahead.remove(&id);
+            self.hold_ahead(id, None);
             return Ok(false);
         }
         self.conn.execute("SAVEPOINT quarantine", ()).await?;
         let outcome = Box::pin(self.apply_frame(frame, time)).await;
-        match &outcome {
-            Ok(Outcome::Ahead(stamp)) => {
-                let author = frame.operation_ref()?.header.public_key;
-                self.ahead.insert(id, (author, *stamp));
-            }
-            _ => {
-                self.ahead.remove(&id);
-            }
-        }
+        let ahead = match &outcome {
+            Ok(Outcome::Ahead(stamp)) => Some((frame.operation_ref()?.header.public_key, *stamp)),
+            _ => None,
+        };
+        self.hold_ahead(id, ahead);
         let failure = match &outcome {
             Ok(Outcome::Waiting(WaitReason::Undecryptable)) => Some(quarantine::UNDECRYPTABLE),
             Err(error) if quarantine::quarantines(error) => Some(error.category()),
@@ -613,6 +609,34 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute("RELEASE pending", ()).await?;
         result
+    }
+    /// Records whether pending head `id` waits for this clock, logging only
+    /// when its author's frames start or stop waiting.
+    fn hold_ahead(&mut self, id: Hash, ahead: Option<(PublicKey, u64)>) {
+        let waiting =
+            |inner: &Self, author: PublicKey| inner.ahead.values().any(|(by, _)| *by == author);
+        let prior = self.ahead.remove(&id);
+        if let Some((author, stamp)) = ahead {
+            if prior.is_none_or(|(by, _)| by != author) && !waiting(self, author) {
+                let seconds = micros()
+                    .map(|now| stamp.saturating_sub(now).div_ceil(1_000_000))
+                    .unwrap_or_default();
+                tracing::warn!(
+                    node = crate::network::trace::peer(&author),
+                    seconds,
+                    "frames of a peer whose clock runs ahead wait for this device's clock"
+                );
+            }
+            self.ahead.insert(id, (author, stamp));
+        }
+        if let Some((author, _)) = prior
+            && !waiting(self, author)
+        {
+            tracing::info!(
+                node = crate::network::trace::peer(&author),
+                "no frames of the peer wait for this device's clock any more"
+            );
+        }
     }
     /// The stamp of a received frame more than `MAX_CLOCK_AHEAD` ahead of
     /// this clock: it waits rather than drag this replica's hybrid clock and

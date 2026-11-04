@@ -310,6 +310,13 @@ impl Node {
                     .collect(),
             },
             network: self.observed_network().await?,
+            alerts: self
+                .clocks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect(),
             coordination: CoordinationStatus {
                 mode: if self.service.is_some() {
                     CoordinationMode::Service
@@ -337,6 +344,65 @@ impl Node {
 }
 
 impl Node {
+    /// Replaces `peer`'s clock alert with the one a handshake's `offset`
+    /// (the peer's clock less this one's, in microseconds) shows: none
+    /// within `MAX_CLOCK_AHEAD`. Logs only when an alert appears or clears.
+    pub(super) fn observe_peer_clock(&self, peer: PublicKey, offset: i64) {
+        let node = peer.to_hex();
+        let label = node.get(..12).unwrap_or_default().to_owned();
+        let seconds = offset.unsigned_abs().div_ceil(1_000_000);
+        let kind = if offset.unsigned_abs() <= rocky_core::MAX_CLOCK_AHEAD.as_micros() as u64 {
+            None
+        } else if offset < 0 {
+            Some(AlertKind::ClockAheadOfPeer { node, seconds })
+        } else {
+            Some(AlertKind::PeerClockAhead { node, seconds })
+        };
+        let mut clocks = self.clocks.lock().unwrap_or_else(PoisonError::into_inner);
+        let prior = clocks.remove(&peer);
+        let changed = prior.as_ref().map(|alert| &alert.kind) != kind.as_ref();
+        let turned = prior
+            .as_ref()
+            .map(|alert| std::mem::discriminant(&alert.kind))
+            != kind.as_ref().map(std::mem::discriminant);
+        match kind {
+            Some(kind) => {
+                let since = match prior {
+                    Some(prior) if !turned => prior.since,
+                    _ => self.status_time().ok(),
+                };
+                if turned {
+                    match kind {
+                        AlertKind::ClockAheadOfPeer { .. } => tracing::warn!(
+                            peer = label,
+                            seconds,
+                            "this device's clock is ahead of the peer's: its changes wait there"
+                        ),
+                        AlertKind::PeerClockAhead { .. } => tracing::warn!(
+                            peer = label,
+                            seconds,
+                            "the peer's clock is ahead of this device's: its changes wait here"
+                        ),
+                    }
+                }
+                clocks.insert(peer, Alert { kind, since });
+                if clocks.len() > MET
+                    && let Some(other) = clocks.keys().find(|key| **key != peer).copied()
+                {
+                    clocks.remove(&other);
+                }
+            }
+            None if prior.is_some() => tracing::warn!(
+                peer = label,
+                "the peer's clock and this device's agree within the bound again"
+            ),
+            None => {}
+        }
+        drop(clocks);
+        if changed {
+            self.observations.touch();
+        }
+    }
     /// The replica's blockers and the bootstrap intent's: scopes it still
     /// imports and the inviter a joined device waits for.
     pub(crate) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {

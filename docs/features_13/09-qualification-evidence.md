@@ -905,3 +905,42 @@ points, and the `board_cap` assertion bounds a board's points.
     (256 unit, 1405 integration passed); `./scripts/check --wasm` 0
     (831 passed, 1 ignored); release `relational_soak` 300 seeds from
     20000 in three chunks of 100, all passed (410 s, 420 s, 356 s).
+- **Closed: a fast clock is reported on both devices** (2026-11-04).
+  The hold above showed the receiver a `ClockAhead` blocker, but the
+  device whose clock ran ahead never learned that its writes waited
+  elsewhere, and no transition was logged.
+  - Handshake: each hello carries the sender's wall clock (microseconds,
+    signed with the hello). Each side records the peer's clock less its
+    own at receipt as `Link::clock_offset`; transit and handshake waits
+    are seconds at most, negligible against `MAX_CLOCK_AHEAD`.
+  - Status: `DatabaseStatus.alerts: Vec<Alert>` (`kind`, `since`) reports
+    conditions that delay or degrade but block no scope; blockers stay
+    for scopes. `AlertKind::ClockAheadOfPeer { node, seconds }` (this
+    device's changes wait on `node`) and `PeerClockAhead { node, seconds }`
+    (`node`'s changes wait here) hold per peer, replaced by every
+    handshake and cleared by one within the bound; in memory, at most 64
+    peers, only node id and seconds. Alerts are part of the status token,
+    so `status_after` wakes when one appears, changes or clears.
+  - Logs: `tracing::warn!` when an alert appears or clears, and when a
+    peer's frames start waiting for this clock (`info!` when none wait
+    any more); never per status poll.
+  - Tests: `tests::admission::each_side_of_a_handshake_learns_the_others_clock_offset`
+    (an hour ahead and none, both ends) and
+    `simulation::clock::a_link_tells_both_devices_when_one_clock_runs_ahead`
+    (a node's own tasks see its clock an hour ahead: after a new link the
+    fast node shows `ClockAheadOfPeer` and the other `PeerClockAhead`,
+    each delivered to a `status_after` wait pending before the link; the
+    fast node's write then waits behind a `ClockAhead` blocker; both
+    alerts clear after its clock is right and a new link, again through
+    `status_after`; 4 min ahead raises none; the held write applies once
+    the receiver's clock reaches it). Both fail with the handshake offset
+    forced to 0.
+  - Formats: link handshake `rocky.link.v22`; replica and frame formats
+    unchanged.
+  - Open: a coordination service's `ClockSkew` refusal still surfaces
+    only as the failed call's `clock_skew` code with `coordinator_time`,
+    not as an alert: it names no peer and has no clearing event.
+  - Checks: `./scripts/lint` 0; `./scripts/check --unit --integration` 0
+    (256 unit, 1408 integration passed); `./scripts/check --wasm` 0
+    (832 passed, 1 ignored); release `relational_soak` 300 seeds from
+    20000 in three chunks of 100, all passed (388 s, 387 s, 557 s).

@@ -85,6 +85,9 @@ struct Simulation {
     coverage: BTreeMap<String, usize>,
     /// Each node's pending `Watch`: the alerts it saw change to.
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
+    /// Each node's pending `WatchMesh`: the view it saw change to.
+    mesh_watches:
+        BTreeMap<usize, tokio::task::JoinHandle<Result<Option<Vec<crate::MeshDevice>>, Failure>>>,
 }
 
 /// Runs `seed` on a current-thread runtime with a paused clock; call it
@@ -146,6 +149,7 @@ pub(super) async fn run_steps(
         synced: vec![false; scenario.nodes],
         scope_local: 0,
         watches: BTreeMap::new(),
+        mesh_watches: BTreeMap::new(),
     };
     let mut report = Report {
         seed,
@@ -303,6 +307,115 @@ impl Simulation {
                         .await
                         .map_err(|_| "not woken")???;
                 Ok(self.alerts(&alerts))
+            }
+            Action::Coordinated(node, behind) => {
+                let running = self.members[*node]
+                    .running
+                    .as_ref()
+                    .and_then(|running| running.node.upgrade())
+                    .ok_or("the node is not running")?;
+                let refusal = behind
+                    .map(|behind| -> Result<_, Failure> {
+                        Ok(rocky_core::CoordinationError::ClockSkew {
+                            coordinator_time: crate::enrollment::now()? + behind,
+                        })
+                    })
+                    .transpose()?;
+                running.observe_coordination(refusal.as_ref().map_or(Ok(()), Err));
+                Ok(if refusal.is_some() {
+                    "refused"
+                } else {
+                    "accepted"
+                }
+                .into())
+            }
+            Action::Trust(node) => {
+                let identity = self
+                    .database(*node)?
+                    .session()
+                    .status()
+                    .await?
+                    .authority
+                    .principal;
+                let grant = self.database(0)?.session().trust(&identity).await?;
+                self.database(*node)?
+                    .session()
+                    .install_trust(&grant.grant)
+                    .await?;
+                Ok("trusted".into())
+            }
+            Action::Mesh(node) => {
+                let status = self.database(*node)?.session().status().await?;
+                Ok(self.mesh(&status.mesh))
+            }
+            Action::WatchMesh(node, device) => {
+                let session = self.database(*node)?.session();
+                let device = self.members[*device]
+                    .node_key
+                    .clone()
+                    .ok_or("the device has no key")?;
+                let watch = tokio::task::spawn_local(async move {
+                    // The device's entry without its times.
+                    let entry = |mesh: &Option<Vec<crate::MeshDevice>>| {
+                        mesh.iter()
+                            .flatten()
+                            .find(|entry| entry.node == device)
+                            .map(|entry| {
+                                let report = crate::HealthReport {
+                                    produced_at_epoch_seconds: 0,
+                                    ..entry.report.clone()
+                                };
+                                (report, entry.silent)
+                            })
+                    };
+                    let mut status = session.status().await?;
+                    let before = entry(&status.mesh);
+                    // Every wake is a changed token: bounded, never a hang.
+                    for _ in 0..1000 {
+                        status = session.status_after(status.token).await?;
+                        if entry(&status.mesh) != before {
+                            return Ok(status.mesh);
+                        }
+                    }
+                    Err("the device's health did not change".into())
+                });
+                self.mesh_watches.insert(*node, watch);
+                Ok("watching".into())
+            }
+            Action::WokenMesh(node) => {
+                let watch = self.mesh_watches.remove(node).ok_or("no watch")?;
+                // Only stops a hang: a paused clock reaches it once idle.
+                let mesh =
+                    rocky_platform::time::timeout(std::time::Duration::from_secs(3600), watch)
+                        .await
+                        .map_err(|_| "not woken")???;
+                Ok(self.mesh(&mesh))
+            }
+            Action::Partial(node) => {
+                let owner = self.members[0]
+                    .node_key
+                    .clone()
+                    .ok_or("node 0 has no key")?;
+                self.running(*node)?
+                    .call(json!({"type": "partition_role", "role":
+                        {"role": "Partial", "full_nodes": [owner], "custody": 1}}))
+                    .await?;
+                self.partial[*node] = true;
+                Ok("partial".into())
+            }
+            Action::Received(node) => {
+                let running = self.members[*node]
+                    .running
+                    .as_ref()
+                    .and_then(|running| running.node.upgrade())
+                    .ok_or("the node is not running")?;
+                let received = running
+                    .reports_received
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                Ok(format!(
+                    "{} reports",
+                    if received == 0 { "no" } else { "some" }
+                ))
             }
             Action::Probe(node) => {
                 let member = self.running(*node)?;
@@ -545,6 +658,40 @@ impl Simulation {
                 )
             })
     }
+    /// Each reporting device by name: its alerts, blockers by kind,
+    /// whether it is silent and which node forwarded its report.
+    fn mesh(&self, mesh: &Option<Vec<crate::MeshDevice>>) -> String {
+        let Some(devices) = mesh else {
+            return "mesh none".into();
+        };
+        let described: Vec<String> = devices
+            .iter()
+            .map(|device| {
+                let mut text = format!(
+                    "{}: {}",
+                    self.name(&device.node),
+                    self.alerts(&device.report.alerts)
+                );
+                for blocker in &device.report.blockers {
+                    text += &format!(", {} {}", blocker.kind, blocker.count);
+                }
+                if let Some(via) = &device.via {
+                    text += &format!(", via {}", self.name(via));
+                }
+                if device.silent {
+                    text += ", silent";
+                }
+                text
+            })
+            .collect();
+        format!("mesh {described:?}")
+    }
+    fn name(&self, key: &str) -> String {
+        self.members
+            .iter()
+            .find(|member| member.node_key.as_deref() == Some(key))
+            .map_or("?".into(), |member| member.name.clone())
+    }
     /// Alerts with node names for keys and whole minutes.
     fn alerts(&self, alerts: &[crate::Alert]) -> String {
         let name = |key: &str| {
@@ -562,6 +709,11 @@ impl Simulation {
                 crate::AlertKind::PeerClockAhead { node, seconds } => {
                     format!("{} ahead {} min", name(node), seconds / 60)
                 }
+                crate::AlertKind::CoordinatorClockSkew { seconds, ahead } => {
+                    format!("coordinator skew {} min ahead {ahead}", seconds / 60)
+                }
+                crate::AlertKind::CoordinatorUnreachable => "coordinator unreachable".into(),
+                crate::AlertKind::RevocationsUnpushed => "revocations unpushed".into(),
             })
             .collect();
         format!("alerts {described:?}")

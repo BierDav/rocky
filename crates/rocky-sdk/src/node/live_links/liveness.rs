@@ -19,6 +19,7 @@ impl Node {
         let direction = opened.direction;
         let expires = opened.expires;
         let offered = opened.offered.clone();
+        let chain = opened.credentials.clone();
         let handle = opened.channels.handle.clone();
         let mut io = io::Io::start(
             opened,
@@ -31,6 +32,8 @@ impl Node {
         let mut stage = service.stage.subscribe();
         let mut changes = changed.subscribe();
         let writer = io.writer();
+        // The peer showed that it collects health reports.
+        let collector = watch::channel(false).0;
         let exit = {
             let receive = async {
                 let mut requests = futures_util::stream::FuturesUnordered::<
@@ -139,6 +142,17 @@ impl Node {
                                 }));
                             }
                         }
+                        Message::Health(bytes) if frame.direction != direction => {
+                            if requests.len() >= 8 {
+                                tracing::debug!("a health message was dropped: the link is busy");
+                                continue;
+                            }
+                            let (chain, collector) = (&chain, &collector);
+                            requests.push(Box::pin(async move {
+                                self.receive_health(peer, chain, collector, bytes).await;
+                                Ok(())
+                            }));
+                        }
                         Message::Close {
                             reason: CloseReason::Authority | CloseReason::Busy,
                         } => return Err("peer closed link".into()),
@@ -172,10 +186,16 @@ impl Node {
                     }
                 }
             };
-            tokio::pin!(receive, send);
+            let health = self.link_health(peer, writer.clone(), direction, collector.subscribe());
+            let health = async {
+                health.await;
+                std::future::pending::<()>().await
+            };
+            tokio::pin!(receive, send, health);
             tokio::select! {
                 biased;
                 _ = authority.changed() => Exit::Close(CloseReason::Authority),
+                () = &mut health => Exit::Close(CloseReason::Detached),
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => Exit::Close(CloseReason::Detached),
                 reason = close.wait_for(|reason| reason.is_some()) => Exit::Close((*reason?).ok_or("link close reason")?),
                 result = &mut receive => Exit::Finished(result),
@@ -187,6 +207,11 @@ impl Node {
             Exit::Close(reason) => {
                 #[cfg(test)]
                 service.live.closing.fetch_add(1, Ordering::SeqCst);
+                if *collector.borrow() && reason != CloseReason::Authority {
+                    let _ =
+                        rocky_platform::time::timeout(CLOSE, self.final_report(&writer, direction))
+                            .await;
+                }
                 // Cancellation also interrupts a blocked channel write.
                 let _ = rocky_platform::time::timeout(CLOSE, async {
                     io.send(Frame::new(direction, Message::Close { reason }))

@@ -3,13 +3,15 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 22;
+pub(super) const HANDSHAKE_VERSION: u32 = 23;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
 pub use lanes::{Reader, Writer};
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
+/// Bytes of one health message; its owner encodes and bounds it.
+pub const HEALTH_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CloseReason {
@@ -44,6 +46,8 @@ pub enum Message {
     Close {
         reason: CloseReason,
     },
+    /// An opaque mesh health message; the embedder reads it.
+    Health(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +103,11 @@ impl Frame {
         {
             return Err(denied("link signal scope quota"));
         }
+        if let Message::Health(bytes) = &self.message
+            && (bytes.is_empty() || bytes.len() > HEALTH_BYTES)
+        {
+            return Err(denied("link health quota"));
+        }
         if let Message::Push { frames, voids, .. } = &self.message
             && ((frames.is_empty() && voids.is_empty())
                 || frames.len() + voids.len() > rows::MAX_SECURE_PAGE)
@@ -123,6 +132,8 @@ pub struct Link {
     /// The peer's wall clock less this device's at the handshake, in
     /// microseconds: positive when the peer's runs ahead.
     pub clock_offset: i64,
+    /// The peer's chain, verified by the handshake.
+    pub credentials: CredentialChain,
     pub local_states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub channels: channels::Channels,
@@ -371,6 +382,7 @@ impl Link {
             direction: side == Side::Acceptor,
             expires: credentials.expires().min(session.credentials.expires()),
             clock_offset,
+            credentials: session.credentials.clone(),
             reader: Reader::new(FrameReader {
                 stream: read,
                 peer: session.peer,
@@ -819,7 +831,7 @@ mod tests {
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/4"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v22");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v23");
     }
 }
 

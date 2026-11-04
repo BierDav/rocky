@@ -45,7 +45,7 @@ impl Drop for Io {
     }
 }
 #[derive(Clone)]
-pub(super) struct Writer {
+pub(in crate::node) struct Writer {
     writes: mpsc::Sender<Write>,
 }
 impl Io {
@@ -179,7 +179,7 @@ impl Io {
     }
 }
 impl Writer {
-    pub(super) async fn send(&self, frame: Frame) -> Result<(), Failure> {
+    pub(in crate::node) async fn send(&self, frame: Frame) -> Result<(), Failure> {
         self.write(Some(frame)).await
     }
     pub(super) async fn finish(&self) -> Result<(), Failure> {

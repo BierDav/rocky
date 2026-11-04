@@ -173,6 +173,7 @@ impl Node {
         let time = now()?;
         let Some((revocations, digest)) = self.settings.lock().await.unpushed_revocations(time)?
         else {
+            self.coordination.observe_push(true, time);
             return Ok(());
         };
         // One push at a time; a concurrent caller leaves it to the first.
@@ -200,6 +201,7 @@ impl Node {
                     Ok(())
                 })
                 .await?;
+                self.coordination.observe_push(true, time);
                 self.activity.record(
                     "revocations_pushed",
                     json!({"digest": HEXLOWER.encode(&digest)}),
@@ -211,6 +213,7 @@ impl Node {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .failed(digest, time);
+                self.coordination.observe_push(false, time);
                 self.activity.record(
                     "revocations_unpushed",
                     json!({"error": error.to_string(), "retry": retry}),

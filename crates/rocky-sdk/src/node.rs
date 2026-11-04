@@ -5,6 +5,7 @@ mod claims;
 mod coordinated;
 mod delivery;
 mod discovery;
+mod health;
 mod held;
 mod live_links;
 mod mesh;
@@ -293,6 +294,17 @@ pub(crate) struct Node {
     /// Peers whose clock the last handshake found more than
     /// `MAX_CLOCK_AHEAD` apart from this one's, as alerts; at most `MET`.
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
+    /// Standing failures of calls to the coordination service.
+    coordination: Arc<health::Coordination>,
+    /// On a trusted node, each other device's latest health report.
+    mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
+    /// Moves whenever `mesh` takes a report, for links that forward them.
+    mesh_revision: watch::Sender<u64>,
+    /// The last attempt to report this device's health failed.
+    report_failing: AtomicBool,
+    /// Health reports that reached this device.
+    #[cfg(test)]
+    pub(crate) reports_received: AtomicU64,
     /// A session brought statements since the last renewal. Rotated keys
     /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
@@ -370,6 +382,12 @@ impl Node {
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
             last_syncs: Default::default(),
+            coordination: Arc::new(health::Coordination::new(observations.clone())),
+            mesh: Default::default(),
+            mesh_revision: watch::channel(0).0,
+            report_failing: AtomicBool::new(false),
+            #[cfg(test)]
+            reports_received: AtomicU64::new(0),
             observations,
             owner: Default::default(),
             replica,
@@ -430,6 +448,10 @@ impl Node {
     }
     /// Lets the owner control its domain on this coordination service.
     pub fn with_service(mut self, service: Option<crate::owner::Service>) -> Self {
+        #[cfg(feature = "iroh")]
+        if let Some(client) = service.as_ref().and_then(|service| service.client()) {
+            client.observe(self.coordination.observer());
+        }
         self.service = service;
         self
     }
@@ -1554,7 +1576,7 @@ impl Node {
                 }
                 _ = async {
                     let settings = self.settings.lock().await;
-                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).filter(|expires| *expires > time).min();
+                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).filter(|expires| *expires > time).min();
                     drop(settings);
                     if let Some(expires) = expires {
                         rocky_platform::time::sleep_until(read + Duration::from_secs(expires - time)).await;
@@ -3429,6 +3451,7 @@ impl Node {
             publisher,
             transport,
             request,
+            observer: self.coordination.observer(),
         };
         let operation = match kind {
             "coordination_register" => crate::AttemptOperation::CoordinatorRegister,

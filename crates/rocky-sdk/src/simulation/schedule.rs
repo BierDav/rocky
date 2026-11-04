@@ -159,6 +159,22 @@ pub(super) enum Action {
     Watch(usize),
     /// Reports the alerts the node's watch saw them change to.
     Woken(usize),
+    /// The coordination service answers the node's call: refused for a
+    /// clock this many seconds behind it, or accepted.
+    Coordinated(usize, Option<u64>),
+    /// Node 0 trusts the node's identity, which installs the grant.
+    Trust(usize),
+    /// Reports the node's view of the mesh's health.
+    Mesh(usize),
+    /// Waits in the background, by `status_after` alone, for the first
+    /// node's view of the second's health to change.
+    WatchMesh(usize, usize),
+    /// Reports the view the node's mesh watch saw.
+    WokenMesh(usize),
+    /// Reports how many health reports reached the node.
+    Received(usize),
+    /// The node takes a partial role: node 0 holds what it does not.
+    Partial(usize),
 }
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -195,6 +211,18 @@ impl fmt::Display for Action {
             Self::Alerts(node) => write!(f, "alerts {}", name(node)),
             Self::Watch(node) => write!(f, "watch {}", name(node)),
             Self::Woken(node) => write!(f, "woken {}", name(node)),
+            Self::Coordinated(node, Some(behind)) => {
+                write!(f, "coordinated {} {behind} s behind", name(node))
+            }
+            Self::Coordinated(node, None) => write!(f, "coordinated {}", name(node)),
+            Self::Trust(node) => write!(f, "trust {}", name(node)),
+            Self::Mesh(node) => write!(f, "mesh {}", name(node)),
+            Self::WatchMesh(node, device) => {
+                write!(f, "watch mesh {} of {}", name(node), name(device))
+            }
+            Self::WokenMesh(node) => write!(f, "woken mesh {}", name(node)),
+            Self::Received(node) => write!(f, "received {}", name(node)),
+            Self::Partial(node) => write!(f, "partial {}", name(node)),
         }
     }
 }

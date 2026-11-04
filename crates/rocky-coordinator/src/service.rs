@@ -1,6 +1,6 @@
 //! The coordination service's client-facing types and its client, on every
 //! target. The voter (Raft, its file store and sockets) is native only.
-pub use crate::client::NetworkCoordinator;
+pub use crate::client::{NetworkCoordinator, Observer};
 pub use crate::machine::Usage;
 pub use crate::machine::{Operation, Outcome, Registration};
 use rocky_core::CoordinationError;

@@ -310,13 +310,8 @@ impl Node {
                     .collect(),
             },
             network: self.observed_network().await?,
-            alerts: self
-                .clocks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .values()
-                .cloned()
-                .collect(),
+            alerts: self.alerts(),
+            mesh: self.mesh_status().await?,
             coordination: CoordinationStatus {
                 mode: if self.service.is_some() {
                     CoordinationMode::Service
@@ -336,6 +331,12 @@ impl Node {
         for peer in &mut token_status.network.peers {
             peer.link.paths.clear();
             peer.link.round_trip_millis = None;
+        }
+        // A refreshed report wakes no wait; a changed one or silence does.
+        for device in token_status.mesh.iter_mut().flatten() {
+            device.report.produced_at_epoch_seconds = 0;
+            device.received_at_epoch_seconds = 0;
+            device.via = None;
         }
         status.token = HEXLOWER
             .encode(&commitment("rocky.sdk.status.v2", &serde_json::to_vec(&token_status)?)[..16]);
@@ -378,7 +379,7 @@ impl Node {
                             seconds,
                             "this device's clock is ahead of the peer's: its changes wait there"
                         ),
-                        AlertKind::PeerClockAhead { .. } => tracing::warn!(
+                        _ => tracing::warn!(
                             peer = label,
                             seconds,
                             "the peer's clock is ahead of this device's: its changes wait here"

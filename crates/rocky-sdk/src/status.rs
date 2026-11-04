@@ -399,7 +399,63 @@ pub enum AlertKind {
     /// `MAX_CLOCK_AHEAD`: its changes wait here until this clock catches up
     /// (a `ClockAhead` blocker once they arrive).
     PeerClockAhead { node: String, seconds: u64 },
+    /// The coordination service refused this device's last call because
+    /// its clock is `seconds` off the service's (`ahead` when this one
+    /// runs ahead). Clears with the next call the service accepts, or
+    /// refuses for a reason it checks after the clock.
+    CoordinatorClockSkew { seconds: u64, ahead: bool },
+    /// No voter of the coordination service answered this device's calls
+    /// for `STANDING_FAILURE` or longer. Clears with the next answer.
+    CoordinatorUnreachable,
+    /// The coordination service has not acknowledged the revocations this
+    /// device holds for `STANDING_FAILURE` or longer: claim rights they end
+    /// still pass there. Clears when a push is acknowledged.
+    RevocationsUnpushed,
 }
+/// How long a coordination failure lasts before it is an alert.
+pub const STANDING_FAILURE: std::time::Duration = std::time::Duration::from_secs(300);
+/// What a device reports of its own health to the domain's trusted nodes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthReport {
+    /// The reporting device's clock when it produced the report.
+    pub produced_at_epoch_seconds: u64,
+    pub alerts: Vec<Alert>,
+    /// Its blockers by kind, without their scopes.
+    pub blockers: Vec<BlockerCount>,
+    pub coordination_failure: Option<CoordinationFailure>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockerCount {
+    /// The blocker kind's `type`, as `BlockerKind` names it.
+    pub kind: String,
+    pub count: u64,
+}
+/// The last refusal or failure of a call to the coordination service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinationFailure {
+    /// `CoordinationError::category`, such as `unavailable` or `clock_skew`.
+    pub code: String,
+    pub at_epoch_seconds: u64,
+}
+/// One device's latest report, as a trusted node holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshDevice {
+    pub node: String,
+    pub report: HealthReport,
+    /// When a trusted node last heard from the device, on its own clock:
+    /// a report, or its link to the device open or closing.
+    pub received_at_epoch_seconds: u64,
+    /// The trusted node that forwarded it; `None` when the device sent it here.
+    pub via: Option<String>,
+    /// No trusted node has heard from this device for `SILENT_AFTER`: no
+    /// link to it is open and none was since `received_at_epoch_seconds`.
+    pub silent: bool,
+}
+/// How long trusted nodes may not hear from a device before it shows silent.
+pub const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseStatus {
     pub token: String,
@@ -410,6 +466,9 @@ pub struct DatabaseStatus {
     pub coordination: CoordinationStatus,
     /// Each condition the application should know of that no blocker shows.
     pub alerts: Vec<Alert>,
+    /// On a trusted node, each other device's latest health report; `None`
+    /// on any other device, which sees only its own status.
+    pub mesh: Option<Vec<MeshDevice>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {

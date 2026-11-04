@@ -2,7 +2,7 @@
 use super::*;
 use rocky_secure::network::link::{self, CloseReason, Frame, Message};
 use std::collections::BTreeSet;
-mod io;
+pub(super) mod io;
 mod liveness;
 
 pub(super) const BUDGET: usize = 32;
@@ -671,6 +671,7 @@ impl Node {
             let result = node
                 .run_link(&service, opened, close_rx, changed_tx, authority)
                 .await;
+            node.link_ended(peer);
             let removed = {
                 let mut entries = service
                     .live

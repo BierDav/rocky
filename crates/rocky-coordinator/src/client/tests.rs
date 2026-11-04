@@ -20,10 +20,19 @@ struct Memory {
     key: PrivateKey,
     state: Arc<Mutex<Metadata>>,
     streams: AtomicUsize,
+    /// Seconds the voter's clock runs ahead of every request's: above zero
+    /// it refuses each one as skewed.
+    ahead: std::sync::atomic::AtomicU64,
 }
 impl Memory {
     fn answer(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis)?;
+        let ahead = self.ahead.load(Ordering::Relaxed);
+        if ahead > 0 {
+            return Err(CoordinationError::ClockSkew {
+                coordinator_time: now()? + ahead,
+            });
+        }
         request.fresh()?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.preflight(request)?;
@@ -153,6 +162,7 @@ impl Service {
                 Metadata::with_limits(genesis.clone(), genesis.limits()).unwrap(),
             )),
             streams: AtomicUsize::new(0),
+            ahead: Default::default(),
         });
         let publisher = PrivateKey::new();
         let tenant = PrivateKey::new();
@@ -200,6 +210,7 @@ impl Service {
                 key,
                 state: memory.state.clone(),
                 streams: AtomicUsize::new(0),
+                ahead: Default::default(),
             }),
         };
         Self {
@@ -411,6 +422,40 @@ async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
     assert!(service.voter.streams.load(Ordering::Relaxed) > 1);
 }
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_observer_sees_every_answer_and_refusal() {
+    let service = Service::start().await;
+    let client = service.client(&service.node);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    client.observe(Arc::new(move |result| {
+        record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(result.err().cloned());
+    }));
+    let invoices = Name::new("invoices").unwrap();
+    assert_eq!(
+        client
+            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+            .await,
+        Ok(1)
+    );
+    service.voter.ahead.store(3600, Ordering::Relaxed);
+    assert!(matches!(
+        client
+            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .await,
+        Err(CoordinationError::ClockSkew { .. })
+    ));
+    let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0], None);
+    assert!(
+        matches!(seen[1], Some(CoordinationError::ClockSkew { coordinator_time }) if coordinator_time >= now().unwrap() + 3599)
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_client_needs_an_endpoint_of_its_transport_kind() {
     let genesis = genesis(&PrivateKey::new());
@@ -419,6 +464,7 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         key: PrivateKey::new(),
         state: Arc::new(Mutex::new(Metadata::new(genesis.clone()).unwrap())),
         streams: AtomicUsize::new(0),
+        ahead: Default::default(),
     });
     let bundle = TrustBundle::new(&genesis).unwrap();
     assert!(matches!(

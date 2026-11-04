@@ -6,6 +6,7 @@
 mod clock;
 mod cluster;
 mod driver;
+mod health;
 mod regressions;
 mod relational;
 mod relational_tests;

@@ -937,10 +937,75 @@ points, and the `board_cap` assertion bounds a board's points.
     forced to 0.
   - Formats: link handshake `rocky.link.v22`; replica and frame formats
     unchanged.
-  - Open: a coordination service's `ClockSkew` refusal still surfaces
-    only as the failed call's `clock_skew` code with `coordinator_time`,
-    not as an alert: it names no peer and has no clearing event.
+  - Open (closed by mesh health below): a coordination service's
+    `ClockSkew` refusal surfaced only as the failed call's error.
   - Checks: `./scripts/lint` 0; `./scripts/check --unit --integration` 0
     (256 unit, 1408 integration passed); `./scripts/check --wasm` 0
     (832 passed, 1 ignored); release `relational_soak` 300 seeds from
     20000 in three chunks of 100, all passed (388 s, 387 s, 557 s).
+- **Closed: mesh health is visible on the device and on trusted nodes**
+  (2026-11-04).
+  - Coordination alerts: `NetworkCoordinator::observe` sees every call's
+    outcome (the node's client and the owner's tenant clients). Standing
+    conditions only: `CoordinatorClockSkew { seconds, ahead }` at a
+    `ClockSkew` refusal, cleared by an acceptance or a refusal the voter
+    makes after its clock check (any but `denied`, which authentication
+    also returns); `CoordinatorUnreachable` once calls go unanswered for
+    `STANDING_FAILURE` (5 min), cleared by any answer;
+    `RevocationsUnpushed` once revocation pushes fail for
+    `STANDING_FAILURE`, cleared by an acknowledged push or none left. One-off
+    refusals (`denied`, `backpressure`, ...) stay attempts. Each keeps the
+    first failure as `since`, wakes `status_after` and logs once on appear
+    and on clear.
+  - Transport, and why: a `Health` signal on live links (opaque, at most
+    8 KiB, `rocky.link.v23`). Links are what a trusted node actually
+    hears from a device: an open link keeps the device heard, so an idle
+    link stays silent on the wire (`an_idle_linked_pair_dials_nothing_for_an_hour`
+    holds). The mailbox keeps durable 30-day group envelopes, and a
+    replicated record would put every report into the operation log; both
+    are wrong for latest-wins state.
+  - Trust: the owner's node, or a node of an identity with the owner's
+    trusted grant, sends `Collector` with that grant first. A device
+    verifies the grant against the peer's handshake chain and only then
+    sends a report. A non-trusted device never sends or holds another
+    device's report.
+  - Report: `HealthReport { produced_at, alerts, blockers (kind and count,
+    no scope), coordination_failure (category and time) }`, JSON signed by
+    the device's node key under the domain scope. It is sent when the
+    link opens, on each change and once more before the link closes, so
+    devices that sync on short links report what their exchange left.
+  - Trusted view: `DatabaseStatus.mesh: Option<Vec<MeshDevice>>` (`None`
+    off trusted nodes) with each device's report, `received_at` (last
+    heard: a report or its link closing), `via` (the forwarding trusted
+    node) and `silent` once no link is open here and `SILENT_AFTER` (5 min)
+    passed; `status_after` wakes at that deadline. Latest-wins by receipt
+    time on a trusted clock, so a device's own skew cannot pin an old
+    report. In memory, at most 256 devices (oldest dropped, logged).
+    Trusted nodes forward what they receive to the trusted peers they link
+    to, and every `REFRESH` (60 s) re-forward the devices they link to as
+    heard then; the token ignores those times, so only changes and silence
+    wake waits. A failed report logs once and never ends the link.
+  - Tests: `node::health::tests::standing_failures_raise_alerts_after_their_bound_and_clear_by_events`;
+    `simulation::health::{a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted,
+    a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear,
+    a_device_that_stops_reporting_shows_silent,
+    only_trusted_nodes_receive_reports,
+    trusted_nodes_share_the_reports_they_receive}`; rocky-coordinator
+    `client::tests::an_observer_sees_every_answer_and_refusal`. Each fails
+    with reports or coordination observation disabled.
+  - Open: a device that links only to non-trusted peers or relays reaches
+    no trusted node. Multi-hop needs reports sealed to the collectors'
+    node keys, a way to learn those keys, and bounded relay storage. On
+    short links a report shows the state when the link closed; a later
+    local change (frames applying on the clock) waits for the next link.
+    After a restart a trusted node knows nothing until devices report again.
+  - Formats: link handshake `rocky.link.v23`; replica and frame formats
+    unchanged.
+  - Checks: `./scripts/lint` 0; `./scripts/check --unit --integration`
+    256 unit and 1343 integration passed; three batches (rocky-sdk lib,
+    rocky-secure lib, rocky-sdk `migrations`) hit the 120 s batch limit
+    at load ~130 and passed alone with `cargo test` (35, 34, 14). wasm32
+    clippy 0; `./scripts/check-wasm-consumer` 0; browser tests for
+    rocky-sdk, rocky-secure and rocky-coordinator in Chromium 542 passed,
+    1 ignored; release `relational_soak` 100 seeds from 20000 passed
+    (389 s).

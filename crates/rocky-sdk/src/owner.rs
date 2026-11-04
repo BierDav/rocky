@@ -63,6 +63,8 @@ mod service {
         pub publisher: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
         pub transport: Option<Arc<dyn Transport>>,
         pub request: &'a Value,
+        /// Sees the outcome of each of the call's requests.
+        pub observer: rocky_coordinator::service::Observer,
     }
 
     fn refused(message: impl Into<String>) -> Failure {
@@ -132,6 +134,7 @@ mod service {
                     ))?;
             let _held = self.lock.lock().await;
             let client = NetworkCoordinator::connect(&self.bundle, tenant.clone(), transport)?;
+            client.observe(domain.observer.clone());
             match kind {
                 "coordination_usage" => {
                     return Ok(serde_json::to_value(client.usage().await?)?);

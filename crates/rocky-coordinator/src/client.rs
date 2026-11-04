@@ -30,7 +30,11 @@ pub struct NetworkCoordinator {
     /// The client lane of a public service; voter TCP when absent.
     route: Option<Arc<dyn Transport>>,
     preferred: Mutex<(Option<u64>, Option<u64>)>,
+    observer: Mutex<Option<Observer>>,
 }
+/// Sees how each call ended: `Ok` once the service answered it, or the
+/// refusal; `Unavailable` when no voter answered.
+pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
 impl NetworkCoordinator {
     /// A client of the voters' TCP addresses, such as the membership
     /// authority's.
@@ -58,7 +62,12 @@ impl NetworkCoordinator {
             claims: Mutex::new(None),
             route,
             preferred: Mutex::new((None, None)),
+            observer: Mutex::new(None),
         })
+    }
+    /// Calls `observer` with the outcome of every later call.
+    pub fn observe(&self, observer: Observer) {
+        *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
     }
     /// Presents `certificate`, this node's under a trusted identity, with
     /// every later request.
@@ -176,6 +185,22 @@ impl NetworkCoordinator {
         replies
     }
     pub async fn call(
+        &self,
+        id: Commitment,
+        operation: Operation,
+    ) -> Result<Outcome, CoordinationError> {
+        let result = self.request(id, operation).await;
+        let observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer(result.as_ref().map(drop));
+        }
+        result
+    }
+    async fn request(
         &self,
         id: Commitment,
         operation: Operation,

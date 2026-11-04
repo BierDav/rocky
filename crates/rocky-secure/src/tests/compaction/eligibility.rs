@@ -19,9 +19,17 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     let issuer = PrivateKey::from_bytes(&[255; 32]);
     let replica = open(&lineage, &dir, "node", &key).await;
     follow_main(&lineage, &replica).await;
+    // An issuer's statement expires; a root statement never does. Its
+    // chain is valid at the statement's time.
+    let signer = PrivateKey::from_bytes(&[251; 32]);
+    let signer_chain = CredentialChain(vec![
+        Authority::owner(lineage.publisher())
+            .issue_issuer(signer.public_key(), None, (0, 86400, 0))
+            .unwrap(),
+    ]);
     let expired = rocky_credentials::Revocation {
         app: lineage.domain.app,
-        issuer: lineage.publisher().public_key(),
+        issuer: signer.public_key(),
         time: 0,
         nodes: BTreeSet::new(),
         identities: [PrivateKey::from_bytes(&[252; 32]).public_key()].into(),
@@ -29,12 +37,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     };
     assert!(!expired.live(now().unwrap()));
     let expired = RevocationSet::try_from(vec![
-        rocky_credentials::SignedRevocation::sign(
-            expired,
-            lineage.publisher(),
-            &CredentialChain::default(),
-        )
-        .unwrap(),
+        rocky_credentials::SignedRevocation::sign(expired, &signer, &signer_chain).unwrap(),
     ])
     .unwrap();
     replica

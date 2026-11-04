@@ -8,6 +8,7 @@
 //! Set `ROCKY_SIM_INTEGRATION=1` for an integration seed's size.
 //! The soak runs `ROCKY_SIM_SEEDS` seeds (default 200) from `ROCKY_SIM_FIRST`:
 //! `ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture`
+//! (`ROCKY_SIM_WALL=frozen` stops the wall clock).
 use super::{
     driver::{self, Report},
     schedule::{Action, Fixture, Scenario, Wall, plan},
@@ -32,13 +33,18 @@ fn requested(seed: u64) -> Scenario {
     }
 }
 /// The soak's size for `seed`: three or four nodes, longer schedules.
+/// `ROCKY_SIM_WALL=frozen` runs it with a wall clock that stands still.
 fn soak_size(seed: u64) -> Scenario {
+    let wall = match std::env::var("ROCKY_SIM_WALL").as_deref() {
+        Ok("frozen") => Wall::Frozen,
+        _ => Wall::Moving,
+    };
     Scenario {
         nodes: 3 + (seed % 2) as usize,
         steps: 40,
         rounds: 5,
         fixture: Fixture::Relational,
-        wall: Wall::Moving,
+        wall,
     }
 }
 

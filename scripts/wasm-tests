@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Run the wasm32 tests of packages in parallel headless browsers.
+
+  scripts/wasm-tests [--only PACKAGE]... [--browser-sync] [CARGO ARGS...]
+      e.g. --only rocky-sdk -p rocky-secure -p rocky-sdk
+
+Builds every test binary once, as `cargo test --tests` would, then runs the
+binaries at once, each in its own browser (scripts/wasm-runner). A binary of
+many tests runs as shards: one per module of several tests, by its path
+prefix, and one for the rest, which skips those prefixes. The shards are
+checked against the binary's listing to run each test exactly once.
+ROCKY_WASM_JOBS sets how many browsers run at once.
+
+--only runs just those packages' binaries of the build, which keeps every
+package of CARGO ARGS for one set of features. --browser-sync runs
+scripts/browser-sync with CARGO ARGS meanwhile: it compiles its test again
+for each native peer, while the browsers run.
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RUNNER = ROOT / "scripts" / "wasm-runner"
+TIMES = ROOT / "target" / "test-tiers" / "wasm.tsv"
+# Each browser holds a whole test binary; four bound the memory they take.
+JOBS = int(os.environ.get("ROCKY_WASM_JOBS", 4))
+# A binary with at least this many tests runs as shards.
+SHARD_TESTS = 40
+# A module with at least this many tests, or that took SHARD_SECONDS before,
+# gets a shard of its own.
+MODULE_TESTS = 4
+SHARD_SECONDS = 5.0
+
+
+def fail(message):
+    print(f"wasm-tests: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def environment():
+    """Cargo's [env] for the runner, which cargo would pass it, and the
+    runner's timeout for one binary: the longest takes minutes."""
+    env = dict(os.environ)
+    config = tomllib.loads((ROOT / ".cargo" / "config.toml").read_text())
+    for name, value in config.get("env", {}).items():
+        # Paths relative to the configuration are the build's, not the runner's.
+        if isinstance(value, dict):
+            if value.get("relative"):
+                continue
+            value = value["value"]
+        env.setdefault(name, str(value))
+    env.setdefault("WASM_BINDGEN_TEST_TIMEOUT", "1800")
+    return env
+
+
+def build(args):
+    """The test binaries: (name, wasm path)."""
+    cmd = ["cargo", "test", "--locked", "--no-run", "--target", "wasm32-unknown-unknown",
+           "--tests", "--message-format", "json-render-diagnostics", *args]
+    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        fail(f"building the wasm32 tests failed with exit {proc.returncode}")
+    binaries = []
+    for line in proc.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("reason") == "compiler-artifact" and message["profile"]["test"] \
+                and (message.get("executable") or "").endswith(".wasm"):
+            package = Path(message["manifest_path"]).parent.name
+            target = message["target"]["name"]
+            binaries.append((f"{package}::{target}", message["executable"]))
+    return binaries
+
+
+def listing(env, wasm):
+    proc = subprocess.run([str(RUNNER), wasm, "--list"], env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        fail(f"listing {wasm} failed:\n{proc.stdout}{proc.stderr}")
+    return [line[: -len(": test")] for line in proc.stdout.splitlines() if line.endswith(": test")]
+
+
+def earlier():
+    times = {}
+    if TIMES.exists():
+        for line in TIMES.read_text().splitlines():
+            took, binary, shard = line.split("\t", 2)
+            times[(binary, shard)] = float(took)
+    return times
+
+
+def plan(binary, tests, times):
+    """Shards as (label, runner arguments, the tests they run)."""
+    if len(tests) < SHARD_TESTS:
+        return [("all", [], tests)]
+    modules = {}
+    for name in tests:
+        parts = name.split("::")
+        if len(parts) > 2:
+            modules.setdefault("::".join(parts[:2]) + "::", []).append(name)
+    chosen = [key for key, names in modules.items()
+              if len(names) >= MODULE_TESTS or times.get((binary, key), 0.0) >= SHARD_SECONDS]
+    # A filter is a substring: keep only prefixes that select no test twice.
+    while True:
+        overlap = [key for key in chosen
+                   if any(sum(other in name for other in chosen) > 1 for name in tests if key in name)]
+        if not overlap:
+            break
+        chosen.remove(overlap[-1])
+    shards = [(key, [key], [name for name in tests if key in name]) for key in chosen]
+    rest = [name for name in tests if not any(key in name for key in chosen)]
+    if rest:
+        skips = [argument for key in chosen for argument in ("--skip", key)]
+        shards.append(("rest", skips, rest))
+    ran = sorted(name for _, _, names in shards for name in names)
+    if ran != sorted(tests):
+        fail(f"{binary}: the shards do not run each test exactly once")
+    return shards
+
+
+def run(env, binary, wasm, label, arguments, expected):
+    start = time.monotonic()
+    proc = subprocess.run([str(RUNNER), wasm, *arguments], env=env, capture_output=True, text=True)
+    took = time.monotonic() - start
+    output = proc.stdout + proc.stderr
+    result = re.search(r"test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored", output)
+    problem = None
+    if proc.returncode != 0 or result is None or result.group(1) != "ok":
+        problem = f"exit {proc.returncode}"
+    elif int(result.group(2)) + int(result.group(4)) != len(expected):
+        problem = f"ran {result.group(2)} and ignored {result.group(4)} of {len(expected)} tests"
+    return binary, label, took, len(expected), problem, output
+
+
+def options(arguments):
+    only, browser_sync = set(), False
+    while arguments and arguments[0] in ("--only", "--browser-sync"):
+        if arguments[0] == "--browser-sync":
+            browser_sync, arguments = True, arguments[1:]
+        elif len(arguments) < 2:
+            fail("--only needs a package")
+        else:
+            only.add(arguments[1])
+            arguments = arguments[2:]
+    return only, browser_sync, arguments
+
+
+def main():
+    only, browser_sync, cargo_args = options(sys.argv[1:])
+    env = environment()
+    started = time.monotonic()
+    binaries = build(cargo_args)
+    if only:
+        binaries = [binary for binary in binaries if binary[0].split("::")[0] in only]
+    built = time.monotonic() - started
+    times = earlier()
+    work = []
+    with ThreadPoolExecutor(max_workers=JOBS) as pool:
+        listed = list(pool.map(lambda binary: listing(env, binary[1]), binaries))
+    for (binary, wasm), tests in zip(binaries, listed):
+        if tests:
+            for label, arguments, names in plan(binary, tests, times):
+                work.append((binary, wasm, label, arguments, names))
+    # The longest first, so they do not start last.
+    work.sort(key=lambda item: -times.get((item[0], item[2]), 0.3 * len(item[4])))
+    print(f"wasm-tests: {sum(len(item[4]) for item in work)} tests of {len(binaries)} binaries "
+          f"in {len(work)} runs, {JOBS} browsers at once; built in {built:.0f}s", flush=True)
+    ran = time.monotonic()
+    failed = []
+    # Cargo is free once the binaries are listed.
+    sync = subprocess.Popen([str(ROOT / "scripts" / "browser-sync"), *cargo_args], cwd=ROOT,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) \
+        if browser_sync else None
+    results = []
+    with ThreadPoolExecutor(max_workers=JOBS) as pool:
+        for binary, label, took, count, problem, output in pool.map(
+                lambda item: run(env, *item[:4], item[4]), work):
+            results.append((took, binary, label))
+            if problem:
+                failed.append(f"{binary} {label}: {problem}")
+                print(f"wasm-tests: ---- {binary} {label}: {problem} ----\n{output}", file=sys.stderr)
+    TIMES.parent.mkdir(parents=True, exist_ok=True)
+    TIMES.write_text("".join(f"{took:.2f}\t{binary}\t{label}\n"
+                             for took, binary, label in sorted(results, reverse=True)))
+    print(f"wasm-tests: {len(work) - len(failed)} of {len(work)} runs passed, "
+          f"wall {time.monotonic() - ran:.0f}s; slowest {', '.join(f'{b} {l} {t:.0f}s' for t, b, l in sorted(results, reverse=True)[:3])}")
+    if sync:
+        output = sync.communicate()[0]
+        print(output, end="")
+        if sync.returncode != 0:
+            failed.append(f"scripts/browser-sync: exit {sync.returncode}")
+        print(f"wasm-tests: scripts/browser-sync finished {time.monotonic() - ran:.0f}s after "
+              "the browsers started", flush=True)
+    for problem in failed:
+        print(f"wasm-tests: failed: {problem}", file=sys.stderr)
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

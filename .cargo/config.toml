@@ -18,6 +18,10 @@ opt-level = 3
 # picks Firefox or Playwright's Chromium.
 [target.wasm32-unknown-unknown]
 runner = "scripts/wasm-runner"
+# Browsers name frames from the name section, not DWARF, which was two thirds
+# of a test binary (160 of rocky-secure's 234 MB): every run of a binary
+# transforms and loads all of it.
+rustflags = ["-C", "debuginfo=0"]
 
 [env]
 # C dependencies of wasm32 (SQLite, ring) archive with the toolchain's llvm-ar.

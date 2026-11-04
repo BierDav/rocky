@@ -183,6 +183,41 @@ class Scope(unittest.TestCase):
                 self.assertIsNone(scope.changed_packages(self.packages(), paths, Path("/repo")))
 
 
+wasm_loader = importlib.machinery.SourceFileLoader("wasm_tests", str(Path(__file__).with_name("wasm-tests")))
+wasm = importlib.util.module_from_spec(importlib.util.spec_from_loader(wasm_loader.name, wasm_loader))
+wasm_loader.exec_module(wasm)
+
+
+class WasmShards(unittest.TestCase):
+    def test_shards_run_each_test_once_even_when_prefixes_overlap(self):
+        tests = ([f"tests::roles::case_{i}" for i in range(6)]
+                 + [f"tests::roles_extra::case_{i}" for i in range(4)]
+                 + [f"tests::small::case_{i}" for i in range(2)]
+                 + [f"tests::small::tests::roles::case_{i}" for i in range(4)]
+                 + [f"top_{i}" for i in range(30)])
+        shards = wasm.plan("binary", tests, {("binary", "tests::small::"): 9.0})
+        ran = sorted(name for _, _, names in shards for name in names)
+        self.assertEqual(ran, sorted(tests))
+        labels = [label for label, _, _ in shards]
+        for name in tests:
+            self.assertLessEqual(sum(label in name for label in labels[:-1]), 1, name)
+        self.assertEqual(labels[-1], "rest")
+        rest = shards[-1][1]
+        for label in labels[:-1]:
+            self.assertIn(label, rest)
+
+    def test_a_small_binary_runs_whole(self):
+        self.assertEqual(wasm.plan("binary", ["a", "b"], {}), [("all", [], ["a", "b"])])
+
+    def test_a_run_that_skips_listed_tests_fails(self):
+        output = "test result: ok. 3 passed; 0 failed; 1 ignored"
+        with patch.object(wasm.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=output, stderr="")):
+            *_, problem, _ = wasm.run({}, "binary", "/x.wasm", "rest", [], ["a", "b", "c", "d", "e"])
+            self.assertEqual(problem, "ran 3 and ignored 1 of 5 tests")
+            *_, problem, _ = wasm.run({}, "binary", "/x.wasm", "rest", [], ["a", "b", "c", "d"])
+            self.assertIsNone(problem)
+
+
 ios_loader = importlib.machinery.SourceFileLoader("ios_results", str(Path(__file__).parent / "ci" / "ios-test-results"))
 ios = importlib.util.module_from_spec(importlib.util.spec_from_loader(ios_loader.name, ios_loader))
 ios_loader.exec_module(ios)

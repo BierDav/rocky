@@ -2,17 +2,18 @@
 # A browser node syncs with a native node over a local iroh relay and claims
 # invoice numbers from the coordination service the native side runs.
 #
-#   scripts/browser-sync    start the native side (rocky-sdk example browser_peer),
-#                           run rocky-sdk's browser_sync test in headless Firefox
+#   scripts/browser-sync [CARGO ARGS]
+#                           start the native side (rocky-sdk example browser_peer),
+#                           run rocky-sdk's browser_sync test in a headless browser
 #                           with its relay, invitation and service bundle, then let
 #                           the native side check the browser's write and claims
 #
-# scripts/check --wasm runs it after the wasm32 tests.
+# scripts/check --wasm runs it after the wasm32 tests, with their packages
+# (`-p ...`, default `-p rocky-sdk`), so the browser test shares their build.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
-PATH="$("$repo_root/scripts/tools" wasm-bindgen-test-runner geckodriver):$PATH"
 
 cargo build --locked -p rocky-sdk --example browser_peer
 work=$(mktemp -d)
@@ -36,8 +37,9 @@ until [ -s "$work/peer" ]; do
     sleep 0.1
 done
 
+[ "$#" -gt 0 ] || set -- -p rocky-sdk
 ROCKY_BROWSER_PEER=$(head -n 1 "$work/peer") cargo test --locked \
-    --target wasm32-unknown-unknown -p rocky-sdk --test browser_sync
+    --target wasm32-unknown-unknown "$@" --test browser_sync
 echo finished >&3
 exec 3>&-
 wait "$peer_pid"

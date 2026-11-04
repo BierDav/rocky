@@ -46,6 +46,19 @@ wasm32 (a browser, in a dedicated Worker) is a supported target of the same
 crates; `./scripts/check --wasm` runs clippy for it and the tests in headless
 Firefox. Status and limits are in features_14 R7.
 
+An application uses one `rocky-sdk` dependency for native nodes and the
+browser; native-only networking and files are selected per target, not by
+features. Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
+it needs a clang that targets wasm32 and an `llvm-ar` that indexes wasm
+objects, which Apple's `ar` does not. In the application's
+`.cargo/config.toml` (`rustup component add llvm-tools`; the path names your
+host):
+
+```toml
+[env]
+AR_wasm32_unknown_unknown = "<rustc --print sysroot>/lib/rustlib/<host>/bin/llvm-ar"
+```
+
 Rust crates live in `crates/`, applications in `examples/` and performance
 probes in `benchmarks/`.
 

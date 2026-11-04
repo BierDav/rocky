@@ -289,6 +289,9 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
         1
     );
 
+    // The owner tells no peer: a link handshake carries its statements even
+    // to a peer that then refuses the link.
+    a.session.set_networking_enabled(false).await?;
     gate.store(false, Ordering::SeqCst);
     a.call(json!({"type":"revoke","identity":admin})).await?;
     assert!(unpushed(&a).await?);
@@ -300,6 +303,7 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     m.session.install_claims(&fresh).await?;
 
     gate.store(true, Ordering::SeqCst);
+    a.session.set_networking_enabled(true).await?;
     // The member, not the revoking owner, syncs first: it learns the
     // statement from the owner and pushes it in the same pass.
     m.sync().await?;
@@ -349,8 +353,11 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     let first = counters::Claim::fresh()?;
     assert_eq!(m.opened.database.claim(invoices.clone(), first).await?, 1);
     // The member stops syncing with peers, so it never learns the statement
-    // and never pushes it itself; its claims still reach the service.
+    // and never pushes it itself; its claims still reach the service. The
+    // owner tells no peer either: a link handshake carries its statements
+    // even to a peer that then refuses the link.
     m.session.set_networking_enabled(false).await?;
+    a.session.set_networking_enabled(false).await?;
 
     gate.store(false, Ordering::SeqCst);
     a.session.revoke_claims(&member).await?;

@@ -166,7 +166,7 @@ fn order_of(row: &[SqlValue]) -> Result<Order, Error> {
         ] => Ok((
             *era,
             Stamp {
-                clock: *clock as u64,
+                clock: stored_clock(*clock)?,
                 author: *author as u32,
                 sequence: *sequence as u64,
             },
@@ -175,14 +175,14 @@ fn order_of(row: &[SqlValue]) -> Result<Order, Error> {
     }
 }
 
-fn order_bindings(scope: i64, (era, stamp): &Order) -> Vec<SqlValue> {
-    vec![
+fn order_bindings(scope: i64, (era, stamp): &Order) -> Result<Vec<SqlValue>, Error> {
+    Ok(vec![
         SqlValue::Integer(scope),
         SqlValue::Integer(*era),
-        SqlValue::Integer(stamp.clock as i64),
+        clock_value(stamp.clock)?,
         SqlValue::Integer(i64::from(stamp.author)),
         SqlValue::Integer(stamp.sequence as i64),
-    ]
+    ])
 }
 
 /// The era an arrival joins: one past the domain's last finalized seal.
@@ -531,7 +531,7 @@ impl<A: RowApplication> Inner<A> {
                 self.conn
                     .query(
                         "SELECT era,clock,author,sequence,hash,txn,member,undo FROM secure_replayed WHERE scope=? AND sealed=0 AND (era,clock,author,sequence)>=(?,?,?,?)",
-                        bindings(order_bindings(scope, &from)),
+                        bindings(order_bindings(scope, &from)?),
                     )
                     .await?,
             )
@@ -1649,7 +1649,7 @@ impl<A: RowApplication> Inner<A> {
                     SqlValue::Integer(id),
                     era.map_or(SqlValue::Null, SqlValue::Integer),
                     SqlValue::Blob(encode(&header.extensions.scope.domain)?),
-                    SqlValue::Integer(stamp.clock as i64),
+                    clock_value(stamp.clock)?,
                     SqlValue::Integer(i64::from(stamp.author)),
                     SqlValue::Integer(stamp.sequence as i64),
                     SqlValue::Blob(operation.hash.as_bytes().to_vec()),

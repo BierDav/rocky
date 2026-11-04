@@ -201,7 +201,7 @@ impl<A: RowApplication> Inner<A> {
         // An unfinished import never proves a deletion.
         match record {
             Some(record) if !record.deleted => Ok(Companion::Present(record.fields)),
-            Some(_) if !self.has_pending(scope).await? && !self.importing(scope).await? => {
+            Some(_) if !self.pending_now(scope).await? && !self.importing(scope).await? => {
                 Ok(Companion::Deleted)
             }
             _ => Ok(Companion::Unavailable),
@@ -224,6 +224,31 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(pending.next().await?.is_some())
     }
+    /// Whether a pending frame of `scope` may apply before this clock
+    /// moves on. Frames waiting for this clock are as if not arrived yet:
+    /// what waits behind them is stamped later still, so a log whose head
+    /// waits for it waits whole.
+    pub(super) async fn pending_now(&self, scope: ResourceScope) -> Result<bool, Error> {
+        let heads = collect_rows(
+            self.conn
+                .query(
+                    "SELECT o.header FROM (SELECT author,min(sequence) AS sequence FROM secure_operations WHERE scope=?1 AND status='pending' GROUP BY author) h JOIN secure_operations o ON o.scope=?1 AND o.author=h.author AND o.sequence=h.sequence",
+                    [encode(&scope)?],
+                )
+                .await?,
+        )
+        .await?;
+        for head in heads {
+            let [SqlValue::Blob(header)] = head.as_slice() else {
+                return Err(Error::Corrupt("pending operation".into()));
+            };
+            let header: p2panda_core::Header<Extensions> = decode(header)?;
+            if self.clock_ahead(&header)?.is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(super) async fn page(
         &self,
         scope: ResourceScope,
@@ -241,7 +266,7 @@ impl<A: RowApplication> Inner<A> {
             rows: BTreeMap::new(),
             complete: has_key
                 && self.holds(scope).await?
-                && !self.has_pending(scope).await?
+                && !self.pending_now(scope).await?
                 && !self.importing(scope).await?,
             next: None,
         };

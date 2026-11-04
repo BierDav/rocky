@@ -282,6 +282,7 @@ impl<A: RowApplication> Inner<A> {
                     pass.clean = Some(hash);
                     if !pass.examined.contains(&hash) {
                         self.waits.remove(&hash);
+                        self.ahead.remove(&hash);
                     }
                     return Ok(true);
                 }
@@ -370,10 +371,20 @@ impl<A: RowApplication> Inner<A> {
         let held = self.quarantined_frame(id).await?;
         if pass.skipped.contains(&id) || held.is_some_and(|held| !held.due(time, pass.context)) {
             self.waits.insert(id, WaitReason::Quarantined);
+            self.ahead.remove(&id);
             return Ok(false);
         }
         self.conn.execute("SAVEPOINT quarantine", ()).await?;
         let outcome = Box::pin(self.apply_frame(frame, time)).await;
+        match &outcome {
+            Ok(Outcome::Ahead(stamp)) => {
+                let author = frame.operation_ref()?.header.public_key;
+                self.ahead.insert(id, (author, *stamp));
+            }
+            _ => {
+                self.ahead.remove(&id);
+            }
+        }
         let failure = match &outcome {
             Ok(Outcome::Waiting(WaitReason::Undecryptable)) => Some(quarantine::UNDECRYPTABLE),
             Err(error) if quarantine::quarantines(error) => Some(error.category()),
@@ -395,6 +406,10 @@ impl<A: RowApplication> Inner<A> {
         match outcome {
             Ok(Outcome::Waiting(reason)) => {
                 self.waits.insert(id, reason);
+                return Ok(false);
+            }
+            Ok(Outcome::Ahead(_)) => {
+                self.waits.insert(id, WaitReason::ClockAhead);
                 return Ok(false);
             }
             Ok(_) => {
@@ -467,6 +482,9 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if reach == tips::FrameReach::Held {
+            if let Some(stamp) = self.clock_ahead(&operation.header)? {
+                return Ok(Outcome::Ahead(stamp));
+            }
             return self.hold_closed_frame(frame, time).await;
         }
         // Every frame of a revoked author is refused, also one whose
@@ -537,6 +555,9 @@ impl<A: RowApplication> Inner<A> {
         {
             return Box::pin(self.apply_bundle(operation, membership, time)).await;
         }
+        if let Some(stamp) = self.clock_ahead(&operation.header)? {
+            return Ok(Outcome::Ahead(stamp));
+        }
         self.conn.execute("SAVEPOINT pending", ()).await?;
         let materialized = match &payload {
             // An outcome record changes no rows itself.
@@ -592,6 +613,20 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute("RELEASE pending", ()).await?;
         result
+    }
+    /// The stamp of a received frame more than `MAX_CLOCK_AHEAD` ahead of
+    /// this clock: it waits rather than drag this replica's hybrid clock and
+    /// last-writer-wins order with it. Every replica applies it once its
+    /// own clock is near, so outcomes still agree. Own frames never wait.
+    pub(super) fn clock_ahead(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> Result<Option<u64>, Error> {
+        if header.public_key == self.config.node.public_key() {
+            return Ok(None);
+        }
+        let bound = micros()?.saturating_add(MAX_CLOCK_AHEAD.as_micros() as u64);
+        Ok((header.timestamp > bound).then_some(header.timestamp))
     }
     pub(super) async fn stored_status(&self, hash: Hash) -> Result<Option<String>, Error> {
         let mut result = self
@@ -842,7 +877,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         match tip.next().await? {
-            Some(row) => Ok(Some(row.get::<i64>(0)? as u64)),
+            Some(row) => Ok(Some(stored_clock(row.get::<i64>(0)?)?)),
             None => Ok(None),
         }
     }
@@ -852,6 +887,8 @@ pub(super) enum Outcome {
     Applied,
     Rejected(String),
     Waiting(WaitReason),
+    /// Waits for this clock to come within `MAX_CLOCK_AHEAD` of the stamp.
+    Ahead(u64),
 }
 
 /// A log's first pending frame: sequence, hash, scope and author.

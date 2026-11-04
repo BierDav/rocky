@@ -302,6 +302,7 @@ fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
         if header.extensions.births.len() > 32
             || header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
+            || header.timestamp > rocky_core::MAX_CLOCK
             || header.extensions.author_sequence > i64::MAX as u64
             || !header.extensions.generation.valid()
         {

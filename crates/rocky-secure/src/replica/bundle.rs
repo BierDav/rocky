@@ -611,6 +611,13 @@ impl<A: RowApplication> Inner<A> {
                 Err(error) => return self.reject_members(&hashes, &error.to_string()).await,
             }
         }
+        let mut ahead = None;
+        for (frame, ..) in &members {
+            ahead = ahead.max(self.clock_ahead(&frame.operation_ref()?.header)?);
+        }
+        if let Some(stamp) = ahead {
+            return Ok(Outcome::Ahead(stamp));
+        }
         if members
             .iter()
             .any(|(_, payload, _)| payload.intent().is_some() != members[0].1.intent().is_some())

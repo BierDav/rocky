@@ -48,6 +48,13 @@ pub enum BlockerKind {
     Quarantined { reason: String, count: u64 },
     /// The next seal of the followed path is not finalized yet.
     FinalizationWaiting { reason: String },
+    /// Frames of `node`, stamped up to `seconds` ahead of this device's
+    /// clock, wait until it is within `MAX_CLOCK_AHEAD` of them.
+    ClockAhead {
+        node: String,
+        count: u64,
+        seconds: u64,
+    },
 }
 
 /// How a scope without a listed checkpoint is rebuilt from frames.
@@ -75,6 +82,8 @@ pub enum ClearsBy {
     /// No peer this device may reach can serve it yet: a trusted peer must
     /// list a base for it first.
     NoPeer,
+    /// This device's clock reaching the waiting frames' stamps.
+    Clock,
 }
 
 /// Why a received frame does not apply yet.
@@ -104,6 +113,8 @@ pub enum WaitReason {
     Quarantined,
     /// No apply pass of this process examined it yet.
     Unexamined,
+    /// Its stamp is more than `MAX_CLOCK_AHEAD` ahead of this device's clock.
+    ClockAhead,
 }
 
 impl WaitReason {
@@ -118,6 +129,7 @@ impl WaitReason {
             | Self::OwnChain
             | Self::Dependencies
             | Self::Undecryptable => ClearsBy::AnyPeer,
+            Self::ClockAhead => ClearsBy::Clock,
         }
     }
 }
@@ -165,12 +177,21 @@ impl fmt::Display for Blocker {
             BlockerKind::FinalizationWaiting { reason } => {
                 format!("finalization waiting ({reason})")
             }
+            BlockerKind::ClockAhead {
+                node,
+                count,
+                seconds,
+            } => format!(
+                "{count} frames of {} up to {seconds} s ahead",
+                node.get(..12).unwrap_or(node)
+            ),
         };
         let clears = match &self.clears_by {
             ClearsBy::AnyPeer => "any permitted peer".into(),
             ClearsBy::Peer { node } => format!("peer {}", node.get(..12).unwrap_or(node)),
             ClearsBy::LocalWork => "local work".into(),
             ClearsBy::Application => "the application".into(),
+            ClearsBy::Clock => "this device's clock".into(),
             ClearsBy::NoPeer => return write!(f, "{} {kind}: no peer can serve", self.scope),
         };
         write!(f, "{} {kind}, cleared by {clears}", self.scope)

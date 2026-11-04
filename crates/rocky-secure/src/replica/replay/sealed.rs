@@ -105,7 +105,7 @@ impl<A: RowApplication> Inner<A> {
                 return Err(corrupt());
             };
             let stamp = Stamp {
-                clock: *clock as u64,
+                clock: stored_clock(*clock)?,
                 author: *author as u32,
                 sequence: *sequence as u64,
             };
@@ -177,7 +177,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let transaction: Commitment = txn.as_slice().try_into().map_err(|_| corrupt())?;
         let stamp = Stamp {
-            clock: *clock as u64,
+            clock: stored_clock(*clock)?,
             author,
             sequence: *sequence as u64,
         };
@@ -266,7 +266,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let transaction: Commitment = txn.as_slice().try_into().map_err(|_| corrupt())?;
             let stamp = Stamp {
-                clock: *clock as u64,
+                clock: stored_clock(*clock)?,
                 author,
                 sequence: *sequence as u64,
             };

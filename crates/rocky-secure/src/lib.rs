@@ -117,7 +117,7 @@ fn micros() -> Result<u64, Error> {
     let time = rocky_platform::time::since_epoch()
         .map(|time| u64::try_from(time.as_micros()).unwrap_or(u64::MAX))
         .map_err(|_| denied("clock before epoch"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "qualification"))]
     let time = time.saturating_add(
         CLOCK_SKEW
             .with(std::cell::Cell::get)
@@ -125,19 +125,38 @@ fn micros() -> Result<u64, Error> {
     );
     Ok(time)
 }
+/// Hybrid time: past every observed clock and at least the wall clock.
+/// Refused above `MAX_CLOCK`, which no replica accepts.
+fn next_clock(observed: u64) -> Result<u64, Error> {
+    observed
+        .checked_add(1)
+        .map(|clock| micros().map(|wall| clock.max(wall)))
+        .transpose()?
+        .filter(|clock| *clock <= rocky_core::MAX_CLOCK)
+        .ok_or_else(|| denied("hybrid clock beyond its bound"))
+}
 fn now() -> Result<u64, Error> {
     let time = rocky_platform::time::since_epoch()
         .map(|time| time.as_secs())
         .map_err(|_| denied("clock before epoch"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "qualification"))]
     let time = time.saturating_add(CLOCK_SKEW.with(std::cell::Cell::get));
     Ok(time)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "qualification"))]
 thread_local! {
     /// Seconds this test thread's clock runs ahead, to expire credentials
     /// without sleeping.
     static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Runs this thread's clock `seconds` ahead, as a device whose wall clock
+/// is ahead does.
+#[cfg(feature = "qualification")]
+pub fn skew_clock(seconds: u64) {
+    CLOCK_SKEW.with(|skew| skew.set(seconds));
+}
+#[cfg(test)]
+thread_local! {
     /// Transactions that apply operations this test thread may still commit
     /// before the pending pass is interrupted. Discovery does not spend it.
     static APPLY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };

@@ -510,7 +510,7 @@ impl<A: RowApplication> Inner<A> {
         readiness: &blockers::DomainReadiness,
         scope: ResourceScope,
     ) -> Result<bool, Error> {
-        Ok(self.has_pending(scope).await?
+        Ok(self.pending_now(scope).await?
             || self.restoring(scope).await?
             || !self.readable_in(readiness, scope).await?.is_empty())
     }

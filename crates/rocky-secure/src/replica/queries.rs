@@ -317,7 +317,7 @@ impl<A: RowApplication> Inner<A> {
             } else if self.restoring(scope).await?
                 // Frames another engine must replay leave this build reading
                 // what it replayed, as if they had not arrived yet.
-                || (self.engine_matches() && self.has_pending(scope).await?)
+                || (self.engine_matches() && self.pending_now(scope).await?)
             {
                 Unavailable::Incomplete
             } else {

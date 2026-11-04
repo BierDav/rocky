@@ -237,11 +237,7 @@ impl<A: RowApplication> Inner<A> {
             _ => None,
         }
         .ok_or_else(|| Error::Corrupt("replayed clock".into()))?;
-        let clock = clock
-            .max(replayed)
-            .checked_add(1)
-            .ok_or_else(|| denied("logical clock exhausted"))?
-            .max(micros()?);
+        let clock = next_clock(clock.max(replayed))?;
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;

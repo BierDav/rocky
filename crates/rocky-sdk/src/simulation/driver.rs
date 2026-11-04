@@ -235,6 +235,34 @@ impl Simulation {
                 self.scope_local += usize::from(elsewhere);
                 Ok("written".into())
             }
+            Action::WriteAhead(node, by) => {
+                let member = self.running(*node)?;
+                rocky_secure::skew_clock(by.as_secs());
+                let written = member.write(&format!("w{index}"), index as u64).await;
+                rocky_secure::skew_clock(0);
+                written.map(|()| "written".into())
+            }
+            Action::Ahead(node) => {
+                let member = self.running(*node)?;
+                let running = member
+                    .running
+                    .as_ref()
+                    .and_then(|running| running.node.upgrade())
+                    .ok_or("the node is not running")?;
+                let frames: u64 = running
+                    .blockers()
+                    .await?
+                    .iter()
+                    .map(|blocker| match blocker.kind {
+                        BlockerKind::ClockAhead { count, .. } => count,
+                        _ => 0,
+                    })
+                    .sum();
+                Ok(format!(
+                    "{frames} ahead, {} keys",
+                    member.keys().await?.len()
+                ))
+            }
             Action::Probe(node) => {
                 let member = self.running(*node)?;
                 let key = format!("w{index}");

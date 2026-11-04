@@ -2906,7 +2906,10 @@ impl Node {
             let clears = match &blocker.clears_by {
                 ClearsBy::AnyPeer => true,
                 ClearsBy::Peer { node: by } => *by == node,
-                ClearsBy::LocalWork | ClearsBy::Application | ClearsBy::NoPeer => false,
+                ClearsBy::LocalWork
+                | ClearsBy::Application
+                | ClearsBy::NoPeer
+                | ClearsBy::Clock => false,
             };
             clears
                 && (served.contains(&blocker.scope)

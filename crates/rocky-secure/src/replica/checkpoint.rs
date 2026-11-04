@@ -132,6 +132,7 @@ pub struct LogPosition {
     pub author: PublicKey,
     pub sequence: u64,
     pub hash: Hash,
+    #[serde(deserialize_with = "rocky_core::bounded_clock")]
     pub clock: u64,
 }
 /// A set bound by its size and an order-independent digest.
@@ -268,6 +269,7 @@ pub struct CheckpointStatement {
     pub previous: Option<Commitment>,
     /// Applied tip of every log, ordered by author.
     pub frontier: Vec<LogPosition>,
+    #[serde(deserialize_with = "rocky_core::bounded_clock")]
     pub clock: u64,
     pub operations: u64,
     /// Stored rows, tombstones and creation identities included.
@@ -1004,7 +1006,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(Some(Log {
             sequence: row.get::<i64>(0)?,
             hash: hash_of(&row.get::<Vec<u8>>(1)?)?,
-            clock: row.get::<i64>(2)? as u64,
+            clock: stored_clock(row.get::<i64>(2)?)?,
             pruned_prefix: row.get::<i64>(3)?,
         }))
     }
@@ -1048,7 +1050,7 @@ impl<A: RowApplication> Inner<A> {
                         author: key_of(author)?,
                         sequence: *sequence as u64,
                         hash: hash_of(hash)?,
-                        clock: *clock as u64,
+                        clock: stored_clock(*clock)?,
                     },
                     *pruned_prefix,
                 ))
@@ -1116,7 +1118,7 @@ impl<A: RowApplication> Inner<A> {
                 bindings(vec![
                     SqlValue::Blob(hash.as_bytes().to_vec()),
                     SqlValue::Integer(scope),
-                    integer(clock),
+                    clock_value(clock)?,
                     SqlValue::Integer(i64::from(creation)),
                 ]),
             )
@@ -1146,7 +1148,7 @@ impl<A: RowApplication> Inner<A> {
                     SqlValue::Blob(operation.header.public_key.as_bytes().to_vec()),
                     integer(operation.header.seq_num),
                     SqlValue::Blob(operation.hash.as_bytes().to_vec()),
-                    integer(operation.header.timestamp),
+                    clock_value(operation.header.timestamp)?,
                 ]),
             )
             .await?;

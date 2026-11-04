@@ -242,11 +242,7 @@ impl<A: RowApplication> Inner<A> {
         if previous.len() > 64 {
             return Err(denied("dependency quota"));
         }
-        // Hybrid time: past every observed value and at least the wall clock.
-        let clock = clock
-            .checked_add(1)
-            .ok_or_else(|| denied("logical clock exhausted"))?
-            .max(micros()?);
+        let clock = next_clock(clock)?;
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;

@@ -1,7 +1,8 @@
 //! Local recovery runs without a peer: at open, after keys, grants,
-//! schemas or the tip graph change, after a commit while a blocker remains
-//! and every `TICK` while local work clears one. Never inside a network
-//! call or a peer session.
+//! schemas or the tip graph change, after a commit while a blocker remains,
+//! every `TICK` while local work clears one and when a received frame
+//! waiting for this clock is due. Never inside a network call or a peer
+//! session.
 use super::*;
 use rocky_core::{Blocker, ClearsBy};
 use rocky_secure::EarlierEpochWrites;
@@ -123,6 +124,9 @@ impl Node {
                 || self.settings.lock().await.pending_follow.is_some();
             let tick = rocky_platform::time::sleep(TICK);
             tokio::pin!(tick);
+            let clock = self.replica.clock_wait().await.ok().flatten();
+            let due = rocky_platform::time::sleep(clock.unwrap_or(TICK));
+            tokio::pin!(due);
             loop {
                 tokio::select! {
                     changed = context.changed() => match changed {
@@ -134,6 +138,7 @@ impl Node {
                     changed = passes.changed() => if changed.is_err() { return },
                     changed = wakes.changed() => if changed.is_err() { return },
                     () = &mut tick, if local => break,
+                    () = &mut due, if clock.is_some() => break,
                 }
                 if self.settings.lock().await.pending_follow.is_some()
                     || !self.blockers().await.unwrap_or_default().is_empty()

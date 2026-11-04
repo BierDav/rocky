@@ -111,8 +111,8 @@ pub use publication::CHUNK_PAGES;
 pub use publication::{PUBLICATION_CHUNK_BUNDLES, Publication};
 pub use queries::Describe;
 use rocky_core::{
-    Blocker, BlockerKind, ClearsBy, Commitment, ResourceScope, Right, RowApplication, RowChange,
-    RowFields, RowSelection, RowWrite, SqlValue, TipId, WaitReason,
+    Blocker, BlockerKind, ClearsBy, Commitment, MAX_CLOCK_AHEAD, ResourceScope, Right,
+    RowApplication, RowChange, RowFields, RowSelection, RowWrite, SqlValue, TipId, WaitReason,
 };
 pub use roles::{
     FrontierLog, Holding, PeerLag, RangePage, ReplicaRole, ReplicaStatus, RoleConfig,
@@ -395,6 +395,8 @@ pub(super) struct Inner<A> {
     importing: BTreeSet<ResourceScope>,
     /// Why each pending log head waited when an apply pass last examined it.
     waits: BTreeMap<Hash, WaitReason>,
+    /// Pending log heads waiting for this clock: their author and stamp.
+    ahead: BTreeMap<Hash, (PublicKey, u64)>,
     /// A frame of an earlier key epoch than its scope's current one applied
     /// since the last scan, and the followed tip that scan saw.
     earlier_epoch: AtomicBool,
@@ -713,6 +715,16 @@ impl<A> EncryptedReplica<A> {
             .clone()
     }
 }
+/// A hybrid clock as SQLite stores it; refused above `MAX_CLOCK`.
+pub(super) fn clock_value(clock: u64) -> Result<SqlValue, Error> {
+    i64::try_from(clock)
+        .map(SqlValue::Integer)
+        .map_err(|_| denied("clock beyond its bound"))
+}
+/// A stored hybrid clock.
+pub(super) fn stored_clock(clock: i64) -> Result<u64, Error> {
+    u64::try_from(clock).map_err(|_| Error::Corrupt("stored clock".into()))
+}
 fn protocol_schema() -> impl Iterator<Item = String> {
     [
         schemas::SCHEMA,
@@ -1030,6 +1042,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             deferred_maintenance: BTreeSet::new(),
             importing: BTreeSet::new(),
             waits: BTreeMap::new(),
+            ahead: BTreeMap::new(),
             earlier_epoch: AtomicBool::new(false),
             epochs_scanned: None,
             rows_written: AtomicU64::new(0),
@@ -1332,6 +1345,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .recovery_events
             .subscribe()
+    }
+    /// How long until the first received frame waiting for this clock may
+    /// apply; none when no frame waits for it. Local recovery runs then.
+    pub async fn clock_wait(&self) -> Result<Option<std::time::Duration>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let Some(stamp) = inner.ahead.values().map(|(_, stamp)| *stamp).min() else {
+            return Ok(None);
+        };
+        let due = stamp.saturating_sub(MAX_CLOCK_AHEAD.as_micros() as u64);
+        Ok(Some(std::time::Duration::from_micros(
+            due.saturating_sub(micros()?),
+        )))
     }
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()

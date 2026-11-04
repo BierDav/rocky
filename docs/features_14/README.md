@@ -101,6 +101,12 @@ Status (2026-11-04): a reference replays after its parent whatever the
 wall clocks: an intent's stamp passes every transaction its author
 replayed (features_13 evidence, "a reference advances the hybrid clock").
 
+Status (2026-11-04): a received stamp is at most `i64::MAX`, refused
+alike everywhere above it, and a frame more than 5 min ahead of this
+device's clock waits until it is near, shown as a `ClockAhead` blocker:
+a fast clock delays its own writes instead of skewing everyone's order
+(features_13 evidence, "received stamps are bounded").
+
 - **Tenant = domain.** `Database::create` makes a domain with a random
   `MeshId` and `DomainId`; its `AppId` derives from the owner's identity
   key (the publisher) and the application name (`rocky_core::Scope`). The

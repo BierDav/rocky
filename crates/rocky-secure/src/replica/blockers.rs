@@ -413,6 +413,16 @@ impl<A: RowApplication> Inner<A> {
                 .get(&hash)
                 .copied()
                 .unwrap_or(WaitReason::Unexamined);
+            if let Some((author, stamp)) = self.ahead.get(&hash) {
+                let seconds = stamp.saturating_sub(micros()?).div_ceil(1_000_000);
+                let entry = pending
+                    .ahead
+                    .entry((scope_label(&scope), author.to_hex()))
+                    .or_default();
+                entry.0 += *count as u64;
+                entry.1 = entry.1.max(seconds);
+                continue;
+            }
             *pending
                 .counts
                 .entry((scope_label(&scope), reason))
@@ -502,6 +512,9 @@ impl<A: RowApplication> Inner<A> {
 struct PendingCounts {
     counts: BTreeMap<(String, WaitReason), u64>,
     quarantined: BTreeMap<(String, String), u64>,
+    /// Frames of a log whose head waits for this clock, by scope and author
+    /// node, with the most seconds a head is ahead.
+    ahead: BTreeMap<(String, String), (u64, u64)>,
 }
 impl PendingCounts {
     fn blockers(self) -> Vec<Blocker> {
@@ -527,6 +540,21 @@ impl PendingCounts {
                             ClearsBy::LocalWork
                         };
                         blocker(scope, BlockerKind::Quarantined { reason, count }, clears_by)
+                    }),
+            )
+            .chain(
+                self.ahead
+                    .into_iter()
+                    .map(|((scope, node), (count, seconds))| {
+                        blocker(
+                            scope,
+                            BlockerKind::ClockAhead {
+                                node,
+                                count,
+                                seconds,
+                            },
+                            ClearsBy::Clock,
+                        )
                     }),
             )
             .collect()

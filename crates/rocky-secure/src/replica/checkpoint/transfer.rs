@@ -60,6 +60,7 @@ struct PageRow {
     row: Vec<u8>,
     #[serde(with = "serde_bytes")]
     fields: Vec<u8>,
+    #[serde(deserialize_with = "rocky_core::bounded_clock")]
     clock: u64,
 }
 /// Encoded bytes of a page row beyond its stored record.
@@ -654,7 +655,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("checkpoint creation stub".into()));
                 };
                 let hash = hash_of(hash)?;
-                if fresh.remove(&hash) != Some(*clock as u64) {
+                if fresh.remove(&hash) != Some(stored_clock(*clock)?) {
                     return Err(denied("checkpoint creation clocks disagree"));
                 }
             }
@@ -1927,7 +1928,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let [SqlValue::Blob(hash), SqlValue::Integer(clock)] = record.as_slice() else {
                     return Err(Error::Corrupt("checkpoint creation clock".into()));
                 };
-                clocks.insert(hash.clone(), *clock as u64);
+                clocks.insert(hash.clone(), stored_clock(*clock)?);
             }
             for (_, page_row, record) in rows {
                 if clocks
@@ -2553,7 +2554,7 @@ impl<A: RowApplication> Inner<A> {
                         SqlValue::Blob(log.author.as_bytes().to_vec()),
                         SqlValue::Integer(log.sequence as i64),
                         SqlValue::Blob(log.hash.as_bytes().to_vec()),
-                        SqlValue::Integer(log.clock as i64),
+                        clock_value(log.clock)?,
                         SqlValue::Integer(log.sequence as i64),
                     ]),
                 )
@@ -2569,7 +2570,7 @@ impl<A: RowApplication> Inner<A> {
                         bindings(vec![
                             SqlValue::Blob(log.hash.as_bytes().to_vec()),
                             SqlValue::Integer(id),
-                            SqlValue::Integer(log.clock as i64),
+                            clock_value(log.clock)?,
                         ]),
                     )
                     .await?;
@@ -2657,7 +2658,9 @@ impl<A: RowApplication> Inner<A> {
                     None => report.reapplied.push(hash),
                 },
                 incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
-                incoming::Outcome::Waiting(_) => report.pending.push(hash),
+                incoming::Outcome::Waiting(_) | incoming::Outcome::Ahead(_) => {
+                    report.pending.push(hash)
+                }
             }
         }
         self.reseed_ledger(scope, id).await?;

@@ -852,3 +852,56 @@ points, and the `board_cap` assertion bounds a board's points.
     checkpoints unchanged.
   - Release soak (seeds 20000..20299, moving clock, this Mac): 300/300
     (chunks 368/362/351 s).
+- **Closed: received stamps are bounded** (2026-11-04). Receipt checked
+  only that a frame's stamp passed its dependencies'. A stamp at or past
+  2^63 was stored negative, so SQL replayed it first while Rust ordered
+  it last and `MAX(clock)` skipped it; a stamp near `u64::MAX` exhausted
+  the hybrid clock of every replica that observed it; and a peer whose
+  clock ran ahead dragged every replica's clock and won every concurrent
+  last-writer-wins conflict for that span.
+  - Validity (deterministic, permanent): a clock is at most
+    `rocky_core::MAX_CLOCK` (`i64::MAX`). `check_header` refuses a frame
+    above it; `SecureStamp`, `LogPosition`, a checkpoint statement's
+    clock and a checkpoint page row's clock refuse it when decoded.
+    Authoring (`next_clock`, rows and intents alike) returns an error
+    instead of passing it. Clocks bind to SQL through `clock_value` /
+    `stored_clock` (checked) instead of `as` casts.
+  - Hold (eventual, never a refusal): a received frame stamped more than
+    `MAX_CLOCK_AHEAD` (5 min) ahead of this replica's wall clock waits as
+    a pending log head (`WaitReason::ClockAhead`) after its other checks
+    pass, single frames, bundles (the latest member) and held-tip frames
+    alike; its log and every frame stamped after it wait behind it. It
+    applies once this clock is within 5 min of it, so every honest replica
+    applies the same frames and a fast clock costs delay, never data. A
+    replica's own frames never wait. The waiting frames use the existing
+    pending storage and its bounds; only their log heads are kept in
+    memory. Read completeness (`pending_now`) ignores them: they are as
+    if not arrived yet, and everything behind them is stamped later.
+  - Wake: `EncryptedReplica::clock_wait` gives the earliest due time; the
+    SDK's local recovery driver sleeps until it on `rocky_platform`'s
+    timer (native and wasm), so a waiting frame applies on time with no
+    other frame or sync.
+  - Visibility: `BlockerKind::ClockAhead { node, count, seconds }`,
+    `ClearsBy::Clock`, per scope and author, in the existing blockers of
+    node and database status.
+  - Bases are exempt: a checkpoint's clocks were applied by its signer
+    under the same hold, so they are within 5 min of that trusted signer's
+    clock; the validity bound still applies to them.
+  - Tests: `tests::replayed_constraints::clock::*` (a stamp past the bound
+    is refused and stored nowhere, one at the bound waits, stamps and log
+    positions past it fail to decode, `next_clock` refuses past it; a
+    peer an hour ahead waits with its successor, shown as a clock blocker,
+    the receiver's own write stays behind it, nothing applies 1 min before
+    due, both apply after it and every replica and a rebuild match the
+    canonical replay; 4.5 min ahead applies at once) and
+    `simulation::clock::frames_from_a_clock_ahead_apply_when_this_clock_is_near_them`
+    (links severed after receipt; the frames apply after the due time by
+    the recovery timer alone, and not before). Each fails without the
+    hold or without the timer.
+  - Formats: `rocky.encrypted-replica.v51` and link handshake
+    `rocky.link.v21` (the stricter validity rule). Frame, checkpoint and
+    page encodings unchanged.
+  - Checks: `./scripts/lint` 0; `./scripts/check --unit --integration` 0
+    (256 unit, 1405 integration passed); `./scripts/check --wasm` 0
+    (831 passed, 1 ignored); release `relational_soak` 300 seeds from
+    20000 in three chunks of 100, all passed (410 s, 420 s, 356 s).

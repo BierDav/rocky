@@ -12,7 +12,7 @@ pub use generation::{Generation, Removed, SchemaChange, Unsupported, classify, r
 mod manifest;
 pub use manifest::*;
 mod secure_row;
-pub use secure_row::{CreationStatement, SecureStamp};
+pub use secure_row::{CreationStatement, MAX_CLOCK, MAX_CLOCK_AHEAD, SecureStamp, bounded_clock};
 mod field_ordinals;
 pub use field_ordinals::FieldOrdinals;
 mod history;

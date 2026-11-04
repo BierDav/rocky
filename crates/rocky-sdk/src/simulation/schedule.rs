@@ -146,6 +146,10 @@ pub(super) enum Action {
     /// The node's networking goes off or on.
     Offline(usize),
     Online(usize),
+    /// A write by a node whose clock runs this far ahead.
+    WriteAhead(usize, Duration),
+    /// Reports the node's frames waiting for its clock and its item keys.
+    Ahead(usize),
 }
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -176,6 +180,8 @@ impl fmt::Display for Action {
             Self::Hold(node, list) => write!(f, "hold {} {list}", name(node)),
             Self::Offline(node) => write!(f, "offline {}", name(node)),
             Self::Online(node) => write!(f, "online {}", name(node)),
+            Self::WriteAhead(node, by) => write!(f, "write {} {by:?} ahead", name(node)),
+            Self::Ahead(node) => write!(f, "ahead {}", name(node)),
         }
     }
 }

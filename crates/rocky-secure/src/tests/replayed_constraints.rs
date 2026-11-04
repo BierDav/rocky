@@ -14,6 +14,7 @@ use rocky_credentials::{Authority, PartitionGrant};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+mod clock;
 // Exhaustive delivery schedules run across threads.
 #[cfg(not(target_family = "wasm"))]
 mod convergence;

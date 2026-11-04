@@ -57,13 +57,14 @@ mod native {
             local: false,
             bind: None,
         };
-        let db = Configuration::new(directory.path().join("owner"), &schema)?
+        let created = Configuration::new(directory.path().join("owner"), &schema)?
             .network(Network::Owned(Arc::new(network)))
             .coordination(Coordination::Service(Box::new(bundle.clone())))
             .create()
-            .await?
-            .database;
-        register(&db).await?;
+            .await?;
+        let root = created.root.ok_or("a created domain returns its root")?;
+        let db = created.database;
+        register(&db, &root.phrase()).await?;
         let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -101,14 +102,16 @@ mod native {
     }
 
     /// Registers the domain with the owner's identity as its one trusted
-    /// one; no later control revision trusts another.
-    async fn register(db: &Database) -> Result<(), Failure> {
+    /// one; no later control revision trusts another. Registering without
+    /// a coordination grant needs the root.
+    async fn register(db: &Database, root: &str) -> Result<(), Failure> {
         let tenant = PrivateKey::new();
         let principal = call(db, json!({"type": "session"})).await?["principal"].clone();
         call(
             db,
             json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-                "registration": vec![1u8; 32], "trusted": [principal], "lifetime": 3600}),
+                "registration": vec![1u8; 32], "trusted": [principal], "lifetime": 3600,
+                "root": {"phrase": root}}),
         )
         .await?;
         Ok(())

@@ -202,6 +202,7 @@ impl Node {
         })
     }
     pub(super) async fn observed_status(&self) -> Result<DatabaseStatus, Failure> {
+        self.refresh_trusted_watch().await?;
         let settings = self.settings.lock().await.clone();
         let generation = self.replica.generations().await?;
         let mut imports = Vec::new();

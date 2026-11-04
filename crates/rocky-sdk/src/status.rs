@@ -411,7 +411,23 @@ pub enum AlertKind {
     /// device holds for `STANDING_FAILURE` or longer: claim rights they end
     /// still pass there. Clears when a push is acknowledged.
     RevocationsUnpushed,
+    /// On a trusted node: no node of the trusted identity `identity` was
+    /// heard from, directly or through another trusted node, for the
+    /// configured threshold (`TRUSTED_STALE_AFTER` by default) since
+    /// `last_heard_epoch_seconds`. Ask the user whether the root should
+    /// revoke it; clears once it is heard again or revoked.
+    TrustedNodeStale {
+        identity: String,
+        last_heard_epoch_seconds: u64,
+    },
+    /// On a trusted node: a seal is due and was not made, for `reason`:
+    /// `no_followed_bookmark`, `no_tip_authority: …` or `failed: …`.
+    /// Clears with the next seal pass that has nothing left undone.
+    SealSkipped { reason: String },
 }
+/// How long a trusted node may stay unheard before the others flag it.
+pub const TRUSTED_STALE_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 60 * 60);
 /// How long a coordination failure lasts before it is an alert.
 pub const STANDING_FAILURE: std::time::Duration = std::time::Duration::from_secs(300);
 /// What a device reports of its own health to the domain's trusted nodes.

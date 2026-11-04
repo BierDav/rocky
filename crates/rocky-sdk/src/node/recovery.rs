@@ -29,10 +29,12 @@ impl Node {
     /// when writes of an earlier key epoch arrived past the last seal, and
     /// lists the bases it holds, so a scope only a listed checkpoint
     /// restores finds a peer that serves it.
-    pub(super) async fn publish_for_members(&self) {
+    /// Returns why a due member seal was not made.
+    pub(super) async fn publish_for_members(&self) -> Option<String> {
         if !self.signs_for_members().await {
-            return;
+            return None;
         }
+        let mut sealing = false;
         let scope = self.domain().scope;
         let published = async {
             // After a revocation members restore rows only from a served
@@ -40,7 +42,10 @@ impl Node {
             // one of an earlier epoch signed again, and one that misses
             // sealed writes of an earlier epoch moves to a later seal.
             match self.replica.earlier_epoch_writes(scope).await? {
-                EarlierEpochWrites::Unsealed => return self.seal_for_members().await,
+                EarlierEpochWrites::Unsealed => {
+                    sealing = true;
+                    return self.seal_for_members().await;
+                }
                 EarlierEpochWrites::Unbased => {
                     self.replica.compact(scope, 0).await?;
                 }
@@ -56,21 +61,33 @@ impl Node {
         if let Err(error) = published {
             self.activity
                 .record_changed("member_seal_failed", json!({"error": error.to_string()}));
+            if sealing {
+                return Some(format!("failed: {error}"));
+            }
         }
+        None
     }
     /// A trusted node seals the followed tip once it holds
     /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
     /// rewind never undoes more; finalizing the seal ends their rewinds.
-    /// The root is never needed.
-    pub(super) async fn seal_routinely(&self) {
-        if self.settings.lock().await.trusted_links().is_none() || !self.signs_for_members().await {
-            return;
-        }
+    /// The root is never needed. Returns why a due seal was not made.
+    pub(super) async fn seal_routinely(&self) -> Option<String> {
+        self.settings.lock().await.trusted_links()?;
+        let scope = self.domain().scope;
         let sealed = async {
+            let due = self.replica.unsealed_replayed_transactions().await?
+                >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
+                || self.replica.earlier_epoch_due().await;
+            if self.replica.followed_bookmark().await.is_none() {
+                return Ok(due.then(|| "no_followed_bookmark".to_owned()));
+            }
+            if let Err(error) = self.tip_signer(scope).await {
+                return Ok(due.then(|| format!("no_tip_authority: {error}")));
+            }
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
-                self.seal_followed(self.domain().scope, false).await?;
+                self.seal_followed(scope, false).await?;
             }
             let awaiting = self.replica.awaiting_outcomes().await?;
             if !awaiting.is_empty() {
@@ -79,12 +96,52 @@ impl Node {
                     json!({"transactions": awaiting.len()}),
                 );
             }
-            Ok::<_, Failure>(())
+            Ok::<_, Failure>(None)
         }
         .await;
-        if let Err(error) = sealed {
+        sealed.unwrap_or_else(|error| {
             self.activity
                 .record_changed("routine_seal_failed", json!({"error": error.to_string()}));
+            Some(format!("failed: {error}"))
+        })
+    }
+    /// Raises, keeps or clears the alert of a seal this trusted node
+    /// should make and did not, for `reason`.
+    pub(super) fn seal_skipped(&self, reason: Option<String>) {
+        let mut skipped = self
+            .seal_skipped
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let changed = match (&*skipped, reason) {
+            (None, None) => false,
+            (Some(_), None) => {
+                tracing::info!("this trusted node seals again");
+                *skipped = None;
+                true
+            }
+            (current, Some(reason)) => {
+                let same = matches!(
+                    current,
+                    Some(crate::Alert { kind: crate::AlertKind::SealSkipped { reason: held }, .. })
+                        if *held == reason
+                );
+                if !same {
+                    tracing::warn!(%reason, "this trusted node skipped a due seal");
+                    let since = current
+                        .as_ref()
+                        .and_then(|alert| alert.since)
+                        .or_else(|| self.status_time().ok());
+                    *skipped = Some(crate::Alert {
+                        kind: crate::AlertKind::SealSkipped { reason },
+                        since,
+                    });
+                }
+                !same
+            }
+        };
+        drop(skipped);
+        if changed {
+            self.observations.touch();
         }
     }
     /// Whether this node seals for members: it signs tip statements and

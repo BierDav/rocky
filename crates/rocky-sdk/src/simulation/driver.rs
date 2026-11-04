@@ -87,6 +87,8 @@ struct Simulation {
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
     /// Each node's pending `WatchMesh`: the view it saw change to.
     mesh_watches: BTreeMap<usize, tokio::task::JoinHandle<Result<MeshView, Failure>>>,
+    /// Member names by identity, for trusted identities.
+    identities: BTreeMap<String, String>,
 }
 /// A node's mesh view; `None` where it has none.
 type MeshView = Option<Vec<crate::MeshDevice>>;
@@ -151,6 +153,7 @@ pub(super) async fn run_steps(
         scope_local: 0,
         watches: BTreeMap::new(),
         mesh_watches: BTreeMap::new(),
+        identities: BTreeMap::new(),
     };
     let mut report = Report {
         seed,
@@ -345,11 +348,24 @@ impl Simulation {
                     .clone()
                     .ok_or("member 0 holds no root")?;
                 let grant = self.database(0)?.session().trust(&identity, root).await?;
+                let creator = self.database(0)?.session().status().await?;
+                for (member, identity) in
+                    [(0, creator.authority.principal), (*node, identity.clone())]
+                {
+                    let name = self.members[member].name.clone();
+                    self.identities.insert(identity, name);
+                }
                 self.database(*node)?
                     .session()
                     .install_trust(&grant.grant)
                     .await?;
                 Ok("trusted".into())
+            }
+            Action::StaleAfter(node, after) => {
+                self.running(*node)?
+                    .call(json!({"type": "trusted_stale_after", "seconds": after.as_secs()}))
+                    .await?;
+                Ok("set".into())
             }
             Action::Mesh(node) => {
                 let status = self.database(*node)?.session().status().await?;
@@ -722,6 +738,11 @@ impl Simulation {
                 }
                 crate::AlertKind::CoordinatorUnreachable => "coordinator unreachable".into(),
                 crate::AlertKind::RevocationsUnpushed => "revocations unpushed".into(),
+                crate::AlertKind::SealSkipped { reason } => format!("seal skipped {reason}"),
+                crate::AlertKind::TrustedNodeStale { identity, .. } => format!(
+                    "{} stale",
+                    self.identities.get(identity).map_or("?", String::as_str)
+                ),
             })
             .collect();
         format!("alerts {described:?}")

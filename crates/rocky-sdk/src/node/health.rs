@@ -6,7 +6,7 @@
 use super::*;
 use crate::status::{
     Alert, AlertKind, BlockerCount, CoordinationFailure, HealthReport, MeshDevice, SILENT_AFTER,
-    STANDING_FAILURE,
+    STANDING_FAILURE, TRUSTED_STALE_AFTER,
 };
 use live_links::io::Writer;
 use rocky_core::CoordinationError;
@@ -175,6 +175,54 @@ impl Coordination {
     }
 }
 
+/// A trusted node's view of the other trusted identities: when each was
+/// granted and last heard, through any of its nodes.
+#[derive(Default)]
+pub(super) struct TrustedWatch {
+    /// The other live trusted identities and their grant times; empty
+    /// unless this device is a trusted node.
+    granted: BTreeMap<PublicKey, u64>,
+    /// Node keys of those identities.
+    nodes: BTreeMap<PublicKey, PublicKey>,
+    heard: BTreeMap<PublicKey, u64>,
+    stale_after: u64,
+}
+/// A last-heard time is saved once it moved this far, or an eighth of
+/// the threshold, so reports and links do not write the settings each time.
+const HEARD_SAVE: u64 = 3600;
+impl TrustedWatch {
+    fn hear(&mut self, node: &PublicKey, at: u64) {
+        if let Some(identity) = self.nodes.get(node) {
+            let heard = self.heard.entry(*identity).or_default();
+            *heard = (*heard).max(at);
+        }
+    }
+    /// Each identity's last sign of life: heard, or else granted.
+    fn last(&self) -> impl Iterator<Item = (PublicKey, u64)> + '_ {
+        self.granted.iter().map(|(identity, granted)| {
+            let heard = self.heard.get(identity).copied().unwrap_or_default();
+            (*identity, heard.max(*granted))
+        })
+    }
+    fn alerts(&self, time: u64) -> impl Iterator<Item = Alert> + '_ {
+        self.last()
+            .filter(move |(_, last)| time.saturating_sub(*last) >= self.stale_after)
+            .map(|(identity, last)| Alert {
+                kind: AlertKind::TrustedNodeStale {
+                    identity: identity.to_hex(),
+                    last_heard_epoch_seconds: last,
+                },
+                since: Some(last.saturating_add(self.stale_after)),
+            })
+    }
+    fn deadline(&self, time: u64) -> Option<u64> {
+        self.last()
+            .map(|(_, last)| last.saturating_add(self.stale_after))
+            .filter(|deadline| *deadline > time)
+            .min()
+    }
+}
+
 /// One health message on a live link.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -238,9 +286,17 @@ impl Node {
             self.coordination.observe(result, time);
         }
     }
-    /// This device's alerts: clocks its peers disagree with and standing
-    /// coordination failures.
+    /// This device's alerts: clocks its peers disagree with, standing
+    /// coordination failures and, on a trusted node, stale trusted nodes
+    /// and a skipped seal.
     pub(super) fn alerts(&self) -> Vec<Alert> {
+        let time = self.status_time().unwrap_or_default();
+        let stale: Vec<Alert> = self
+            .trusted_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .alerts(time)
+            .collect();
         let mut alerts: Vec<Alert> = self
             .clocks
             .lock()
@@ -248,9 +304,150 @@ impl Node {
             .values()
             .cloned()
             .chain(self.coordination.alerts())
+            .chain(stale)
+            .chain(
+                self.seal_skipped
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            )
             .collect();
         alerts.sort();
         alerts
+    }
+    /// Reloads the other trusted identities from the registry, merges the
+    /// saved last-heard times and saves those that moved `HEARD_SAVE`.
+    pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
+        let registry = if self.collects().await {
+            Some(self.registry().await?)
+        } else {
+            None
+        };
+        let mut settings = self.settings.lock().await;
+        let own = settings.identity;
+        let saved = settings
+            .authority
+            .as_ref()
+            .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
+            .unwrap_or_default();
+        let (granted, nodes) = match &registry {
+            Some(registry) => {
+                let granted: BTreeMap<PublicKey, u64> = registry
+                    .trusted_identities(&settings.revocations)
+                    .into_iter()
+                    .filter(|identity| *identity != own)
+                    .filter_map(|identity| {
+                        let record = registry.trusted.get(&identity)?;
+                        Some((identity, record.granted))
+                    })
+                    .collect();
+                let nodes = registry
+                    .records
+                    .iter()
+                    .filter(|(_, record)| !record.revoked)
+                    .filter_map(|(node, record)| {
+                        let user = record.device.as_ref()?.user;
+                        granted.contains_key(&user).then_some((*node, user))
+                    })
+                    .collect();
+                (granted, nodes)
+            }
+            None => Default::default(),
+        };
+        let save = {
+            let mut watch = self
+                .trusted_watch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            watch.stale_after = saved.1.unwrap_or(TRUSTED_STALE_AFTER.as_secs());
+            for (identity, at) in &saved.0 {
+                let heard = watch.heard.entry(*identity).or_default();
+                *heard = (*heard).max(*at);
+            }
+            watch
+                .heard
+                .retain(|identity, _| granted.contains_key(identity));
+            watch.granted = granted;
+            watch.nodes = nodes;
+            let granularity = HEARD_SAVE.min(watch.stale_after / 8);
+            let moved = watch.heard.iter().any(|(identity, at)| {
+                saved
+                    .0
+                    .get(identity)
+                    .is_none_or(|saved| at.saturating_sub(*saved) >= granularity)
+            });
+            (moved || watch.heard.len() != saved.0.len()).then(|| watch.heard.clone())
+        };
+        if let (Some(heard), Some(_)) = (save, &settings.authority) {
+            let mut draft = settings.clone();
+            if let Some(issuing) = draft.authority.as_mut() {
+                issuing.heard = heard;
+            }
+            draft.save(&self.path)?;
+            *settings = draft;
+        }
+        Ok(())
+    }
+    /// A sign of life from `node` at `at`, if it is another trusted node's.
+    fn hear_trusted(&self, node: &PublicKey, at: u64) {
+        let mut watch = self
+            .trusted_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let before = watch.heard.clone();
+        watch.hear(node, at);
+        let time = self.status_time().unwrap_or_default();
+        // A stale node heard again clears its alert.
+        let cleared = watch.granted.keys().any(|identity| {
+            let last = |heard: &BTreeMap<PublicKey, u64>| {
+                heard
+                    .get(identity)
+                    .copied()
+                    .unwrap_or_default()
+                    .max(watch.granted[identity])
+            };
+            time.saturating_sub(last(&before)) >= watch.stale_after
+                && time.saturating_sub(last(&watch.heard)) < watch.stale_after
+        });
+        drop(watch);
+        if cleared {
+            self.observations.touch();
+        }
+    }
+    /// Sets how long another trusted identity may stay unheard before this
+    /// trusted node flags it.
+    pub(super) async fn set_trusted_stale_after(&self, seconds: u64) -> Result<Value, Failure> {
+        if !(60..=10 * 366 * 24 * 60 * 60).contains(&seconds) {
+            return Err(Box::new(crate::node::Refused(
+                "stale_after must be a minute to ten years".into(),
+            )));
+        }
+        if !self.collects().await {
+            return Err(Box::new(crate::node::Refused(
+                "only a trusted node watches other trusted nodes".into(),
+            )));
+        }
+        {
+            let mut settings = self.settings.lock().await;
+            let mut draft = settings.clone();
+            draft
+                .authority
+                .as_mut()
+                .ok_or("a trusted node issues")?
+                .stale_after = Some(seconds);
+            draft.save(&self.path)?;
+            *settings = draft;
+        }
+        self.refresh_trusted_watch().await?;
+        self.observations.touch();
+        Ok(json!({"stale_after": seconds}))
+    }
+    /// The next time, after `time`, another trusted node turns stale.
+    pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {
+        self.trusted_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .deadline(time)
     }
     /// Whether this device collects health reports: a trusted node, whose
     /// identity holds the root's trusted grant.
@@ -445,6 +642,7 @@ impl Node {
         {
             held.received = held.received.max(time);
         }
+        self.hear_trusted(&node, time);
         self.observations.touch();
     }
     async fn send_health(
@@ -512,6 +710,8 @@ impl Node {
                 if !self.proves_collector(&settings, peer, chain)? {
                     return Err("the peer is no trusted node".into());
                 }
+                drop(settings);
+                self.hear_trusted(&peer, self.status_time()?);
                 collector.send_replace(true);
                 return Ok(());
             }
@@ -545,6 +745,7 @@ impl Node {
         if report.alerts.len() > MAX_ITEMS || report.blockers.len() > MAX_ITEMS {
             return Err("the report exceeds its bounds".into());
         }
+        self.hear_trusted(&signed.node, received);
         let mut mesh = self.mesh.lock().unwrap_or_else(PoisonError::into_inner);
         let prior = mesh.get(&signed.node);
         if prior.is_some_and(|held| held.received > received) {

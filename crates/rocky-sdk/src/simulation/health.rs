@@ -160,3 +160,36 @@ async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
     );
     Ok(())
 }
+
+/// A trusted node flags another it has not heard from for its configured
+/// threshold, through `status_after` alone; the flag survives a restart
+/// and clears once the other is heard again.
+#[tokio::test(start_paused = true)]
+async fn a_trusted_node_flags_another_it_has_not_heard_from() -> Result<(), Failure> {
+    let steps = vec![
+        Trust(2),
+        Sync(2),
+        StaleAfter(0, Duration::from_secs(300)),
+        Alerts(0),
+        Watch(0),
+        Offline(2),
+        Woken(0),
+        Restart(0),
+        Alerts(0),
+        Online(2),
+        Watch(0),
+        Sync(2),
+        Woken(0),
+    ];
+    assert_eq!(
+        run(3, steps, &[" woken ", " alerts ", " stale after "]).await?,
+        [
+            "set",
+            "alerts []",
+            r#"alerts ["c stale"]"#,
+            r#"alerts ["c stale"]"#,
+            "alerts []"
+        ]
+    );
+    Ok(())
+}

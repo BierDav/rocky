@@ -176,6 +176,8 @@ pub(super) enum Action {
     Received(usize),
     /// The node takes a partial role: node 0 holds what it does not.
     Partial(usize),
+    /// The trusted node flags another trusted node unheard this long.
+    StaleAfter(usize, Duration),
 }
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -224,6 +226,7 @@ impl fmt::Display for Action {
             Self::WokenMesh(node) => write!(f, "woken mesh {}", name(node)),
             Self::Received(node) => write!(f, "received {}", name(node)),
             Self::Partial(node) => write!(f, "partial {}", name(node)),
+            Self::StaleAfter(node, after) => write!(f, "stale after {} {after:?}", name(node)),
         }
     }
 }

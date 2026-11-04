@@ -298,6 +298,11 @@ pub(crate) struct Node {
     coordination: Arc<health::Coordination>,
     /// On a trusted node, each other device's latest health report.
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
+    /// On a trusted node, the other trusted identities and when each was
+    /// last heard.
+    trusted_watch: std::sync::Mutex<health::TrustedWatch>,
+    /// On a trusted node, the seal it should have made and did not.
+    seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
     /// Moves whenever `mesh` takes a report, for links that forward them.
     mesh_revision: watch::Sender<u64>,
     /// The last attempt to report this device's health failed.
@@ -385,6 +390,8 @@ impl Node {
             coordination: Arc::new(health::Coordination::new(observations.clone())),
             mesh: Default::default(),
             mesh_revision: watch::channel(0).0,
+            trusted_watch: Default::default(),
+            seal_skipped: Default::default(),
             report_failing: AtomicBool::new(false),
             #[cfg(test)]
             reports_received: AtomicU64::new(0),
@@ -959,6 +966,12 @@ impl Node {
                 Ok(serde_json::to_value(self.replica.retention_limits().await)?)
             }
             "status" => self.readiness().await,
+            "trusted_stale_after" => {
+                let seconds = request["seconds"]
+                    .as_u64()
+                    .ok_or_else(|| refused("seconds must be a number"))?;
+                self.set_trusted_stale_after(seconds).await
+            }
             "activity" => Ok(self.activity.after(token(request)?)),
             "activity_next" => {
                 let mut closing = client.closing.subscribe();
@@ -1596,7 +1609,7 @@ impl Node {
                 }
                 _ = async {
                     let settings = self.settings.lock().await;
-                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).filter(|expires| *expires > time && *expires < rocky_credentials::NEVER / 2).min();
+                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).chain(self.stale_deadline(time)).filter(|expires| *expires > time && *expires < rocky_credentials::NEVER / 2).min();
                     drop(settings);
                     if let Some(expires) = expires {
                         rocky_platform::time::sleep_until(read + Duration::from_secs(expires - time)).await;
@@ -2334,9 +2347,10 @@ impl Node {
         self.sync_state.send_replace("syncing");
         // Finality records and member seals reach peers in this pass's
         // graph exchange.
-        self.seal_routinely().await;
+        let routine = self.seal_routinely().await;
         self.finalize_seals().await;
-        self.publish_for_members().await;
+        let members = self.publish_for_members().await;
+        self.seal_skipped(routine.or(members));
         self.close_migrations().await?;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         let saved = self.settings.lock().await.clone();

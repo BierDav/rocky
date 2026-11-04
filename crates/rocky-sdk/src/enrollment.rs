@@ -283,6 +283,12 @@ pub struct Issuing {
     /// Every node and identity a statement this issuer learned revoked.
     /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
+    /// On a trusted node: when it last heard from each other trusted
+    /// identity, saved coarsely so a restart keeps staleness.
+    pub heard: BTreeMap<PublicKey, u64>,
+    /// Seconds another trusted identity may stay unheard before it is
+    /// stale; `None` is `TRUSTED_STALE_AFTER`.
+    pub stale_after: Option<u64>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -269,6 +269,65 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     db.close().await
 }
 
+/// A trusted node with a seal due but no followed bookmark raises an
+/// alert instead of skipping silently; following one seals and clears it.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failure> {
+    use rocky_sdk::{AlertKind, Database, Network, Open, transport::memory::Hub};
+    use std::sync::Arc;
+    let directory = Scratch::new().await;
+    let hub = Arc::new(Hub::default());
+    let schema = serde_json::to_string(&schema()?)?;
+    let db = Database::create(
+        Open {
+            directory: directory.path(),
+            schema: &schema,
+            secrets: None,
+            identity: None,
+            network: Some(Network::Owned(hub.connector("owner"))),
+            coordination: None,
+        },
+        None,
+    )?
+    .database;
+    let session = db.session();
+    session.set_automatic_sync(false).await?;
+    let skipped = |alerts: &[rocky_sdk::Alert]| -> Vec<String> {
+        alerts
+            .iter()
+            .filter_map(|alert| match &alert.kind {
+                AlertKind::SealSkipped { reason } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    for index in 0..128 {
+        let mut tx = db.transaction().await?;
+        let id = tx.next_id("notes", vec![]).await?;
+        tx.execute(
+            "INSERT INTO notes(id,body) VALUES(?,?)",
+            params![id, format!("note {index}")],
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    session.sync_once().await?;
+    assert_eq!(
+        skipped(&session.status().await?.alerts),
+        ["no_followed_bookmark"]
+    );
+    let genesis = session.tip_status().await?.tip;
+    session
+        .create_bookmark(Configuration::BOOKMARK, None)
+        .await?;
+    session.follow(Configuration::BOOKMARK).await?;
+    session.sync_once().await?;
+    assert_ne!(session.tip_status().await?.tip, genesis);
+    assert!(skipped(&session.status().await?.alerts).is_empty());
+    db.close().await
+}
+
 fn outbox_schema() -> Result<Schema, Failure> {
     Schema::builder("outbox_application", 1)
         .table(Table::replayed("orders").column(Column::new("item", Affinity::Text).required()))

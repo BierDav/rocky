@@ -350,6 +350,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// batches after a restart or a lost reply, with the same bytes, and
     /// received ones. Returns the statements admitted.
     pub async fn settle_tip_statements(&self) -> Result<usize, Error> {
+        // A batch chained after another settles in a later round.
+        let mut admitted = 0;
+        loop {
+            let round = self.settle_round().await?;
+            if round == 0 {
+                return Ok(admitted);
+            }
+            admitted += round;
+        }
+    }
+    async fn settle_round(&self) -> Result<usize, Error> {
         let (pending, own) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             let own = inner
@@ -362,8 +373,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let mut admitted = 0;
         for (batch, statements) in pending {
+            let own = own.contains(&batch);
             let coordinated = match self
-                .coordinate_tip_statements(&statements, false, own.contains(&batch))
+                .coordinate_tip_statements(&statements, false, own)
                 .await
             {
                 Ok(coordinated) => coordinated,
@@ -385,8 +397,190 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Err(Error::Rejected(_)) => continue,
                 Err(error) => return Err(error),
             };
+            // An own statement dropped as lost takes the own statements
+            // chained after it: none of them is ever published.
+            if own {
+                let mut dropped = BTreeSet::new();
+                for statement in &statements {
+                    let id = statement.id()?;
+                    let kept = coordinated
+                        .kept
+                        .iter()
+                        .chain(&coordinated.deferred)
+                        .any(|kept| kept.id().is_ok_and(|kept| kept == id));
+                    if !kept && statement.chain_place().is_some() {
+                        dropped.insert(id);
+                    }
+                }
+                self.forget_chained_after(dropped).await?;
+            }
         }
         Ok(admitted)
+    }
+    /// Forgets own journaled batches chained after `dropped`, transitively.
+    async fn forget_chained_after(&self, mut dropped: BTreeSet<Commitment>) -> Result<(), Error> {
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut forget = BTreeSet::new();
+        let pending = inner.pending_tips(Some(true)).await?;
+        loop {
+            let before = forget.len();
+            for (batch, statements) in &pending {
+                if forget.contains(batch) {
+                    continue;
+                }
+                let after = statements.iter().any(|statement| {
+                    statement
+                        .chain_place()
+                        .and_then(|(_, link)| link.previous)
+                        .is_some_and(|previous| dropped.contains(&previous))
+                });
+                if after {
+                    forget.insert(*batch);
+                    for statement in statements {
+                        dropped.insert(statement.id()?);
+                    }
+                }
+            }
+            if forget.len() == before {
+                break;
+            }
+        }
+        if forget.is_empty() {
+            return Ok(());
+        }
+        tracing::warn!(
+            batches = forget.len(),
+            "own tip statements chained after a lost seal are dropped unpublished"
+        );
+        transaction!(inner, |inner| {
+            for batch in &forget {
+                inner.forget_tips(*batch).await?;
+            }
+            Ok(())
+        })?;
+        drop(flush_guard(inner, &self.inner).await?);
+        Ok(())
+    }
+    /// Forgets an own journaled batch the coordinator refused for good.
+    pub(in crate::replica) async fn forget_own_batch(
+        &self,
+        batch: Commitment,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        transaction!(inner, |inner| inner.forget_tips(batch).await)?;
+        drop(flush_guard(inner, &self.inner).await?);
+        Ok(())
+    }
+    /// This node's live statements on `identity`'s chain through `lane`,
+    /// held or journaled, and the live link its next one takes: after all
+    /// of them. Staged statements, which may be withdrawn, are on their own
+    /// branch and count for neither.
+    pub async fn own_chain(
+        &self,
+        scope: rocky_core::Scope,
+        identity: rocky_credentials::PublicKey,
+        lane: rocky_credentials::PublicKey,
+    ) -> Result<(rocky_credentials::ChainLink, Vec<TipStatement>), Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut graph = inner.scope_graph(scope)?;
+        for (_, statements) in inner.pending_tips(Some(true)).await? {
+            for statement in statements.iter().filter(|s| s.scope() == scope) {
+                statement.append(&mut graph);
+            }
+        }
+        let staged: BTreeSet<Commitment> = rows(
+            &inner.conn,
+            "SELECT digest FROM secure_tip_statements WHERE staged=1",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|record| match record.as_slice() {
+            [SqlValue::Blob(digest)] => Commitment::try_from(digest.as_slice()).ok(),
+            _ => None,
+        })
+        .collect();
+        graph.remove_statements(&staged).map_err(credential)?;
+        let next = graph.next_link(&identity, &lane).map_err(credential)?;
+        let statements = crate::replica::tips::graph_statements(&graph)
+            .into_iter()
+            .filter(|statement| {
+                statement
+                    .chain_place()
+                    .is_some_and(|(signer, link)| signer == identity && link.lane == lane)
+            })
+            .collect();
+        Ok((next, statements))
+    }
+    /// Whether a statement of `statements` names as predecessor an own
+    /// journaled statement the graph does not hold yet.
+    pub(in crate::replica) async fn after_pending(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut waiting = BTreeSet::new();
+        for (_, batch) in inner.pending_tips(Some(true)).await? {
+            for statement in batch {
+                waiting.insert(statement.id()?);
+            }
+        }
+        for statement in statements {
+            waiting.remove(&statement.id()?);
+        }
+        for statement in statements {
+            let Some(previous) = statement.chain_place().and_then(|(_, link)| link.previous) else {
+                continue;
+            };
+            if waiting.contains(&previous)
+                && collect_rows(
+                    inner
+                        .conn
+                        .query(
+                            "SELECT 1 FROM secure_tip_statements WHERE digest=?",
+                            [previous.to_vec()],
+                        )
+                        .await?,
+                )
+                .await?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Refuses own statements chained after a staged one: the stage may be
+    /// withdrawn and never published.
+    pub(in crate::replica) async fn refuse_after_stage(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<(), Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let staged: BTreeSet<Vec<u8>> = rows(
+            &inner.conn,
+            "SELECT digest FROM secure_tip_statements WHERE staged=1",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|record| match record.as_slice() {
+            [SqlValue::Blob(digest)] => Some(digest.clone()),
+            _ => None,
+        })
+        .collect();
+        for statement in statements {
+            if let Some(previous) = statement.chain_place().and_then(|(_, link)| link.previous)
+                && staged.contains(previous.as_slice())
+            {
+                return Err(refusal(
+                    "migration_pending",
+                    "a staged schema switch must finish or be withdrawn before this node signs again",
+                ));
+            }
+        }
+        Ok(())
     }
     /// Unadmitted candidates, for relay to trusted nodes that can inspect
     /// and acknowledge them. They are never returned by `tip_statements`.
@@ -424,9 +618,27 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         statements: &[TipStatement],
     ) -> Result<(), Error> {
+        self.check_statements_over(statements, false).await
+    }
+    /// `check_statements`, over this node's journaled statements too when
+    /// `pending`.
+    pub(in crate::replica) async fn check_statements_over(
+        &self,
+        statements: &[TipStatement],
+        pending: bool,
+    ) -> Result<(), Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut graphs = BTreeMap::new();
-        for statement in statements {
+        let journaled = match pending {
+            true => inner
+                .pending_tips(Some(true))
+                .await?
+                .into_iter()
+                .flat_map(|(_, batch)| batch)
+                .collect(),
+            false => Vec::new(),
+        };
+        for statement in journaled.iter().chain(statements) {
             statement.id()?;
             let scope = statement.scope();
             if let std::collections::btree_map::Entry::Vacant(entry) = graphs.entry(scope) {

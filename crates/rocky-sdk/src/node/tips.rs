@@ -46,6 +46,95 @@ pub(super) struct Signer {
     pub(super) links: CredentialChain,
     /// A trusted identity, which opens tips.
     opens: bool,
+    /// While held, the next link of this node's chain: a trusted
+    /// identity's statements name it. See `Node::hold_chain`.
+    chain: Option<Chain>,
+}
+pub(super) struct Chain {
+    _held: tokio::sync::OwnedMutexGuard<()>,
+    next: std::sync::Mutex<rocky_credentials::ChainLink>,
+    /// This chain's statements, held or journaled: one signed again keeps
+    /// its link, so a retry has the same bytes and never takes a new place.
+    known: Vec<TipStatement>,
+}
+/// A signed tip statement a trusted identity chains.
+pub(super) trait Linked: Sized {
+    type Statement;
+    fn endorse_linked(
+        statement: Self::Statement,
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
+        link: Option<rocky_credentials::ChainLink>,
+    ) -> Result<Self, rocky_credentials::Error>;
+    fn id(&self) -> Result<rocky_core::Commitment, rocky_credentials::Error>;
+    /// The link of `known` when it is this kind of statement with `body`.
+    fn known_link(
+        known: &TipStatement,
+        body: &Self::Statement,
+    ) -> Option<rocky_credentials::ChainLink>;
+}
+macro_rules! linked {
+    ($($signed:ty => $statement:ty, $variant:ident),*) => {$(
+        impl Linked for $signed {
+            type Statement = $statement;
+            fn known_link(
+                known: &TipStatement,
+                body: &$statement,
+            ) -> Option<rocky_credentials::ChainLink> {
+                match known {
+                    TipStatement::$variant(signed) if signed.statement == *body => signed.link,
+                    _ => None,
+                }
+            }
+            fn endorse_linked(
+                statement: $statement,
+                signer: &dyn IdentityProvider,
+                chain: &CredentialChain,
+                link: Option<rocky_credentials::ChainLink>,
+            ) -> Result<Self, rocky_credentials::Error> {
+                <$signed>::endorse_linked(statement, signer, chain, link)
+            }
+            fn id(&self) -> Result<rocky_core::Commitment, rocky_credentials::Error> {
+                <$signed>::id(self)
+            }
+        }
+    )*};
+}
+linked!(
+    SignedSeal => SealStatement, Seal,
+    SignedTipOpening => TipOpeningStatement, Opening,
+    SignedBookmarkMove => BookmarkMoveStatement, Bookmark,
+    SignedGenesisLine => GenesisLineStatement, GenesisLine,
+    rocky_credentials::SignedCheckpointRecord => rocky_credentials::CheckpointRecordStatement, Checkpoint
+);
+impl Signer {
+    /// Signs `statement`; a trusted identity at its node's next link, which
+    /// `Node::hold_chain` must hold.
+    pub(super) fn endorse<T: Linked>(&self, statement: T::Statement) -> Result<T, Failure> {
+        if let Some(link) = self.chain.as_ref().and_then(|chain| {
+            chain
+                .known
+                .iter()
+                .find_map(|known| T::known_link(known, &statement))
+        }) {
+            return Ok(T::endorse_linked(
+                statement,
+                &*self.identity,
+                &self.links,
+                Some(link),
+            )?);
+        }
+        let mut next = self
+            .chain
+            .as_ref()
+            .map(|chain| chain.next.lock().unwrap_or_else(PoisonError::into_inner));
+        let link = next.as_deref().copied();
+        let signed = T::endorse_linked(statement, &*self.identity, &self.links, link)?;
+        if let (Some(next), Some(link)) = (next.as_mut(), link) {
+            **next = link.next(signed.id()?);
+        }
+        Ok(signed)
+    }
 }
 
 impl Node {
@@ -547,18 +636,15 @@ impl Node {
         if unlisted.is_empty() {
             return Ok(());
         }
-        let Ok(signer) = self.tip_signer(scope).await else {
+        let Ok(mut signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
+        self.hold_chain(&mut signer, scope).await?;
         let records = unlisted
             .into_iter()
             .map(|statement| {
                 Ok(TipStatement::Checkpoint(Box::new(
-                    rocky_credentials::SignedCheckpointRecord::endorse(
-                        statement,
-                        &*signer.identity,
-                        &signer.links,
-                    )?,
+                    signer.endorse(statement)?,
                 )))
             })
             .collect::<Result<Vec<_>, Failure>>()?;
@@ -593,15 +679,61 @@ impl Node {
             identity,
             links,
             opens,
+            chain: None,
         })
     }
+    /// Holds this node's chain of tip statements for a trusted `signer`
+    /// until it drops: its statements take the next links after the head
+    /// the graph holds, and no other signing on this node forks them.
+    pub(super) async fn hold_chain(
+        &self,
+        signer: &mut Signer,
+        scope: Scope,
+    ) -> Result<(), Failure> {
+        if !signer.opens || signer.chain.is_some() {
+            return Ok(());
+        }
+        let held = self.tip_chain.clone().lock_owned().await;
+        let lane = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let (next, known) = self
+            .replica
+            .own_chain(scope, signer.identity.public_key()?, lane)
+            .await?;
+        signer.chain = Some(Chain {
+            _held: held,
+            next: std::sync::Mutex::new(next),
+            known,
+        });
+        Ok(())
+    }
 
+    /// `hold_chain` for a staged schema switch: its statements take a branch
+    /// of their own off the live chain, so a withdrawn stage leaves the live
+    /// chain whole and live signing goes on while it waits.
+    pub(super) async fn hold_stage_chain(
+        &self,
+        signer: &mut Signer,
+        scope: Scope,
+    ) -> Result<(), Failure> {
+        self.hold_chain(signer, scope).await?;
+        if let Some(chain) = signer.chain.as_mut() {
+            let stage = rocky_core::commitment(
+                "rocky.sdk.stage-branch.v1",
+                PrivateKey::new().public_key().as_bytes(),
+            );
+            let next = chain.next.get_mut().unwrap_or_else(PoisonError::into_inner);
+            *next = next.staged(stage);
+            chain.known.clear();
+        }
+        Ok(())
+    }
     /// Publishes `statements` once they have the effect `expected` checks
     /// on the graph they extend; a statement that would lose to a lower
     /// digest is refused rather than published.
     async fn publish_tips(
         &self,
         scope: Scope,
+        signer: Option<Signer>,
         statements: Vec<TipStatement>,
         expected: impl FnOnce(&TipGraph) -> Result<(), Failure>,
     ) -> Result<(), Failure> {
@@ -614,6 +746,8 @@ impl Node {
         let before = self.replica.followed_tip().await;
         self.prepare_terminal_credentials().await?;
         let published = self.replica.publish_tip_statements(&statements).await;
+        // The graph now holds the statements; later signing chains after them.
+        drop(signer);
         self.wake_sync();
         published?;
         self.finalize_seals().await;
@@ -631,17 +765,15 @@ impl Node {
         from: Option<TipId>,
         to: Option<TipId>,
     ) -> Result<TipStatement, Failure> {
-        Ok(TipStatement::Bookmark(SignedBookmarkMove::endorse(
-            BookmarkMoveStatement {
+        Ok(TipStatement::Bookmark(
+            signer.endorse::<SignedBookmarkMove>(BookmarkMoveStatement {
                 format: BOOKMARK_MOVE_FORMAT,
                 scope,
                 name: name.into(),
                 from,
                 to,
-            },
-            &*signer.identity,
-            &signer.links,
-        )?))
+            })?,
+        ))
     }
 
     /// Seals the followed tip at its locally known frontier. The tip
@@ -674,18 +806,14 @@ impl Node {
             .seal_frontier(scope, close)
             .await
             .map_err(refused)?;
-        Ok(SignedSeal::endorse(
-            SealStatement {
-                format: SEAL_FORMAT,
-                scope,
-                tip,
-                frontier,
-                action,
-                recovery: None,
-            },
-            &*signer.identity,
-            &signer.links,
-        )?)
+        signer.endorse(SealStatement {
+            format: SEAL_FORMAT,
+            scope,
+            tip,
+            frontier,
+            action,
+            recovery: None,
+        })
     }
 
     /// `continue` seals the followed tip and moves its bookmark on, in one
@@ -703,7 +831,8 @@ impl Node {
                 "the followed bookmark no longer points to the followed tip",
             ));
         }
-        let signer = self.tip_signer(scope).await?;
+        let mut signer = self.tip_signer(scope).await?;
+        self.hold_chain(&mut signer, scope).await?;
         // Records for transactions only this replica holds whole let the
         // seal cover them.
         self.replica.publish_missing_outcomes().await?;
@@ -719,7 +848,7 @@ impl Node {
                 Some(next),
             )?);
         }
-        self.publish_tips(scope, statements, |graph| {
+        self.publish_tips(scope, Some(signer), statements, |graph| {
             if graph.bookmark(&name)? != successor.or(Some(tip)) {
                 return Err(refused("another move of this bookmark takes precedence"));
             }
@@ -791,35 +920,40 @@ impl Node {
             root,
         )?;
         let id = seal.id()?;
-        self.publish_tips(scope, vec![TipStatement::Seal(seal)], |graph| {
-            match graph.seal(tip)? {
+        self.publish_tips(
+            scope,
+            None,
+            vec![TipStatement::Seal(seal)],
+            |graph| match graph.seal(tip)? {
                 Some(winner) if winner.id()? == id => Ok(()),
                 _ => Err(refused("another seal of this tip takes precedence")),
-            }
-        })
+            },
+        )
         .await
     }
 
     /// A trusted node signs the minimum of trusted acknowledgments that
     /// makes a seal on the genesis line final.
     async fn sign_genesis_minimum(&self, scope: Scope, minimum: u32) -> Result<(), Failure> {
-        let signer = self.tip_signer(scope).await?;
+        let mut signer = self.tip_signer(scope).await?;
         if !signer.opens {
             return Err(refused(
                 "only a trusted node signs the genesis line's minimum",
             ));
         }
-        let line = SignedGenesisLine::endorse(
-            GenesisLineStatement {
-                format: GENESIS_LINE_FORMAT,
-                scope,
-                minimum_in_sync: minimum,
-            },
-            &*signer.identity,
-            &signer.links,
-        )?;
-        self.publish_tips(scope, vec![TipStatement::GenesisLine(line)], |_| Ok(()))
-            .await
+        self.hold_chain(&mut signer, scope).await?;
+        let line = signer.endorse::<SignedGenesisLine>(GenesisLineStatement {
+            format: GENESIS_LINE_FORMAT,
+            scope,
+            minimum_in_sync: minimum,
+        })?;
+        self.publish_tips(
+            scope,
+            Some(signer),
+            vec![TipStatement::GenesisLine(line)],
+            |_| Ok(()),
+        )
+        .await
     }
 
     async fn prepare_terminal_credentials(&self) -> Result<(), Failure> {
@@ -927,10 +1061,11 @@ impl Node {
         let graph = self.replica.tip_graph(scope).await?;
         let parent = graph.seal_by_id(seal).map_err(refused)?;
         let schema = graph.schema(parent.statement.tip).map_err(refused)?;
-        let signer = self.tip_signer(scope).await?;
+        let mut signer = self.tip_signer(scope).await?;
         if !signer.opens {
             return Err(refused("only the owner or a trusted identity opens tips"));
         }
+        self.hold_chain(&mut signer, scope).await?;
         // A branch starts from the seal's state, which this device must hold.
         self.replica.finalize_path(scope).await?;
         if self.replica.held_seal(scope, seal).await?.is_none() {
@@ -938,20 +1073,21 @@ impl Node {
                 "this device does not hold the seal's state; pull it from a device that keeps it with the tips action pull, or seal now",
             ));
         }
-        let opening = SignedTipOpening::endorse(
-            TipOpeningStatement {
-                format: TIP_OPENING_FORMAT,
-                schema,
-                scope,
-                seal,
-                minimum_in_sync,
-            },
-            &*signer.identity,
-            &signer.links,
-        )?;
+        let opening = signer.endorse::<SignedTipOpening>(TipOpeningStatement {
+            format: TIP_OPENING_FORMAT,
+            schema,
+            scope,
+            seal,
+            minimum_in_sync,
+        })?;
         let tip = opening.tip()?;
-        self.publish_tips(scope, vec![TipStatement::Opening(opening)], |_| Ok(()))
-            .await?;
+        self.publish_tips(
+            scope,
+            Some(signer),
+            vec![TipStatement::Opening(opening)],
+            |_| Ok(()),
+        )
+        .await?;
         Ok(tip)
     }
 
@@ -971,9 +1107,10 @@ impl Node {
             None => self.replica.followed_tip().await,
         };
         let target = graph.canonical_tip(tip).map_err(refused)?;
-        let signer = self.tip_signer(scope).await?;
+        let mut signer = self.tip_signer(scope).await?;
+        self.hold_chain(&mut signer, scope).await?;
         let statement = Self::bookmark_move(&signer, scope, name, None, Some(tip))?;
-        self.publish_tips(scope, vec![statement], |graph| {
+        self.publish_tips(scope, Some(signer), vec![statement], |graph| {
             if graph.bookmark(name)? != Some(target) {
                 return Err(refused(
                     "this bookmark name was used before; choose another name",
@@ -1003,7 +1140,8 @@ impl Node {
         if target == Some(from) {
             return Err(refused("the bookmark already points to this tip"));
         }
-        let signer = self.tip_signer(scope).await?;
+        let mut signer = self.tip_signer(scope).await?;
+        self.hold_chain(&mut signer, scope).await?;
         let mut statements = Vec::new();
         if let Some(to) = to
             && !graph.continues_any(from, to)?
@@ -1013,7 +1151,7 @@ impl Node {
             statements.push(TipStatement::Seal(close));
         }
         statements.push(Self::bookmark_move(&signer, scope, name, Some(from), to)?);
-        self.publish_tips(scope, statements, |graph| {
+        self.publish_tips(scope, Some(signer), statements, |graph| {
             if graph.bookmark(name)? != target {
                 return Err(refused("another move of this bookmark takes precedence"));
             }

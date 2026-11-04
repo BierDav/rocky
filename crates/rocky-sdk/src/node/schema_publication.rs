@@ -27,7 +27,7 @@ impl Node {
         if settings.application(&self.declared)? != crate::DeclaredSchema::Ahead {
             return Ok(());
         }
-        let Ok(signer) = self.tip_signer(scope).await else {
+        let Ok(mut signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
         let source = self.replica.followed_tip().await;
@@ -48,40 +48,38 @@ impl Node {
             self.declared.version,
             rocky_core::EngineIdentity::current(),
         )?;
-        let seal = SignedSeal::endorse(
-            SealStatement {
-                format: SEAL_FORMAT,
-                scope,
-                tip: source,
-                frontier: self.replica.seal_frontier(scope, migrates).await?,
-                action: if migrates {
-                    SealAction::Close
-                } else {
-                    SealAction::Continue {
-                        schema: domain.manifest().hash(),
-                    }
-                },
-                recovery: None,
+        // A continue published at once is live; a staged switch branches.
+        if !migrates && self.replica.domain_log().is_some() {
+            self.hold_chain(&mut signer, scope).await?;
+        } else {
+            self.hold_stage_chain(&mut signer, scope).await?;
+        }
+        let seal = signer.endorse::<SignedSeal>(SealStatement {
+            format: SEAL_FORMAT,
+            scope,
+            tip: source,
+            frontier: self.replica.seal_frontier(scope, migrates).await?,
+            action: if migrates {
+                SealAction::Close
+            } else {
+                SealAction::Continue {
+                    schema: domain.manifest().hash(),
+                }
             },
-            &*signer.identity,
-            &signer.links,
-        )?;
+            recovery: None,
+        })?;
         let mut statements = vec![TipStatement::Seal(seal.clone())];
         let target = if migrates {
             let minimum = graph
                 .line_minimum(source)?
                 .ok_or("set the source line's signed minimum before migration")?;
-            let opening = SignedTipOpening::endorse(
-                TipOpeningStatement {
-                    format: TIP_OPENING_FORMAT,
-                    scope,
-                    seal: seal.id()?,
-                    schema: domain.manifest().hash(),
-                    minimum_in_sync: u32::try_from(minimum)?,
-                },
-                &*signer.identity,
-                &signer.links,
-            )?;
+            let opening = signer.endorse::<SignedTipOpening>(TipOpeningStatement {
+                format: TIP_OPENING_FORMAT,
+                scope,
+                seal: seal.id()?,
+                schema: domain.manifest().hash(),
+                minimum_in_sync: u32::try_from(minimum)?,
+            })?;
             let target = opening.tip()?;
             statements.push(TipStatement::Opening(opening));
             target
@@ -109,6 +107,7 @@ impl Node {
                 }
                 Err(error) => return Err(error.into()),
             }
+            drop(signer);
             self.replica
                 .install_tip_schema(
                     target,
@@ -161,6 +160,8 @@ impl Node {
                 parents: parents.into_iter().collect(),
             })
             .await?;
+        // The local graph holds the staged statements; later signing chains after them.
+        drop(signer);
         self.replica
             .install_tip_schema(
                 target,

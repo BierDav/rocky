@@ -85,6 +85,7 @@ impl Domain {
             nodes: BTreeSet::new(),
             identities: subjects.iter().copied().collect(),
             capabilities: BTreeSet::new(),
+            cut: Default::default(),
         };
         let signed = self.authority().revoke(statement).expect("revocation");
         RevocationSet::try_from(vec![signed]).expect("set")

@@ -1058,11 +1058,8 @@ points, and the `board_cap` assertion bounds a board's points.
   either alone keeps it passing.
 - Open: root recovery escrow (partition keys sealed to the root at
   creation, recovery from root + descriptor) is not implemented. Root
-  revocation of a trusted identity that signed seals or bookmark moves
-  drops them (`TipGraph::exclude_revoked`), which leaves bookmarks it moved
-  unresolved; the cascade test revokes a trusted node that signed none.
-  Keeping history needs a root-signed cut, e.g. per-signer statement hash
-  chains whose heads the root statement names.
+  revocation of a trusted identity keeps what it signed up to a cut (see
+  [Revocation cut](#revocation-cut)).
 - Formats: credential extension v8 (`origin`); issuer settings gain
   `heard` and `stale_after`; status gains `RevocationReason`,
   `TrustedNodeStale` and `SealSkipped`; frozen checkpoint vectors
@@ -1076,3 +1073,89 @@ points, and the `board_cap` assertion bounds a board's points.
   on `main` (two 15 s dials to its closed keeper). wasm32 clippy 0;
   `./scripts/check-wasm-consumer` 0; Chromium browser tests: rocky-credentials
   73, rocky-secure 463 (1 ignored), rocky-sdk 25 passed.
+
+## Revocation cut
+
+- Chains: every tip statement a trusted identity signs (seal, opening,
+  bookmark move, genesis minimum, checkpoint record) carries a `ChainLink`
+  `{lane: signing node, sequence, previous, stage}` under its signature;
+  owners' and issuers' carry none. A chain is (identity, node): the
+  predecessor must be the same identity's statement on that node one place
+  before, found through an index by ID. Two statements at one place of one
+  branch are recorded as `TipGraph::equivocations`. Terminal
+  acknowledgments carry their own per-node chain (no stage) and are not
+  checked for a predecessor on admission.
+- Stage branches: a staged schema switch signs on a branch of its own
+  (`stage: Some(random)`) off the live head; the live chain ignores staged
+  statements and goes on signing while a stage waits, so a withdrawn stage
+  orphans only its branch and its tip IDs never change. After a release the
+  live chain continues past the highest place on any branch.
+- Cut: a root revocation (`rocky.revocation.v4`) may carry `cut: [{identity,
+  lane, statements: [Head], acknowledgments}]`, ordered, at most 32 chains
+  and 64 heads, each naming an identity or node the same statement
+  revokes. A head carries its sequence. Statements reachable from a head
+  stay in resolution; the rest are past the cut. Without a cut every
+  statement of the ended chain is left out as before. Only a statement
+  whose signer is the cut's identity skips the revocation check; another
+  identity on that lane is judged by its own chain. Decision 5 is
+  unchanged: the origin cascade ends what the identity enrolled.
+- Enforcement: a replica holding the cut refuses on arrival a statement it
+  leaves out for good (at or past a head's place without being it, or
+  before a held head and off its path) and deletes stored ones, except
+  what a kept statement or local state (bases, replays, relays, pulls,
+  staged statements, followed tips) refers to. Both are recorded
+  (`secure_past_cut`, 256 per chain) and counted in the alert.
+- Own chain: a node's next link comes after its held and journaled
+  statements; one chained after a statement still waiting for its
+  coordinated log entry is journaled behind it (`chain_pending`,
+  retryable) and settles after it. When the waiting seal loses its log,
+  the own statements chained after it are dropped unpublished. Signing an
+  identical statement again reuses its link, so a retry keeps its bytes.
+- Proposal: `revoke` with the root (`Session::revoke_trusted`) cuts each
+  node of the revoked identity at every head the calling node holds;
+  `"cut": false` keeps none.
+- Transparency: status and health reports carry
+  `AlertKind::TipStatementsPastCut { signer, node, statements,
+  acknowledgments }` (held, refused and deleted) and
+  `AlertKind::TipChainEquivocation { signer, node, sequence,
+  acknowledgment }` on every device that holds or refused them.
+- Formats: seal 2, tip opening 3, bookmark move 2, genesis line 2,
+  checkpoint record 2, terminal acknowledgment 2, finality id v2,
+  revocation v4.
+- Tests: rocky-credentials `tips::{a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch,
+  a_cut_refuses_what_follows_its_head_and_prunes_only_what_nothing_kept_needs,
+  a_cut_binds_its_chain_to_the_identity_it_names,
+  a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names,
+  a_chained_statement_needs_its_predecessor_and_the_trusted_link}`;
+  rocky-secure `tips::a_held_cut_refuses_and_prunes_what_follows_its_head`,
+  `tip_schemas::a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsewhere`;
+  rocky-sdk `tips::races::{revoking_the_creator_keeps_what_it_sealed_and_main_moves_on_through_another_trusted_node,
+  a_statement_the_revoked_creator_signed_past_the_cut_is_deleted_and_surfaced,
+  revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner}`
+  (`"cut": false`) and
+  `tips::coordinated::a_statement_after_one_waiting_on_its_log_entry_follows_it_without_a_fork`;
+  `an_unreachable_coordinator_refuses_seals_and_moves_and_publishes_nothing`
+  now expects `chain_pending` for the calls after the first. Mutations:
+  a lane-only admission bypass fails the identity test; counting staged
+  statements in the live chain fails the stage test; ignoring journaled
+  statements fails the waiting-seal test; without the cut the creator
+  revocation deletes `main`.
+- Limits: acknowledgments past a cut are left out of finality but not
+  refused or deleted, since they arrive inside finality records whose other
+  acknowledgments count. A stage branch tag is unauthenticated within the
+  identity: a node of a trusted identity can branch its own chain without
+  an equivocation alert; a cut still keeps only named heads. A cut of a
+  node with many stage branches signed alongside live statements needs a
+  head per such branch (64 in all).
+  Deleting a past-cut fork also deletes its equivocation record; the alert
+  keeps the count. A statement an honest node built on a past-cut one is
+  refused where the cut is held. Past-cut records stop at 256 per chain;
+  the count goes on.
+- Checks (on `main` cd58e1f6): `./scripts/lint` 0; `./scripts/check --unit
+  --integration` 245 unit and 1109 integration passed in 68 s wall;
+  raw nextest over rocky-secure 535 passed, its six exhaustive convergence
+  sweeps over the 60 s limit passed alone with `cargo test` (26 in 211 s);
+  rocky-sdk `registry::a_full_registry_refuses…` passed alone in 6 s;
+  wasm32 clippy 0; `./scripts/check-wasm-consumer` 0; verify.py passes;
+  Chromium: rocky-credentials 78, rocky-coordinator 51, rocky-secure 465
+  (1 ignored), rocky-sdk 25 passed. The claims race test passed 3 of 3 alone.

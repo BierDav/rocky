@@ -1420,3 +1420,97 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
             .contains(&variants[winner].0.id().unwrap())
     );
 }
+
+/// A cut held refuses what the revoked identity signs past its head on
+/// arrival; a replica that held such a statement deletes it. Both count it.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    let b_key = PrivateKey::new();
+    let b = open(&f, &dir.path().join("b.db"), &b_key).await;
+    for replica in [&a, &b] {
+        main(&f, replica).await;
+    }
+    let genesis = a.followed_tip().await;
+    let trusted = PrivateKey::new();
+    let chain = CredentialChain(vec![
+        Authority::owner(&f.publisher)
+            .issue_trusted(
+                trusted.public_key(),
+                f.public.domain,
+                rocky_credentials::AuthorRange::ALL,
+                now().unwrap(),
+            )
+            .unwrap(),
+    ]);
+    let linked = |name: &str, link| {
+        let TipStatement::Bookmark(unsigned) = bookmark(&f, name, None, Some(genesis)) else {
+            unreachable!()
+        };
+        SignedBookmarkMove::endorse_linked(unsigned.statement, &trusted, &chain, Some(link))
+            .unwrap()
+    };
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let kept = linked("kept", first);
+    let late = linked("late", first.next(kept.id().unwrap()));
+    a.receive_tip_statements(&[TipStatement::Bookmark(kept.clone())])
+        .await
+        .unwrap();
+    b.receive_tip_statements(&[
+        TipStatement::Bookmark(kept.clone()),
+        TipStatement::Bookmark(late.clone()),
+    ])
+    .await
+    .unwrap();
+    let statement = rocky_credentials::Revocation {
+        app: f.public.domain.app,
+        issuer: f.publisher.public_key(),
+        time: now().unwrap(),
+        nodes: Default::default(),
+        identities: [trusted.public_key()].into(),
+        capabilities: Default::default(),
+        cut: vec![rocky_credentials::Cut {
+            identity: trusted.public_key(),
+            lane: trusted.public_key(),
+            statements: vec![rocky_credentials::Head {
+                sequence: 0,
+                id: kept.id().unwrap(),
+            }],
+            acknowledgments: None,
+        }],
+    };
+    let revoked = RevocationSet::try_from(vec![
+        SignedRevocation::sign(statement, &f.publisher, &CredentialChain::default()).unwrap(),
+    ])
+    .unwrap();
+    for replica in [&a, &b] {
+        replica.learn_revocations(&revoked).await.unwrap();
+    }
+    a.receive_tip_statements(&[TipStatement::Bookmark(late.clone())])
+        .await
+        .unwrap();
+    for replica in [&a, &b] {
+        let graph = replica.tip_graph(f.public.domain).await.unwrap();
+        assert_eq!(graph.bookmark("kept").unwrap(), Some(genesis));
+        assert!(!graph.moves.contains(&late));
+        assert!(graph.past_cut.is_empty());
+        assert_eq!(
+            replica.past_cut_records(f.public.domain).await.unwrap(),
+            [(trusted.public_key(), trusted.public_key(), 1)]
+        );
+        let held = replica.tip_statements(None, 32).await.unwrap();
+        assert!(!held.contains(&TipStatement::Bookmark(late.clone())));
+    }
+    // Deleted for good: reopening keeps it out.
+    drop(b);
+    let b = open(&f, &dir.path().join("b.db"), &b_key).await;
+    assert!(
+        !b.tip_graph(f.public.domain)
+            .await
+            .unwrap()
+            .moves
+            .contains(&late)
+    );
+}

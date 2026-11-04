@@ -53,6 +53,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
             .into(),
             identities: Default::default(),
             capabilities: Default::default(),
+            cut: Default::default(),
         },
         l.publisher(),
         &CredentialChain::default(),
@@ -160,7 +161,7 @@ async fn warm_descriptor_uses_the_new_current_migration_minimum() {
         .publish_tip_statements(&[TipStatement::GenesisLine(
             SignedGenesisLine::sign(
                 GenesisLineStatement {
-                    format: 1,
+                    format: rocky_credentials::GENESIS_LINE_FORMAT,
                     scope: l.domain,
                     minimum_in_sync: 3,
                 },

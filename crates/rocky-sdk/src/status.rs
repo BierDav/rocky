@@ -440,6 +440,25 @@ pub enum AlertKind {
     /// `no_followed_bookmark`, `no_tip_authority: …` or `failed: …`.
     /// Clears with the next seal pass that has nothing left undone.
     SealSkipped { reason: String },
+    /// A root revocation's cut left out `statements` tip statements and
+    /// `acknowledgments` terminal acknowledgments that the identity
+    /// `signer` signed through its node `node` past the kept head; this
+    /// device holds them and resolves without them.
+    TipStatementsPastCut {
+        signer: String,
+        node: String,
+        statements: u64,
+        acknowledgments: u64,
+    },
+    /// The identity `signer`'s node `node` signed two statements (or
+    /// acknowledgments) at `sequence` of its chain: its key signed a fork.
+    /// Ask the user whether the root should revoke it.
+    TipChainEquivocation {
+        signer: String,
+        node: String,
+        sequence: u64,
+        acknowledgment: bool,
+    },
 }
 /// How long a trusted node may stay unheard before the others flag it.
 pub const TRUSTED_STALE_AFTER: std::time::Duration =

@@ -62,6 +62,13 @@ fn ack(credentials: CredentialChain) -> Result<TerminalAck, rocky_credentials::E
         },
         &PrivateKey::from_bytes(&[7; 32]),
         credentials,
+        // The longest link: the most digits and a predecessor.
+        rocky_credentials::ChainLink {
+            lane: PrivateKey::from_bytes(&[7; 32]).public_key(),
+            sequence: u64::MAX - 1,
+            previous: Some([255; 32]),
+            stage: None,
+        },
     )
 }
 fn fits(message: Message) {

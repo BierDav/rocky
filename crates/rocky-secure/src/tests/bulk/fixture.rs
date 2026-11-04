@@ -45,7 +45,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
         .publish_tip_statements(&[TipStatement::GenesisLine(
             SignedGenesisLine::sign(
                 GenesisLineStatement {
-                    format: 1,
+                    format: rocky_credentials::GENESIS_LINE_FORMAT,
                     scope: l.domain,
                     minimum_in_sync: 2,
                 },
@@ -70,7 +70,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
     .unwrap();
     let opening = SignedTipOpening::endorse(
         TipOpeningStatement {
-            format: 2,
+            format: rocky_credentials::TIP_OPENING_FORMAT,
             scope: l.domain,
             seal: close.id().unwrap(),
             schema: l.definition(3).hash(),

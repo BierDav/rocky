@@ -17,7 +17,7 @@ async fn candidate_at(
         .publish_tip_statements(&[TipStatement::GenesisLine(
             rocky_credentials::SignedGenesisLine::sign(
                 rocky_credentials::GenesisLineStatement {
-                    format: 1,
+                    format: rocky_credentials::GENESIS_LINE_FORMAT,
                     scope: lineage.domain,
                     minimum_in_sync: 2,
                 },
@@ -42,7 +42,7 @@ async fn candidate_at(
     .unwrap();
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
-            format: 2,
+            format: rocky_credentials::TIP_OPENING_FORMAT,
             scope: lineage.domain,
             seal: close.id().unwrap(),
             schema: lineage.definition(target_version).hash(),

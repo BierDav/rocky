@@ -67,6 +67,7 @@ fn revocation(by: &dyn rocky_credentials::IdentityProvider, identity: &PrivateKe
         nodes: Default::default(),
         identities: [identity.public_key()].into(),
         capabilities: Default::default(),
+        cut: Default::default(),
     }
 }
 fn set(statement: rocky_credentials::SignedRevocation) -> RevocationSet {

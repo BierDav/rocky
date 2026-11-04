@@ -1,17 +1,90 @@
 //! Domain-scoped seal, tip-opening and bookmark statements.
+use crate::revocation::{Cut, Head};
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
     SignedCheckpointRecord, decode_bounded, denied, encode,
 };
 use rocky_core::{Commitment, Scope, TipId};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Reverse, collections::BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 
-pub const SEAL_FORMAT: u32 = 1;
-pub const TIP_OPENING_FORMAT: u32 = 2;
-pub const BOOKMARK_MOVE_FORMAT: u32 = 1;
-pub const GENESIS_LINE_FORMAT: u32 = 1;
+pub const SEAL_FORMAT: u32 = 2;
+pub const TIP_OPENING_FORMAT: u32 = 3;
+pub const BOOKMARK_MOVE_FORMAT: u32 = 2;
+pub const GENESIS_LINE_FORMAT: u32 = 2;
 pub const MAX_BOOKMARK_NAME: usize = 128;
+
+/// A node's place in its chain of signed tip statements, or of terminal
+/// acknowledgments: every one names the hash (ID) of the one before. A
+/// root revocation keeps a revoked node's chain up to the heads it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChainLink {
+    /// The signing node.
+    pub lane: PublicKey,
+    pub sequence: u64,
+    /// The ID of the lane's previous statement; `None` only at sequence 0.
+    pub previous: Option<Commitment>,
+    /// A staged schema switch's own branch of the lane, which may never be
+    /// published; `None` on the live chain.
+    pub stage: Option<Commitment>,
+}
+impl ChainLink {
+    /// The first link of `lane`.
+    pub fn first(lane: PublicKey) -> Self {
+        Self {
+            lane,
+            sequence: 0,
+            previous: None,
+            stage: None,
+        }
+    }
+    /// The link after the statement `id`, which carried this one, on the
+    /// same branch.
+    pub fn next(&self, id: Commitment) -> Self {
+        Self {
+            lane: self.lane,
+            sequence: self.sequence.saturating_add(1),
+            previous: Some(id),
+            stage: self.stage,
+        }
+    }
+    /// This link on the branch `stage`.
+    pub fn staged(self, stage: Commitment) -> Self {
+        Self {
+            stage: Some(stage),
+            ..self
+        }
+    }
+    pub fn validate(&self) -> Result<(), Error> {
+        if (self.sequence == 0) != self.previous.is_none() || self.sequence == u64::MAX {
+            return Err(denied("invalid chain link"));
+        }
+        Ok(())
+    }
+}
+/// Two statements of one node's chain at the same place: a signer whose
+/// key signed both, which no honest node does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Equivocation {
+    /// The trusted identity the chain belongs to.
+    pub identity: PublicKey,
+    pub lane: PublicKey,
+    pub sequence: u64,
+    pub acknowledgment: bool,
+}
+/// A statement a root revocation's cut left out: past the kept head of
+/// its chain, or off that branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PastCut {
+    pub id: Commitment,
+    pub identity: PublicKey,
+    pub link: ChainLink,
+    pub acknowledgment: bool,
+}
 
 /// Genesis uses the current schema digest; its domain is the graph's scope.
 pub fn genesis_tip(schema: Commitment) -> TipId {
@@ -165,6 +238,8 @@ macro_rules! signed_statement {
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub struct $signed {
             pub statement: $statement,
+            /// Present exactly when a trusted identity signs.
+            pub link: Option<$crate::tips::ChainLink>,
             endorsement: Endorsement,
         }
         impl $signed {
@@ -174,15 +249,29 @@ macro_rules! signed_statement {
             ) -> Result<Self, Error> {
                 Self::endorse(statement, owner, &CredentialChain::default())
             }
+            /// The owner or an issuer signs; neither has a chain link.
             pub fn endorse(
                 statement: $statement,
                 signer: &dyn IdentityProvider,
                 chain: &CredentialChain,
             ) -> Result<Self, Error> {
+                Self::endorse_linked(statement, signer, chain, None)
+            }
+            /// A trusted identity signs at `link` of its node's chain.
+            pub fn endorse_linked(
+                statement: $statement,
+                signer: &dyn IdentityProvider,
+                chain: &CredentialChain,
+                link: Option<$crate::tips::ChainLink>,
+            ) -> Result<Self, Error> {
                 statement.validate()?;
+                if let Some(link) = &link {
+                    link.validate()?;
+                }
                 let signed = Self {
-                    endorsement: Endorsement::sign(signer, chain, $label, &statement)?,
+                    endorsement: Endorsement::sign(signer, chain, $label, &(&statement, &link))?,
                     statement,
+                    link,
                 };
                 signed.to_bytes()?;
                 Ok(signed)
@@ -207,13 +296,36 @@ macro_rules! signed_statement {
             ) -> Result<(), Error> {
                 self.statement.validate()?;
                 graph.check_scope(self.statement.scope)?;
+                if let Some(link) = &self.link {
+                    link.validate()?;
+                }
+                // A cut chain's statements are judged by the cut, not refused;
+                // only the identity the cut names signs on that chain.
+                let signer = self.endorsement.signer(publisher);
+                let current = current.filter(|(revocations, _)| {
+                    self.link
+                        .is_none_or(|link| revocations.cut(&signer, &link.lane).is_none())
+                });
                 let trusted = self.endorsement.verify_tip_statement(
                     publisher,
                     self.statement.scope,
                     $label,
-                    &self.statement,
+                    &(&self.statement, &self.link),
                     current,
                 )?;
+                let unlinked = self.endorsement.chain.0.is_empty() || !trusted;
+                match (unlinked, &self.link) {
+                    (true, Some(_)) => {
+                        return Err(denied("only a trusted identity's statement is chained"));
+                    }
+                    (false, None) => {
+                        return Err(denied(
+                            "a trusted identity's statement names its chain link",
+                        ));
+                    }
+                    (_, Some(link)) => graph.check_predecessor(signer, link)?,
+                    (true, None) => {}
+                }
                 self.check_graph(graph, trusted)
             }
             pub fn endorsement(&self) -> &Endorsement {
@@ -258,29 +370,29 @@ signed_statement!(
     SignedSeal,
     SealStatement,
     SEAL_FORMAT,
-    "rocky.seal.v1",
-    "rocky.seal.id.v1"
+    "rocky.seal.v2",
+    "rocky.seal.id.v2"
 );
 signed_statement!(
     SignedTipOpening,
     TipOpeningStatement,
     TIP_OPENING_FORMAT,
-    "rocky.tip-opening.v2",
-    "rocky.tip-opening.id.v2"
+    "rocky.tip-opening.v3",
+    "rocky.tip-opening.id.v3"
 );
 signed_statement!(
     SignedGenesisLine,
     GenesisLineStatement,
     GENESIS_LINE_FORMAT,
-    "rocky.genesis-line.v1",
-    "rocky.genesis-line.id.v1"
+    "rocky.genesis-line.v2",
+    "rocky.genesis-line.id.v2"
 );
 signed_statement!(
     SignedBookmarkMove,
     BookmarkMoveStatement,
     BOOKMARK_MOVE_FORMAT,
-    "rocky.bookmark-move.v1",
-    "rocky.bookmark-move.id.v1"
+    "rocky.bookmark-move.v2",
+    "rocky.bookmark-move.id.v2"
 );
 
 impl SignedSeal {
@@ -308,8 +420,11 @@ impl SignedSeal {
         if !self.endorsement.chain.0.is_empty() {
             return Err(denied("only the owner signs a recovery seal"));
         }
+        if self.link.is_some() {
+            return Err(denied("only the owner signs a recovery seal"));
+        }
         self.endorsement
-            .verify(owner, "rocky.seal.v1", &self.statement)?;
+            .verify(owner, "rocky.seal.v2", &(&self.statement, &self.link))?;
         Ok(recovery)
     }
     pub fn successor(&self) -> Result<Option<TipId>, Error> {
@@ -363,6 +478,66 @@ impl SignedBookmarkMove {
     }
 }
 
+/// The IDs of `identity`'s chain through `lane` reachable from `heads`
+/// through predecessors: what a cut keeps of that chain.
+fn kept(
+    chained: &[Chained<'_>],
+    identity: &PublicKey,
+    lane: &PublicKey,
+    heads: &BTreeSet<Head>,
+) -> BTreeSet<Commitment> {
+    let by_id: BTreeMap<Commitment, &Chained<'_>> = chained
+        .iter()
+        .filter(|item| item.identity == *identity && item.link.lane == *lane)
+        .map(|item| (item.id, item))
+        .collect();
+    let mut kept = BTreeSet::new();
+    for head in heads {
+        let mut cursor = Some(head.id);
+        while let Some(id) = cursor {
+            let Some(item) = by_id.get(&id) else { break };
+            if !kept.insert(id) {
+                break;
+            }
+            cursor = item.link.previous;
+        }
+    }
+    kept
+}
+
+/// Chained statements' identities and links by ID: built over the graph's lists as they grow, rebuilt when one
+/// changed otherwise. Never compared or serialized.
+#[derive(Default)]
+struct ChainIndex(Mutex<Places>);
+#[derive(Clone, Default)]
+struct Places {
+    /// Per list: how many it indexed, and the last one's ID.
+    built: [(usize, Option<Commitment>); 5],
+    /// Each chained statement's identity and link, by ID.
+    links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
+}
+impl Clone for ChainIndex {
+    fn clone(&self) -> Self {
+        Self(Mutex::new(self.places().clone()))
+    }
+}
+impl PartialEq for ChainIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ChainIndex {}
+impl std::fmt::Debug for ChainIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChainIndex")
+    }
+}
+impl ChainIndex {
+    fn places(&self) -> MutexGuard<'_, Places> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Who signed a tip statement, in the order races resolve by: the owner,
 /// then a trusted identity, then an issuer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -409,6 +584,24 @@ pub struct TipGraph {
     /// left out of resolution. See [`Self::exclude_revoked`].
     #[serde(skip)]
     pub revoked: BTreeSet<Commitment>,
+    /// Of `revoked`, the statements and acknowledgments a root
+    /// revocation's cut left out. See [`Self::exclude_revoked`].
+    #[serde(skip)]
+    pub past_cut: BTreeSet<PastCut>,
+    /// Places of a node's chain that hold two statements.
+    #[serde(skip)]
+    pub equivocations: BTreeSet<Equivocation>,
+    #[serde(skip)]
+    index: ChainIndex,
+}
+/// A chained statement or acknowledgment of a graph: its ID, signer and
+/// link, and the chain it was signed through.
+struct Chained<'a> {
+    id: Commitment,
+    /// The trusted identity whose chain it is.
+    identity: PublicKey,
+    link: ChainLink,
+    credentials: &'a CredentialChain,
 }
 type BookmarkWalk<'a> = (
     Option<TipId>,
@@ -427,35 +620,194 @@ impl TipGraph {
             finalities: Vec::new(),
             checkpoints: Vec::new(),
             revoked: BTreeSet::new(),
+            past_cut: BTreeSet::new(),
+            equivocations: BTreeSet::new(),
+            index: ChainIndex::default(),
         }
     }
-    /// Leaves out of resolution every seal, opening, move and checkpoint record whose
-    /// signer's chain `revocations` ends; the owner's never are. Returns whether the set
-    /// changed, so callers resolve again.
+    /// Refuses a chained statement whose predecessor in its lane, signed
+    /// by the same identity one place before, the graph lacks.
+    pub(crate) fn check_predecessor(
+        &self,
+        signer: PublicKey,
+        link: &ChainLink,
+    ) -> Result<(), Error> {
+        let Some(previous) = link.previous else {
+            return Ok(());
+        };
+        // On any branch of the same identity's lane: a stage branches off
+        // the live chain, which continues after a published stage.
+        if self
+            .indexed()?
+            .links
+            .get(&previous)
+            .is_some_and(|(identity, held)| {
+                *identity == signer
+                    && held.lane == link.lane
+                    && held.sequence.saturating_add(1) == link.sequence
+            })
+        {
+            return Ok(());
+        }
+        Err(denied(
+            "a tip statement's predecessor is missing or does not match",
+        ))
+    }
+    /// The chain index, brought up to the graph's lists.
+    fn indexed(&self) -> Result<MutexGuard<'_, Places>, Error> {
+        let mut index = self.index.places();
+        macro_rules! lists {
+            ($($n:tt $list:ident),*) => {
+                let stale = false $(|| match index.built[$n] {
+                    (0, _) => false,
+                    (count, last) => self.$list.get(count - 1).map(|signed| signed.id()).transpose()? != last,
+                })*;
+                if stale {
+                    *index = Places::default();
+                }
+                $(
+                    let from = index.built[$n].0;
+                    for signed in self.$list.iter().skip(from) {
+                        let id = signed.id()?;
+                        if let (Some(link), Some(signer)) = (signed.link, Endorsement::signer_of(&signed.endorsement().chain)) {
+                            index.links.insert(id, (signer, link));
+                        }
+                        index.built[$n] = (from.max(index.built[$n].0) + 1, Some(id));
+                    }
+                )*
+            };
+        }
+        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints);
+        Ok(index)
+    }
+    /// Every signed statement: a lazy ID, its chain and its link.
+    #[allow(clippy::type_complexity)]
+    fn signed(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            Box<dyn Fn() -> Result<Commitment, Error> + '_>,
+            &CredentialChain,
+            Option<ChainLink>,
+        ),
+    > + '_ {
+        macro_rules! of {
+            ($list:expr) => {
+                $list.iter().map(|signed| {
+                    (
+                        Box::new(move || signed.id()) as Box<dyn Fn() -> Result<Commitment, Error>>,
+                        &signed.endorsement().chain,
+                        signed.link,
+                    )
+                })
+            };
+        }
+        of!(self.seals)
+            .chain(of!(self.openings))
+            .chain(of!(self.moves))
+            .chain(of!(self.genesis_lines))
+            .chain(of!(self.checkpoints))
+    }
+    /// The chained statements, then the acknowledgments of every finality
+    /// record, each once.
+    fn chained(&self) -> Result<(Vec<Chained<'_>>, Vec<Chained<'_>>), Error> {
+        let mut statements = Vec::new();
+        for (id, credentials, link) in self.signed() {
+            if let (Some(link), Some(identity)) = (link, Endorsement::signer_of(credentials)) {
+                statements.push(Chained {
+                    id: id()?,
+                    identity,
+                    link,
+                    credentials,
+                });
+            }
+        }
+        let mut acknowledgments = Vec::new();
+        let mut seen = BTreeSet::new();
+        for record in &self.finalities {
+            for ack in &record.acknowledgments {
+                let id = ack.id()?;
+                if let Some(identity) = ack.identity()
+                    && seen.insert(id)
+                {
+                    acknowledgments.push(Chained {
+                        id,
+                        identity,
+                        link: ack.link,
+                        credentials: &ack.credentials,
+                    });
+                }
+            }
+        }
+        Ok((statements, acknowledgments))
+    }
+    /// Leaves out of resolution every seal, opening, move and checkpoint
+    /// record whose signer's chain `revocations` ends; the owner's never
+    /// are. A chain a root statement cuts keeps the statements up to the
+    /// heads it names and loses the rest; those are `past_cut`. Two
+    /// chained statements at one place are an `equivocation`. Returns
+    /// whether the left-out set changed, so callers resolve again.
     pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
         let mut revoked = BTreeSet::new();
-        let signed = self
-            .seals
-            .iter()
-            .map(|seal| (seal.id(), &seal.endorsement().chain))
-            .chain(
-                self.openings
-                    .iter()
-                    .map(|opening| (opening.id(), &opening.endorsement().chain)),
-            )
-            .chain(
-                self.moves
-                    .iter()
-                    .map(|movement| (movement.id(), &movement.endorsement().chain)),
-            )
-            .chain(
-                self.checkpoints
-                    .iter()
-                    .map(|record| (record.id(), &record.endorsement().chain)),
-            );
-        for (id, chain) in signed {
-            if revocations.ends_chain(chain)? {
-                revoked.insert(id?);
+        let mut past_cut = BTreeSet::new();
+        let mut equivocations = BTreeSet::new();
+        let (statements, acknowledgments) = self.chained()?;
+        let mut kept_statements = BTreeSet::new();
+        let mut kept_acks = BTreeSet::new();
+        for ((identity, lane), heads) in revocations.cut_lanes() {
+            kept_statements.extend(kept(&statements, identity, lane, &heads.statements));
+            kept_acks.extend(kept(
+                &acknowledgments,
+                identity,
+                lane,
+                &heads.acknowledgments,
+            ));
+        }
+        let mut judge = |chained: &[Chained<'_>], kept: &BTreeSet<Commitment>, ack: bool| {
+            let mut places = BTreeMap::new();
+            let mut ended = BTreeSet::new();
+            for item in chained {
+                let place = (
+                    item.identity,
+                    item.link.lane,
+                    item.link.stage,
+                    item.link.sequence,
+                );
+                if let Some(other) = places.insert(place, item.id)
+                    && other != item.id
+                {
+                    equivocations.insert(Equivocation {
+                        identity: item.identity,
+                        lane: item.link.lane,
+                        sequence: item.link.sequence,
+                        acknowledgment: ack,
+                    });
+                }
+                let cut = revocations.cut(&item.identity, &item.link.lane).is_some();
+                let out = match cut {
+                    true => !kept.contains(&item.id),
+                    false => revocations.ends_chain(item.credentials)?,
+                };
+                if out {
+                    ended.insert(item.id);
+                    if cut {
+                        past_cut.insert(PastCut {
+                            id: item.id,
+                            identity: item.identity,
+                            link: item.link,
+                            acknowledgment: ack,
+                        });
+                    }
+                }
+            }
+            Ok::<_, Error>(ended)
+        };
+        revoked.extend(judge(&statements, &kept_statements, false)?);
+        let ended_acks = judge(&acknowledgments, &kept_acks, true)?;
+        // Unchained statements: the owner's and issuers'.
+        for (id, chain, link) in self.signed() {
+            if link.is_none() && revocations.ends_chain(chain)? {
+                revoked.insert(id()?);
             }
         }
         // Revoked acknowledgments no longer count toward a seal's finality.
@@ -464,13 +816,208 @@ impl TipGraph {
                 Ok(minimum) => minimum,
                 Err(_) => continue,
             };
-            if record.acknowledgments.len() - record.revoked(revocations)? < minimum {
+            let mut ended = 0;
+            for ack in &record.acknowledgments {
+                ended += usize::from(ended_acks.contains(&ack.id()?));
+            }
+            if record.acknowledgments.len() - ended < minimum {
                 revoked.insert(record.id()?);
             }
         }
         let changed = revoked != self.revoked;
         self.revoked = revoked;
+        self.past_cut = past_cut;
+        self.equivocations = equivocations;
         Ok(changed)
+    }
+    /// Whether a root statement's cut leaves out, for good, the statement
+    /// `id` that `identity` signed at `link`: it is at or after a kept
+    /// head's place without being that head, or before one this graph
+    /// holds without leading to it. Admission refuses it and holders prune it.
+    pub fn beyond_cut(
+        &self,
+        revocations: &RevocationSet,
+        identity: &PublicKey,
+        link: &ChainLink,
+        id: Commitment,
+    ) -> Result<bool, Error> {
+        let Some(heads) = revocations.cut(identity, &link.lane) else {
+            return Ok(false);
+        };
+        let index = self.indexed()?;
+        for head in &heads.statements {
+            if head.id == id {
+                return Ok(false);
+            }
+            // A head reaches only lower places.
+            if link.sequence >= head.sequence {
+                continue;
+            }
+            // Walk back from the head while the graph holds it.
+            let mut cursor = head.id;
+            let reached = loop {
+                let Some((_, held)) = index.links.get(&cursor) else {
+                    // Not held: undecided until it arrives.
+                    break true;
+                };
+                match held.previous {
+                    Some(previous) if held.sequence > link.sequence + 1 => cursor = previous,
+                    Some(previous) => break previous == id,
+                    None => break false,
+                }
+            };
+            if reached {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    /// The statements a cut leaves out for good (see [`Self::beyond_cut`])
+    /// that no other statement this graph keeps refers to, whether as a
+    /// predecessor, a sealed tip, an opened seal, a bookmark's tip or a
+    /// finality record's seal, nor `pinned`, which the holder keeps state
+    /// for. A holder deletes them.
+    pub fn prunable(
+        &self,
+        revocations: &RevocationSet,
+        pinned: &BTreeSet<Commitment>,
+    ) -> Result<BTreeSet<Commitment>, Error> {
+        let (statements, _) = self.chained()?;
+        let mut prunable = BTreeSet::new();
+        for item in &statements {
+            if self.beyond_cut(revocations, &item.identity, &item.link, item.id)? {
+                prunable.insert(item.id);
+            }
+        }
+        if prunable.is_empty() {
+            return Ok(prunable);
+        }
+        let mut references: Vec<(Commitment, Vec<Commitment>)> = Vec::new();
+        macro_rules! refer {
+            ($list:expr, |$s:ident| $refs:expr) => {
+                for $s in &$list {
+                    let mut refs: Vec<Commitment> = $refs;
+                    refs.extend($s.link.and_then(|link| link.previous));
+                    references.push(($s.id()?, refs));
+                }
+            };
+        }
+        refer!(self.seals, |s| vec![s.statement.tip.0]);
+        refer!(self.openings, |s| vec![s.statement.seal]);
+        refer!(self.moves, |s| [s.statement.from, s.statement.to]
+            .into_iter()
+            .flatten()
+            .map(|tip| tip.0)
+            .collect());
+        refer!(self.genesis_lines, |s| Vec::new());
+        refer!(self.checkpoints, |s| vec![s.statement.seal]);
+        for record in &self.finalities {
+            references.push((record.id()?, vec![record.seal]));
+        }
+        prunable.retain(|id| !pinned.contains(id));
+        // What a kept statement refers to stays, and so on.
+        loop {
+            let needed: BTreeSet<Commitment> = references
+                .iter()
+                .filter(|(id, _)| !prunable.contains(id))
+                .flat_map(|(_, refs)| refs.iter().copied())
+                .filter(|id| prunable.contains(id))
+                .collect();
+            if needed.is_empty() {
+                return Ok(prunable);
+            }
+            prunable.retain(|id| !needed.contains(id));
+        }
+    }
+    /// Deletes `ids` from the graph's statement lists.
+    pub fn remove_statements(&mut self, ids: &BTreeSet<Commitment>) -> Result<(), Error> {
+        macro_rules! remove {
+            ($($list:ident),*) => {$(
+                let mut kept = Vec::with_capacity(self.$list.len());
+                for signed in std::mem::take(&mut self.$list) {
+                    if !ids.contains(&signed.id()?) {
+                        kept.push(signed);
+                    }
+                }
+                self.$list = kept;
+            )*};
+        }
+        remove!(seals, openings, moves, genesis_lines, checkpoints);
+        *self.index.places() = Places::default();
+        Ok(())
+    }
+    /// The heads this graph holds of `identity`'s chains through `lane`,
+    /// for a root statement's cut: every statement no other one follows,
+    /// stage branches included, and the latest acknowledgment.
+    pub fn heads(&self, identity: &PublicKey, lane: &PublicKey) -> Result<Cut, Error> {
+        let (statements, acknowledgments) = self.chained()?;
+        let ours: Vec<&Chained<'_>> = statements
+            .iter()
+            .filter(|item| item.identity == *identity && item.link.lane == *lane)
+            .collect();
+        let followed: BTreeSet<Commitment> =
+            ours.iter().filter_map(|item| item.link.previous).collect();
+        let leaves: Vec<Head> = ours
+            .iter()
+            .filter(|item| !followed.contains(&item.id))
+            .map(|item| Head {
+                sequence: item.link.sequence,
+                id: item.id,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let head = |chained: &[Chained<'_>]| {
+            chained
+                .iter()
+                .filter(|item| item.identity == *identity && item.link.lane == *lane)
+                .min_by_key(|item| (Reverse(item.link.sequence), item.id))
+                .map(|item| Head {
+                    sequence: item.link.sequence,
+                    id: item.id,
+                })
+        };
+        Ok(Cut {
+            identity: *identity,
+            lane: *lane,
+            statements: leaves,
+            acknowledgments: head(&acknowledgments),
+        })
+    }
+    /// The live link `signer` signs its next statement at through its node
+    /// `lane`: after the highest place this graph holds on any branch, so no
+    /// place repeats, or the first.
+    pub fn next_link(&self, signer: &PublicKey, lane: &PublicKey) -> Result<ChainLink, Error> {
+        let (statements, _) = self.chained()?;
+        Ok(statements
+            .iter()
+            .filter(|item| item.identity == *signer && item.link.lane == *lane)
+            .min_by_key(|item| (Reverse(item.link.sequence), item.id))
+            .map_or(ChainLink::first(*lane), |head| ChainLink {
+                stage: None,
+                ..head.link.next(head.id)
+            }))
+    }
+    /// The link the node `lane` acknowledges at next, after the latest of
+    /// its acknowledgments this graph's finality records hold.
+    pub fn next_ack_link(&self, lane: &PublicKey) -> Result<ChainLink, Error> {
+        let (_, acknowledgments) = self.chained()?;
+        Ok(acknowledgments
+            .iter()
+            .filter(|item| item.link.lane == *lane)
+            .min_by_key(|item| (Reverse(item.link.sequence), item.id))
+            .map_or(ChainLink::first(*lane), |head| head.link.next(head.id)))
+    }
+    /// The lanes `identity` signed chained statements or acknowledgments
+    /// through.
+    pub fn lanes_of(&self, identity: &PublicKey) -> Result<BTreeSet<PublicKey>, Error> {
+        let (statements, acknowledgments) = self.chained()?;
+        Ok(statements
+            .iter()
+            .chain(&acknowledgments)
+            .filter(|item| item.identity == *identity)
+            .map(|item| item.link.lane)
+            .collect())
     }
     /// The order races resolve by: higher authority first, then the lower
     /// digest. Smaller wins.

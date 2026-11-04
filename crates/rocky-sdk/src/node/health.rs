@@ -315,6 +315,52 @@ impl Node {
         alerts.sort();
         alerts
     }
+    /// What a root revocation's cut left out of the domain's tip graph,
+    /// held, refused or pruned, per signing node, and each fork of a node's
+    /// chain the graph holds.
+    pub(super) async fn tip_chain_alerts(&self) -> Result<Vec<Alert>, Failure> {
+        let graph = match self.replica.tip_graph(self.domain().scope).await {
+            Ok(graph) => graph,
+            // Before the domain's graph is installed there is nothing to judge.
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut past: BTreeMap<(PublicKey, PublicKey), (u64, u64)> = BTreeMap::new();
+        // Refused on arrival or pruned: no longer held, still counted.
+        for (identity, lane, count) in self.replica.past_cut_records(graph.scope).await? {
+            past.entry((identity, lane)).or_default().0 += count;
+        }
+        for item in &graph.past_cut {
+            let counts = past.entry((item.identity, item.link.lane)).or_default();
+            if item.acknowledgment {
+                counts.1 += 1;
+            } else {
+                counts.0 += 1;
+            }
+        }
+        let past = past
+            .into_iter()
+            .map(|((signer, node), (statements, acknowledgments))| {
+                AlertKind::TipStatementsPastCut {
+                    signer: signer.to_hex(),
+                    node: node.to_hex(),
+                    statements,
+                    acknowledgments,
+                }
+            });
+        let forks = graph
+            .equivocations
+            .iter()
+            .map(|fork| AlertKind::TipChainEquivocation {
+                signer: fork.identity.to_hex(),
+                node: fork.lane.to_hex(),
+                sequence: fork.sequence,
+                acknowledgment: fork.acknowledgment,
+            });
+        Ok(past
+            .chain(forks)
+            .map(|kind| Alert { kind, since: None })
+            .collect())
+    }
     /// Reloads the other trusted identities from the registry, merges the
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
@@ -481,6 +527,8 @@ impl Node {
             *counts.entry(kind).or_default() += 1;
         }
         let mut alerts = self.alerts();
+        alerts.extend(self.tip_chain_alerts().await?);
+        alerts.sort();
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {
             produced_at_epoch_seconds: self.status_time()?,

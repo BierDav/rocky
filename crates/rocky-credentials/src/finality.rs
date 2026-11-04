@@ -3,14 +3,14 @@
 //! that seal final for every member, without a coordinator call. See
 //! `docs/runtime/seal-finality.md`.
 use crate::{
-    CredentialChain, Error, PrivateKey, PublicKey, RevocationSet, Signature, decode_bounded,
-    denied, encode, signing_bytes,
+    ChainLink, CredentialChain, Error, PrivateKey, PublicKey, RevocationSet, Signature,
+    decode_bounded, denied, encode, signing_bytes,
 };
 use rocky_core::{Commitment, PrincipalKind, Scope, TipId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const TERMINAL_ACK_FORMAT: u32 = 1;
+pub const TERMINAL_ACK_FORMAT: u32 = 2;
 pub const SEAL_FINALITY_FORMAT: u32 = 1;
 /// The coordinator's in-sync cap: no record needs more acknowledgments.
 pub const MAX_FINALITY_ACKS: usize = 15;
@@ -39,23 +39,32 @@ pub struct TerminalAck {
     pub statement: TerminalAckStatement,
     pub signer: PublicKey,
     pub credentials: CredentialChain,
+    /// Its place in the signing node's chain of acknowledgments.
+    pub link: ChainLink,
     signature: Signature,
 }
-const TERMINAL_ACK: &str = "rocky.terminal-ack.v1";
+const TERMINAL_ACK: &str = "rocky.terminal-ack.v2";
 impl TerminalAck {
+    /// `node` acknowledges at `link` of its own chain.
     pub fn sign(
         statement: TerminalAckStatement,
         node: &PrivateKey,
         credentials: CredentialChain,
+        link: ChainLink,
     ) -> Result<Self, Error> {
         if statement.format != TERMINAL_ACK_FORMAT {
             return Err(denied("unsupported terminal acknowledgment format"));
         }
-        let signature = node.sign(&signing_bytes(TERMINAL_ACK, &statement)?);
+        if link.lane != node.public_key() || link.stage.is_some() {
+            return Err(denied("an acknowledgment names its own node's chain"));
+        }
+        link.validate()?;
+        let signature = node.sign(&signing_bytes(TERMINAL_ACK, &(&statement, &link))?);
         let ack = Self {
             statement,
             signer: node.public_key(),
             credentials,
+            link,
             signature,
         };
         ack.to_bytes()?;
@@ -71,16 +80,39 @@ impl TerminalAck {
         if self.statement.format != TERMINAL_ACK_FORMAT {
             return Err(denied("unsupported terminal acknowledgment format"));
         }
+        if self.link.lane != self.signer || self.link.stage.is_some() {
+            return Err(denied("an acknowledgment names its own node's chain"));
+        }
+        self.link.validate()?;
+        // A cut node's acknowledgments are judged by the cut, not refused.
+        let current = current.filter(|(revocations, _)| {
+            self.identity()
+                .is_none_or(|identity| revocations.cut(&identity, &self.signer).is_none())
+        });
         let identity =
             self.credentials
                 .trusted_node(publisher, self.statement.scope, self.signer, current)?;
         if !self.signer.verify(
-            &signing_bytes(TERMINAL_ACK, &self.statement)?,
+            &signing_bytes(TERMINAL_ACK, &(&self.statement, &self.link))?,
             &self.signature,
         ) {
             return Err(denied("invalid terminal acknowledgment signature"));
         }
         Ok(identity)
+    }
+    /// The trusted identity the node's chain starts at, as named, unverified.
+    pub fn identity(&self) -> Option<PublicKey> {
+        self.credentials
+            .0
+            .first()
+            .map(|link| link.capability.subject)
+    }
+    /// Its hash: what the next acknowledgment of its node names.
+    pub fn id(&self) -> Result<Commitment, Error> {
+        Ok(rocky_core::commitment(
+            "rocky.terminal-ack.id.v1",
+            &self.to_bytes()?,
+        ))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         let bytes = encode(self)?;
@@ -170,19 +202,9 @@ impl SealFinality {
         }
         Ok(nodes.len())
     }
-    /// Acknowledgments whose chains `revocations` ends.
-    pub fn revoked(&self, revocations: &RevocationSet) -> Result<usize, Error> {
-        let mut count = 0;
-        for ack in &self.acknowledgments {
-            if revocations.ends_chain(&ack.credentials)? {
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.seal-finality.id.v1",
+            "rocky.seal-finality.id.v2",
             &self.to_bytes()?,
         ))
     }

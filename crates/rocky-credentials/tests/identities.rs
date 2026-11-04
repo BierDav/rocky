@@ -79,6 +79,7 @@ impl Domain {
             nodes: BTreeSet::new(),
             identities: BTreeSet::new(),
             capabilities: BTreeSet::new(),
+            cut: Default::default(),
         };
         statement(&mut body);
         let signed = Authority::owner(&self.owner)
@@ -282,6 +283,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         nodes: BTreeSet::new(),
         identities: [domain.publisher()].into(),
         capabilities: BTreeSet::new(),
+        cut: Default::default(),
     };
     let signed = Authority::owner(&domain.owner)
         .revoke(owner)

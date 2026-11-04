@@ -433,3 +433,147 @@ async fn an_additive_switch_changes_the_same_storage_for_ten_or_a_thousand_rows(
     assert_eq!(small, large);
     assert_eq!((small_events, large_events), (0, 0));
 }
+
+/// A trusted node's staged statements take a branch of their own: the
+/// live chain goes on while the stage waits, and once it is withdrawn the
+/// statements signed meanwhile are accepted elsewhere.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsewhere() {
+    use rocky_credentials::{BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove};
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let key = PrivateKey::new();
+    let a = lineage
+        .open(&dir.path().join("a.db"), &key, 2, None)
+        .await
+        .unwrap();
+    let b = lineage
+        .open(&dir.path().join("b.db"), &PrivateKey::new(), 2, None)
+        .await
+        .unwrap();
+    follow_main(&lineage, &a).await;
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    let source = a.followed_tip().await;
+    let trusted = PrivateKey::new();
+    let chain = CredentialChain(vec![
+        rocky_credentials::Authority::owner(lineage.publisher())
+            .issue_trusted(
+                trusted.public_key(),
+                lineage.domain,
+                rocky_credentials::AuthorRange::ALL,
+                now().unwrap(),
+            )
+            .unwrap(),
+    ]);
+    let lane = trusted.public_key();
+    let create = |name: &str, link| {
+        TipStatement::Bookmark(
+            SignedBookmarkMove::endorse_linked(
+                BookmarkMoveStatement {
+                    format: BOOKMARK_MOVE_FORMAT,
+                    scope: lineage.domain,
+                    name: name.into(),
+                    from: None,
+                    to: Some(source),
+                },
+                &trusted,
+                &chain,
+                Some(link),
+            )
+            .unwrap(),
+        )
+    };
+    let (link, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
+    a.publish_tip_statements(&[create("before", link)])
+        .await
+        .unwrap();
+
+    // The stage branches off the live head.
+    let (link, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
+    let staged = link.staged([9; 32]);
+    let mut statement = sign_seal(
+        &lineage,
+        source,
+        a.seal_frontier(lineage.domain, false).await.unwrap(),
+    )
+    .statement;
+    statement.action = SealAction::Continue {
+        schema: lineage.definition(3).hash(),
+    };
+    let seal = SignedSeal::endorse_linked(statement, &trusted, &chain, Some(staged)).unwrap();
+    let target = seal.successor().unwrap().unwrap();
+    let movement = SignedBookmarkMove::endorse_linked(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "main".into(),
+            from: Some(source),
+            to: Some(target),
+        },
+        &trusted,
+        &chain,
+        Some(staged.next(seal.id().unwrap())),
+    )
+    .unwrap();
+    let publication = rocky_core::commitment("branch.stage", &target.0);
+    a.stage_schema(crate::SchemaStage {
+        publication,
+        scope: lineage.domain,
+        bookmark: "main".into(),
+        source,
+        target,
+        from_version: 2,
+        coordinated: false,
+        statements: vec![TipStatement::Seal(seal), TipStatement::Bookmark(movement)],
+        program: vec![],
+        parents: vec![],
+    })
+    .await
+    .unwrap();
+
+    // While it waits, the live chain signs on after its own head.
+    let (meanwhile, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
+    assert_eq!((meanwhile.sequence, meanwhile.stage), (1, None));
+    a.publish_tip_statements(&[create("meanwhile", meanwhile)])
+        .await
+        .unwrap();
+    a.install_tip_schema(target, lineage.definition(3), b"verified".to_vec())
+        .await
+        .unwrap();
+    let mut security = lineage.config(3, &key);
+    security.manifest = lineage.config(2, &key).manifest;
+    a.switch_schema(
+        target,
+        lineage.app(3),
+        crate::SchemaConfig {
+            security,
+            tables: Some(lineage.projection(3)),
+        },
+    )
+    .await
+    .unwrap();
+    a.withdraw_staged_schema(
+        publication,
+        lineage.app(2),
+        crate::SchemaConfig {
+            security: lineage.config(2, &key),
+            tables: Some(lineage.projection(2)),
+        },
+    )
+    .await
+    .unwrap();
+    let (after, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
+    a.publish_tip_statements(&[create("after", after)])
+        .await
+        .unwrap();
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    let graph = b.tip_graph(lineage.domain).await.unwrap();
+    for name in ["before", "meanwhile", "after"] {
+        assert_eq!(graph.bookmark(name).unwrap(), Some(source), "{name}");
+    }
+    assert!(graph.equivocations.is_empty());
+}

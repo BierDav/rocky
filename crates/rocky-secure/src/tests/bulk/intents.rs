@@ -42,7 +42,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
         .publish_tip_statements(&[TipStatement::GenesisLine(
             SignedGenesisLine::sign(
                 GenesisLineStatement {
-                    format: 1,
+                    format: rocky_credentials::GENESIS_LINE_FORMAT,
                     scope: l.domain,
                     minimum_in_sync: 2,
                 },
@@ -67,7 +67,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
     .unwrap();
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
-            format: 2,
+            format: rocky_credentials::TIP_OPENING_FORMAT,
             scope: l.domain,
             seal: close.id().unwrap(),
             schema: l.definition(3).hash(),

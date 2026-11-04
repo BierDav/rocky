@@ -320,6 +320,7 @@ pub(crate) fn revoking(
         nodes: BTreeSet::new(),
         identities: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
+        cut: Default::default(),
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),

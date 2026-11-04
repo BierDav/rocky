@@ -3422,11 +3422,23 @@ impl Settings {
     /// completes it, now or at the next open. A trusted identity, or one of
     /// its nodes, only `root` revokes: it signs here, and the statement
     /// also ends every identity that one first enrolled.
+    #[cfg(test)]
     pub fn begin_revocation(
         &mut self,
         target: Revoke,
         registry: &Registry,
         root: Option<&dyn IdentityProvider>,
+    ) -> Result<(), Failure> {
+        self.begin_revocation_cut(target, registry, root, Vec::new())
+    }
+    /// As `begin_revocation`; a root statement also carries `cut`, the
+    /// heads of the revoked nodes' chains of tip statements that stay valid.
+    pub fn begin_revocation_cut(
+        &mut self,
+        target: Revoke,
+        registry: &Registry,
+        root: Option<&dyn IdentityProvider>,
+        cut: Vec<rocky_credentials::Cut>,
     ) -> Result<(), Failure> {
         let own = self.identity;
         let own_node = self
@@ -3523,6 +3535,7 @@ impl Settings {
                 nodes: [rocky_credentials::PeerId::of(node)].into(),
                 identities: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
+                cut: if root.is_some() { cut } else { Vec::new() },
             },
             // The cascade is the root statement's: it names the trusted
             // identity alone, whose origin the enrolled ones carry.
@@ -3546,6 +3559,7 @@ impl Settings {
                             .and_then(|record| record.grant.id().ok()),
                     )
                     .collect(),
+                cut: if root.is_some() { cut } else { Vec::new() },
             },
             Revoke::Claims(capability) => Revocation {
                 app: domain.manifest().app,
@@ -3554,6 +3568,7 @@ impl Settings {
                 nodes: BTreeSet::new(),
                 identities: BTreeSet::new(),
                 capabilities: [capability].into(),
+                cut: Default::default(),
             },
         };
         // A claim right reads nothing: no key rotates.

@@ -94,7 +94,7 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
         .unwrap()
         .verify(owner.public_key(), &graph)
         .unwrap();
-    for format in [0, 3, u32::MAX] {
+    for format in [0, 1, 9, u32::MAX] {
         let mut other = signed.clone();
         other.statement.format = format;
         assert!(other.verify(owner.public_key(), &graph).is_err());
@@ -145,10 +145,11 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
                 .issue_issuer(issuer.public_key(), None, (100, 1000, 0))
                 .unwrap(),
         ]);
-        let signed = SignedSeal::endorse(
+        let signed = SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), index as u64, &owner).statement,
             issuer,
             &chain,
+            link(&graph, issuer, &chain),
         )
         .unwrap();
         signed
@@ -267,10 +268,11 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     let first = seal(&graph, graph.genesis(), 1, &owner);
     let next = first.successor().unwrap().unwrap();
     graph.seals.push(first.clone());
-    let opened = SignedTipOpening::endorse(
+    let opened = SignedTipOpening::endorse_linked(
         opening(&graph, &first, &owner).statement,
         &trusted,
         &trusted_chain,
+        link(&graph, &trusted, &trusted_chain),
     )
     .unwrap();
     opened
@@ -281,10 +283,15 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     assert_eq!(graph.line_root(branch).unwrap(), branch);
     assert!(!graph.continues(next, branch).unwrap());
     assert!(
-        SignedTipOpening::endorse(opened.statement, &issuer, &issuer_chain)
-            .unwrap()
-            .verify(owner.public_key(), &graph)
-            .is_err()
+        SignedTipOpening::endorse_linked(
+            opened.statement,
+            &issuer,
+            &issuer_chain,
+            link(&graph, &issuer, &issuer_chain)
+        )
+        .unwrap()
+        .verify(owner.public_key(), &graph)
+        .is_err()
     );
     for (from, to, allowed) in [
         (Some(graph.genesis()), Some(next), true),
@@ -294,18 +301,28 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         (Some(next), Some(branch), false),
     ] {
         let statement = movement(&graph, "main", from, to, &owner).statement;
-        let signed =
-            SignedBookmarkMove::endorse(statement.clone(), &issuer, &issuer_chain).unwrap();
+        let signed = SignedBookmarkMove::endorse_linked(
+            statement.clone(),
+            &issuer,
+            &issuer_chain,
+            link(&graph, &issuer, &issuer_chain),
+        )
+        .unwrap();
         assert_eq!(
             signed
                 .verify_current(owner.public_key(), &graph, &RevocationSet::new(), 200)
                 .is_ok(),
             allowed
         );
-        SignedBookmarkMove::endorse(statement, &trusted, &trusted_chain)
-            .unwrap()
-            .verify_current(owner.public_key(), &graph, &RevocationSet::new(), 200)
-            .unwrap();
+        SignedBookmarkMove::endorse_linked(
+            statement,
+            &trusted,
+            &trusted_chain,
+            link(&graph, &trusted, &trusted_chain),
+        )
+        .unwrap()
+        .verify_current(owner.public_key(), &graph, &RevocationSet::new(), 200)
+        .unwrap();
     }
     assert!(
         Authority::issuer(&issuer, &issuer_chain)
@@ -315,20 +332,22 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     let forged = SignedCapability::sign(trusted_chain.0[0].capability.clone(), &issuer).unwrap();
     let forged_chain = CredentialChain(vec![issuer_chain.0[0].clone(), forged]);
     assert!(
-        SignedTipOpening::endorse(
+        SignedTipOpening::endorse_linked(
             opening(&graph, &first, &owner).statement,
             &trusted,
-            &forged_chain
+            &forged_chain,
+            link(&graph, &trusted, &forged_chain)
         )
         .unwrap()
         .verify(owner.public_key(), &graph)
         .is_err()
     );
     // A trusted grant never expires; only the root's revocation ends it.
-    let opened = SignedTipOpening::endorse(
+    let opened = SignedTipOpening::endorse_linked(
         opening(&graph, &first, &owner).statement,
         &trusted,
         &trusted_chain,
+        link(&graph, &trusted, &trusted_chain),
     )
     .unwrap();
     assert!(
@@ -353,10 +372,11 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     );
     let mut other = graph.clone();
     other.scope.domain = DomainId([7; 16]);
-    let wrong = SignedSeal::endorse(
+    let wrong = SignedSeal::endorse_linked(
         seal(&other, other.genesis(), 0, &owner).statement,
         &trusted,
         &trusted_chain,
+        link(&graph, &trusted, &trusted_chain),
     )
     .unwrap();
     assert!(wrong.verify(owner.public_key(), &other).is_err());
@@ -432,10 +452,11 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
     };
     let chain = CredentialChain(vec![SignedCapability::sign(capability, &owner).unwrap()]);
     assert!(
-        SignedSeal::endorse(
+        SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), 1, &owner).statement,
             &user,
-            &chain
+            &chain,
+            link(&graph, &user, &chain)
         )
         .unwrap()
         .verify(owner.public_key(), &graph)
@@ -473,10 +494,11 @@ fn node_signatures_never_inherit_trusted_identity_control() {
         None
     );
     assert!(
-        SignedSeal::endorse(
+        SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), 1, &owner).statement,
             &node,
-            &chain
+            &chain,
+            link(&graph, &node, &chain)
         )
         .unwrap()
         .verify(owner.public_key(), &graph)
@@ -513,8 +535,13 @@ fn endorsed(
     signer: &PrivateKey,
     chain: &CredentialChain,
 ) -> SignedSeal {
-    let signed =
-        SignedSeal::endorse(seal(graph, tip, sequence, owner).statement, signer, chain).unwrap();
+    let signed = SignedSeal::endorse_linked(
+        seal(graph, tip, sequence, owner).statement,
+        signer,
+        chain,
+        link(graph, signer, chain),
+    )
+    .unwrap();
     signed
         .verify_current(owner.public_key(), graph, &RevocationSet::new(), 200)
         .unwrap();
@@ -528,6 +555,7 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
         nodes: Default::default(),
         identities: identities.iter().copied().collect(),
         capabilities: Default::default(),
+        cut: Default::default(),
     };
     let signed = Authority::owner(owner).revoke(statement).unwrap();
     RevocationSet::try_from(vec![signed]).unwrap()
@@ -648,10 +676,11 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
     close.statement.action = SealAction::Close;
     let close = SignedSeal::sign(close.statement, &owner).unwrap();
     graph.seals.push(forward_seal.clone());
-    let forward = SignedBookmarkMove::endorse(
+    let forward = SignedBookmarkMove::endorse_linked(
         movement(&graph, "main", Some(main_tip), Some(forward_tip), &owner).statement,
         &issuer,
         &chain,
+        link(&graph, &issuer, &chain),
     )
     .unwrap();
     graph.seals.push(close.clone());
@@ -711,6 +740,7 @@ fn ack(
         },
         node,
         chain.clone(),
+        rocky_credentials::ChainLink::first(node.public_key()),
     )
     .unwrap()
 }
@@ -772,10 +802,11 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
         .unwrap();
     // An issuer cannot sign the genesis line's minimum.
     assert!(
-        rocky_credentials::SignedGenesisLine::endorse(
+        rocky_credentials::SignedGenesisLine::endorse_linked(
             line(1).statement,
             &issuer,
-            &issuer_chain(&owner, &issuer)
+            &issuer_chain(&owner, &issuer),
+            link(&graph, &issuer, &issuer_chain(&owner, &issuer))
         )
         .unwrap()
         .verify(owner.public_key(), &graph)
@@ -848,10 +879,11 @@ fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
         signer: PrivateKey::new().public_key(),
         rows,
     };
-    let record = SignedCheckpointRecord::endorse(
+    let record = SignedCheckpointRecord::endorse_linked(
         statement(&sealed, 4),
         &issuer,
         &issuer_chain(&owner, &issuer),
+        link(&graph, &issuer, &issuer_chain(&owner, &issuer)),
     )
     .unwrap();
     // A record of a seal the graph does not hold, or of another domain, is refused.
@@ -921,7 +953,13 @@ fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entr
         trusted_chain(&graph, &owner, &trusted),
         issuer_chain(&owner, &trusted),
     ] {
-        let other = SignedSeal::endorse(recovered(recovery), &trusted, &chain).unwrap();
+        let other = SignedSeal::endorse_linked(
+            recovered(recovery),
+            &trusted,
+            &chain,
+            link(&graph, &trusted, &chain),
+        )
+        .unwrap();
         assert!(other.verify(owner.public_key(), &graph).is_err());
         assert!(other.verify_recovery(owner.public_key()).is_err());
     }
@@ -1068,7 +1106,13 @@ fn recovery_finality_binds_the_exact_replaced_head_and_keeps_the_signed_quorum()
                 let mut statement = ack(&graph, &seal, node).statement;
                 statement.position = position;
                 statement.running = running;
-                TerminalAck::sign(statement, &node.0, node.1.clone()).unwrap()
+                TerminalAck::sign(
+                    statement,
+                    &node.0,
+                    node.1.clone(),
+                    rocky_credentials::ChainLink::first(node.0.public_key()),
+                )
+                .unwrap()
             })
             .collect::<Vec<_>>()
     };
@@ -1162,4 +1206,381 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
         .unwrap();
     assert!(grants.is_empty());
     assert!(partitions.is_empty());
+}
+/// The next chain link of `signer` in `graph` when `chain` is a trusted
+/// grant; an owner's or issuer's statement has none.
+fn link(
+    graph: &TipGraph,
+    signer: &PrivateKey,
+    chain: &CredentialChain,
+) -> Option<rocky_credentials::ChainLink> {
+    let trusted = matches!(chain.0.as_slice(), [only] if only.capability.extended().is_ok_and(|e| e.trusted.is_some()));
+    trusted.then(|| {
+        graph
+            .next_link(&signer.public_key(), &signer.public_key())
+            .unwrap()
+    })
+}
+
+/// A move of `name` to genesis, signed by the trusted `signer` at `link`.
+fn linked_move(
+    graph: &TipGraph,
+    name: &str,
+    signer: &PrivateKey,
+    chain: &CredentialChain,
+    link: rocky_credentials::ChainLink,
+) -> SignedBookmarkMove {
+    SignedBookmarkMove::endorse_linked(
+        BookmarkMoveStatement {
+            format: BOOKMARK_MOVE_FORMAT,
+            scope: graph.scope,
+            name: name.into(),
+            from: None,
+            to: Some(graph.genesis()),
+        },
+        signer,
+        chain,
+        Some(link),
+    )
+    .unwrap()
+}
+/// A root statement revoking `identity`, keeping its chain through its
+/// own key up to `head` when given.
+fn cutting(
+    owner: &PrivateKey,
+    identity: rocky_credentials::PublicKey,
+    head: Option<&SignedBookmarkMove>,
+) -> RevocationSet {
+    let cut = head.map(|head| rocky_credentials::Cut {
+        identity,
+        lane: identity,
+        statements: vec![rocky_credentials::Head {
+            sequence: head.link.unwrap().sequence,
+            id: head.id().unwrap(),
+        }],
+        acknowledgments: None,
+    });
+    let statement = rocky_credentials::Revocation {
+        app: graph().scope.app,
+        issuer: owner.public_key(),
+        time: 200,
+        nodes: Default::default(),
+        identities: [identity].into(),
+        capabilities: Default::default(),
+        cut: cut.into_iter().collect(),
+    };
+    RevocationSet::try_from(vec![Authority::owner(owner).revoke(statement).unwrap()]).unwrap()
+}
+fn ids(moves: &[&SignedBookmarkMove]) -> std::collections::BTreeSet<[u8; 32]> {
+    moves
+        .iter()
+        .map(|statement| statement.id().unwrap())
+        .collect()
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let mut graph = graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&graph, "base", &trusted, &chain, first);
+    graph.moves.push(base.clone());
+    // Two statements name the same predecessor: a fork of the chain.
+    let fork = first.next(base.id().unwrap());
+    let kept = linked_move(&graph, "kept", &trusted, &chain, fork);
+    let other = linked_move(&graph, "other", &trusted, &chain, fork);
+    for statement in [&kept, &other] {
+        statement.verify(owner.public_key(), &graph).unwrap();
+    }
+    graph.moves.extend([kept.clone(), other.clone()]);
+    let after = linked_move(
+        &graph,
+        "after",
+        &trusted,
+        &chain,
+        fork.next(other.id().unwrap()),
+    );
+    after.verify(owner.public_key(), &graph).unwrap();
+    graph.moves.push(after.clone());
+    graph.exclude_revoked(&RevocationSet::new()).unwrap();
+    assert!(graph.revoked.is_empty());
+    assert_eq!(
+        graph.equivocations.iter().copied().collect::<Vec<_>>(),
+        [rocky_credentials::Equivocation {
+            identity: trusted.public_key(),
+            lane: trusted.public_key(),
+            sequence: 1,
+            acknowledgment: false,
+        }]
+    );
+
+    // A cut at `kept` keeps it and its predecessor; the other branch and
+    // what follows it are past the cut, for good.
+    let revocations = cutting(&owner, trusted.public_key(), Some(&kept));
+    graph.exclude_revoked(&revocations).unwrap();
+    assert_eq!(graph.revoked, ids(&[&other, &after]));
+    assert_eq!(
+        graph
+            .past_cut
+            .iter()
+            .map(|item| item.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ids(&[&other, &after])
+    );
+    assert_eq!(graph.bookmark("kept").unwrap(), Some(graph.genesis()));
+    assert_eq!(graph.bookmark("other").unwrap(), None);
+    assert_eq!(
+        graph.prunable(&revocations, &Default::default()).unwrap(),
+        ids(&[&other, &after])
+    );
+
+    // Without a cut, the revocation leaves out the whole chain.
+    graph
+        .exclude_revoked(&cutting(&owner, trusted.public_key(), None))
+        .unwrap();
+    assert_eq!(graph.revoked, ids(&[&base, &kept, &other, &after]));
+    assert!(graph.past_cut.is_empty());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_cut_refuses_what_follows_its_head_and_prunes_only_what_nothing_kept_needs() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let mut graph = graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&graph, "base", &trusted, &chain, first);
+    graph.moves.push(base.clone());
+    let late = linked_move(
+        &graph,
+        "late",
+        &trusted,
+        &chain,
+        first.next(base.id().unwrap()),
+    );
+    let revocations = cutting(&owner, trusted.public_key(), Some(&base));
+    let place = |statement: &SignedBookmarkMove| {
+        graph
+            .beyond_cut(
+                &revocations,
+                &trusted.public_key(),
+                &statement.link.unwrap(),
+                statement.id().unwrap(),
+            )
+            .unwrap()
+    };
+    // The head stays; a statement after it is refused before it is held.
+    assert!(!place(&base));
+    assert!(place(&late));
+    // A revoked identity's statement past the cut is still admissible
+    // syntax: the cut, not the revocation, judges it.
+    late.verify_current(owner.public_key(), &graph, &revocations, 300)
+        .unwrap();
+    graph.moves.push(late.clone());
+    graph.exclude_revoked(&revocations).unwrap();
+    assert_eq!(
+        graph.prunable(&revocations, &Default::default()).unwrap(),
+        ids(&[&late])
+    );
+    // A late seal the owner opened a tip on stays held, and so does its
+    // predecessor; nothing kept needs the rest.
+    let next = late.link.unwrap().next(late.id().unwrap());
+    let sealed = SignedSeal::endorse_linked(
+        seal(&graph, graph.genesis(), 1, &owner).statement,
+        &trusted,
+        &chain,
+        Some(next),
+    )
+    .unwrap();
+    graph.seals.push(sealed.clone());
+    let after = linked_move(
+        &graph,
+        "after",
+        &trusted,
+        &chain,
+        next.next(sealed.id().unwrap()),
+    );
+    graph.moves.push(after.clone());
+    graph.openings.push(opening(&graph, &sealed, &owner));
+    assert_eq!(
+        graph.prunable(&revocations, &Default::default()).unwrap(),
+        ids(&[&after])
+    );
+    graph.remove_statements(&ids(&[&after])).unwrap();
+    assert_eq!(graph.moves, [base, late]);
+    assert_eq!(graph.seals, [sealed]);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_cut_binds_its_chain_to_the_identity_it_names() {
+    let owner = PrivateKey::new();
+    let (cut_identity, impostor) = (PrivateKey::new(), PrivateKey::new());
+    let cut_chain = trusted_chain(&graph(), &owner, &cut_identity);
+    let impostor_chain = trusted_chain(&graph(), &owner, &impostor);
+    let mut graph = graph();
+    let lane = rocky_credentials::ChainLink::first(cut_identity.public_key());
+    let head = linked_move(&graph, "head", &cut_identity, &cut_chain, lane);
+    graph.moves.push(head.clone());
+    // The root keeps the first identity's chain up to its head and ends
+    // the impostor with no cut.
+    let statement = rocky_credentials::Revocation {
+        app: graph.scope.app,
+        issuer: owner.public_key(),
+        time: 200,
+        nodes: Default::default(),
+        identities: [cut_identity.public_key(), impostor.public_key()].into(),
+        capabilities: Default::default(),
+        cut: vec![rocky_credentials::Cut {
+            identity: cut_identity.public_key(),
+            lane: cut_identity.public_key(),
+            statements: vec![rocky_credentials::Head {
+                sequence: 0,
+                id: head.id().unwrap(),
+            }],
+            acknowledgments: None,
+        }],
+    };
+    let revocations =
+        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
+    // The impostor signs on the cut identity's lane: the cut does not
+    // judge it, so its own revocation refuses it.
+    let forged = linked_move(&graph, "forged", &impostor, &impostor_chain, lane);
+    assert!(
+        forged
+            .verify_current(owner.public_key(), &graph, &revocations, 300)
+            .is_err()
+    );
+    // Were it held, it is the impostor's revoked chain, not past the cut.
+    graph.moves.push(forged.clone());
+    graph.exclude_revoked(&revocations).unwrap();
+    assert!(graph.revoked.contains(&forged.id().unwrap()));
+    assert!(graph.past_cut.is_empty());
+    assert!(graph.equivocations.is_empty());
+    assert!(!graph.revoked.contains(&head.id().unwrap()));
+    // A cut may only name identities or nodes its statement revokes.
+    let unrevoked = rocky_credentials::Revocation {
+        app: graph.scope.app,
+        issuer: owner.public_key(),
+        time: 200,
+        nodes: Default::default(),
+        identities: [impostor.public_key()].into(),
+        capabilities: Default::default(),
+        cut: vec![rocky_credentials::Cut {
+            identity: cut_identity.public_key(),
+            lane: cut_identity.public_key(),
+            statements: Vec::new(),
+            acknowledgments: None,
+        }],
+    };
+    assert!(Authority::owner(&owner).revoke(unrevoked).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let mut graph = graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&graph, "base", &trusted, &chain, first);
+    // A later link whose predecessor the graph does not hold.
+    let ahead = linked_move(
+        &graph,
+        "ahead",
+        &trusted,
+        &chain,
+        first.next(base.id().unwrap()),
+    );
+    let missing = ahead.verify(owner.public_key(), &graph).unwrap_err();
+    assert!(missing.to_string().contains("predecessor"), "{missing}");
+    graph.moves.push(base.clone());
+    ahead.verify(owner.public_key(), &graph).unwrap();
+    // A link naming another predecessor at that place is refused.
+    let wrong = linked_move(
+        &graph,
+        "wrong",
+        &trusted,
+        &chain,
+        rocky_credentials::ChainLink {
+            previous: Some([7; 32]),
+            stage: None,
+            ..first.next(base.id().unwrap())
+        },
+    );
+    assert!(wrong.verify(owner.public_key(), &graph).is_err());
+    // A trusted statement without a link, or an issuer's with one, is refused.
+    let unlinked =
+        SignedBookmarkMove::endorse_linked(base.statement.clone(), &trusted, &chain, None).unwrap();
+    assert!(unlinked.verify(owner.public_key(), &graph).is_err());
+    let issuer = PrivateKey::new();
+    let linked_issuer = SignedBookmarkMove::endorse_linked(
+        base.statement.clone(),
+        &issuer,
+        &issuer_chain(&owner, &issuer),
+        Some(rocky_credentials::ChainLink::first(issuer.public_key())),
+    )
+    .unwrap();
+    assert!(linked_issuer.verify(owner.public_key(), &graph).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let mut graph = graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&graph, "base", &trusted, &chain, first);
+    graph.moves.push(base.clone());
+    // A stage and the live chain both continue from the base, at the same
+    // sequence: two branches, no fork.
+    let after = first.next(base.id().unwrap());
+    let staged = linked_move(&graph, "staged", &trusted, &chain, after.staged([5; 32]));
+    let live = linked_move(&graph, "live", &trusted, &chain, after);
+    for statement in [&staged, &live] {
+        statement.verify(owner.public_key(), &graph).unwrap();
+        graph.moves.push(statement.clone());
+    }
+    graph.exclude_revoked(&RevocationSet::new()).unwrap();
+    assert!(graph.equivocations.is_empty());
+    // The live chain goes on past every branch, so no place repeats.
+    assert_eq!(
+        graph
+            .next_link(&trusted.public_key(), &trusted.public_key())
+            .unwrap()
+            .sequence,
+        2
+    );
+    // The proposer's cut names both heads and keeps both.
+    let heads = graph
+        .heads(&trusted.public_key(), &trusted.public_key())
+        .unwrap();
+    assert_eq!(heads.statements.len(), 2);
+    let app = graph.scope.app;
+    let keep = |cut: rocky_credentials::Cut| {
+        let statement = rocky_credentials::Revocation {
+            app,
+            issuer: owner.public_key(),
+            time: 200,
+            nodes: Default::default(),
+            identities: [trusted.public_key()].into(),
+            capabilities: Default::default(),
+            cut: vec![cut],
+        };
+        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap()
+    };
+    graph.exclude_revoked(&keep(heads.clone())).unwrap();
+    assert!(graph.revoked.is_empty());
+    // Naming only the live head leaves the stage branch out.
+    let live_only = rocky_credentials::Cut {
+        statements: vec![rocky_credentials::Head {
+            sequence: 1,
+            id: live.id().unwrap(),
+        }],
+        ..heads
+    };
+    graph.exclude_revoked(&keep(live_only)).unwrap();
+    assert_eq!(graph.revoked, ids(&[&staged]));
 }

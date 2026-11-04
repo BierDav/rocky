@@ -42,7 +42,14 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_followed_tip(id INTEGER PRIMARY KEY CHECK(id=1),scope BLOB NOT NULL,bookmark TEXT NOT NULL,tip BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_node_tips(scope BLOB NOT NULL,node BLOB NOT NULL,tip BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_line_nodes(line BLOB PRIMARY KEY,node BLOB NOT NULL UNIQUE) WITHOUT ROWID",
+    // The last terminal acknowledgment each local node signed: its chain's head.
+    "CREATE TABLE IF NOT EXISTS secure_ack_chain(lane BLOB PRIMARY KEY,ack BLOB NOT NULL) WITHOUT ROWID",
+    // Statements a root revocation's cut left out for good, refused on
+    // arrival or pruned: what the past-cut alert counts, never stored.
+    "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,PRIMARY KEY(scope,digest)) WITHOUT ROWID",
 ];
+/// Past-cut statements recorded per chain; more count no further.
+const MAX_PAST_CUT_RECORDS: i64 = 256;
 
 /// A graph record is always exchanged independently of row subscriptions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +88,18 @@ impl TipStatement {
             Self::Finality(s) => s.scope,
             Self::Checkpoint(s) => s.statement.scope,
         }
+    }
+    /// The trusted identity and chain link of a chained statement.
+    pub fn chain_place(&self) -> Option<(PublicKey, rocky_credentials::ChainLink)> {
+        let (link, chain) = match self {
+            Self::Seal(s) => (s.link, &s.endorsement().chain),
+            Self::Opening(s) => (s.link, &s.endorsement().chain),
+            Self::Bookmark(s) => (s.link, &s.endorsement().chain),
+            Self::GenesisLine(s) => (s.link, &s.endorsement().chain),
+            Self::Checkpoint(s) => (s.link, &s.endorsement().chain),
+            Self::Finality(_) => return None,
+        };
+        Some((rocky_credentials::Endorsement::signer_of(chain)?, link?))
     }
     pub fn append(&self, graph: &mut TipGraph) {
         match self {
@@ -763,6 +782,7 @@ impl<A: RowApplication> Inner<A> {
         for graph in self.graphs.values_mut() {
             changed |= graph.exclude_revoked(revocations).map_err(credential)?;
         }
+        changed |= self.prune_past_cut(revocations).await?;
         // A revoked signer's pulled states leave before any follow can
         // install them, whether or not a graph changed.
         self.revalidate_pulled().await?;
@@ -781,6 +801,121 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(changed)
+    }
+    /// Deletes the statements a cut leaves out for good that nothing kept
+    /// refers to, recording them for the alert. Inside the caller's
+    /// transaction; returns whether a graph changed.
+    pub(in crate::replica) async fn prune_past_cut(
+        &mut self,
+        revocations: &rocky_credentials::RevocationSet,
+    ) -> Result<bool, Error> {
+        if revocations.cut_lanes().next().is_none() {
+            return Ok(false);
+        }
+        let pinned = self.pinned_statements().await?;
+        let mut changed = false;
+        for scope in self.graphs.keys().copied().collect::<Vec<_>>() {
+            let Some(graph) = self.graphs.get(&scope) else {
+                continue;
+            };
+            let prunable = graph.prunable(revocations, &pinned).map_err(credential)?;
+            if prunable.is_empty() {
+                continue;
+            }
+            let pruned: Vec<TipStatement> = graph_statements(graph)
+                .into_iter()
+                .filter(|statement| statement.id().is_ok_and(|id| prunable.contains(&id)))
+                .collect();
+            for statement in &pruned {
+                self.record_past_cut(scope, statement).await?;
+                self.conn
+                    .execute(
+                        "DELETE FROM secure_tip_statements WHERE digest=? AND staged=0",
+                        [statement.id()?.to_vec()],
+                    )
+                    .await?;
+            }
+            if let Some(graph) = self.graphs.get_mut(&scope) {
+                graph.remove_statements(&prunable).map_err(credential)?;
+                graph.exclude_revoked(revocations).map_err(credential)?;
+            }
+            changed = true;
+        }
+        if changed {
+            self.invalidate_context();
+        }
+        Ok(changed)
+    }
+    /// Statements this replica keeps state for: seals its bases, replays,
+    /// relays and wanted pulls name, staged statements and the tips it
+    /// follows or writes on. Pruning keeps them.
+    async fn pinned_statements(&self) -> Result<BTreeSet<Commitment>, Error> {
+        let mut pinned: BTreeSet<Commitment> = [self.workspace.tip.0].into();
+        pinned.extend(self.line_nodes.keys().map(|tip| tip.0));
+        for query in [
+            "SELECT seal FROM secure_finalized",
+            "SELECT seal FROM secure_compaction_lost",
+            "SELECT seal FROM secure_served",
+            "SELECT seal FROM secure_kept_marks",
+            "SELECT seal FROM secure_replayed_seals",
+            "SELECT seal FROM secure_close_relays",
+            "SELECT seal FROM secure_pulled",
+            "SELECT seal FROM secure_wanted_seals",
+            "SELECT digest FROM secure_tip_statements WHERE staged=1",
+        ] {
+            for record in rows(&self.conn, query).await? {
+                if let [SqlValue::Blob(bytes)] = record.as_slice()
+                    && let Ok(id) = Commitment::try_from(bytes.as_slice())
+                {
+                    pinned.insert(id);
+                }
+            }
+        }
+        Ok(pinned)
+    }
+    /// Records a chained statement a cut leaves out, up to the bound per chain.
+    pub(in crate::replica) async fn record_past_cut(
+        &self,
+        scope: Scope,
+        statement: &TipStatement,
+    ) -> Result<(), Error> {
+        let Some((identity, link)) = statement.chain_place() else {
+            return Ok(());
+        };
+        let (scope, identity, lane) = (
+            encode(&scope)?,
+            identity.as_bytes().to_vec(),
+            link.lane.as_bytes().to_vec(),
+        );
+        let held = collect_rows(
+            self.conn
+                .query(
+                    "SELECT COUNT(*) FROM secure_past_cut WHERE scope=? AND identity=? AND lane=?",
+                    bindings(vec![
+                        SqlValue::Blob(scope.clone()),
+                        SqlValue::Blob(identity.clone()),
+                        SqlValue::Blob(lane.clone()),
+                    ]),
+                )
+                .await?,
+        )
+        .await?;
+        if matches!(held.first().map(Vec::as_slice), Some([SqlValue::Integer(count)]) if *count >= MAX_PAST_CUT_RECORDS)
+        {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO secure_past_cut VALUES(?,?,?,?)",
+                bindings(vec![
+                    SqlValue::Blob(scope),
+                    SqlValue::Blob(statement.id()?.to_vec()),
+                    SqlValue::Blob(identity),
+                    SqlValue::Blob(lane),
+                ]),
+            )
+            .await?;
+        Ok(())
     }
     pub(super) async fn store_followed(
         &self,
@@ -1324,6 +1459,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
+        let statements = &self.refuse_past_cut(statements).await?;
         let mut fresh = false;
         for statement in statements {
             fresh |= !self.holds_statement(statement.id()?).await?;
@@ -1338,6 +1474,64 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         self.admit_pending_tips(&coordinated.kept, Some(batch), &coordinated.deferred)
             .await
+    }
+    /// Leaves out of a received batch the statements a cut this replica
+    /// holds refuses for good, recording them for the alert.
+    async fn refuse_past_cut(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<Vec<TipStatement>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut kept = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let beyond = match (
+                statement.chain_place(),
+                inner.graphs.get(&statement.scope()),
+            ) {
+                (Some((identity, link)), Some(graph)) => graph
+                    .beyond_cut(&inner.config.revocations, &identity, &link, statement.id()?)
+                    .map_err(credential)?,
+                _ => false,
+            };
+            match beyond {
+                true => inner.record_past_cut(statement.scope(), statement).await?,
+                false => kept.push(statement.clone()),
+            }
+        }
+        Ok(kept)
+    }
+    /// The statements cuts refused or pruned here, per identity and lane.
+    pub async fn past_cut_records(
+        &self,
+        scope: Scope,
+    ) -> Result<Vec<(PublicKey, PublicKey, u64)>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut counts = Vec::new();
+        for record in collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT identity,lane,COUNT(*) FROM secure_past_cut WHERE scope=? GROUP BY identity,lane",
+                    [encode(&scope)?],
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Blob(identity), SqlValue::Blob(lane), SqlValue::Integer(count)] =
+                record.as_slice()
+            else {
+                return Err(Error::Corrupt("past cut record".into()));
+            };
+            let key = |bytes: &[u8]| -> Result<PublicKey, Error> {
+                let bytes: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("past cut key".into()))?;
+                PublicKey::from_bytes(&bytes).map_err(|_| Error::Corrupt("past cut key".into()))
+            };
+            counts.push((key(identity)?, key(lane)?, u64::try_from(*count).unwrap_or_default()));
+        }
+        Ok(counts)
     }
     /// Admits verified statements; `journal` names the batch the admission
     /// settles, forgotten in the same transaction.
@@ -1470,6 +1664,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if let Some(stage) = stage {
                 inner.record_schema_stage(stage).await?;
             }
+            // A head that arrived settles which earlier statements its cut leaves out.
+            let revocations = inner.config.revocations.clone();
+            inner.prune_past_cut(&revocations).await?;
             if let Some((scope, name)) = old_followed.clone() {
                 inner.follow_resolved(scope, &name).await?;
             }
@@ -1712,6 +1909,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
+        self.refuse_after_stage(statements).await?;
+        // Chained after an own statement still waiting for its log entry:
+        // it waits too, journaled, and settles after it.
+        if self.after_pending(statements).await? {
+            if let Err(error) = self.settle_tip_statements().await {
+                tracing::debug!(%error, "settling earlier statements failed");
+            }
+            if self.after_pending(statements).await? {
+                self.check_statements_over(statements, true).await?;
+                self.journal_tips(statements, true).await?;
+                return Err(coordinated::refusal(
+                    "chain_pending",
+                    "an earlier statement of this node waits for its coordinated log entry; this one is journaled after it",
+                ));
+            }
+        }
         let journaled = match self.domain_log().is_some()
             && statements
                 .iter()
@@ -1734,6 +1947,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     Error::Application(inner) => inner.downcast_ref::<coordinated::Unconfirmed>(),
                     _ => None,
                 };
+                // Another seal ended the log: nothing of the batch is ever
+                // published, and the node's next statement does not chain after it.
+                let refused = matches!(&error, Error::Application(inner)
+                    if inner.downcast_ref::<coordinated::Refusal>().is_some_and(|refusal| refusal.code == "sealed"));
+                if refused && let Some(batch) = journaled {
+                    self.forget_own_batch(batch).await?;
+                }
                 return Err(match unconfirmed {
                     Some(unconfirmed) => {
                         coordinated::refusal(unconfirmed.code, &unconfirmed.message)

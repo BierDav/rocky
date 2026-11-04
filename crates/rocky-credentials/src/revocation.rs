@@ -43,7 +43,33 @@ pub struct Revocation {
     pub nodes: BTreeSet<crate::PeerId>,
     pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
+    /// Only in a root statement, ordered by identity and node without
+    /// repeats: for each node (lane) of a trusted identity the statement
+    /// revokes, the heads of its chains that stay valid. A chain without
+    /// an entry keeps nothing once its signer is revoked.
+    pub cut: Vec<Cut>,
 }
+/// The heads a root statement keeps of one node's chains: the tip
+/// statements `identity` signed through `lane`, every branch's head in
+/// order, and the node's terminal acknowledgments. Empty keeps none.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Cut {
+    pub identity: PublicKey,
+    pub lane: PublicKey,
+    pub statements: Vec<Head>,
+    pub acknowledgments: Option<Head>,
+}
+/// A kept chain head and its place, so admission refuses a later
+/// statement without holding the head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Head {
+    pub sequence: u64,
+    pub id: Commitment,
+}
+/// Chains a root statement may cut, and heads in all, bounded by the
+/// statement's size.
+pub const MAX_CUT_LANES: usize = 32;
+pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
@@ -70,6 +96,27 @@ impl Revocation {
     fn empty(&self) -> bool {
         self.nodes.is_empty() && self.identities.is_empty() && self.capabilities.is_empty()
     }
+    /// A cut only in a root statement, ordered without repeats, naming
+    /// chains of identities or nodes the statement revokes.
+    fn valid_cut(&self, root: bool) -> bool {
+        (root || self.cut.is_empty())
+            && self.cut.len() <= MAX_CUT_LANES
+            && self
+                .cut
+                .windows(2)
+                .all(|pair| (pair[0].identity, pair[0].lane) < (pair[1].identity, pair[1].lane))
+            && self
+                .cut
+                .iter()
+                .map(|cut| cut.statements.len())
+                .sum::<usize>()
+                <= MAX_CUT_HEADS
+            && self.cut.iter().all(|cut| {
+                (self.identities.contains(&cut.identity)
+                    || self.nodes.contains(&crate::PeerId::of(cut.lane)))
+                    && cut.statements.windows(2).all(|pair| pair[0] < pair[1])
+            })
+    }
 }
 
 /// A statement signed by the owner, or by an issuer identity whose chain
@@ -81,14 +128,17 @@ pub struct SignedRevocation {
     pub chain: CredentialChain,
     signature: Signature,
 }
-const SIGNED: &str = "rocky.revocation.v3";
+const SIGNED: &str = "rocky.revocation.v4";
 impl SignedRevocation {
     pub fn sign(
         statement: Revocation,
         signer: &dyn IdentityProvider,
         chain: &CredentialChain,
     ) -> Result<Self, Error> {
-        if statement.issuer != signer.public_key()? || statement.empty() {
+        if statement.issuer != signer.public_key()?
+            || statement.empty()
+            || !statement.valid_cut(chain.0.is_empty())
+        {
             return Err(denied("invalid revocation"));
         }
         let signed = Self {
@@ -124,6 +174,7 @@ impl SignedRevocation {
         };
         if statement.app != app
             || statement.empty()
+            || !statement.valid_cut(self.chain.0.is_empty())
             || statement.identities.contains(&publisher)
             || encode(self)?.len() > MAX_REVOCATION_BYTES
             || signer.ok() != Some(statement.issuer)
@@ -199,6 +250,14 @@ pub struct RevocationSet {
     capabilities: BTreeSet<Commitment>,
     /// What root statements name, which alone end protected links.
     root: Ended,
+    /// The heads root statements keep, by signing identity and lane.
+    cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
+}
+/// Every head root statements keep of one node's two chains.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Heads {
+    pub statements: BTreeSet<Head>,
+    pub acknowledgments: BTreeSet<Head>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Ended {
@@ -244,6 +303,11 @@ impl RevocationSet {
                 .extend(signed.statement.nodes.iter().copied());
             root.capabilities
                 .extend(signed.statement.capabilities.iter().copied());
+            for cut in &signed.statement.cut {
+                let heads = self.cuts.entry((cut.identity, cut.lane)).or_default();
+                heads.statements.extend(cut.statements.iter().copied());
+                heads.acknowledgments.extend(cut.acknowledgments);
+            }
         }
         self.statements.insert(id, signed);
         Ok(true)
@@ -332,6 +396,15 @@ impl RevocationSet {
             "rocky.revocation-set.v1",
             &encode(&live)?,
         ))
+    }
+    /// The heads root statements keep of what `identity` signed through
+    /// `lane`, when one cuts that chain.
+    pub fn cut(&self, identity: &PublicKey, lane: &PublicKey) -> Option<&Heads> {
+        self.cuts.get(&(*identity, *lane))
+    }
+    /// Every chain a root statement cuts, by identity and lane.
+    pub fn cut_lanes(&self) -> impl Iterator<Item = (&(PublicKey, PublicKey), &Heads)> {
+        self.cuts.iter()
     }
     /// Whether some statement revokes `key` as a credential subject.
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {

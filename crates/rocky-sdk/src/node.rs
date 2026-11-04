@@ -301,6 +301,8 @@ pub(crate) struct Node {
     /// On a trusted node, the other trusted identities and when each was
     /// last heard.
     trusted_watch: std::sync::Mutex<health::TrustedWatch>,
+    /// Held while this node signs chained tip statements.
+    tip_chain: Arc<tokio::sync::Mutex<()>>,
     /// On a trusted node, the seal it should have made and did not.
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
     /// Moves whenever `mesh` takes a report, for links that forward them.
@@ -392,6 +394,7 @@ impl Node {
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
+            tip_chain: Default::default(),
             report_failing: AtomicBool::new(false),
             #[cfg(test)]
             reports_received: AtomicU64::new(0),
@@ -1232,7 +1235,10 @@ impl Node {
                         ));
                     }
                 };
-                let revoked = self.revoke_with(target, root).await?;
+                // The root keeps what the revoked trusted nodes signed up
+                // to the heads this node holds, unless told to keep none.
+                let keep = request["cut"].as_bool().unwrap_or(true);
+                let revoked = self.revoke_with(target, root, keep).await?;
                 self.activity.record(
                     "device_revoked",
                     match target {
@@ -1705,18 +1711,72 @@ impl Node {
     /// are saved before the replica learns them, so an interruption
     /// completes at the next open.
     async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<Value, Failure> {
-        self.revoke_with(target, &Root::default()).await
+        self.revoke_with(target, &Root::default(), false).await
+    }
+    /// The cut a root revocation of `target` carries: for each node of the
+    /// revoked trusted identity, or the revoked node, the latest heads of
+    /// its chains this node's tip graph holds.
+    /// The chains a root revocation of `target` keeps: each node of the
+    /// revoked trusted identity up to the latest heads this node holds.
+    async fn revocation_cut(
+        &self,
+        target: crate::enrollment::Revoke,
+        registry: &crate::registry::Registry,
+    ) -> Result<Vec<rocky_credentials::Cut>, Failure> {
+        let graph = self.replica.tip_graph(self.domain().scope).await?;
+        let user_of = |node: &PublicKey| {
+            registry
+                .get(node)
+                .and_then(|record| record.device.as_ref())
+                .map(|device| device.user)
+        };
+        let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match target {
+            crate::enrollment::Revoke::Identity(identity) => {
+                let mut lanes = graph.lanes_of(&identity)?;
+                lanes.extend(registry.records.iter().filter_map(|(node, record)| {
+                    (record.device.as_ref()?.user == identity).then_some(*node)
+                }));
+                (identity, lanes)
+            }
+            crate::enrollment::Revoke::Node(node) => match user_of(&node) {
+                Some(identity) => (identity, [node].into()),
+                None => return Ok(Vec::new()),
+            },
+            crate::enrollment::Revoke::Claims(_) => return Ok(Vec::new()),
+        };
+        let mut cut = Vec::new();
+        for lane in lanes {
+            let heads = graph.heads(&identity, &lane)?;
+            if !heads.statements.is_empty() || heads.acknowledgments.is_some() {
+                cut.push(heads);
+            }
+        }
+        if cut.len() > rocky_credentials::MAX_CUT_LANES
+            || cut.iter().map(|cut| cut.statements.len()).sum::<usize>()
+                > rocky_credentials::MAX_CUT_HEADS
+        {
+            return Err(refused(
+                "the revoked identity signed through too many nodes to cut",
+            ));
+        }
+        Ok(cut)
     }
     async fn revoke_with(
         &self,
         target: crate::enrollment::Revoke,
         root: &Root,
+        keep: bool,
     ) -> Result<Value, Failure> {
         let registry = self.registry().await?;
+        let cut = if keep && root.signer().is_some() {
+            self.revocation_cut(target, &registry).await?
+        } else {
+            Vec::new()
+        };
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         draft
-            .begin_revocation(target, &registry, root.signer())
+            .begin_revocation_cut(target, &registry, root.signer(), cut)
             .map_err(|error| -> Failure {
                 if error.is::<crate::enrollment::RevocationSetFull>()
                     || error.is::<crate::enrollment::PublisherRequired>()
@@ -3903,7 +3963,8 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
     }
 }
 /// A replica refusal that names its own code: `sealed`,
-/// `coordinator_unavailable`, `behind`, `stale_recovery` and `abandoned`.
+/// `coordinator_unavailable`, `behind`, `stale_recovery`, `abandoned`,
+/// `chain_pending` and `migration_pending`.
 fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
     match error.downcast_ref::<Error>()? {
         Error::Application(error) => error.downcast_ref(),
@@ -3938,7 +3999,7 @@ pub fn error(error: &Failure) -> Value {
             refusal.code,
             matches!(
                 refusal.code,
-                "coordinator_unavailable" | "behind" | "recovery_pending"
+                "coordinator_unavailable" | "behind" | "recovery_pending" | "chain_pending"
             ),
         )
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {

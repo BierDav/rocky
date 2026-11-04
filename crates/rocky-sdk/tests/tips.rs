@@ -692,6 +692,60 @@ mod coordinated {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_statement_after_one_waiting_on_its_log_entry_follows_it_without_a_fork()
+    -> Result<(), Failure> {
+        let root = tempfile::tempdir()?;
+        let a = Device::create(root.path(), None)?;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        main(&a).await;
+        a.add(1, "milk").await;
+        log.set_available(false);
+        let held = tips(&a, "seal", json!({})).await.expect_err("unconfirmed");
+        assert_eq!(held["code"], "coordinator_unavailable", "{held}");
+        // The next statement takes the place after the held seal and waits
+        // behind it, journaled.
+        let later = tips(&a, "create", json!({"name": "later"}))
+            .await
+            .expect_err("waits for the seal");
+        assert_eq!(later["code"], "chain_pending", "{later}");
+        assert_eq!(later["retryable"], true);
+
+        // The same seal again, once the coordinator answers, settles both
+        // in chain order.
+        log.set_available(true);
+        let sealed = ok(&a, "seal", json!({})).await;
+        assert!(
+            log.head(log_of(&a, &main_tip(&a).await))?
+                .terminal
+                .is_none()
+        );
+        let inspection = ok(&a, "inspect", json!({})).await;
+        let names: Vec<&str> = inspection["bookmarks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|bookmark| bookmark["name"].as_str())
+            .collect();
+        assert_eq!(names, ["later", "main"], "{inspection}");
+        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(ok(&a, "status", json!({})).await["tip"], sealed["tip"]);
+        let alerts = a.ok(json!({"type": "status"})).await["alerts"].clone();
+        assert!(
+            !alerts.to_string().contains("tip_chain_equivocation"),
+            "{alerts}"
+        );
+        a.close().await;
+        Ok(())
+    }
+    async fn main_tip(device: &Device) -> Value {
+        ok(device, "status", json!({})).await["tip"].clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn an_unreachable_coordinator_refuses_seals_and_moves_and_publishes_nothing()
     -> Result<(), Failure> {
         let root = tempfile::tempdir()?;
@@ -706,14 +760,20 @@ mod coordinated {
         a.add(1, "milk").await;
 
         log.set_available(false);
-        for (action, body) in [
-            ("seal", json!({})),
-            ("seal", json!({"close": true})),
+        // The first waits on the coordinator; the others chain after it
+        // and wait behind it.
+        for (action, body, code) in [
+            ("seal", json!({}), "coordinator_unavailable"),
+            ("seal", json!({"close": true}), "chain_pending"),
             // Moving `main` back off its open tip needs that tip's close seal.
-            ("move", json!({"name": "main", "tip": genesis})),
+            (
+                "move",
+                json!({"name": "main", "tip": genesis}),
+                "chain_pending",
+            ),
         ] {
             let refused = tips(&a, action, body).await.expect_err("unconfirmed");
-            assert_eq!(refused["code"], "coordinator_unavailable", "{refused}");
+            assert_eq!(refused["code"], code, "{refused}");
             assert_eq!(refused["retryable"], true);
         }
         let inspection = ok(&a, "inspect", json!({})).await;
@@ -732,6 +792,14 @@ mod coordinated {
         assert_ne!(sealed["tip"], first["tip"]);
         assert!(log.head(log_of(&a, &first["tip"]))?.terminal.is_some());
         assert_eq!(a.titles().await, ["milk"]);
+        // The close seal lost its log to the first; it and the move chained
+        // after it are dropped, never published.
+        let inspection = ok(&a, "inspect", json!({})).await;
+        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            inspection["bookmarks"][0]["moves"].as_array().map(Vec::len),
+            Some(3)
+        );
         a.close().await;
         Ok(())
     }
@@ -996,6 +1064,7 @@ mod races {
 
     struct Household {
         _root: tempfile::TempDir,
+        hub: Arc<Hub>,
         owner: Device,
         trusted: [Device; 2],
         member: Device,
@@ -1053,6 +1122,7 @@ mod races {
         );
         let house = Household {
             _root: root,
+            hub,
             owner,
             trusted: [t0, t1],
             member,
@@ -1153,14 +1223,16 @@ mod races {
         .await;
         assert_eq!(owner.titles().await, ["before", "on the winner"]);
 
-        // The root revoking the winner's trusted node leaves its seal and
-        // move out of resolution: every other device follows the other
-        // continuation, and the write on the revoked one goes with it.
+        // The root revoking the winner's trusted node with no cut leaves
+        // its seal and move out of resolution: every other device follows
+        // the other continuation, and the write on the revoked one goes
+        // with it.
         owner
             .ok(json!({
                 "type": "revoke",
                 "trust": house.grants[winner]["capability"],
                 "root": owner.root(),
+                "cut": false,
             }))
             .await;
         let revoked = &house.trusted[winner];
@@ -1191,6 +1263,114 @@ mod races {
         let held = member.ok(json!({"type": "held_changes"})).await;
         assert_eq!(held["count"], 0, "{held}");
         Ok(())
+    }
+
+    /// Alerts of `kind` in `device`'s status.
+    async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
+        device.ok(json!({"type": "status"})).await["alerts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|alert| alert["kind"]["type"] == kind)
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoking_the_creator_keeps_what_it_sealed_and_main_moves_on_through_another_trusted_node()
+    -> Result<(), Failure> {
+        let house = household().await?;
+        let (owner, member) = (&house.owner, &house.member);
+        owner.add(2, "sealed by the creator").await;
+        let sealed = ok(owner, "seal", json!({})).await["tip"].clone();
+        let titles = ["before", "sealed by the creator"];
+        settle_on(&house.all(), &sealed, &titles).await;
+
+        // A surviving trusted node proposes the cut at the creator's head;
+        // the root signs it with the revocation. The member the creator
+        // enrolled ends with it.
+        let creator = owner.ok(json!({"type": "session"})).await["principal"].clone();
+        let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
+        t0.ok(json!({"type": "revoke", "identity": creator, "root": owner.root()}))
+            .await;
+        let rest = [t0, t1];
+        // The rotation that follows may seal once more.
+        settle(&rest).await;
+        let followed = ok(t0, "status", json!({})).await["tip"].clone();
+        settle_on(&rest, &followed, &titles).await;
+        for device in rest {
+            let inspection = ok(device, "inspect", json!({})).await;
+            let kept = seal_by_id(&inspection, &sealed);
+            assert_eq!(
+                (kept["revoked"].clone(), kept["canonical"].clone()),
+                (json!(false), json!(true)),
+                "{inspection}"
+            );
+            assert!(alerts(device, "tip_statements_past_cut").await.is_empty());
+        }
+        let ended = member
+            .sync()
+            .await
+            .expect_err("the member ends with the creator");
+        assert!(ended.to_string().contains("revoked"), "{ended}");
+        // Main keeps moving through the other trusted node.
+        t0.add(3, "after").await;
+        settle(&rest).await;
+        let next = ok(t1, "seal", json!({})).await["tip"].clone();
+        assert_ne!(next, followed);
+        settle_on(&rest, &next, &["after", "before", "sealed by the creator"]).await;
+        for device in house.all() {
+            device.close().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_statement_the_revoked_creator_signed_past_the_cut_is_deleted_and_surfaced()
+    -> Result<(), Failure> {
+        let house = household().await?;
+        let (owner, member) = (&house.owner, &house.member);
+        let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
+        // The creator signs a bookmark that reaches t1 and the member, not t0.
+        for other in ["owner", "t1", "m"] {
+            house.hub.set_down("t0", other, true);
+        }
+        ok(owner, "create", json!({"name": "late"})).await;
+        settle(&[owner, t1, member]).await;
+        assert_eq!(bookmarks(t1).await, ["late", "main"]);
+        // t0 proposes the cut from the heads it holds, without that one.
+        let creator = owner.ok(json!({"type": "session"})).await["principal"].clone();
+        t0.ok(json!({"type": "revoke", "identity": creator, "root": owner.root()}))
+            .await;
+        for other in ["owner", "t1", "m"] {
+            house.hub.set_down("t0", other, false);
+        }
+        settle(&[t0, t1]).await;
+        // t1, which held the statement, deletes it and says so; it never
+        // reaches t0.
+        let past = alerts(t1, "tip_statements_past_cut").await;
+        assert_eq!(past.len(), 1, "{past:?}");
+        assert_eq!(past[0]["kind"]["statements"], 1, "{past:?}");
+        assert_eq!(past[0]["kind"]["signer"], creator, "{past:?}");
+        for device in [t0, t1] {
+            let names = ok(device, "inspect", json!({})).await["bookmarks"].clone();
+            assert_eq!(names.as_array().map(Vec::len), Some(1), "{names}");
+            assert_eq!(bookmarks(device).await, ["main"]);
+        }
+        assert!(alerts(t0, "tip_statements_past_cut").await.is_empty());
+        for device in house.all() {
+            device.close().await;
+        }
+        Ok(())
+    }
+    async fn bookmarks(device: &Device) -> Vec<String> {
+        ok(device, "inspect", json!({})).await["bookmarks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|bookmark| !bookmark["tip"].is_null())
+            .filter_map(|bookmark| bookmark["name"].as_str().map(str::to_owned))
+            .collect()
     }
 }
 

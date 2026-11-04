@@ -1043,7 +1043,9 @@ impl Session {
     /// and every identity it first enrolled, wherever those renewed since;
     /// all keys rotate. Their devices see why and enroll again with an
     /// honest trusted node. Without the root it fails with
-    /// `publisher_required`; no trusted node revokes another.
+    /// `publisher_required`; no trusted node revokes another. The statement
+    /// keeps the tip statements its nodes signed up to the latest heads this
+    /// node holds; later ones raise `AlertKind::TipStatementsPastCut`.
     pub async fn revoke_trusted(
         &self,
         identity: &str,

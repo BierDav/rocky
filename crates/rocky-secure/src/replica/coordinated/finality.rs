@@ -102,7 +102,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .iter()
                     .any(|ack| ack.signer == node.public_key())
             {
-                let ack = TerminalAck::sign(statement, &node, chain.clone()).map_err(credential)?;
+                let ack = self
+                    .sign_ack(scope, statement, &node, chain.clone())
+                    .await?;
                 let bytes = ack.to_bytes().map_err(credential)?;
                 if coordinator.acknowledge_terminal(log, bytes).await.is_ok() {
                     acknowledgments.push(ack);
@@ -199,7 +201,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .iter()
                 .any(|ack| ack.signer == node.public_key())
         {
-            let ack = TerminalAck::sign(statement, &node, chain).map_err(credential)?;
+            let ack = self.sign_ack(log.scope, statement, &node, chain).await?;
             if coordinator
                 .acknowledge_terminal(log, ack.to_bytes().map_err(credential)?)
                 .await
@@ -220,6 +222,63 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Signs `statement` as `node`'s next acknowledgment, saved as its
+    /// chain's head before it leaves; the one it signed last when that
+    /// names the same entry, so a retry neither forks nor gaps the chain.
+    async fn sign_ack(
+        &self,
+        scope: Scope,
+        statement: TerminalAckStatement,
+        node: &PrivateKey,
+        chain: CredentialChain,
+    ) -> Result<TerminalAck, Error> {
+        let lane = node.public_key();
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        let held = rows(
+            &inner.conn,
+            &format!(
+                "SELECT ack FROM secure_ack_chain WHERE lane=x'{}'",
+                lane.to_hex()
+            ),
+        )
+        .await?;
+        let last = match held.first().map(Vec::as_slice) {
+            Some([SqlValue::Blob(bytes)]) => {
+                Some(TerminalAck::from_bytes(bytes).map_err(credential)?)
+            }
+            Some(_) => return Err(Error::Corrupt("acknowledgment chain".into())),
+            None => None,
+        };
+        if let Some(last) = last
+            .as_ref()
+            .filter(|last| last.statement == statement && last.credentials == chain)
+        {
+            return Ok(last.clone());
+        }
+        let link = match &last {
+            Some(last) => last.link.next(last.id().map_err(credential)?),
+            None => match inner.graphs.get(&scope) {
+                Some(graph) => graph.next_ack_link(&lane).map_err(credential)?,
+                None => rocky_credentials::ChainLink::first(lane),
+            },
+        };
+        let ack = TerminalAck::sign(statement, node, chain, link).map_err(credential)?;
+        let bytes = ack.to_bytes().map_err(credential)?;
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO secure_ack_chain(lane,ack) VALUES(?,?)",
+                    bindings(vec![
+                        SqlValue::Blob(lane.as_bytes().to_vec()),
+                        SqlValue::Blob(bytes.clone()),
+                    ]),
+                )
+                .await?;
+            Ok(())
+        })?;
+        Ok(ack)
+    }
     /// The node and author number used to acknowledge the composed log.
     pub async fn terminal_author(&self) -> Result<(PublicKey, u32), Error> {
         let coordinator = self.domain_log().ok_or_else(|| denied("no composed log"))?;

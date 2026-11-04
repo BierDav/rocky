@@ -71,7 +71,7 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
     let minimum = TipStatement::GenesisLine(
         rocky_credentials::SignedGenesisLine::sign(
             rocky_credentials::GenesisLineStatement {
-                format: 1,
+                format: rocky_credentials::GENESIS_LINE_FORMAT,
                 scope: lineage.domain,
                 minimum_in_sync: 1,
             },

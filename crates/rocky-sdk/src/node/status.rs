@@ -318,7 +318,12 @@ impl Node {
                     .collect(),
             },
             network: self.observed_network().await?,
-            alerts: self.alerts(),
+            alerts: {
+                let mut alerts = self.alerts();
+                alerts.extend(self.tip_chain_alerts().await?);
+                alerts.sort();
+                alerts
+            },
             mesh: self.mesh_status().await?,
             coordination: CoordinationStatus {
                 mode: if self.service.is_some() {

@@ -739,6 +739,15 @@ impl Simulation {
                 crate::AlertKind::CoordinatorUnreachable => "coordinator unreachable".into(),
                 crate::AlertKind::RevocationsUnpushed => "revocations unpushed".into(),
                 crate::AlertKind::SealSkipped { reason } => format!("seal skipped {reason}"),
+                crate::AlertKind::TipStatementsPastCut {
+                    node,
+                    statements,
+                    acknowledgments,
+                    ..
+                } => format!("{} past cut {statements}+{acknowledgments}", name(node)),
+                crate::AlertKind::TipChainEquivocation { node, sequence, .. } => {
+                    format!("{} forked at {sequence}", name(node))
+                }
                 crate::AlertKind::TrustedNodeStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)

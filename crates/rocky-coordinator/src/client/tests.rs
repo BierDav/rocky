@@ -384,6 +384,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
             nodes: Default::default(),
             identities: [identity.public_key()].into(),
             capabilities: Default::default(),
+            cut: Default::default(),
         },
         &service.publisher,
         &CredentialChain::default(),

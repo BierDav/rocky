@@ -8,7 +8,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope, Scope};
 use serde::{Deserialize, Serialize};
 
-pub const CHECKPOINT_RECORD_FORMAT: u32 = 1;
+pub const CHECKPOINT_RECORD_FORMAT: u32 = 2;
 
 /// A checkpoint of `table` holding the state of `seal`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,8 +42,8 @@ crate::tips::signed_statement!(
     SignedCheckpointRecord,
     CheckpointRecordStatement,
     CHECKPOINT_RECORD_FORMAT,
-    "rocky.checkpoint-record.v1",
-    "rocky.checkpoint-record.id.v1"
+    "rocky.checkpoint-record.v2",
+    "rocky.checkpoint-record.id.v2"
 );
 
 impl SignedCheckpointRecord {

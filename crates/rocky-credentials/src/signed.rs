@@ -118,6 +118,10 @@ impl Endorsement {
         }
         Ok(trusted)
     }
+    /// The identity at the end of a non-empty chain: who signed through it.
+    pub fn signer_of(chain: &CredentialChain) -> Option<PublicKey> {
+        chain.0.last().map(|last| last.capability.subject)
+    }
     /// The signing identity, as the endorsement names it, unverified.
     pub fn signer(&self, publisher: PublicKey) -> PublicKey {
         self.chain

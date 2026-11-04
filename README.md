@@ -39,7 +39,9 @@ It is needed only to add or revoke a trusted node; those calls fail with
 `publisher_required` without it. Trusted nodes have their own keys and
 invite, renew, revoke ordinary devices and seal; their grants never
 expire, and the others raise `TrustedNodeStale` for one they have not
-heard from.
+heard from. Revoking a trusted node keeps the seals and bookmark moves it
+signed up to the latest ones the revoking node holds; the rest raise
+`TipStatementsPastCut`.
 
 The todo app shares ordered lists between trusted, full and partial
 devices. Run several installations in one window, or one per device over

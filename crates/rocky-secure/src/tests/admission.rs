@@ -78,6 +78,7 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
                 } else {
                     BTreeSet::new()
                 },
+                cut: Default::default(),
             };
             SignedRevocation::sign(
                 statement,

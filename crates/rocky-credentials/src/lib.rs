@@ -63,9 +63,9 @@ pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::PartitionGrant;
 pub use peer::PeerId;
 pub use revocation::{
-    DAY, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES,
-    MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL, Revocation, RevocationSet, SIGNATURE_OVERHEAD,
-    SignedRevocation,
+    Cut, DAY, Head, Heads, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_CUT_HEADS, MAX_CUT_LANES,
+    MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL,
+    Revocation, RevocationSet, SIGNATURE_OVERHEAD, SignedRevocation,
 };
 pub use root::RootKey;
 pub use signed::{
@@ -74,10 +74,10 @@ pub use signed::{
 };
 
 pub use tips::{
-    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, GENESIS_LINE_FORMAT,
-    GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, Recovery, SEAL_FORMAT, SealAction,
-    SealStatement, SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
+    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, ChainLink, Equivocation,
+    GENESIS_LINE_FORMAT, GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, PastCut, Recovery,
+    SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedGenesisLine, SignedSeal,
+    SignedTipOpening, TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

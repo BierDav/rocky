@@ -346,6 +346,7 @@ fn terminal_ack(
         },
         key,
         Default::default(),
+        rocky_credentials::ChainLink::first(key.public_key()),
     )
     .unwrap()
     .to_bytes()

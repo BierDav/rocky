@@ -809,9 +809,10 @@ points, and the `board_cap` assertion bounds a board's points.
   - Production changes: the runtime's session and placement nonces were
     clock-derived and are now 32 random bytes (unique under a paused
     clock); no API takes caller randomness.
-  - Test: `relational_tests::one_seed_replays_identically` (seeds 3 and
-    20245 twice: same steps, outcomes, coverage and per-member digests
-    of frontier, rows and replayed positions). The soak prints
+  - Tests: `relational_tests::one_seed_replays_identically` (seed 3) and
+    `a_soak_seed_replays_identically` (20245), each run twice (same
+    steps, outcomes, coverage and per-member digests of frontier, rows
+    and replayed positions). The soak prints
     `seed N replay <digest>` per seed.
   - Not fixed by the seam: tokio picks among ready `select!` branches
     with a per-runtime random seed that stable tokio cannot set. On a

@@ -39,6 +39,9 @@ fn soak_size(seed: u64) -> Scenario {
         Ok("frozen") => Wall::Frozen,
         _ => Wall::Moving,
     };
+    soak_at(seed, wall)
+}
+fn soak_at(seed: u64, wall: Wall) -> Scenario {
     Scenario {
         nodes: 3 + (seed % 2) as usize,
         steps: 40,
@@ -74,30 +77,57 @@ async fn check(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
     Ok(report)
 }
 macro_rules! seeds {
-    ($($name:ident = $seed:expr),* $(,)?) => {$(
+    ($($name:ident = $seed:expr, $wall:ident),* $(,)?) => {$(
         #[tokio::test(start_paused = true)]
         async fn $name() -> Result<(), Failure> {
-            check($seed, INTEGRATION).await.map(drop)
+            check($seed, soak_at($seed, Wall::$wall)).await.map(drop)
         }
     )*};
 }
-seeds!(seed_1 = 1, seed_2 = 2, seed_3 = 3, seed_4 = 4);
+// Soak-sized seeds that together reach every step kind, crash point and
+// wait the soak's seeds 20000..20200 (moving) and 20000..20100 (frozen)
+// reached: a greedy cover of the `covers` lines `relational_soak` prints.
+// One frozen seed keeps a standing wall clock in the gate.
+seeds!(
+    seed_20080 = 20080,
+    Moving,
+    seed_20060 = 20060,
+    Moving,
+    seed_20084 = 20084,
+    Moving,
+    seed_20089 = 20089,
+    Moving,
+    seed_20091 = 20091,
+    Moving,
+    seed_20050 = 20050,
+    Moving,
+    seed_20101 = 20101,
+    Moving,
+    seed_20080_frozen = 20080,
+    Frozen,
+);
 
 /// One seed run twice ends in the same steps, outcomes, coverage and
 /// per-member state digests: keys, nonces, lineages and the wall clock
-/// follow the seed. Seed 20245 once failed only in some runs.
+/// follow the seed.
+async fn replays_identically(seed: u64, scenario: Scenario) -> Result<(), Failure> {
+    let first = simulate(seed, scenario, plan(seed, scenario)).await?;
+    let second = simulate(seed, scenario, plan(seed, scenario)).await?;
+    assert!(!first.states.is_empty());
+    assert_eq!(first.dump(), second.dump());
+    assert_eq!(first.coverage, second.coverage);
+    assert_eq!(first.states, second.states, "seed {seed}");
+    assert_eq!(first.digest(), second.digest());
+    Ok(())
+}
 #[tokio::test(start_paused = true)]
 async fn one_seed_replays_identically() -> Result<(), Failure> {
-    for (seed, scenario) in [(3, INTEGRATION), (20245, soak_size(20245))] {
-        let first = simulate(seed, scenario, plan(seed, scenario)).await?;
-        let second = simulate(seed, scenario, plan(seed, scenario)).await?;
-        assert!(!first.states.is_empty());
-        assert_eq!(first.dump(), second.dump());
-        assert_eq!(first.coverage, second.coverage);
-        assert_eq!(first.states, second.states, "seed {seed}");
-        assert_eq!(first.digest(), second.digest());
-    }
-    Ok(())
+    replays_identically(3, INTEGRATION).await
+}
+/// Seed 20245 once failed only in some runs.
+#[tokio::test(start_paused = true)]
+async fn a_soak_seed_replays_identically() -> Result<(), Failure> {
+    replays_identically(20245, soak_at(20245, Wall::Moving)).await
 }
 
 #[tokio::test(start_paused = true)]
@@ -157,12 +187,29 @@ async fn relational_soak() -> Result<(), Failure> {
     let started = std::time::Instant::now();
     for seed in first..first + count {
         let scenario = soak_size(seed);
-        let report = simulate(seed, scenario, plan(seed, scenario)).await?;
+        let steps = plan(seed, scenario);
+        // The plan's step kinds, to choose the gate's `seeds!` from.
+        let kinds: std::collections::BTreeSet<String> = steps
+            .iter()
+            .map(|step| {
+                format!("{step:?}")
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        let report = simulate(seed, scenario, steps).await?;
         for (what, times) in &report.coverage {
             *coverage.entry(what.clone()).or_default() += times;
         }
         // Two soaks of one build compare by these lines.
         println!("seed {seed} replay {}", report.digest());
+        // What the seed reached, to choose the gate's `seeds!` from.
+        println!(
+            "seed {seed} covers {kinds:?} {:?}",
+            report.coverage.keys().collect::<Vec<_>>()
+        );
         if let Some(failure) = failure(&report) {
             println!("{}", report.dump());
             failed.entry(failure).or_default().push(seed);

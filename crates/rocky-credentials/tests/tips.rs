@@ -261,13 +261,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     ]);
     let trusted_chain = CredentialChain(vec![
         Authority::owner(&owner)
-            .issue_trusted(
-                trusted.public_key(),
-                graph.scope,
-                Vec::new(),
-                AuthorRange::ALL,
-                (100, 1000, 0),
-            )
+            .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
             .unwrap(),
     ]);
     let first = seal(&graph, graph.genesis(), 1, &owner);
@@ -315,13 +309,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     }
     assert!(
         Authority::issuer(&issuer, &issuer_chain)
-            .issue_trusted(
-                trusted.public_key(),
-                graph.scope,
-                Vec::new(),
-                AuthorRange::ALL,
-                (100, 1000, 0)
-            )
+            .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
             .is_err()
     );
     let forged = SignedCapability::sign(trusted_chain.0[0].capability.clone(), &issuer).unwrap();
@@ -336,15 +324,32 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         .verify(owner.public_key(), &graph)
         .is_err()
     );
+    // A trusted grant never expires; only the root's revocation ends it.
+    let opened = SignedTipOpening::endorse(
+        opening(&graph, &first, &owner).statement,
+        &trusted,
+        &trusted_chain,
+    )
+    .unwrap();
     assert!(
-        SignedTipOpening::endorse(
-            opening(&graph, &first, &owner).statement,
-            &trusted,
-            &trusted_chain
-        )
-        .unwrap()
-        .verify_current(owner.public_key(), &graph, &RevocationSet::new(), 1200)
-        .is_err()
+        opened
+            .verify_current(
+                owner.public_key(),
+                &graph,
+                &RevocationSet::new(),
+                u64::MAX / 2
+            )
+            .is_ok()
+    );
+    assert!(
+        opened
+            .verify_current(
+                owner.public_key(),
+                &graph,
+                &revoking(&owner, &[trusted.public_key()]),
+                1200
+            )
+            .is_err()
     );
     let mut other = graph.clone();
     other.scope.domain = DomainId([7; 16]);
@@ -445,22 +450,7 @@ fn node_signatures_never_inherit_trusted_identity_control() {
     let node = PrivateKey::new();
     let graph = graph();
     let root = Authority::owner(&owner)
-        .issue_trusted(
-            identity.public_key(),
-            graph.scope,
-            vec![rocky_core::ResourceGrant {
-                scope: rocky_core::ResourceScope {
-                    domain: graph.scope,
-                    table: [9; 32],
-                    encryption: [8; 32],
-                },
-                rows: rocky_core::RowSelection::All,
-                fields: rocky_core::FieldSelection::All,
-                rights: [rocky_core::Right::Read].into(),
-            }],
-            AuthorRange::ALL,
-            (100, 1000, 0),
-        )
+        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
         .unwrap();
     let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
     chain
@@ -508,9 +498,8 @@ fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> 
             .issue_trusted(
                 trusted.public_key(),
                 graph.scope,
-                Vec::new(),
                 AuthorRange::new(5, 5).unwrap(),
-                (100, 1000, 0),
+                100,
             )
             .unwrap(),
     ])
@@ -700,22 +689,7 @@ fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, Credential
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
     let root = Authority::owner(owner)
-        .issue_trusted(
-            identity.public_key(),
-            graph.scope,
-            vec![rocky_core::ResourceGrant {
-                scope: rocky_core::ResourceScope {
-                    domain: graph.scope,
-                    table: [9; 32],
-                    encryption: [8; 32],
-                },
-                rows: rocky_core::RowSelection::All,
-                fields: rocky_core::FieldSelection::All,
-                rights: [rocky_core::Right::Read].into(),
-            }],
-            AuthorRange::ALL,
-            (100, 1000, 0),
-        )
+        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
         .unwrap();
     let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
     (node, chain)
@@ -1167,13 +1141,7 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
     let grant = Authority::owner(&owner)
-        .issue_trusted(
-            identity.public_key(),
-            graph.scope,
-            vec![],
-            AuthorRange::ALL,
-            (100, 1000, 0),
-        )
+        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
         .unwrap();
     let chain = CredentialChain(vec![grant])
         .certify(&identity, node.public_key(), 1)

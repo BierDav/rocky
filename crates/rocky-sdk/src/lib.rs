@@ -194,7 +194,7 @@ pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
 #[cfg(not(target_family = "wasm"))]
 pub use engine::Engine;
-pub use enrollment::{DeviceKeys, Supplied, route_enrollment};
+pub use enrollment::{DeviceKeys, PublisherRequired, Supplied, route_enrollment};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// Named domain counters whose idempotent claims hand out unique,
@@ -219,7 +219,7 @@ pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
-pub use rocky_credentials::{FileIdentityProvider, IdentityProvider, Purpose};
+pub use rocky_credentials::{FileIdentityProvider, IdentityProvider, Purpose, RootKey};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};

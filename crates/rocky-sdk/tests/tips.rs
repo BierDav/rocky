@@ -169,7 +169,7 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     assert_eq!(at_second.len(), 1);
     assert_eq!(at_second[0]["rows"], 3);
     for record in at_first.iter().chain(&at_second) {
-        assert_eq!(record["authority"], "owner");
+        assert_eq!(record["authority"], "trusted");
         assert!(
             record["signer"]
                 .as_str()
@@ -226,7 +226,10 @@ async fn requests_and_authority_are_checked() -> Result<(), Failure> {
         ("delete", json!({"name": "main"})),
     ] {
         let refused = message(tips(&b, action, body).await.unwrap_err());
-        assert!(refused.contains("only the owner"), "{action}: {refused}");
+        assert!(
+            refused.contains("only a trusted identity or an issuer"),
+            "{action}: {refused}"
+        );
     }
 
     // An issuer seals and moves forward, but opens no tip and moves nothing back.
@@ -552,7 +555,7 @@ mod coordinated {
         a.add(1, "base").await;
         let b = Device::join(
             &root.path().join("b"),
-            &a.invite().await,
+            &a.invite_as(json!({"kind": "issuer"})).await,
             Network::Owned(hub.connector("b")),
         )?;
         let c = Device::join(
@@ -561,7 +564,7 @@ mod coordinated {
             Network::Owned(hub.connector("c")),
         )?;
         let identity = b.ok(json!({"type":"session"})).await["principal"].clone();
-        let grant = ok(&a, "trust", json!({"identity":identity})).await;
+        let grant = ok(&a, "trust", json!({"identity":identity, "root": a.root()})).await;
         ok(&b, "install_trust", json!({"grant":grant["grant"]})).await;
         b.database
             .coordinate(Some(Arc::new(log.client(node_key(&b).await))))
@@ -759,9 +762,15 @@ mod trusted {
         let mut devices = Vec::new();
         for index in 0..count {
             let name = format!("d{index}");
+            // Only an issuer identity is trusted: the first device.
+            let invitation = if index == 0 {
+                owner.invite_as(json!({"kind": "issuer"})).await
+            } else {
+                owner.invite().await
+            };
             let device = Device::join(
                 &root.path().join(&name),
-                &owner.invite().await,
+                &invitation,
                 Network::Owned(hub.connector(&name)),
             )?;
             introduce(&owner, &device).await;
@@ -793,7 +802,12 @@ mod trusted {
     }
     /// The owner grants `device`'s identity trust and the device installs it.
     async fn trust(owner: &Device, device: &Device) -> Value {
-        let granted = ok(owner, "trust", json!({"identity": identity(device).await})).await;
+        let granted = ok(
+            owner,
+            "trust",
+            json!({"identity": identity(device).await, "root": owner.root()}),
+        )
+        .await;
         ok(device, "install_trust", json!({"grant": granted["grant"]})).await;
         granted
     }
@@ -821,11 +835,15 @@ mod trusted {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == main_tip))
             .ok_or("main's latest seal")?["id"]
             .clone();
-        // Without the grant a writer opens nothing.
+        // Without the grant an issuer opens no branch.
         let refused = tips(t, "open", json!({"seal": seal, "minimum_in_sync": 1}))
             .await
             .expect_err("untrusted");
-        assert!(message(refused).contains("only the owner"));
+        let refused = message(refused);
+        assert!(
+            refused.contains("a trusted identity opens tips"),
+            "{refused}"
+        );
         trust(owner, t).await;
 
         let dev = ok(t, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
@@ -929,12 +947,12 @@ mod trusted {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn revoking_a_trusted_grant_ends_the_identitys_tip_authority() -> Result<(), Failure> {
+    async fn revoking_a_trusted_node_ends_its_tip_authority() -> Result<(), Failure> {
         let house = household(1).await?;
         let owner = &house.owner;
         let t = &house.devices[0];
         let granted = trust(owner, t).await;
-        // Only the owner grants, and only an identity's own device installs.
+        // Only the root grants, and only an identity's own device installs.
         assert!(
             tips(t, "trust", json!({"identity": identity(owner).await}))
                 .await
@@ -946,7 +964,7 @@ mod trusted {
                 .is_err()
         );
         owner
-            .ok(json!({"type": "revoke", "trust": granted["capability"]}))
+            .ok(json!({"type": "revoke", "trust": granted["capability"], "root": owner.root()}))
             .await;
         settle(&[owner, t]).await;
         let tip = ok(t, "status", json!({})).await["tip"].clone();
@@ -955,12 +973,15 @@ mod trusted {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == tip))
             .ok_or("seal")?["id"]
             .clone();
-        let refused = tips(t, "open", json!({"seal": seal, "minimum_in_sync": 1}))
+        // The revoked trusted node learned it and opens nothing more.
+        tips(t, "open", json!({"seal": seal, "minimum_in_sync": 1}))
             .await
             .expect_err("trust revoked");
-        assert!(message(refused).contains("only the owner"));
-        // The identity keeps writing under its other grants.
-        t.add(2, "still writing").await;
+        let status = t.ok(json!({"type": "status"})).await;
+        assert!(
+            status["authority"]["verified_revocation"].is_object(),
+            "{status}"
+        );
         Ok(())
     }
 }
@@ -992,9 +1013,14 @@ mod races {
         main(&owner).await;
         let mut joined = Vec::new();
         for name in ["t0", "t1", "m"] {
+            let invitation = if name == "m" {
+                owner.invite().await
+            } else {
+                owner.invite_as(json!({"kind": "issuer"})).await
+            };
             let device = Device::join(
                 &root.path().join(name),
-                &owner.invite().await,
+                &invitation,
                 Network::Owned(hub.connector(name)),
             )?;
             introduce(&owner, &device).await;
@@ -1008,7 +1034,12 @@ mod races {
         let mut grants = Vec::new();
         for device in &joined[..2] {
             let identity = device.ok(json!({"type": "session"})).await["principal"].clone();
-            let granted = ok(&owner, "trust", json!({"identity": identity})).await;
+            let granted = ok(
+                &owner,
+                "trust",
+                json!({"identity": identity, "root": owner.root()}),
+            )
+            .await;
             ok(device, "install_trust", json!({"grant": granted["grant"]})).await;
             grants.push(granted);
         }
@@ -1092,67 +1123,6 @@ mod races {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == *id))
             .unwrap_or(&Value::Null)
     }
-    fn bookmark<'a>(inspection: &'a Value, name: &str) -> &'a Value {
-        inspection["bookmarks"]
-            .as_array()
-            .and_then(|bookmarks| bookmarks.iter().find(|bookmark| bookmark["name"] == name))
-            .unwrap_or(&Value::Null)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_owners_backward_move_beats_a_trusted_forward_move_whatever_their_digests()
-    -> Result<(), Failure> {
-        let house = household().await?;
-        let (owner, trusted) = (&house.owner, &house.trusted[0]);
-        let tip = ok(owner, "status", json!({})).await["tip"].clone();
-        let inspection = ok(owner, "inspect", json!({})).await;
-        let earlier = seal_by_id(&inspection, &tip)["id"].clone();
-        // Apart: the trusted identity seals main's tip and moves it
-        // forward; the owner opens a tip on the earlier seal and moves
-        // main back there, closing main's tip.
-        let forward = ok(trusted, "seal", json!({})).await["tip"].clone();
-        trusted.add(2, "forward").await;
-        let back = ok(
-            owner,
-            "open",
-            json!({"seal": earlier, "minimum_in_sync": 1}),
-        )
-        .await["tip"]
-            .clone();
-        ok(owner, "move", json!({"name": "main", "tip": back})).await;
-        settle(&house.all()).await;
-
-        for device in house.all() {
-            let status = ok(device, "status", json!({})).await;
-            assert_eq!(status["tip"], back, "{status}");
-            assert_eq!(device.titles().await, ["before"]);
-            let inspection = ok(device, "inspect", json!({})).await;
-            let main = bookmark(&inspection, "main");
-            assert_eq!(main["tip"], back);
-            assert_eq!(main["losers"].as_array().map(Vec::len), Some(1), "{main}");
-            assert_eq!(main["losers"][0]["name"], "main/1");
-            assert_eq!(main["losers"][0]["tip"], forward);
-            let won = inspection["seals"]
-                .as_array()
-                .and_then(|seals| {
-                    seals
-                        .iter()
-                        .find(|seal| seal["tip"] == tip && seal["canonical"] == true)
-                })
-                .ok_or("winning seal")?;
-            assert_eq!(
-                (won["action"].clone(), won["authority"].clone()),
-                (json!("close"), json!("owner"))
-            );
-            assert_eq!(seal_by_id(&inspection, &forward)["authority"], "trusted");
-        }
-        // The forward write went with its line: intents hold nothing.
-        for device in [trusted, owner] {
-            let held = device.ok(json!({"type": "held_changes"})).await;
-            assert_eq!(held["count"], 0, "{held}");
-        }
-        Ok(())
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner()
@@ -1183,16 +1153,31 @@ mod races {
         .await;
         assert_eq!(owner.titles().await, ["before", "on the winner"]);
 
-        // Revoking the winner's trusted grant leaves its seal and move out of
-        // resolution: every device follows the other continuation, and the
-        // write on the revoked one goes with it.
+        // The root revoking the winner's trusted node leaves its seal and
+        // move out of resolution: every other device follows the other
+        // continuation, and the write on the revoked one goes with it.
         owner
-            .ok(json!({"type": "revoke", "trust": house.grants[winner]["capability"]}))
+            .ok(json!({
+                "type": "revoke",
+                "trust": house.grants[winner]["capability"],
+                "root": owner.root(),
+            }))
             .await;
-        settle_on(&house.all(), &next, &["before"]).await;
-        for device in house.all() {
-            let status = ok(device, "status", json!({})).await;
-            assert_eq!(status["tip"], next, "{status}");
+        let revoked = &house.trusted[winner];
+        let rest: Vec<&Device> = house
+            .all()
+            .into_iter()
+            .filter(|device| !std::ptr::eq(*device, revoked))
+            .collect();
+        // The rotation that follows may seal `next` once more.
+        settle(&rest).await;
+        let followed = ok(owner, "status", json!({})).await["tip"].clone();
+        if followed != next {
+            let inspection = ok(owner, "inspect", json!({})).await;
+            assert_eq!(seal_by_id(&inspection, &followed)["tip"], next);
+        }
+        settle_on(&rest, &followed, &["before"]).await;
+        for device in rest {
             assert_eq!(device.titles().await, ["before"]);
             let inspection = ok(device, "inspect", json!({})).await;
             let revoked = seal_by_id(&inspection, &continuations[winner]);
@@ -1258,7 +1243,8 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
     assert!(refused.contains("pull"), "{refused}");
 
     let identity = b.ok(json!({"type":"session"})).await["principal"].clone();
-    let grant = ok(&a, "trust", json!({"identity":identity})).await["grant"].clone();
+    let grant =
+        ok(&a, "trust", json!({"identity":identity, "root": a.root()})).await["grant"].clone();
     ok(&b, "install_trust", json!({"grant":grant})).await;
     // The issuer opens a branch on the old seal; the owner knows its graph but lacks its state.
     let branch = ok(&b, "open", open.clone()).await["tip"].clone();

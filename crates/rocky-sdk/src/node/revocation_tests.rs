@@ -51,6 +51,7 @@ async fn issuer(
         &store,
         crate::enrollment::DEFAULT_TTL,
         None,
+        &rocky_credentials::RootKey::generate(),
     )?;
     let vault = settings.vault(&store);
     let domain = settings.domain()?;
@@ -334,8 +335,10 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let settings = node.settings.lock().await.clone();
     let record = settings.groups.values().next().ok_or("group")?;
     let secret = [245; 32];
+    // The node signs under its chain, as every sender does.
+    let sender = settings.credentials.clone();
     let envelope = rocky_credentials::GroupSecretEnvelope::seal(
-        &PrivateKey::from_bytes(&node.vault.get("identity")?),
+        &PrivateKey::from_bytes(&node.vault.get("node")?),
         record.address,
         1,
         secret,
@@ -352,7 +355,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         let node = reload(root.path(), store.clone()).await?;
         fault::STOP.with(|stop| stop.set(Some((fault::Stage::Table, passed))));
         let error = node
-            .install_envelope(partition.clone(), &envelope, None, false)
+            .install_envelope(partition.clone(), &envelope, Some(&sender), false)
             .await
             .unwrap_err();
         assert!(

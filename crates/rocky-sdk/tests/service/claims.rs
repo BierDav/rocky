@@ -20,7 +20,7 @@ async fn owner(root: &std::path::Path, bundle: &TrustBundle) -> Result<Peer, Fai
     let tenant = PrivateKey::new();
     a.call(
         json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600}),
+        "trusted":[owner],"lifetime":3600,"root":a.root()}),
     )
     .await?;
     Ok(a)
@@ -41,7 +41,7 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     let tenant = PrivateKey::new();
     a.call(
         json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600}),
+        "trusted":[owner],"lifetime":3600,"root":a.root()}),
     )
     .await?;
     let m = Peer::start(
@@ -185,7 +185,7 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     let tenant = PrivateKey::new();
     a.call(
         json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600}),
+        "trusted":[owner],"lifetime":3600,"root":a.root()}),
     )
     .await?;
     let b = Peer::start(

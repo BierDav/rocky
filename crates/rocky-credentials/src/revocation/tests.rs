@@ -8,9 +8,13 @@ const NOW: u64 = 2_000_000_000;
 /// An issuer identity of `publisher`: its key and issuer chain, valid for
 /// the statement times these tests use.
 fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
+    issuer_at(publisher, NOW)
+}
+/// An issuer whose chain is valid for 300 days around `time`.
+fn issuer_at(publisher: &PrivateKey, time: u64) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
     let link = Authority::owner(publisher)
-        .issue_issuer(key.public_key(), None, (NOW - 5 * DAY, 300 * DAY, DAY))
+        .issue_issuer(key.public_key(), None, (time - 5 * DAY, 300 * DAY, DAY))
         .unwrap();
     (key, CredentialChain(vec![link]))
 }
@@ -96,23 +100,24 @@ fn every_interleaving_of_merges_yields_one_digest() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
-    // The owner signs: its statements need no chain valid at their time.
+    // An issuer signs: the root's statements are permanent (below).
     let publisher = PrivateKey::new();
     let sign = |time| {
+        let issuing = issuer_at(&publisher, time);
         SignedRevocation::sign(
-            statement(&publisher, time, PrivateKey::new().public_key()),
-            &publisher,
-            &CredentialChain::default(),
+            statement(&issuing.0, time, PrivateKey::new().public_key()),
+            &issuing.0,
+            &issuing.1,
         )
         .unwrap()
     };
     let fresh = sign(NOW);
     let old = sign(NOW - MAX_CHAIN_LIFETIME - LIFETIME_SKEW - DAY);
-    assert!(!old.statement.live(NOW));
+    assert!(!old.live(NOW));
     // The same day-rounded cutoff on either side of the expiry instant.
-    let expiry = fresh.statement.expiry_day() * DAY;
-    assert!(fresh.statement.live(expiry - 1));
-    assert!(!fresh.statement.live(expiry));
+    let expiry = fresh.expiry_day() * DAY;
+    assert!(fresh.live(expiry - 1));
+    assert!(!fresh.live(expiry));
     assert!(expiry >= fresh.statement.time + MAX_CHAIN_LIFETIME + LIFETIME_SKEW);
 
     let mut with_old = single(&fresh);
@@ -249,28 +254,74 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     );
 }
 
+/// Two identities the root signed for cannot revoke each other: only a
+/// root statement ends a root-signed link. Two issuers below one do.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_revoked_issuers_statement_counts_and_two_issuers_revoke_each_other() {
+fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
     let publisher = PrivateKey::new();
-    let (a, b) = (issuer(&publisher), issuer(&publisher));
     let revoke = |by: &(PrivateKey, CredentialChain), target: &PrivateKey| {
         let mut body = statement(&by.0, NOW, PrivateKey::new().public_key());
         body.identities = [target.public_key()].into();
         signed(body, by)
     };
+    let (a, b) = (issuer(&publisher), issuer(&publisher));
     let mut set = single(&revoke(&a, &b.0));
     set.merge(&single(&revoke(&b, &a.0)), publisher.public_key(), APP, NOW)
         .unwrap();
     assert!(set.revokes(&a.0.public_key()) && set.revokes(&b.0.public_key()));
     assert_eq!(set.len(), 2);
-    // Each issuer's chain is ended: neither signs a current statement.
+    assert!(
+        a.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_ok()
+    );
+    assert!(
+        b.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_ok()
+    );
+    // Below `a`, two issuers end each other's chains.
+    let below = |parent: &(PrivateKey, CredentialChain)| {
+        let key = PrivateKey::new();
+        let link = Authority::issuer(&parent.0, &parent.1)
+            .issue_issuer(key.public_key(), None, (NOW - 5 * DAY, 300 * DAY, DAY))
+            .unwrap();
+        let mut chain = parent.1.clone();
+        chain.0.push(link);
+        (key, chain)
+    };
+    let (c, d) = (below(&a), below(&a));
+    let mut set = single(&revoke(&c, &d.0));
+    set.merge(&single(&revoke(&d, &c.0)), publisher.public_key(), APP, NOW)
+        .unwrap();
+    assert!(
+        c.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_err()
+    );
+    assert!(
+        d.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_err()
+    );
+    // The root ends `a`, and with it every chain below.
+    let root = SignedRevocation::sign(
+        Revocation {
+            identities: [a.0.public_key()].into(),
+            ..statement(&publisher, NOW, PrivateKey::new().public_key())
+        },
+        &publisher,
+        &CredentialChain::default(),
+    )
+    .unwrap();
+    let set = single(&root);
     assert!(
         a.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_err()
     );
     assert!(
-        b.1.issuer(publisher.public_key(), Some((&set, NOW)))
+        c.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_err()
+    );
+    assert!(
+        b.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_ok()
     );
 }
 
@@ -284,4 +335,28 @@ fn signing_adds_a_bounded_overhead() {
         - encode(&body).unwrap().len()
         - encode(&issuing.1).unwrap().len();
     assert!(overhead <= SIGNATURE_OVERHEAD, "{overhead}");
+}
+
+/// A root statement never leaves the set: it may end a trusted grant,
+/// which never expires.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_root_statement_is_permanent() {
+    let publisher = PrivateKey::new();
+    let old = NOW - 10 * MAX_CHAIN_LIFETIME;
+    let root = SignedRevocation::sign(
+        statement(&publisher, old, PrivateKey::new().public_key()),
+        &publisher,
+        &CredentialChain::default(),
+    )
+    .unwrap();
+    assert!(root.root() && root.live(NOW) && root.live(u64::MAX - 1));
+    assert!(!root.statement.live(NOW));
+    let mut set = RevocationSet::new();
+    assert_eq!(
+        set.merge(&single(&root), publisher.public_key(), APP, NOW)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(set.pruned(u64::MAX - 1).len(), 1);
 }

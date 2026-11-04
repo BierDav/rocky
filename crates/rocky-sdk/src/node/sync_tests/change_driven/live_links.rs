@@ -1169,7 +1169,9 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
 
 // Inject a verified incoming statement without renewal or key installation.
 async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
+    // The creating device's trusted identity signs it.
     let publisher = PrivateKey::from_bytes(&node.vault.get("identity")?);
+    let links = node.settings.lock().await.issuer_links();
     let statement = rocky_credentials::SignedRevocation::sign(
         rocky_credentials::Revocation {
             app: node.domain().manifest().app,
@@ -1180,7 +1182,7 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
             capabilities: Default::default(),
         },
         &publisher,
-        &rocky_credentials::CredentialChain::default(),
+        &links,
     )?;
     node.replica
         .learn_revocations(&RevocationSet::try_from(vec![statement])?)

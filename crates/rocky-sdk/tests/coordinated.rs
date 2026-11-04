@@ -126,13 +126,12 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     );
     let c = Device::new(Database::join(
         open(&c_dir, network("c")),
-        &a.invite_as(json!({"kind":"writer","scopes":["items"]}))
-            .await,
+        &a.invite_as(json!({"kind":"issuer"})).await,
     )?)?;
     introduce(&a, &c).await;
     let principal = c.ok(json!({"type":"session"})).await["principal"].clone();
     let grant = a
-        .ok(json!({"type":"tips","action":"trust","identity":principal}))
+        .ok(json!({"type":"tips","action":"trust","identity":principal,"root":a.root()}))
         .await;
     c.ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
         .await;

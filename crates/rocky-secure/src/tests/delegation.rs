@@ -27,6 +27,7 @@ fn delegated(
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             trusted: None,
             claims: None,
+            origin: None,
             partitions: Vec::new(),
             authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             node: None,
@@ -92,6 +93,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             link.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
                 trusted: None,
                 claims: None,
+                origin: None,
                 partitions: Vec::new(),
                 authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
                 node: None,

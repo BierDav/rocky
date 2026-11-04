@@ -1,5 +1,5 @@
-//! The owner's control of its domain on a coordination service: register
-//! the domain under a tenant key and sign later control revisions. Only
+//! A trusted node's control of its domain on a coordination service:
+//! register the domain under a tenant key and sign later control revisions. Only
 //! identities and generations leave the device. See
 //! `docs/runtime/public-coordination.md`.
 #[cfg(feature = "iroh")]
@@ -59,7 +59,7 @@ mod service {
         pub application: String,
         /// The domain's publisher, whose coordination grant registering needs.
         pub anchor: PublicKey,
-        /// Present on the owner only, whose identity signs that grant itself.
+        /// The root, when the call carries it, which signs that grant here.
         pub publisher: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
         pub transport: Option<Arc<dyn Transport>>,
         pub request: &'a Value,
@@ -208,8 +208,8 @@ mod service {
             let time = self.signing_time(tenant.public_key(), request_id, inputs)?;
             let certificate = ControlCertificate::sign(control(time)?, &tenant)?;
             let reference = if revision == 1 {
-                // The owner's grant names this tenant for the application:
-                // signed here on the owner, or one it signed earlier.
+                // The root's grant names this tenant for the application:
+                // signed here with the root, or one it signed earlier.
                 let grant = match (supplied, domain.publisher) {
                     (None, Some(owner)) => SignedCoordinationGrant::sign(
                         CoordinationGrant {
@@ -222,9 +222,9 @@ mod service {
                         &*owner,
                     )?,
                     (None, None) => {
-                        return Err(refused(
-                            "registering needs the owner's coordination grant: the owner signs one with coordination_grant",
-                        ));
+                        return Err(Box::new(crate::enrollment::PublisherRequired(
+                            "registering without a coordination grant",
+                        )));
                     }
                     (Some(supplied), _) => supplied,
                 };

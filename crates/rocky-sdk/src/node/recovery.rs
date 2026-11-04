@@ -58,11 +58,12 @@ impl Node {
                 .record_changed("member_seal_failed", json!({"error": error.to_string()}));
         }
     }
-    /// The owner seals the followed tip once it holds
+    /// A trusted node seals the followed tip once it holds
     /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
     /// rewind never undoes more; finalizing the seal ends their rewinds.
+    /// The root is never needed.
     pub(super) async fn seal_routinely(&self) {
-        if !self.settings.lock().await.owner() || !self.signs_for_members().await {
+        if self.settings.lock().await.trusted_links().is_none() || !self.signs_for_members().await {
             return;
         }
         let sealed = async {

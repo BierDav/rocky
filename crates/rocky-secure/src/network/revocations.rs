@@ -59,7 +59,7 @@ impl NativeSession {
         }
         let ours: Vec<Commitment> = held
             .statements()
-            .filter(|signed| signed.statement.live(time))
+            .filter(|signed| signed.live(time))
             .map(SignedRevocation::id)
             .collect::<Result<_, _>>()
             .map_err(credential)?;
@@ -92,7 +92,7 @@ impl NativeSession {
         }
         let lacking: Vec<Vec<u8>> = held
             .statements()
-            .filter(|signed| signed.statement.live(time))
+            .filter(|signed| signed.live(time))
             .zip(&ours)
             .filter(|(_, id)| !named.contains(*id))
             .map(|(signed, _)| signed.to_bytes())

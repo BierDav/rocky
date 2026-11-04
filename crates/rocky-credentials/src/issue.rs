@@ -22,6 +22,8 @@ pub struct Resource {
 
 /// Most grants one capability holds.
 pub const MAX_GRANTS: usize = 64;
+/// The expiry of a root-signed trusted grant: none.
+pub const NEVER: u64 = u64::MAX;
 
 /// A raw grant: rights over one named reader scope, optionally limited to
 /// some of its columns. Any set is issuable, `Custody` included; the
@@ -292,10 +294,10 @@ fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
         && right.iter().all(|grant| left.contains(grant))
 }
 
-/// What an identity with issuer authority signs: the owner's, whose key is
-/// the publisher key, or an issuer's through its chain of issuer links. The
-/// identity's provider signs; no key is copied. What it signs holds in every
-/// generation of the domain.
+/// What an identity with issuer authority signs: the root's, whose key is
+/// the publisher key, or an issuer's through its chain of issuer links from
+/// the root's trusted grant. The provider signs; no key is copied. What it
+/// signs holds in every generation of the domain.
 pub struct Authority<'a> {
     pub identity: &'a dyn IdentityProvider,
     /// The issuer links from the publisher to `identity`; empty for the owner.
@@ -303,7 +305,8 @@ pub struct Authority<'a> {
 }
 static OWNER: CredentialChain = CredentialChain(Vec::new());
 impl<'a> Authority<'a> {
-    /// The owner: its identity key is the publisher key.
+    /// The root: its key is the publisher key. It is offline and signs only
+    /// the domain's genesis, trusted grants and their revocations.
     pub fn owner(identity: &'a dyn IdentityProvider) -> Self {
         Self {
             identity,
@@ -362,6 +365,7 @@ impl<'a> Authority<'a> {
             grants,
             Extended {
                 authors,
+                origin: self.origin()?,
                 ..Extended::default()
             },
             delegations,
@@ -387,39 +391,57 @@ impl<'a> Authority<'a> {
             Extended {
                 authors,
                 issues: true,
+                origin: self.origin()?,
                 ..Extended::default()
             },
             delegations,
             validity,
         )
     }
-    /// Only the owner grants whole-scope tip and bookmark control. It adds
-    /// no issuer authority and cannot be passed to another identity.
+    /// The root's trusted grant: whole-domain tip and bookmark control
+    /// with issuer authority over `authors`, valid from `time` and never
+    /// expiring; only a root-signed revocation ends it. Only the root signs
+    /// one, and no trusted grant is delegated.
     pub fn issue_trusted(
         &self,
         subject: PublicKey,
         scope: rocky_core::Scope,
-        grants: Vec<ResourceGrant>,
         authors: AuthorRange,
-        validity: (u64, u64, u64),
+        time: u64,
     ) -> Result<SignedCapability, Error> {
         if !self.chain.0.is_empty() {
-            return Err(denied("only the owner grants trusted identity authority"));
+            return Err(denied("only the root grants trusted identity authority"));
         }
-        if grants.iter().any(|grant| grant.scope.domain != scope) {
-            return Err(denied("trusted identity grants name another domain"));
-        }
-        self.sign_link(
-            subject,
-            grants,
-            Extended {
-                authors: Some(authors),
-                trusted: Some(scope),
-                ..Extended::default()
+        SignedCapability::sign(
+            Capability {
+                subject,
+                kind: PrincipalKind::User,
+                grants: Vec::new(),
+                not_before: time.saturating_sub(crate::LIFETIME_SKEW),
+                expires: NEVER,
+                delegations: (MAX_CREDENTIAL_DEPTH - 1) as u8,
+                extension: Extension::new(Extended {
+                    authors: Some(authors),
+                    issues: true,
+                    trusted: Some(scope),
+                    ..Extended::default()
+                })?,
             },
-            1,
-            validity,
+            self.identity,
         )
+    }
+    /// The trusted identity a link this authority signs descends from: its
+    /// own when it holds a trusted grant, else the one its links name.
+    /// The root's links descend from none.
+    pub fn origin(&self) -> Result<Option<PublicKey>, Error> {
+        let Some(last) = self.chain.0.last() else {
+            return Ok(None);
+        };
+        let extended = last.capability.extended()?;
+        Ok(match extended.trusted {
+            Some(_) => Some(last.capability.subject),
+            None => extended.origin,
+        })
     }
     /// The delegations this authority's identity holds.
     fn delegations(&self) -> Result<u8, Error> {
@@ -493,15 +515,20 @@ impl<'a> Authority<'a> {
         revocations: &RevocationSet,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        if prior.kind != PrincipalKind::User || revocations.revokes(&prior.subject) {
+        let extended = prior.extended()?;
+        if prior.kind != PrincipalKind::User
+            || revocations.revokes(&prior.subject)
+            || extended
+                .origin
+                .is_some_and(|origin| revocations.revokes_origin(&origin))
+        {
             return Err(denied("invalid or revoked credential"));
         }
         if prior.delegations >= self.delegations()? {
             return Err(denied("an issuer above this one renews the credential"));
         }
-        let extended = prior.extended()?;
-        if extended.trusted.is_some() && !self.chain.0.is_empty() {
-            return Err(denied("only the owner renews trusted identity authority"));
+        if extended.trusted.is_some() {
+            return Err(denied("a trusted grant never expires and is never renewed"));
         }
         self.sign_link(
             prior.subject,
@@ -510,8 +537,9 @@ impl<'a> Authority<'a> {
                 authors: extended.authors,
                 partitions: extended.partitions,
                 issues: extended.issues,
-                trusted: extended.trusted,
+                trusted: None,
                 claims: extended.claims,
+                origin: extended.origin,
                 ..Extended::default()
             },
             prior.delegations,

@@ -40,6 +40,13 @@ impl Peer {
             opened,
         })
     }
+    /// The root a created peer holds, as root-only calls name it.
+    pub fn root(&self) -> Value {
+        self.opened
+            .root
+            .as_ref()
+            .map_or(Value::Null, |root| json!({"phrase": root.phrase()}))
+    }
     pub async fn call(&self, request: Value) -> Result<Value, Failure> {
         call(&self.session, &self.scope, request).await
     }
@@ -130,14 +137,17 @@ pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer
         assert_ne!(identity["principal"], identity["node"]);
     }
     let grant = a
-        .tips("trust", json!({"identity":trusted["principal"]}))
+        .tips(
+            "trust",
+            json!({"identity":trusted["principal"], "root": a.root()}),
+        )
         .await?;
     t.tips("install_trust", json!({"grant":grant["grant"]}))
         .await?;
     let tenant = PrivateKey::new();
     a.call(
         json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner["principal"],trusted["principal"]],"lifetime":3600}),
+        "trusted":[owner["principal"],trusted["principal"]],"lifetime":3600,"root":a.root()}),
     )
     .await?;
     introduce(&a, &t).await?;

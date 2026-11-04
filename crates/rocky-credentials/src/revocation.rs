@@ -27,7 +27,9 @@ pub const MAX_REVOCATION_SET_BYTES: usize = 2 * 1024 * 1024;
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
 
 /// One revocation: the identities, node certificates and capability IDs it
-/// ends, the identity that signed it and when. Its ID is its hash.
+/// ends, the identity that signed it and when. Its ID is its hash. Signed
+/// by the root it is permanent; otherwise it leaves the set once every
+/// chain it ends has expired.
 /// Naming an identity ends every chain through it, so all its nodes;
 /// naming a node ends only that node's certificate; naming a claim right's
 /// grant ends every link of that right.
@@ -136,12 +138,39 @@ impl SignedRevocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         self.statement.id()
     }
-    /// Whether this statement ends a chain through `link`.
-    pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
+    /// Whether the root signed it.
+    pub fn root(&self) -> bool {
+        self.chain.0.is_empty()
+    }
+    /// Whether it is still in the distributed set at `time`. A root
+    /// statement always is: it may end a trusted grant, which never expires.
+    pub fn live(&self, time: u64) -> bool {
+        self.root() || self.statement.live(time)
+    }
+    /// The first day it is no longer live; `u64::MAX` for a root statement.
+    pub fn expiry_day(&self) -> u64 {
+        if self.root() {
+            u64::MAX
+        } else {
+            self.statement.expiry_day()
+        }
+    }
+    /// Whether this statement ends a chain through `link`, a `protected`
+    /// one (see `CredentialChain::protected`) only when the root signed
+    /// it. A root statement naming an identity also ends every link that
+    /// identity first enrolled.
+    pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
+        if protected && !self.root() {
+            return Ok(false);
+        }
         let subject = &link.capability.subject;
         let extended = link.capability.extended()?;
         let capabilities = &self.statement.capabilities;
         Ok(self.statement.subjects().any(|key| key == subject)
+            || (self.root()
+                && extended
+                    .origin
+                    .is_some_and(|origin| self.statement.identities.contains(&origin)))
             || extended
                 .node
                 .is_some_and(|node| self.statement.nodes.contains(&node))
@@ -165,6 +194,14 @@ impl SignedRevocation {
 #[serde(into = "Vec<SignedRevocation>", try_from = "Vec<SignedRevocation>")]
 pub struct RevocationSet {
     statements: BTreeMap<Commitment, SignedRevocation>,
+    subjects: BTreeSet<PublicKey>,
+    references: BTreeSet<crate::PeerId>,
+    capabilities: BTreeSet<Commitment>,
+    /// What root statements name, which alone end protected links.
+    root: Ended,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Ended {
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
     capabilities: BTreeSet<Commitment>,
@@ -200,6 +237,14 @@ impl RevocationSet {
             .extend(signed.statement.nodes.iter().copied());
         self.capabilities
             .extend(signed.statement.capabilities.iter().copied());
+        if signed.root() {
+            let root = &mut self.root;
+            root.subjects.extend(signed.statement.subjects().copied());
+            root.references
+                .extend(signed.statement.nodes.iter().copied());
+            root.capabilities
+                .extend(signed.statement.capabilities.iter().copied());
+        }
         self.statements.insert(id, signed);
         Ok(true)
     }
@@ -234,7 +279,7 @@ impl RevocationSet {
                 continue;
             }
             signed.verify(publisher, app)?;
-            if signed.statement.live(time) && next.insert(signed.clone())? {
+            if signed.live(time) && next.insert(signed.clone())? {
                 added.push(signed.clone());
             }
         }
@@ -247,7 +292,7 @@ impl RevocationSet {
     pub fn pruned(&self, time: u64) -> Self {
         let mut set = Self::default();
         for signed in self.statements.values() {
-            if signed.statement.live(time) {
+            if signed.live(time) {
                 // Every held statement was inserted once already.
                 let _ = set.insert(signed.clone());
             }
@@ -271,7 +316,7 @@ impl RevocationSet {
     pub fn live(&self, time: u64) -> usize {
         self.statements
             .values()
-            .filter(|signed| signed.statement.live(time))
+            .filter(|signed| signed.live(time))
             .count()
     }
     /// Identifies the live set at `time`: two holders of the same live
@@ -280,7 +325,7 @@ impl RevocationSet {
         let live: Vec<&Commitment> = self
             .statements
             .iter()
-            .filter(|(_, signed)| signed.statement.live(time))
+            .filter(|(_, signed)| signed.live(time))
             .map(|(id, _)| id)
             .collect();
         Ok(rocky_core::commitment(
@@ -300,18 +345,31 @@ impl RevocationSet {
     pub fn revokes_capability(&self, id: &Commitment) -> bool {
         self.capabilities.contains(id)
     }
+    /// Whether a root statement revoked the trusted identity `origin`, and
+    /// with it every identity it first enrolled.
+    pub fn revokes_origin(&self, origin: &PublicKey) -> bool {
+        self.root.subjects.contains(origin)
+    }
     /// Whether some statement ends a chain through `link`: its subject,
-    /// node, capability ID or, on a claim link, its grant.
-    pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
+    /// node, capability ID, on a claim link its grant, or a root
+    /// statement its origin. A `protected` link only a root statement ends.
+    pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         let extended = link.capability.extended()?;
-        Ok(self.subjects.contains(&link.capability.subject)
-            || extended
-                .node
-                .is_some_and(|node| self.revokes_reference(&node))
-            || self.capabilities.contains(&link.id()?)
+        let (subjects, references, capabilities) = if protected {
+            let root = &self.root;
+            (&root.subjects, &root.references, &root.capabilities)
+        } else {
+            (&self.subjects, &self.references, &self.capabilities)
+        };
+        Ok(subjects.contains(&link.capability.subject)
+            || extended.node.is_some_and(|node| references.contains(&node))
+            || capabilities.contains(&link.id()?)
             || extended
                 .claims
-                .is_some_and(|right| self.capabilities.contains(&right.grant)))
+                .is_some_and(|right| capabilities.contains(&right.grant))
+            || extended
+                .origin
+                .is_some_and(|origin| self.revokes_origin(&origin)))
     }
     /// The first statement that revokes the holder of `chain`: its node
     /// certificate or the identity that signed it. A statement ending an
@@ -321,20 +379,30 @@ impl RevocationSet {
         chain: &CredentialChain,
     ) -> Result<Option<&SignedRevocation>, Error> {
         let start = chain.0.len().saturating_sub(2);
-        for signed in self.statements.values() {
-            for link in &chain.0[start..] {
-                if signed.ends(link)? {
-                    return Ok(Some(signed));
-                }
-            }
-        }
-        Ok(None)
+        self.first_ending(chain, start)
     }
     /// The first statement that ends `chain`, if any.
     pub fn revoking(&self, chain: &CredentialChain) -> Result<Option<&SignedRevocation>, Error> {
+        self.first_ending(chain, 0)
+    }
+    /// Whether some statement ends a link of `chain`, each judged by its
+    /// position.
+    pub fn ends_chain(&self, chain: &CredentialChain) -> Result<bool, Error> {
+        for (index, link) in chain.0.iter().enumerate() {
+            if self.ends_at(link, chain.protected(index)?)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    fn first_ending(
+        &self,
+        chain: &CredentialChain,
+        start: usize,
+    ) -> Result<Option<&SignedRevocation>, Error> {
         for signed in self.statements.values() {
-            for link in &chain.0 {
-                if signed.ends(link)? {
+            for (index, link) in chain.0.iter().enumerate().skip(start) {
+                if signed.ends_at(link, chain.protected(index)?)? {
                     return Ok(Some(signed));
                 }
             }

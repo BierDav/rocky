@@ -86,9 +86,10 @@ struct Simulation {
     /// Each node's pending `Watch`: the alerts it saw change to.
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
     /// Each node's pending `WatchMesh`: the view it saw change to.
-    mesh_watches:
-        BTreeMap<usize, tokio::task::JoinHandle<Result<Option<Vec<crate::MeshDevice>>, Failure>>>,
+    mesh_watches: BTreeMap<usize, tokio::task::JoinHandle<Result<MeshView, Failure>>>,
 }
+/// A node's mesh view; `None` where it has none.
+type MeshView = Option<Vec<crate::MeshDevice>>;
 
 /// Runs `seed` on a current-thread runtime with a paused clock; call it
 /// inside a `LocalSet`.
@@ -330,6 +331,7 @@ impl Simulation {
                 .into())
             }
             Action::Trust(node) => {
+                self.invite_as(0, *node, json!({"kind": "issuer"})).await?;
                 let identity = self
                     .database(*node)?
                     .session()
@@ -337,7 +339,12 @@ impl Simulation {
                     .await?
                     .authority
                     .principal;
-                let grant = self.database(0)?.session().trust(&identity).await?;
+                let root = self
+                    .running(0)?
+                    .root
+                    .clone()
+                    .ok_or("member 0 holds no root")?;
+                let grant = self.database(0)?.session().trust(&identity, root).await?;
                 self.database(*node)?
                     .session()
                     .install_trust(&grant.grant)
@@ -664,7 +671,7 @@ impl Simulation {
         let Some(devices) = mesh else {
             return "mesh none".into();
         };
-        let described: Vec<String> = devices
+        let mut described: Vec<String> = devices
             .iter()
             .map(|device| {
                 let mut text = format!(
@@ -684,6 +691,7 @@ impl Simulation {
                 text
             })
             .collect();
+        described.sort();
         format!("mesh {described:?}")
     }
     fn name(&self, key: &str) -> String {
@@ -832,12 +840,21 @@ impl Simulation {
         }
     }
     async fn invite(&mut self, by: usize, node: usize) -> Result<String, Failure> {
+        let writer = json!({"kind": "writer", "scopes": self.fixture.scopes()});
+        self.invite_as(by, node, writer).await
+    }
+    async fn invite_as(
+        &mut self,
+        by: usize,
+        node: usize,
+        profile: serde_json::Value,
+    ) -> Result<String, Failure> {
         if self.members[node].node_key.is_some() {
             return Err("skipped: already a member".into());
         }
         let uri = self
             .running(by)?
-            .call(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": self.fixture.scopes()}}))
+            .call(json!({"type": "pairing", "profile": profile}))
             .await?["uri"]
             .as_str()
             .ok_or("pairing uri")?

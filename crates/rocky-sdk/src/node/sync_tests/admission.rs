@@ -1,7 +1,7 @@
 //! Credentialed strangers against the inbound link budget
 //! (`docs/decisions/0051-roster-free-admission.md`).
 use super::*;
-use rocky_credentials::{Authority, device_chain};
+use rocky_credentials::Authority;
 use rocky_secure::network::link::Link;
 
 #[tokio::test]
@@ -25,7 +25,8 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             // 64 devices of the domain, none of them a contact of A.
             let publisher = PrivateKey::from_bytes(&a.vault.get("identity")?);
             let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
-            let authority = Authority::owner(&publisher);
+            let issuer_links = a.settings.lock().await.issuer_links();
+            let authority = Authority::issuer(&publisher, &issuer_links);
             let strangers = (0..64)
                 .map(|_| {
                     let (user, node) = (PrivateKey::new(), PrivateKey::new());
@@ -36,18 +37,16 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                         (1, Some(rocky_credentials::AuthorRange::ALL)),
                         (now()?, crate::enrollment::DEFAULT_TTL, 300),
                     )?;
+                    let first = capability
+                        .capability
+                        .authors()?
+                        .ok_or("principal range")?
+                        .first;
+                    let mut chain = issuer_links.clone();
+                    chain.0.push(capability);
                     Ok((
                         node.clone(),
-                        device_chain(
-                            capability.clone(),
-                            &user,
-                            node.public_key(),
-                            capability
-                                .capability
-                                .authors()?
-                                .ok_or("principal range")?
-                                .first,
-                        )?,
+                        chain.complete(&user, node.public_key(), first)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;

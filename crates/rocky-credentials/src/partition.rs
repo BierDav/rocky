@@ -237,6 +237,7 @@ impl crate::Authority<'_> {
             crate::Extended {
                 authors,
                 partitions,
+                origin: self.origin()?,
                 ..crate::Extended::default()
             },
             delegations,

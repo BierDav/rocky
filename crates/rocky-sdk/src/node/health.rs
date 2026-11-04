@@ -10,7 +10,7 @@ use crate::status::{
 };
 use live_links::io::Writer;
 use rocky_core::CoordinationError;
-use rocky_credentials::{Signature, SignedCapability};
+use rocky_credentials::Signature;
 use rocky_secure::network::link::{self, Frame, HEALTH_BYTES};
 
 /// Devices whose reports a trusted node holds; the oldest is dropped first.
@@ -22,7 +22,7 @@ pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 /// Changes that arrive together become one report.
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Coordination failures that stand, from every call to the service.
 /// Without iroh no service is composed, so none arises.
@@ -184,11 +184,8 @@ struct Wire {
 }
 #[derive(Serialize, Deserialize)]
 enum HealthMessage {
-    /// The sender collects reports: a trusted node shows the owner's
-    /// trusted grant to its identity; the owner's own chain shows it.
-    Collector {
-        trust: Option<Box<SignedCapability>>,
-    },
+    /// The sender collects reports: its admitted chain shows a trusted node.
+    Collector,
     /// A device's report; `received` is when a trusted node got it from the
     /// device, present only when one forwards it.
     Report {
@@ -255,41 +252,27 @@ impl Node {
         alerts.sort();
         alerts
     }
-    /// Whether this device collects health reports: the owner, or a node of
-    /// an identity holding the owner's trusted grant, which it shows.
-    async fn collects(&self) -> Option<Option<SignedCapability>> {
-        let settings = self.settings.lock().await;
-        if settings.owner() {
-            return Some(None);
-        }
-        settings
-            .trusted_links()
-            .map(|links| links.0.into_iter().next())
+    /// Whether this device collects health reports: a trusted node, whose
+    /// identity holds the root's trusted grant.
+    async fn collects(&self) -> bool {
+        self.settings.lock().await.trusted_links().is_some()
     }
-    /// Whether `peer`, admitted with `chain`, is the owner's node or one of
-    /// an identity `trust` shows the owner trusts.
+    /// Whether `peer`, admitted with `chain`, is a trusted node: a node of
+    /// an identity the root's unrevoked trusted grant names.
     fn proves_collector(
         &self,
         settings: &Settings,
         peer: PublicKey,
         chain: &CredentialChain,
-        trust: Option<SignedCapability>,
     ) -> Result<bool, Failure> {
-        let identity = chain.provenance(settings.publisher, peer)?.subject;
-        if identity == settings.publisher {
-            return Ok(true);
-        }
-        let Some(trust) = trust else {
-            return Ok(false);
-        };
-        Ok(CredentialChain(vec![trust])
-            .trusted_identity(
+        Ok(chain
+            .trusted_node(
                 settings.publisher,
                 self.domain().scope,
-                &settings.revocations,
-                now()?,
+                peer,
+                Some((&settings.revocations, now()?)),
             )
-            .is_ok_and(|trusted| trusted == identity))
+            .is_ok())
     }
     pub(super) async fn health_report(&self) -> Result<HealthReport, Failure> {
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -348,11 +331,8 @@ impl Node {
         mut collector: watch::Receiver<bool>,
     ) {
         let send = |message| self.send_health(&writer, direction, message);
-        if let Some(trust) = self.collects().await
-            && let Err(error) = send(HealthMessage::Collector {
-                trust: trust.map(Box::new),
-            })
-            .await
+        if self.collects().await
+            && let Err(error) = send(HealthMessage::Collector).await
         {
             self.reported(Err(&error));
             return;
@@ -373,7 +353,7 @@ impl Node {
             frames.borrow_and_update();
             mesh.borrow_and_update();
             // Between trusted nodes alone: a device's idle link writes nothing.
-            let trusted = self.collects().await.is_some();
+            let trusted = self.collects().await;
             let due = trusted && refreshed.elapsed() >= REFRESH;
             let result = async {
                 let report = self.health_report().await?;
@@ -527,9 +507,9 @@ impl Node {
             return Err("unsupported health message version".into());
         }
         let (signed, received) = match wire.message {
-            HealthMessage::Collector { trust } => {
+            HealthMessage::Collector => {
                 let settings = self.settings.lock().await;
-                if !self.proves_collector(&settings, peer, chain, trust.map(|trust| *trust))? {
+                if !self.proves_collector(&settings, peer, chain)? {
                     return Err("the peer is no trusted node".into());
                 }
                 collector.send_replace(true);
@@ -539,7 +519,7 @@ impl Node {
         };
         #[cfg(test)]
         self.reports_received.fetch_add(1, Ordering::Relaxed);
-        if self.collects().await.is_none() {
+        if !self.collects().await {
             return Err("this device collects no reports".into());
         }
         if self.settings.lock().await.revocations.revokes(&signed.node) {
@@ -612,7 +592,7 @@ impl Node {
     }
     /// Each device's latest report on a trusted node; `None` elsewhere.
     pub(super) async fn mesh_status(&self) -> Result<Option<Vec<MeshDevice>>, Failure> {
-        if self.collects().await.is_none() {
+        if !self.collects().await {
             return Ok(None);
         }
         let time = self.status_time()?;

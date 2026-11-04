@@ -100,12 +100,14 @@ impl Endorsement {
                 return Err(denied("tip statements require an identity"));
             }
             let trusted = self.chain.0.len() == 1 && leaf.extended()?.trusted == Some(scope);
+            // A trusted grant's issuer authority holds in its own domain only.
             if !trusted
-                && self
-                    .chain
-                    .0
-                    .iter()
-                    .any(|link| !link.capability.extended().is_ok_and(|e| e.issues))
+                && self.chain.0.iter().any(|link| {
+                    !link
+                        .capability
+                        .extended()
+                        .is_ok_and(|e| e.issues && e.trusted.is_none_or(|held| held == scope))
+                })
             {
                 return Err(denied("the chain ends at no issuer"));
             }
@@ -471,16 +473,27 @@ impl CredentialChain {
         }
         let mut issuer = publisher;
         let mut parent: Option<(&Capability, Extended)> = None;
-        for signed in &self.0 {
+        for (index, signed) in self.0.iter().enumerate() {
             let capability = &signed.capability;
             let extended = capability.extended()?;
             let stale = match current {
                 Some((revocations, time)) => {
                     capability.not_before > time
                         || capability.expires <= time
-                        || revocations.ends(signed)?
+                        || revocations.ends_at(signed, self.protected(index)?)?
                 }
                 None => false,
+            };
+            // Only the root's trusted grant, and a node certificate directly
+            // under it, live until the root revokes them.
+            let forever = match &parent {
+                None => extended.trusted.is_some() && extended.issues,
+                Some((parent, _)) => parent.expires == crate::NEVER && self.protected(index)?,
+            };
+            let lifetime = if capability.expires == crate::NEVER && forever {
+                0
+            } else {
+                capability.expires - capability.not_before
             };
             let held = capability.grants.len() + extended.partitions.len();
             // A node certificate under a trusted or claim link holds no
@@ -492,7 +505,7 @@ impl CredentialChain {
             if signed.issuer != issuer
                 || stale
                 || capability.not_before >= capability.expires
-                || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
+                || lifetime > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
                 || (held == 0
                     && !extended.issues
@@ -568,6 +581,19 @@ impl CredentialChain {
         parent
             .map(|(leaf, _)| leaf)
             .ok_or_else(|| denied("missing leaf credential"))
+    }
+    /// Whether link `index` is a trusted identity's own: its root-signed
+    /// grant or a node certificate directly under it. Only the root's
+    /// statements end those; a trusted node never revokes another.
+    pub(crate) fn protected(&self, index: usize) -> Result<bool, Error> {
+        Ok(match index {
+            0 => true,
+            1 => {
+                self.0[0].capability.extended()?.trusted.is_some()
+                    && self.0[1].capability.kind == PrincipalKind::Node
+            }
+            _ => false,
+        })
     }
     /// Node certificates carry exactly one number, attenuated from their
     /// identity's range, and name their subject. Only identities hold issuer

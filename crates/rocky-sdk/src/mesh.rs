@@ -90,7 +90,7 @@ pub(crate) fn mint_value(
             || value
                 .statement
                 .and_then(|id| set.get(&id))
-                .is_some_and(|signed| signed.statement.live(time))
+                .is_some_and(|signed| signed.live(time))
     });
     if let std::collections::btree_map::Entry::Vacant(entry) = state.values.entry(id) {
         entry.insert(DiscoverySecret::sign(
@@ -295,8 +295,7 @@ impl Settings {
         let time = now()?;
         state.values.retain(|id, _| {
             self.revocations.statements().any(|signed| {
-                signed.statement.live(time)
-                    && signed.id().is_ok_and(|held| HEXLOWER.encode(&held) == *id)
+                signed.live(time) && signed.id().is_ok_and(|held| HEXLOWER.encode(&held) == *id)
             })
         });
         for value in values {
@@ -305,7 +304,7 @@ impl Settings {
             let Some(statement) = self.revocations.get(&id) else {
                 return Err("discovery value names an unknown statement".into());
             };
-            if !statement.statement.live(time) {
+            if !statement.live(time) {
                 continue;
             }
             let id = HEXLOWER.encode(&id);
@@ -360,7 +359,7 @@ impl Settings {
         for signed in self
             .revocations
             .statements()
-            .filter(|signed| signed.statement.live(time))
+            .filter(|signed| signed.live(time))
         {
             let id = signed.id()?;
             bytes.extend(id);
@@ -475,10 +474,11 @@ mod tests {
             &store,
             crate::enrollment::DEFAULT_TTL,
             None,
+            &rocky_credentials::RootKey::generate(),
         )?;
         let av = a.vault(&store);
         let publisher = PrivateKey::from_bytes(&av.get("identity")?);
-        let owner = rocky_credentials::CredentialChain::default();
+        let owner = a.issuer_links();
         let old = a.discovery_topics(&av, now()?)?.0;
         let statement = Revocation {
             app: a.domain()?.manifest().app,
@@ -537,6 +537,7 @@ mod tests {
             &store,
             crate::enrollment::DEFAULT_TTL,
             None,
+            &rocky_credentials::RootKey::generate(),
         )?;
         let vault = settings.vault(&store);
         let configured = PrivateKey::new().public_key();

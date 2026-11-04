@@ -19,6 +19,8 @@ chacha20poly1305 = "=0.10.1"
 curve25519-dalek = "=4.1.3"
 rand = "=0.8.8"
 sha2 = "0.10"
+# The root key's 24-word backup phrase (BIP 39, English).
+bip39 = { version = "=2.2.2", default-features = false }
 
 # Browsers supply randomness through `crypto.getRandomValues`.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

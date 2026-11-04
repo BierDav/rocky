@@ -146,22 +146,15 @@ async fn only_trusted_nodes_receive_reports() -> Result<(), Failure> {
 }
 
 /// A trusted node that never links to a device learns its report from
-/// another trusted node, the owner here.
+/// another trusted node, the creating device here.
 #[tokio::test(start_paused = true)]
 async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
-    let steps = vec![
-        Invite(0, 2),
-        Trust(1),
-        Sever(1, 2),
-        Sync(2),
-        Sync(1),
-        Mesh(1),
-        Mesh(2),
-    ];
+    let steps = vec![Trust(2), Sever(1, 2), Sync(1), Sync(2), Mesh(2), Mesh(1)];
     assert_eq!(
-        run(3, steps, &[" mesh "]).await?,
+        run(3, steps, &[" mesh ", " trust "]).await?,
         [
-            r#"mesh ["a: alerts []", "c: alerts [], via a"]"#,
+            "trusted",
+            r#"mesh ["a: alerts []", "b: alerts [], via a"]"#,
             "mesh none"
         ]
     );

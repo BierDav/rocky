@@ -1,8 +1,7 @@
 //! The identity a database's node belongs to: held in the secret store, or
 //! supplied by the application's `IdentityProvider`. The identity signs
-//! node certificates and, with issuer authority, what an issuer signs; the
-//! owner's identity key is the publisher key. See
-//! `docs/runtime/sdk-enrollment.md#identities`.
+//! node certificates and, with issuer authority, what an issuer signs. No
+//! identity is the root.
 use crate::{Failure, domain::Domain, enrollment::Settings, secrets::Vault};
 use rocky_credentials::{
     AuthorRange, Authority, CredentialChain, IdentityProvider, PrivateKey, PublicKey, Purpose,
@@ -47,19 +46,10 @@ impl Settings {
         }
         Ok(provider)
     }
-    /// Whether this node's identity is the owner's: its key is the
-    /// publisher key.
-    pub fn owner(&self) -> bool {
-        self.identity == self.publisher
-    }
-    /// The issuer links an issuer signs through: none for the owner, else
-    /// its chain without the node certificate.
+    /// The issuer links an issuer signs through: its chain without the node
+    /// certificate, from the root's trusted grant.
     pub(crate) fn issuer_links(&self) -> CredentialChain {
-        if self.owner() {
-            CredentialChain::default()
-        } else {
-            self.credentials.delegable()
-        }
+        self.credentials.delegable()
     }
     /// The identity's chain to the node certificate: the links it holds
     /// its grants by.

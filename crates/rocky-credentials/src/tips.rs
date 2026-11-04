@@ -140,7 +140,7 @@ impl BookmarkMoveStatement {
     }
 }
 
-/// The owner's minimum of distinct trusted nodes whose acknowledgments make
+/// A trusted identity's minimum of distinct trusted nodes whose acknowledgments make
 /// a seal on the genesis line final. Several resolve to the largest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenesisLineStatement {
@@ -332,9 +332,11 @@ impl SignedTipOpening {
     }
 }
 impl SignedGenesisLine {
-    fn check_graph(&self, _graph: &TipGraph, _trusted: bool) -> Result<(), Error> {
-        if !self.endorsement.chain.0.is_empty() {
-            return Err(denied("only the owner signs the genesis line's minimum"));
+    fn check_graph(&self, _graph: &TipGraph, trusted: bool) -> Result<(), Error> {
+        if !trusted {
+            return Err(denied(
+                "only a trusted identity signs the genesis line's minimum",
+            ));
         }
         Ok(())
     }
@@ -452,11 +454,8 @@ impl TipGraph {
                     .map(|record| (record.id(), &record.endorsement().chain)),
             );
         for (id, chain) in signed {
-            for link in &chain.0 {
-                if revocations.ends(link)? {
-                    revoked.insert(id?);
-                    break;
-                }
+            if revocations.ends_chain(chain)? {
+                revoked.insert(id?);
             }
         }
         // Revoked acknowledgments no longer count toward a seal's finality.

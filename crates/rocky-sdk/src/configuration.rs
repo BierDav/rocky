@@ -60,15 +60,31 @@ impl Configuration {
             coordination: self.coordination.clone(),
         }
     }
+    /// Creates an installation under a fresh root key, which
+    /// `Opened::root` hands back once: show its phrase to the user or keep
+    /// its secret behind a passkey. See [`Self::create_with_root`].
+    pub async fn create(&self) -> Result<Opened, Failure> {
+        let root = crate::RootKey::generate();
+        let created = crate::RootKey::from_secret(root.secret());
+        let mut opened = self.create_with_root(Arc::new(root)).await?;
+        opened.root = Some(created);
+        Ok(opened)
+    }
     /// Creates an installation; refuses an existing one. Startup runs off the
     /// caller's async executor: natively on the database's own thread.
     ///
-    /// The creating device owns the domain and follows a new bookmark,
+    /// `root`, the domain's offline root, signs the genesis and a trusted
+    /// grant to this device's own identity, and is dropped: the device never
+    /// runs as the root. A passkey or a phrase-backed [`crate::RootKey`]
+    /// supplies it. The creating device follows a new bookmark,
     /// [`Self::BOOKMARK`], so its sync passes seal routinely: only seals make
     /// replay drops final and bound the undo history. `Database::create`
     /// leaves bookmarks to the caller.
-    pub async fn create(&self) -> Result<Opened, Failure> {
-        let opened = Database::launch_create(self.options(), None).await?;
+    pub async fn create_with_root(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<Opened, Failure> {
+        let opened = Database::launch_create(self.options(), None, root).await?;
         let session = opened.database.session();
         let followed = async {
             session.create_bookmark(Self::BOOKMARK, None).await?;
@@ -76,7 +92,7 @@ impl Configuration {
         }
         .await;
         if let Err(error) = followed {
-            // Never hand out an owner that silently never seals.
+            // Never hand out a trusted node that silently never seals.
             opened.database.close().await?;
             return Err(format!(
                 "created, but could not follow the `{}` bookmark: {error}; open the \

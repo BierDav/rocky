@@ -756,7 +756,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
-        &a.invite().await,
+        &a.invite_as(json!({"kind": "issuer"})).await,
         Network::Owned(hub.connector("b")),
     )?;
     let c = Device::join(
@@ -769,7 +769,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     introduce(&b, &c).await;
     let principal = b.ok(json!({"type":"session"})).await["principal"].clone();
     let trusted = a
-        .ok(json!({"type":"tips", "action":"trust", "identity":principal}))
+        .ok(json!({"type":"tips", "action":"trust", "identity":principal, "root":a.root()}))
         .await;
     b.ok(json!({"type":"tips", "action":"install_trust", "grant":trusted["grant"]}))
         .await;
@@ -813,8 +813,10 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
         .await;
     b.close().await;
     let b = Device::new(Database::open(open(&b_dir, THIRD, network("b")))?)?;
-    assert_eq!(generation(&b).await["current"]["schema"], 3);
-    let unrelated = generation(&b).await["manifest"].clone();
+    // A trusted node is an issuer: it publishes its schema on `dev` as a
+    // migration, which waits there for its finality.
+    let reopened = generation(&b).await;
+    assert_eq!(reopened["application"], "ahead", "{reopened}");
 
     // `c`'s application declares the first schema, and only `b` is
     // reachable: `c` learns the graph from `b` and fetches the record it
@@ -833,17 +835,6 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "behind");
     assert_eq!(chain(&c_dir)?, before);
-    let file = rusqlite::Connection::open(c_dir.join("rocky.sqlite"))?;
-    let stored: i64 = file.query_row(
-        "SELECT count(*) FROM secure_tip_schemas WHERE hex(manifest)=upper(?)",
-        [unrelated.as_str().ok_or("manifest")?],
-        |row| row.get(0),
-    )?;
-    assert_eq!(
-        stored, 0,
-        "the provider's unrelated schema grants no requirement"
-    );
-    drop(file);
     // Back on `main`, `b`'s next pass completes its pending switch.
     b.ok(json!({"type":"tips", "action":"follow", "name":"main"}))
         .await;

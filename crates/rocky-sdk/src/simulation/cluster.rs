@@ -65,6 +65,8 @@ pub(super) struct Member {
     schema: &'static str,
     /// Seconds this device's wall clock runs ahead, across restarts.
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
+    /// The offline root of the domain this member created: its user holds it.
+    pub(super) root: Option<Arc<crate::RootKey>>,
 }
 
 impl Member {
@@ -78,6 +80,7 @@ impl Member {
             node_key: None,
             revoked: false,
             ahead: Arc::default(),
+            root: None,
         }
     }
     /// Starts the node: creating, joining or opening its directory.
@@ -111,7 +114,16 @@ impl Member {
         Ok(())
     }
     pub(super) async fn create(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
-        self.start(hub, Install::Create { ttl: DEFAULT_TTL }).await
+        let root = Arc::new(crate::RootKey::generate());
+        self.root = Some(root.clone());
+        self.start(
+            hub,
+            Install::Create {
+                ttl: DEFAULT_TTL,
+                root: std::sync::Mutex::new(Some(root)),
+            },
+        )
+        .await
     }
     pub(super) async fn join(&mut self, hub: &Arc<Hub>, invitation: &str) -> Result<(), Failure> {
         self.start(

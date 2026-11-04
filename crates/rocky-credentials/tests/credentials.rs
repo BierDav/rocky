@@ -939,6 +939,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         issues: false,
         trusted: None,
         claims: None,
+        origin: None,
     })
     .expect("extension");
     let widened = CredentialChain(vec![
@@ -962,7 +963,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 8,
+        version: 9,
         authors: range,
         rotation: 9,
     })

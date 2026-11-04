@@ -162,7 +162,8 @@ pub(super) enum Action {
     /// The coordination service answers the node's call: refused for a
     /// clock this many seconds behind it, or accepted.
     Coordinated(usize, Option<u64>),
-    /// Node 0 trusts the node's identity, which installs the grant.
+    /// Node 0 enrolls the node with an issuer invitation and the root
+    /// trusts its identity, which installs the grant.
     Trust(usize),
     /// Reports the node's view of the mesh's health.
     Mesh(usize),

@@ -79,7 +79,8 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     let trusted = identity["principal"].clone();
     let tenant = PrivateKey::new();
     let register = json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-        "registration": vec![1u8; 32], "trusted": [trusted], "lifetime": 3600});
+        "registration": vec![1u8; 32], "trusted": [trusted], "lifetime": 3600,
+        "root": {"phrase": opened.root.as_ref().ok_or("created with a root")?.phrase()}});
     let registered = call(&session, &scope, register.clone()).await?;
     assert_eq!(registered["tenant"], tenant.public_key().to_hex());
     assert_eq!(call(&session, &scope, register).await?, registered);

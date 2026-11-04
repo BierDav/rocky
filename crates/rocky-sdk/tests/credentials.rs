@@ -258,14 +258,15 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     let (creator, issuer) = (session(&a).await, session(&i).await);
     assert_eq!(issuer["issuer"], json!(true));
     assert_eq!(issuer["profile"], json!({"kind": "issuer"}));
-    // The issuer signs with its own identity through its chain: the
-    // publisher key stays with the owner's identity and no copy exists.
+    // Each device signs with its own identity through its chain: the
+    // root is the publisher, and no device stores it.
     assert_ne!(issuer["node"], creator["node"]);
     assert_ne!(issuer["principal"], creator["principal"]);
     let (owner, paired) = (identity(root, "a")?, identity(root, "i")?);
     assert_eq!(paired["publisher"], owner["publisher"]);
-    assert_eq!(owner["identity"], owner["publisher"]);
+    assert_ne!(owner["identity"], owner["publisher"]);
     assert_ne!(paired["identity"], paired["publisher"]);
+    assert_eq!(secret(root, "a", "publisher")?, None);
     assert_ne!(
         secret(root, "i", "identity")?,
         secret(root, "a", "identity")?
@@ -524,15 +525,26 @@ fn issued(
     user: rocky_sdk::credentials::PublicKey,
     grants_of: &str,
 ) -> Result<Credentials, Failure> {
+    // The creating device's trusted identity issues, below its grant.
     let creator = identity(root, "a")?;
     let owner = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
+    let held: CredentialChain = serde_json::from_value(creator["credentials"].clone())?;
+    let issuer = CredentialChain(vec![held.0.first().ok_or("trusted grant")?.clone()]);
     let revocations: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(creator["revocations"].clone())?;
     // The grants of an enrolled device's profile, without its keys.
     let model: CredentialChain =
         serde_json::from_value(identity(root, grants_of)?["credentials"].clone())?;
-    let grants = model.0.first().ok_or("chain")?.capability.grants.clone();
-    let authority = Authority::owner(&owner);
+    let grants = model
+        .0
+        .iter()
+        .rev()
+        .find(|link| !link.capability.grants.is_empty())
+        .ok_or("chain")?
+        .capability
+        .grants
+        .clone();
+    let authority = Authority::issuer(&owner, &issuer);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -542,10 +554,12 @@ fn issued(
         rocky_credentials::AuthorRange::new(4096, 5119)?,
         (now, 3600, 300),
     )?;
+    let mut chain = issuer;
+    chain.0.push(capability);
     Ok(Credentials {
-        publisher: owner.public_key(),
+        publisher: serde_json::from_value(creator["publisher"].clone())?,
         revocations,
-        chain: CredentialChain(vec![capability]),
+        chain,
     })
 }
 

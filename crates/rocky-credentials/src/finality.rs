@@ -174,11 +174,8 @@ impl SealFinality {
     pub fn revoked(&self, revocations: &RevocationSet) -> Result<usize, Error> {
         let mut count = 0;
         for ack in &self.acknowledgments {
-            for link in &ack.credentials.0 {
-                if revocations.ends(link)? {
-                    count += 1;
-                    break;
-                }
+            if revocations.ends_chain(&ack.credentials)? {
+                count += 1;
             }
         }
         Ok(count)

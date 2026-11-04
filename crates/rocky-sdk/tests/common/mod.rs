@@ -17,6 +17,8 @@ pub struct Device {
     pub network: Option<NetworkService>,
     session: Session,
     scope: Value,
+    /// The creating device's root, which root-only calls name.
+    root: Option<String>,
 }
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
@@ -34,6 +36,7 @@ impl Device {
         Ok(Self {
             session: opened.database.session(),
             scope: serde_json::from_str(&opened.database.scope())?,
+            root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
             database: opened.database,
             network: opened.network,
         })
@@ -46,6 +49,12 @@ impl Device {
     }
     pub fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
         Self::new(Database::open(open(directory, network))?)
+    }
+    /// The root this device created the domain with, as a call names it.
+    pub fn root(&self) -> Value {
+        self.root
+            .as_ref()
+            .map_or(Value::Null, |phrase| json!({ "phrase": phrase }))
     }
     /// The value of a successful call, or its error object.
     pub async fn call(&self, request: Value) -> Result<Value, Value> {

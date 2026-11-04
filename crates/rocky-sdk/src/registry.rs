@@ -18,6 +18,8 @@ pub const MAX_LABEL: usize = 256;
 const MAX_GRANTS: usize = 256;
 /// Identities holding a recorded claim right.
 pub const MAX_CLAIM_RIGHTS: usize = 256;
+/// Live trusted identities: the coordinator's trusted list holds as many.
+pub const MAX_TRUSTED: usize = 32;
 
 /// The named refusal of a write that would add the 257th device.
 #[derive(Debug)]
@@ -53,6 +55,10 @@ pub struct Device {
     pub profile: Option<Profile>,
     /// The issuer that wrote the record first.
     pub issuer: PublicKey,
+    /// The trusted identity that first enrolled the device's identity, as
+    /// its capability names it; the root's revocation of that identity
+    /// revokes this device too. `None` for a trusted identity's own device.
+    pub origin: Option<PublicKey>,
     pub enrolled: u64,
     /// Stable invitation digest; retained independently of later invitations.
     pub invitation: Option<String>,
@@ -80,6 +86,14 @@ pub struct ClaimRecord {
     pub delegations: u8,
     /// The issuer that granted it.
     pub issuer: PublicKey,
+    pub granted: u64,
+}
+/// A trusted identity's root-signed grant, so every trusted node knows the
+/// whole trusted set and whom it last heard from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedRecord {
+    pub grant: rocky_credentials::SignedCapability,
     pub granted: u64,
 }
 #[derive(Serialize, Deserialize)]
@@ -122,6 +136,8 @@ impl Record {
 pub struct Registry {
     pub records: BTreeMap<PublicKey, Record>,
     pub claims: BTreeMap<PublicKey, ClaimRecord>,
+    /// Root-signed trusted grants, by identity, revoked ones included.
+    pub trusted: BTreeMap<PublicKey, TrustedRecord>,
 }
 impl Registry {
     pub fn get(&self, node: &PublicKey) -> Option<&Record> {
@@ -151,12 +167,38 @@ impl Registry {
     pub fn revoked(&self, node: &PublicKey) -> bool {
         self.get(node).is_some_and(|record| record.revoked)
     }
+    /// The identities the trusted identity `origin` first enrolled, itself
+    /// or through issuers below it: what the root's revocation of `origin`
+    /// ends, wherever they renewed since.
+    pub fn enrolled_by(&self, origin: PublicKey) -> std::collections::BTreeSet<PublicKey> {
+        self.records
+            .values()
+            .filter_map(|record| record.device.as_ref())
+            .filter(|device| device.origin == Some(origin))
+            .map(|device| device.user)
+            .collect()
+    }
+    /// The live trusted identities: granted by the root, not revoked by it.
+    pub fn trusted_identities(
+        &self,
+        revocations: &rocky_credentials::RevocationSet,
+    ) -> Vec<PublicKey> {
+        self.trusted
+            .keys()
+            .filter(|identity| !revocations.revokes_origin(identity))
+            .copied()
+            .collect()
+    }
 
     fn apply(&mut self, node: &str, entry: &str, value: &str) -> Result<(), Failure> {
         let node: PublicKey = node.parse()?;
         // A claim row is keyed by the holder identity, not a node.
         if entry == CLAIMS {
             self.claims.insert(node, parse(value)?);
+            return Ok(());
+        }
+        if entry == TRUSTED {
+            self.trusted.insert(node, parse(value)?);
             return Ok(());
         }
         let record = self.records.entry(node).or_default();
@@ -313,6 +355,10 @@ impl Changes {
     pub fn claims(&mut self, identity: &PublicKey, record: &ClaimRecord) -> Result<(), Failure> {
         self.push(identity, CLAIMS.into(), record, Mode::Replace)
     }
+    /// The root's trusted grant to `identity`.
+    pub fn trusted(&mut self, identity: &PublicKey, record: &TrustedRecord) -> Result<(), Failure> {
+        self.push(identity, TRUSTED.into(), record, Mode::Replace)
+    }
     /// Ends the renewals of `identity`'s claim right.
     pub fn unclaim(&mut self, identity: &PublicKey) -> Result<(), Failure> {
         self.push(identity, CLAIMS.into(), &Tombstone {}, Mode::Delete)
@@ -328,6 +374,7 @@ impl Changes {
     }
 }
 const CLAIMS: &str = "claims";
+const TRUSTED: &str = "trusted";
 fn capability_entry(capability: &Capability) -> String {
     format!("capability/{}", HEXLOWER.encode(&capability.id))
 }

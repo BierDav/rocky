@@ -877,7 +877,17 @@ impl Node {
     }
 
     /// Handles one call of the native ABI for a session.
+    #[cfg(test)]
     pub async fn dispatch(&self, client: &Client, request: &Value) -> Result<Value, Failure> {
+        self.dispatch_with(client, request, &Root::default()).await
+    }
+    /// As `dispatch`, with the root signer of a root-only call.
+    pub(crate) async fn dispatch_with(
+        &self,
+        client: &Client,
+        request: &Value,
+        root: &Root,
+    ) -> Result<Value, Failure> {
         let kind = request["type"].as_str().unwrap_or_default();
         if self.ended.lock().await.is_some()
             && !matches!(
@@ -934,7 +944,7 @@ impl Node {
                 Ok(json!({"open": self.settings.lock().await.invitation_open(uri)?}))
             }
             "generation" => self.generation().await,
-            "tips" => self.tips(request).await,
+            "tips" => self.tips_with(request, root).await,
             "claims" => self.claims(request).await,
             "held_changes" => self.held_changes().await,
             "coordinated" => self.coordinated_status().await,
@@ -1178,36 +1188,44 @@ impl Node {
                         None => Ok(None),
                     }
                 };
+                // A trusted grant, by its capability id, names its identity.
                 let trust = match request["trust"].as_str() {
-                    Some(id) => Some(
-                        HEXLOWER
+                    Some(id) => {
+                        let id: rocky_core::Commitment = HEXLOWER
                             .decode(id.as_bytes())
                             .ok()
                             .and_then(|bytes| bytes.try_into().ok())
-                            .ok_or_else(|| refused("trust must be a hex capability id"))?,
-                    ),
+                            .ok_or_else(|| refused("trust must be a hex capability id"))?;
+                        let registry = self.registry().await?;
+                        Some(
+                            registry
+                                .trusted
+                                .iter()
+                                .find(|(_, record)| record.grant.id().is_ok_and(|held| held == id))
+                                .map(|(identity, _)| *identity)
+                                .ok_or_else(|| refused("no such trusted grant is recorded"))?,
+                        )
+                    }
                     None => None,
                 };
                 let target = match (key("node")?, key("identity")?, trust) {
                     (Some(node), None, None) => crate::enrollment::Revoke::Node(node),
-                    (None, Some(identity), None) => crate::enrollment::Revoke::Identity(identity),
-                    (None, None, Some(trust)) => crate::enrollment::Revoke::Trust(trust),
+                    (None, Some(identity), None) | (None, None, Some(identity)) => {
+                        crate::enrollment::Revoke::Identity(identity)
+                    }
                     _ => {
                         return Err(refused(
                             "revoke names one node, one identity or one trusted grant",
                         ));
                     }
                 };
-                let revoked = self.revoke(target).await?;
+                let revoked = self.revoke_with(target, root).await?;
                 self.activity.record(
                     "device_revoked",
                     match target {
                         crate::enrollment::Revoke::Node(node) => json!({"node": node.to_hex()}),
                         crate::enrollment::Revoke::Identity(identity) => {
                             json!({"identity": identity.to_hex()})
-                        }
-                        crate::enrollment::Revoke::Trust(trust) => {
-                            json!({"trust": HEXLOWER.encode(&trust)})
                         }
                         crate::enrollment::Revoke::Claims(link) => {
                             json!({"claims": HEXLOWER.encode(&link)})
@@ -1280,7 +1298,9 @@ impl Node {
                 );
                 Ok(json!({"subscription": id.to_string()}))
             }
-            kind if kind.starts_with("coordination_") => self.coordination(kind, request).await,
+            kind if kind.starts_with("coordination_") => {
+                self.coordination(kind, request, root).await
+            }
             "next" => self.next(client, subscription(request)?).await,
             "unsubscribe" => {
                 client.subscriptions()?.remove(&subscription(request)?);
@@ -1576,7 +1596,7 @@ impl Node {
                 }
                 _ = async {
                     let settings = self.settings.lock().await;
-                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).filter(|expires| *expires > time).min();
+                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).filter(|expires| *expires > time && *expires < rocky_credentials::NEVER / 2).min();
                     drop(settings);
                     if let Some(expires) = expires {
                         rocky_platform::time::sleep_until(read + Duration::from_secs(expires - time)).await;
@@ -1672,13 +1692,22 @@ impl Node {
     /// are saved before the replica learns them, so an interruption
     /// completes at the next open.
     async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<Value, Failure> {
+        self.revoke_with(target, &Root::default()).await
+    }
+    async fn revoke_with(
+        &self,
+        target: crate::enrollment::Revoke,
+        root: &Root,
+    ) -> Result<Value, Failure> {
         let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         draft
-            .begin_revocation(target, &registry)
+            .begin_revocation(target, &registry, root.signer())
             .map_err(|error| -> Failure {
-                if error.is::<crate::enrollment::RevocationSetFull>() {
+                if error.is::<crate::enrollment::RevocationSetFull>()
+                    || error.is::<crate::enrollment::PublisherRequired>()
+                {
                     error
                 } else {
                     refused(error)
@@ -1715,10 +1744,8 @@ impl Node {
             self.activity
                 .record("revocations_unpushed", json!({"error": error.to_string()}));
         }
-        if !matches!(
-            target,
-            crate::enrollment::Revoke::Trust(_) | crate::enrollment::Revoke::Claims(_)
-        ) && let Err(error) = self.seal_for_members().await
+        if !matches!(target, crate::enrollment::Revoke::Claims(_))
+            && let Err(error) = self.seal_for_members().await
         {
             self.activity.record(
                 "revocation_seal_failed",
@@ -1733,7 +1760,7 @@ impl Node {
     /// Teaches the replica what the identity already records: the
     /// revocations, this device's chain and new key epochs, earlier ones
     /// first.
-    async fn apply(
+    pub(super) async fn apply(
         &self,
         settings: &mut Shared<Settings>,
         mut keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
@@ -3487,7 +3514,12 @@ impl Node {
     /// the domain's trusted nodes with its tenant key, which stays in this
     /// process, close the domain or read usage; and the publisher's grant
     /// that lets a tenant register the application's domains.
-    async fn coordination(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
+    async fn coordination(
+        &self,
+        kind: &str,
+        request: &Value,
+        root: &Root,
+    ) -> Result<Value, Failure> {
         match kind {
             "coordination_register"
             | "coordination_control"
@@ -3502,22 +3534,19 @@ impl Node {
                         "registering a domain's trusted nodes needs an issuer",
                     ));
                 }
-                // Only the owner's identity signs a coordination grant here.
-                let publisher = if settings.owner() {
-                    Some(settings.identity(&self.vault)?)
-                } else {
-                    None
-                };
+                // Only the root signs a coordination grant here.
+                let publisher = root
+                    .shared()
+                    .filter(|root| root.public_key().is_ok_and(|key| key == settings.publisher));
                 self.service_call(service, kind, request, publisher).await
             }
             "coordination_grant" => {
-                let owner = {
-                    let settings = self.settings.lock().await;
-                    if !settings.owner() {
-                        return Err(refused("only the owner's identity holds the publisher key"));
-                    }
-                    settings.identity(&self.vault)?
-                };
+                let publisher = self.settings.lock().await.publisher;
+                let owner = crate::enrollment::root_signer(
+                    root.signer(),
+                    publisher,
+                    "signing a coordination grant",
+                )?;
                 // The tenant's public key, or its secret in this process.
                 let hex32 = |name: &str| -> Option<[u8; 32]> {
                     HEXLOWER
@@ -3549,7 +3578,7 @@ impl Node {
                         not_before: time.saturating_sub(60),
                         expires: time.saturating_add(lifetime),
                     },
-                    &*owner,
+                    owner,
                 )?;
                 Ok(json!({ "grant": grant }))
             }
@@ -3806,6 +3835,41 @@ fn subscription(request: &Value) -> Result<u64, Failure> {
         .ok_or("subscription must be a string")?
         .parse()?)
 }
+/// The root signer one call carries: the application's signer, or a
+/// `"root"` of the request, `{"phrase": ...}` or `{"secret": hex}`. It is
+/// dropped when the call ends; only root-only actions look at it.
+#[derive(Default)]
+pub(crate) struct Root(Option<Arc<dyn rocky_credentials::IdentityProvider>>);
+impl Root {
+    pub(crate) fn of(
+        request: &Value,
+        supplied: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+    ) -> Result<Self, Failure> {
+        if let Some(supplied) = supplied {
+            return Ok(Self(Some(supplied)));
+        }
+        let given = &request["root"];
+        let key = match (given["phrase"].as_str(), given["secret"].as_str()) {
+            (None, None) if given.is_null() => return Ok(Self(None)),
+            (Some(phrase), None) => rocky_credentials::RootKey::from_phrase(phrase)?,
+            (None, Some(secret)) => rocky_credentials::RootKey::from_secret(
+                HEXLOWER
+                    .decode(secret.as_bytes())
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or_else(|| refused("root secret must be 64 hexadecimal digits"))?,
+            ),
+            _ => return Err(refused("root names one phrase or one secret")),
+        };
+        Ok(Self(Some(Arc::new(key))))
+    }
+    pub(crate) fn signer(&self) -> Option<&dyn rocky_credentials::IdentityProvider> {
+        self.0.as_deref()
+    }
+    pub(crate) fn shared(&self) -> Option<Arc<dyn rocky_credentials::IdentityProvider>> {
+        self.0.clone()
+    }
+}
 /// The statement that revokes this device, when a session ended on it.
 fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
     match error.downcast_ref::<Error>()? {
@@ -3838,6 +3902,8 @@ fn is_authority(error: &Failure) -> bool {
 pub fn error(error: &Failure) -> Value {
     let (code, retryable) = if error.is::<crate::enrollment::Revoked>() {
         ("revoked", false)
+    } else if error.is::<crate::enrollment::PublisherRequired>() {
+        ("publisher_required", false)
     } else if error.is::<crate::registry::RegistryFull>() {
         ("registry_full", false)
     } else if error.is::<crate::enrollment::RevocationSetFull>() {

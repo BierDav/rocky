@@ -22,6 +22,7 @@ pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
 mod peer;
 mod revocation;
+mod root;
 mod signed;
 mod tips;
 
@@ -56,7 +57,7 @@ pub use identity::{
     CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
     LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,
 };
-pub use issue::{Authority, Grant, MAX_GRANTS, Profile, Resource, device_chain};
+pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::PartitionGrant;
@@ -66,6 +67,7 @@ pub use revocation::{
     MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL, Revocation, RevocationSet, SIGNATURE_OVERHEAD,
     SignedRevocation,
 };
+pub use root::RootKey;
 pub use signed::{
     Capability, CredentialChain, Credentials, Endorsement, MAX_ENDORSEMENT_BYTES, SignedCapability,
     SignedManifest, Verified, VerifiedChain,

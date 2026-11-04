@@ -47,6 +47,10 @@ pub enum Coordination {
 pub struct Opened {
     pub database: Arc<Database>,
     pub network: Option<NetworkService>,
+    /// The root key a create without one made. Show its phrase to the user
+    /// once, or keep its secret behind a passkey: Rocky keeps no copy, and
+    /// only it adds or revokes trusted nodes and recovers the domain.
+    pub root: Option<crate::RootKey>,
 }
 
 // The blocking constructors make the other installs; a browser has create,
@@ -55,6 +59,8 @@ pub struct Opened {
 pub(crate) enum Install {
     Create {
         ttl: u64,
+        /// Taken once, when the domain is written.
+        root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
     },
     Join {
         invitation: String,
@@ -94,6 +100,8 @@ enum Command {
         session: u64,
         bytes: Vec<u8>,
         ending: Arc<AtomicBool>,
+        /// The root signer of a root-only call, dropped when it ends.
+        root: Option<Arc<dyn crate::IdentityProvider>>,
         reply: oneshot::Sender<Vec<u8>>,
     },
     End(u64, oneshot::Sender<()>),
@@ -237,18 +245,41 @@ impl Database {
     }
     // Blocks the caller until the database is open, which a browser cannot.
     #[cfg(not(target_family = "wasm"))]
-    /// Creates a domain in an empty directory, owned by this node's
-    /// identity, whose key is the publisher key. Credentials last
-    /// `credential_ttl` seconds, 30 days by default.
+    /// Creates a domain in an empty directory under a fresh root key, which
+    /// `Opened::root` hands back once; see `create_with_root`. Credentials
+    /// last `credential_ttl` seconds, 30 days by default.
     pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
-        Self::start(open, Self::create_install(credential_ttl)?)
+        let root = crate::RootKey::generate();
+        let created = crate::RootKey::from_secret(root.secret());
+        let mut opened = Self::start(open, Self::create_install(credential_ttl, Arc::new(root))?)?;
+        opened.root = Some(created);
+        Ok(opened)
     }
-    fn create_install(credential_ttl: Option<u64>) -> Result<Install, Failure> {
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
+    /// Creates a domain in an empty directory whose root `root` signs it:
+    /// the genesis and a trusted grant to this device's own identity, which
+    /// it runs on from then on. The root is dropped when the domain is
+    /// written and never stored; renewing and sealing never need it.
+    pub fn create_with_root(
+        open: Open<'_>,
+        credential_ttl: Option<u64>,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<Opened, Failure> {
+        Self::start(open, Self::create_install(credential_ttl, root)?)
+    }
+    fn create_install(
+        credential_ttl: Option<u64>,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
             return Err("credential lifetime must be between a minute and a year".into());
         }
-        Ok(Install::Create { ttl })
+        Ok(Install::Create {
+            ttl,
+            root: std::sync::Mutex::new(Some(root)),
+        })
     }
     // Blocks the caller until the database is open, which a browser cannot.
     #[cfg(not(target_family = "wasm"))]
@@ -431,8 +462,9 @@ impl Database {
     pub(crate) async fn launch_create(
         open: Open<'_>,
         credential_ttl: Option<u64>,
+        root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::launch(open, Self::create_install(credential_ttl)?, None).await
+        Self::launch(open, Self::create_install(credential_ttl, root)?, None).await
     }
     pub(crate) async fn launch_join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
         let install = Self::join_install(&open, invitation)?;
@@ -481,6 +513,7 @@ impl Database {
                     sessions: AtomicU64::new(1),
                 });
                 Ok(Opened {
+                    root: None,
                     network: network.map(|id| NetworkService::new(&shared, id)),
                     database: Arc::new(Self {
                         shared,
@@ -843,8 +876,16 @@ pub struct Session {
 }
 impl Session {
     pub(crate) async fn request(&self, request: Value) -> Result<Value, Failure> {
+        self.request_with_root(request, None).await
+    }
+    pub(crate) async fn request_with_root(
+        &self,
+        request: Value,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<Value, Failure> {
         let call = json!({"version":1,"scope":serde_json::from_str::<Value>(&self.scope)?,"request":request});
-        let response: Value = serde_json::from_str(&self.call(call.to_string()).await?)?;
+        let response: Value =
+            serde_json::from_str(&self.call_with_root(call.to_string(), root).await?)?;
         if response["status"] != "ok" {
             return Err(Box::new(crate::CallFailure {
                 code: response["error"]["code"]
@@ -903,9 +944,18 @@ impl Session {
             .await
             .map(drop)
     }
-    async fn tips<T: serde::de::DeserializeOwned>(&self, mut request: Value) -> Result<T, Failure> {
+    async fn tips<T: serde::de::DeserializeOwned>(&self, request: Value) -> Result<T, Failure> {
+        self.tips_with_root(request, None).await
+    }
+    async fn tips_with_root<T: serde::de::DeserializeOwned>(
+        &self,
+        mut request: Value,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<T, Failure> {
         request["type"] = json!("tips");
-        Ok(serde_json::from_value(self.request(request).await?)?)
+        Ok(serde_json::from_value(
+            self.request_with_root(request, root).await?,
+        )?)
     }
     /// The followed bookmark and tip; see `docs/runtime/tips-and-bookmarks.md`.
     pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
@@ -920,13 +970,18 @@ impl Session {
     pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"seal","close":close})).await
     }
-    /// The owner recovers the followed tip when no ordinary seal can end its
+    /// The root recovers the followed tip when no ordinary seal can end its
     /// coordinated log: one `continue` seal replacing the log's exact head.
-    pub async fn recover(&self) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"recover"})).await
+    /// Without the root it fails with `publisher_required`.
+    pub async fn recover(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.tips_with_root(json!({"action":"recover"}), Some(root))
+            .await
     }
-    /// The owner signs the minimum of trusted acknowledgments that makes a
-    /// seal on the genesis line final.
+    /// A trusted node signs the minimum of trusted acknowledgments that
+    /// makes a seal on the genesis line final.
     pub async fn set_genesis_minimum(
         &self,
         minimum_in_sync: u32,
@@ -970,13 +1025,34 @@ impl Session {
     pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"follow","name":name})).await
     }
-    /// The owner grants `identity` trust for this domain: it opens tips and
-    /// moves bookmarks backward or sideways.
-    pub async fn trust(&self, identity: &str) -> Result<crate::TrustGrant, Failure> {
-        self.tips(json!({"action":"trust","identity":identity}))
+    /// The root makes `identity`, an issuer identity, a trusted identity of
+    /// this domain: its nodes are trusted nodes, which renew, revoke and
+    /// seal, open tips and move bookmarks backward or sideways. The grant
+    /// never expires; only `revoke_trusted` ends it. Every trusted node
+    /// learns it from the registry. Without the root it fails with
+    /// `publisher_required`.
+    pub async fn trust(
+        &self,
+        identity: &str,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TrustGrant, Failure> {
+        self.tips_with_root(json!({"action":"trust","identity":identity}), Some(root))
             .await
     }
-    /// Installs a trusted grant the owner issued to this device's identity.
+    /// The root revokes the trusted identity `identity`, every node of it
+    /// and every identity it first enrolled, wherever those renewed since;
+    /// all keys rotate. Their devices see why and enroll again with an
+    /// honest trusted node. Without the root it fails with
+    /// `publisher_required`; no trusted node revokes another.
+    pub async fn revoke_trusted(
+        &self,
+        identity: &str,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<Value, Failure> {
+        self.request_with_root(json!({"type":"revoke","identity":identity}), Some(root))
+            .await
+    }
+    /// Installs a trusted grant the root issued to this device's identity.
     pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"install_trust","grant":grant}))
             .await
@@ -1042,6 +1118,17 @@ impl Session {
     }
 
     pub async fn call(&self, request: String) -> Result<String, Failure> {
+        self.call_with_root(request, None).await
+    }
+    /// As `call`, with the root signer a root-only request needs: granting
+    /// or revoking trust and recovery. It signs inside this call and is
+    /// dropped when the call ends; a request may instead carry
+    /// `"root": {"phrase": ...}` or `{"secret": ...}`.
+    pub async fn call_with_root(
+        &self,
+        request: String,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<String, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
         }
@@ -1064,6 +1151,7 @@ impl Session {
                 session,
                 bytes,
                 ending: self.closed.clone(),
+                root,
                 reply,
             })
             .await?;
@@ -1150,8 +1238,14 @@ async fn identity(
         return Err("existing identity has no runtime database; recovery is required".into());
     }
     match install {
-        Install::Create { ttl } => {
-            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone())?;
+        Install::Create { ttl, root } => {
+            let root = root
+                .lock()
+                .map_err(|_| "root poisoned")?
+                .take()
+                .ok_or(crate::enrollment::PublisherRequired("creating a domain"))?;
+            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
+            drop(root);
             let vault = settings.vault(secrets);
             let started = async {
                 let Some(network) = network else {
@@ -1800,6 +1894,7 @@ async fn run_inner(
                 session,
                 bytes,
                 ending,
+                root,
                 mut reply,
             } => {
                 let Ok(permit) = budget.clone().try_acquire_owned() else {
@@ -1824,11 +1919,11 @@ async fn run_inner(
                     let _permit = permit;
                     let response = if waits {
                         tokio::select! {
-                            response = dispatch(&bytes, client, &node) => response,
+                            response = dispatch(&bytes, client, &node, None) => response,
                             () = reply.closed() => return,
                         }
                     } else {
-                        dispatch(&bytes, client, &node).await
+                        dispatch(&bytes, client, &node, root).await
                     };
                     if ending.load(Ordering::SeqCst) {
                         node.end_sessions(Some(session));
@@ -2065,13 +2160,19 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
-async fn dispatch(bytes: &[u8], client: Result<Arc<Client>, Failure>, node: &Node) -> Vec<u8> {
+async fn dispatch(
+    bytes: &[u8],
+    client: Result<Arc<Client>, Failure>,
+    node: &Node,
+    root: Option<Arc<dyn crate::IdentityProvider>>,
+) -> Vec<u8> {
     let result: Result<Value, Failure> = async {
         let call: Value = serde_json::from_slice(bytes)?;
         if call["version"] != 1 || call["scope"] != serde_json::to_value(node.domain().scope)? {
             return Err("foreign scope or SDK version".into());
         }
-        Box::pin(node.dispatch(&*client?, &call["request"])).await
+        let root = node::Root::of(&call["request"], root)?;
+        Box::pin(node.dispatch_with(&*client?, &call["request"], &root)).await
     }
     .await;
     let response = match result {
@@ -2382,6 +2483,7 @@ mod tests {
                     session: session.id,
                     bytes: bytes.clone(),
                     ending: session.closed.clone(),
+                    root: None,
                     reply,
                 })
                 .await?;

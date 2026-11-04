@@ -163,7 +163,13 @@ async fn enrolled_schema(
         let vault = settings.vault(&store);
         node(root, settings, vault, transport).await
     } else {
-        let settings = Settings::create(schema, &store, crate::enrollment::DEFAULT_TTL, None)?;
+        let settings = Settings::create(
+            schema,
+            &store,
+            crate::enrollment::DEFAULT_TTL,
+            None,
+            &rocky_credentials::RootKey::generate(),
+        )?;
         settings.save(&path)?;
         let vault = settings.vault(&store);
         let transport = hub
@@ -472,7 +478,7 @@ async fn consumer_sql_allocates_string_ids_with_node_author() -> Result<(), Fail
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));
-    let settings = Settings::create(&schema, &store, crate::enrollment::DEFAULT_TTL, None)?;
+    let settings = Settings::create(&schema, &store, crate::enrollment::DEFAULT_TTL, None, &rocky_credentials::RootKey::generate())?;
     let vault = settings.vault(&store);
     let hub = Arc::new(Hub::default());
     let transport = hub

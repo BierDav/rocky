@@ -98,8 +98,14 @@ async fn synced(device: &Device) -> Result<Value, Failure> {
 fn chain_capability(directory: &Path) -> Result<String, Failure> {
     let chain: CredentialChain =
         serde_json::from_value(identity(directory)?["credentials"].clone())?;
-    let root = chain.0.first().ok_or("empty chain")?;
-    Ok(data_encoding::HEXLOWER.encode(&root.id()?))
+    // The device identity's own link, below the issuing trusted grant.
+    let link = chain
+        .0
+        .iter()
+        .rev()
+        .find(|link| link.capability.kind == rocky_core::PrincipalKind::User)
+        .ok_or("empty chain")?;
+    Ok(data_encoding::HEXLOWER.encode(&link.id()?))
 }
 /// Rows of the registry's typed table in a device's file.
 fn registry_rows(directory: &Path, entry: &str) -> Result<i64, Failure> {

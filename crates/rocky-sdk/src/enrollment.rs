@@ -1,10 +1,11 @@
 //! The SDK's enrollment plumbing over `rocky-credentials`: domain
 //! creation, invitations with a grant profile, supplied credentials,
 //! renewal by any issuer, and revocation with key rotation. Permissions
-//! belong to identities; an identity with issuer authority is an issuer,
-//! and only the owner's identity holds the publisher key. Every node signs
-//! with its own key under its identity's certificate. See
-//! `docs/runtime/sdk-enrollment.md`.
+//! belong to identities; an identity with issuer authority is an issuer.
+//! The publisher key is the domain's offline root: it signs the genesis,
+//! the trusted grants that make trusted nodes and their revocations, and
+//! nothing else. No device holds it. Every node signs with its own key
+//! under its identity's certificate.
 use crate::{
     Failure,
     domain::Domain,
@@ -45,7 +46,8 @@ const CONTACT_VERSION: u32 = 2;
 pub const MAX_CONTACTS: usize = 64;
 /// Contacts one sync pass dials.
 pub const MAX_DIALED: usize = 16;
-const MAX_ISSUERS: usize = 8;
+/// Issuers one device renews with: every trusted node, at most.
+const MAX_ISSUERS: usize = crate::registry::MAX_TRUSTED;
 const MAX_ROUTES: usize = 4;
 const MAX_ADDRESS: usize = 2048;
 /// Default lifetime of issued credentials.
@@ -99,6 +101,33 @@ impl std::fmt::Display for Revoked {
 }
 impl std::error::Error for Revoked {}
 
+/// A root-only action without the root's signer, or with another key:
+/// creating the domain, granting or revoking trust, and recovery.
+#[derive(Debug)]
+pub struct PublisherRequired(pub &'static str);
+impl std::fmt::Display for PublisherRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "publisher_required: {} needs the domain's root key",
+            self.0
+        )
+    }
+}
+impl std::error::Error for PublisherRequired {}
+/// The root signer one call carries, checked against the pinned publisher
+/// key; never stored.
+pub(crate) fn root_signer<'a>(
+    root: Option<&'a dyn IdentityProvider>,
+    publisher: PublicKey,
+    action: &'static str,
+) -> Result<&'a dyn IdentityProvider, Failure> {
+    match root {
+        Some(root) if root.public_key()? == publisher => Ok(root),
+        _ => Err(Box::new(PublisherRequired(action))),
+    }
+}
+
 /// A revocation refused because 1,024 live statements are held.
 #[derive(Debug)]
 pub(crate) struct RevocationSetFull;
@@ -133,10 +162,9 @@ pub struct Settings {
     pub schema: Schema,
     pub mesh: MeshId,
     pub domain: DomainId,
-    /// The pinned trust anchor: the domain's publisher key, the owner
-    /// identity's.
+    /// The pinned trust anchor: the domain's publisher key, its offline root.
     pub publisher: PublicKey,
-    /// The identity this node belongs to; the owner's is the publisher key.
+    /// The identity this node belongs to; never the root.
     pub identity: PublicKey,
     /// Whether the identity's key is in the secret store; otherwise the
     /// application's identity provider supplies it.
@@ -189,9 +217,6 @@ pub struct Settings {
     pub author_high_water: u32,
     /// Envelopes this device sends, by delivery digest, until delivered.
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
-    /// The owner's trusted grant to this identity for its domain, through
-    /// which it signs tip statements. See `docs/runtime/tips-and-bookmarks.md`.
-    pub trusted: Option<SignedCapability>,
     /// This identity's counter claim right, which its node presents to the
     /// coordination service.
     pub claims: Option<crate::claims::Holding>,
@@ -277,18 +302,20 @@ pub struct Rotation {
     /// The recorded nodes it revokes, whose registry tombstones complete it.
     pub nodes: Vec<PublicKey>,
     pub statement: Revocation,
+    /// The root's signature, made when it began: the root is not there to
+    /// sign when an interrupted revocation completes.
+    pub signed: Option<SignedRevocation>,
     pub statements: Vec<Commitment>,
     pub keys: BTreeMap<String, u64>,
     pub groups: BTreeMap<String, u64>,
 }
 /// What a revocation ends: one node's certificate, or an identity and every
-/// node of it.
+/// node of it. Of a trusted identity only the root revokes either, and its
+/// revocation also ends every identity the trusted one first enrolled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Revoke {
     Node(PublicKey),
     Identity(PublicKey),
-    /// One trusted grant, by its capability id; the identity keeps its others.
-    Trust(Commitment),
     /// A claim right, by its grant id: every link of it, whoever signed it.
     Claims(Commitment),
 }
@@ -794,7 +821,7 @@ impl Settings {
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
         let time = now()?;
         for signed in set.statements() {
-            if signed.statement.live(time) && self.revocations.get(&signed.id()?).is_none() {
+            if signed.live(time) && self.revocations.get(&signed.id()?).is_none() {
                 return Ok(true);
             }
         }
@@ -1228,13 +1255,16 @@ impl Settings {
             })
     }
 
-    /// A new domain owned by this node's identity: `provider`'s, or one
-    /// made in the secret store. Its key is the publisher key.
+    /// A new domain whose root `root` signs its genesis and a trusted
+    /// grant to this node's identity: `provider`'s, or one made in the
+    /// secret store. The root's key is the publisher key; it is used here
+    /// and dropped, never stored.
     pub fn create(
         schema: &Schema,
         store: &std::sync::Arc<dyn crate::SecretStore>,
         ttl: u64,
         provider: Option<Arc<dyn IdentityProvider>>,
+        root: &dyn IdentityProvider,
     ) -> Result<Self, Failure> {
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
@@ -1246,18 +1276,16 @@ impl Settings {
                 Arc::new(crate::identities::StoredIdentity(vault.clone()))
             }
         };
-        let publisher = identity.public_key()?;
+        let publisher = root.public_key()?;
+        if identity.public_key()? == publisher {
+            return Err("a device's identity is never the root key".into());
+        }
         vault.create("node")?;
         vault.create("transport")?;
         vault.create("credential")?;
         vault.create(crate::groups::NAMING_ROLE)?;
         let (mesh, domain) = (MeshId(random()), DomainId(random()));
         let bound = Domain::new(schema, *publisher.as_bytes(), mesh, domain)?;
-        crate::mesh::create_root(
-            &vault,
-            (&*identity, &CredentialChain::default()),
-            bound.scope,
-        )?;
         // The registry's key is made like any collection's.
         let mut keys = BTreeMap::new();
         for (name, _) in bound.scopes() {
@@ -1266,51 +1294,29 @@ impl Settings {
             vault.put(&key_role(name, epoch), &key)?;
             keys.insert(name.to_owned(), vec![epoch]);
         }
-        let manifest = SignedManifest::sign(&bound.manifest(), &*identity)?;
-        let mut settings = Self {
-            version: VERSION,
-            installation,
-            schema: schema.clone(),
-            mesh,
-            domain,
-            publisher,
-            identity: publisher,
-            stored_identity,
-            provider,
-            genesis: HEXLOWER.encode(&manifest.to_bytes()?),
-            generation: schema.version,
-            engine: rocky_core::EngineIdentity::current(),
-            pending: None,
-            pending_follow: None,
-            bootstrap: None,
-            revocations: RevocationSet::new(),
-            credentials: CredentialChain(Vec::new()),
+        let manifest = SignedManifest::sign(&bound.manifest(), root)?;
+        let grant = Authority::owner(root).issue_trusted(
+            identity.public_key()?,
+            bound.scope,
+            AuthorRange::ALL,
+            now()?,
+        )?;
+        let mut settings = Self::installed(
+            (installation, stored_identity),
+            (publisher, identity.public_key()?, identity.clone()),
+            (mesh, domain, schema.clone()),
+            HEXLOWER.encode(&manifest.to_bytes()?),
             ttl,
-            profile: Profile::Issuer,
-            keys,
-            authority: Some(Issuing::default()),
-            issuers: Vec::new(),
-            enrollment_upstream: None,
-            delivery_nodes: BTreeMap::new(),
-            contact_refs: BTreeMap::new(),
-            resolved_refs: BTreeSet::new(),
-            contact_meta: BTreeMap::new(),
-            peers: BTreeMap::new(),
-            enrollment_routes: BTreeMap::new(),
-            logged_out: false,
-            minting: None,
-            granted_authors: BTreeMap::new(),
-            author_high_water: 0,
-            deliveries: BTreeMap::new(),
-            trusted: None,
-            claims: None,
-            revocations_pushed: None,
-            groups: BTreeMap::new(),
-            epoch_statements: BTreeMap::new(),
-        };
-        // A supplied owner identity may certify several nodes.
+        );
+        if stored_identity {
+            settings.provider = None;
+        }
+        settings.keys = keys;
+        settings.authority = Some(Issuing::default());
         settings.minting = Some(settings.minting_of(AuthorRange::ALL));
-        settings.credentials = settings.owner_chain(&vault, &bound)?;
+        let links = CredentialChain(vec![grant]);
+        crate::mesh::create_root(&vault, (&*identity, &links), bound.scope)?;
+        settings.credentials = settings.certify(&vault, links, &bound)?;
         Ok(settings)
     }
     /// A node of `identity` about to be installed in `domain`, holding
@@ -1357,7 +1363,6 @@ impl Settings {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
-            trusted: None,
             claims: None,
             revocations_pushed: None,
             groups: BTreeMap::new(),
@@ -1367,47 +1372,68 @@ impl Settings {
     fn validity(&self) -> Result<(u64, u64, u64), Failure> {
         Ok((now()?, self.ttl, SKEW))
     }
-    /// The owner's trusted grant to `identity` for this domain: tip and
-    /// bookmark authority with no grants, over the author range a device
-    /// of that identity was recorded with.
-    pub fn issue_trust(
+    /// The root's trusted grant to `identity`, an issuer identity a device
+    /// of which is recorded, with the registry row that tells every trusted
+    /// node: issuer authority over its recorded author range, tip and
+    /// bookmark control, and no expiry. `root` signs and is dropped.
+    pub fn trust(
         &self,
-        vault: &Vault,
         registry: &Registry,
         identity: PublicKey,
-    ) -> Result<SignedCapability, Failure> {
-        if !self.owner() {
-            return Err("only the owner grants trust".into());
-        }
-        if identity == self.publisher {
-            return Err("the owner needs no trusted grant".into());
-        }
-        if self.tombstoned(&identity) || self.revocations.revokes(&identity) {
+        root: Option<&dyn IdentityProvider>,
+    ) -> Result<(SignedCapability, Changes), Failure> {
+        let root = root_signer(root, self.publisher, "granting trust")?;
+        if self.tombstoned(&identity) || self.revocations.revokes_origin(&identity) {
             return Err("identity was revoked".into());
         }
-        let authors = registry
+        let records: Vec<_> = registry
             .records
             .values()
             .filter(|record| {
-                record
-                    .device
-                    .as_ref()
-                    .is_some_and(|device| device.user == identity)
+                !record.revoked
+                    && record
+                        .device
+                        .as_ref()
+                        .is_some_and(|device| device.user == identity)
             })
+            .collect();
+        let authors = records
+            .iter()
             .find_map(|record| record.capability().map(|capability| capability.authors))
             .ok_or("no device of this identity is recorded")?;
-        let owner = self.identity(vault)?;
-        Ok(Authority::owner(&*owner).issue_trusted(
+        if !records
+            .iter()
+            .any(|record| record.profile().is_some_and(Profile::issues))
+        {
+            return Err("only an identity enrolled with an issuer invitation is trusted".into());
+        }
+        let live = registry.trusted_identities(&self.revocations);
+        if !live.contains(&identity) && live.len() >= crate::registry::MAX_TRUSTED {
+            return Err(format!(
+                "a domain has at most {} trusted identities",
+                crate::registry::MAX_TRUSTED
+            )
+            .into());
+        }
+        let grant = Authority::owner(root).issue_trusted(
             identity,
             self.domain()?.scope,
-            Vec::new(),
             authors,
-            self.validity()?,
-        )?)
+            now()?,
+        )?;
+        let mut changes = Changes::default();
+        changes.trusted(
+            &identity,
+            &crate::registry::TrustedRecord {
+                grant: grant.clone(),
+                granted: now()?,
+            },
+        )?;
+        Ok((grant, changes))
     }
-    /// Keeps `link` once it is the owner's current trusted grant to this
-    /// identity for its domain.
-    pub fn install_trust(&mut self, path: &Path, link: SignedCapability) -> Result<(), Failure> {
+    /// Takes `link` as this issuer identity's credentials once it is the
+    /// root's current trusted grant to it: its nodes are trusted nodes.
+    pub fn install_trust(&mut self, vault: &Vault, link: SignedCapability) -> Result<(), Failure> {
         let identity = CredentialChain(vec![link.clone()]).trusted_identity(
             self.publisher,
             self.domain()?.scope,
@@ -1417,13 +1443,17 @@ impl Settings {
         if identity != self.identity {
             return Err("the trusted grant names another identity".into());
         }
-        self.trusted = Some(link);
-        self.save(path)
+        if !self.issuer() {
+            return Err("only an issuer identity becomes trusted".into());
+        }
+        let domain = self.domain()?;
+        self.credentials = self.certify(vault, CredentialChain(vec![link]), &domain)?;
+        Ok(())
     }
     /// The chain this identity signs tip statements through as a trusted
-    /// identity, while its grant holds.
+    /// identity, while its grant holds: its root-signed grant.
     pub(crate) fn trusted_links(&self) -> Option<CredentialChain> {
-        let chain = CredentialChain(vec![self.trusted.clone()?]);
+        let chain = self.identity_links();
         chain
             .trusted_identity(
                 self.publisher,
@@ -1434,17 +1464,6 @@ impl Settings {
             .ok()
             .filter(|identity| *identity == self.identity)
             .map(|_| chain)
-    }
-    /// The owner's own chain, signed afresh: its identity's issuer
-    /// authority over every author number, then this node's certificate.
-    fn owner_chain(&self, vault: &Vault, domain: &Domain) -> Result<CredentialChain, Failure> {
-        let identity = self.identity(vault)?;
-        let root = Authority::owner(&*identity).issue_issuer(
-            self.publisher,
-            self.minting.map(|minting| minting.range),
-            self.validity()?,
-        )?;
-        self.certify(vault, CredentialChain(vec![root]), domain)
     }
     /// An identity capability `authority` signs for `identity`: issuer
     /// authority with `authors`, or `grants` and their whole partitions.
@@ -1467,6 +1486,23 @@ impl Settings {
             (1, authors),
             self.validity()?,
         )?)
+    }
+    /// The origin this identity's own link names: `None` for a trusted
+    /// identity, which the root enrolled.
+    pub(crate) fn link_origin(&self) -> Result<Option<PublicKey>, Failure> {
+        Ok(match self.identity_links().0.last() {
+            Some(link) => link.capability.extended()?.origin,
+            None => None,
+        })
+    }
+    /// The origin of what this identity enrolls: itself when trusted.
+    pub(crate) fn issuing_origin(&self) -> Result<Option<PublicKey>, Failure> {
+        Ok(match self.identity_links().0.last() {
+            Some(link) if link.capability.extended()?.trusted.is_some() => {
+                Some(link.capability.subject)
+            }
+            _ => self.link_origin()?,
+        })
     }
     fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
         self.authority
@@ -1887,6 +1923,7 @@ impl Settings {
                 kind: registry::Kind::Paired,
                 profile: Some(profile.clone()),
                 issuer,
+                origin: issued.capability.extended()?.origin,
 
                 enrolled: time,
                 invitation: Some(HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token))),
@@ -2005,6 +2042,7 @@ impl Settings {
                 kind: registry::Kind::Granted,
                 profile: Some(profile),
                 issuer,
+                origin: capability.capability.extended()?.origin,
 
                 enrolled: time,
                 invitation: None,
@@ -2105,6 +2143,7 @@ impl Settings {
                     kind: registry::Kind::Delegated,
                     profile: Some(profile),
                     issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
+                    origin: self.issuing_origin()?,
 
                     enrolled: now()?,
                     invitation: None,
@@ -2271,6 +2310,7 @@ impl Settings {
                 kind: registry::Kind::Created,
                 profile: Some(self.profile.clone()),
                 issuer: node,
+                origin: self.link_origin()?,
 
                 enrolled: now()?,
                 invitation: None,
@@ -2289,6 +2329,19 @@ impl Settings {
             },
             known,
         )?;
+        // A trusted node records its own grant: only the root revokes it.
+        if let Some(links) = self.trusted_links()
+            && !registry.trusted.contains_key(&self.identity)
+        {
+            let grant = links.0.first().ok_or("missing trusted grant")?.clone();
+            changes.trusted(
+                &self.identity,
+                &registry::TrustedRecord {
+                    granted: grant.capability.not_before,
+                    grant,
+                },
+            )?;
+        }
         // A revocation interrupted before its tombstone was written, or one
         // learned from a statement.
         for (other, record) in &registry.records {
@@ -2504,7 +2557,6 @@ impl Settings {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
-            trusted: None,
             claims: None,
             revocations_pushed: None,
             groups: BTreeMap::new(),
@@ -2693,7 +2745,6 @@ impl Joining {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
-            trusted: None,
             claims: None,
             revocations_pushed: None,
             groups: BTreeMap::new(),
@@ -2913,11 +2964,12 @@ impl Settings {
         }
         Err(failure)
     }
-    /// Renews this device's credentials. A member asks its issuers in
-    /// turn, `first` before the others. The owner signs its own; with
-    /// `learn` it first asks the other issuers, which is how it hears of
-    /// their revocations. Another issuer asks issuers above it, and
-    /// otherwise certifies its node again under the identity it holds.
+    /// Renews this device's credentials; the root is never needed. A member
+    /// asks its issuers in turn, `first` before the others. A trusted node,
+    /// whose grant never expires, certifies its node again; with `learn` it
+    /// first asks the other issuers, which is how it hears of their
+    /// revocations. Another issuer asks issuers above it, and otherwise
+    /// certifies its node again under the identity it holds.
     pub async fn request_renewal(
         &self,
         vault: &Vault,
@@ -2926,7 +2978,7 @@ impl Settings {
         first: Option<PublicKey>,
     ) -> Result<Renewed, Failure> {
         if self.issuer() {
-            if (learn || !self.owner())
+            if (learn || self.trusted_links().is_none())
                 && let Some(transport) = transport
             {
                 match self.renew_remotely(vault, transport, first).await {
@@ -3071,16 +3123,11 @@ impl Settings {
     fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
         self.issue_own(vault)
     }
-    /// An issuer's own chain for the current definition: the owner signs
-    /// its identity's authority afresh; another issuer certifies its node
-    /// again under the issuer links it holds, which an issuer above it
-    /// renews.
+    /// An issuer's own chain for the current definition: its node certified
+    /// again under the links it holds, which a trusted grant never needs
+    /// renewed and an issuer above renews otherwise.
     pub(crate) fn issue_own(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
-        let domain = self.domain()?;
-        if self.owner() {
-            return self.owner_chain(vault, &domain);
-        }
-        self.certify(vault, self.identity_links(), &domain)
+        self.certify(vault, self.identity_links(), &self.domain()?)
     }
     /// Whether a renewed capability is this identity's own, with the
     /// authority it holds and the grants it holds or its profile's over
@@ -3242,6 +3289,7 @@ impl Settings {
                 kind: registry::Kind::Renewed,
                 profile: Some(profile_of(&granted, &domain)),
                 issuer: me,
+                origin: prior.extended()?.origin,
 
                 enrolled: time,
                 invitation: None,
@@ -3318,6 +3366,7 @@ impl Settings {
                 kind: registry::Kind::Partition,
                 profile: None,
                 issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
+                origin: self.issuing_origin()?,
 
                 enrolled: now()?,
                 invitation: None,
@@ -3341,10 +3390,15 @@ impl Settings {
     /// the registry recorded of the nodes, and the key epoch each collection
     /// and group partition they could read rotates to, the held maximum
     /// plus one. The intent is all that changes; `rotate` signs and
-    /// completes it, now or at the next open.
-    pub fn begin_revocation(&mut self, target: Revoke, registry: &Registry) -> Result<(), Failure> {
-        // Another issuer is revoked like any node; it never held the
-        // publisher key (`docs/runtime/sdk-enrollment.md`).
+    /// completes it, now or at the next open. A trusted identity, or one of
+    /// its nodes, only `root` revokes: it signs here, and the statement
+    /// also ends every identity that one first enrolled.
+    pub fn begin_revocation(
+        &mut self,
+        target: Revoke,
+        registry: &Registry,
+        root: Option<&dyn IdentityProvider>,
+    ) -> Result<(), Failure> {
         let own = self.identity;
         let own_node = self
             .credentials
@@ -3352,6 +3406,41 @@ impl Settings {
             .last()
             .and_then(|leaf| leaf.capability.extended().ok())
             .and_then(|extension| extension.node);
+        let user_of = |node: &PublicKey| {
+            registry
+                .get(node)
+                .and_then(|record| record.device.as_ref())
+                .map(|device| device.user)
+        };
+        let trusted = match target {
+            Revoke::Identity(identity) => registry.trusted.contains_key(&identity),
+            Revoke::Node(node) => {
+                user_of(&node).is_some_and(|user| registry.trusted.contains_key(&user))
+            }
+            Revoke::Claims(_) => false,
+        };
+        let root = if trusted {
+            Some(root_signer(
+                root,
+                self.publisher,
+                "revoking a trusted node",
+            )?)
+        } else {
+            None
+        };
+        let nodes_of = |identities: &BTreeSet<PublicKey>| -> Vec<PublicKey> {
+            registry
+                .records
+                .iter()
+                .filter(|(_, record)| {
+                    record
+                        .device
+                        .as_ref()
+                        .is_some_and(|device| identities.contains(&device.user))
+                })
+                .map(|(node, _)| *node)
+                .collect()
+        };
         let nodes: Vec<PublicKey> = match target {
             Revoke::Node(node) => {
                 if own_node == Some(rocky_credentials::PeerId::of(node)) {
@@ -3367,28 +3456,18 @@ impl Settings {
                     return Err("an issuer cannot revoke its own identity".into());
                 }
                 if identity == self.publisher {
-                    return Err("the owner's identity is never revoked".into());
+                    return Err("the root is never revoked".into());
                 }
                 if self.tombstoned(&identity) {
                     return Err("identity is already revoked".into());
                 }
-                registry
-                    .records
-                    .iter()
-                    .filter(|(_, record)| {
-                        record
-                            .device
-                            .as_ref()
-                            .is_some_and(|device| device.user == identity)
-                    })
-                    .map(|(node, _)| *node)
-                    .collect()
-            }
-            Revoke::Trust(_) => {
-                if !self.owner() {
-                    return Err("only the owner revokes a trusted grant".into());
+                // A trusted identity's nodes and those of the identities it
+                // first enrolled, which its revocation ends too.
+                let mut identities = BTreeSet::from([identity]);
+                if trusted {
+                    identities.extend(registry.enrolled_by(identity));
                 }
-                Vec::new()
+                nodes_of(&identities)
             }
             Revoke::Claims(_) => Vec::new(),
         };
@@ -3406,30 +3485,40 @@ impl Settings {
             .collect();
         // A node loses its certificate; an identity also its
         // capabilities, so no node of it renews.
+        let issuer = if root.is_some() { self.publisher } else { own };
         let statement = match target {
             Revoke::Node(node) => Revocation {
                 app: domain.manifest().app,
-                issuer: own,
+                issuer,
                 time,
                 nodes: [rocky_credentials::PeerId::of(node)].into(),
                 identities: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
             },
+            // The cascade is the root statement's: it names the trusted
+            // identity alone, whose origin the enrolled ones carry.
             Revoke::Identity(identity) => Revocation {
                 app: domain.manifest().app,
-                issuer: own,
+                issuer,
                 time,
                 nodes: nodes
                     .iter()
+                    .filter(|node| user_of(node) == Some(identity))
                     .map(|node| rocky_credentials::PeerId::of(*node))
                     .collect(),
                 identities: [identity].into(),
                 capabilities: records
                     .iter()
                     .filter_map(|record| record.capability)
+                    .chain(
+                        registry
+                            .trusted
+                            .get(&identity)
+                            .and_then(|record| record.grant.id().ok()),
+                    )
                     .collect(),
             },
-            Revoke::Trust(capability) | Revoke::Claims(capability) => Revocation {
+            Revoke::Claims(capability) => Revocation {
                 app: domain.manifest().app,
                 issuer: own,
                 time,
@@ -3438,8 +3527,8 @@ impl Settings {
                 capabilities: [capability].into(),
             },
         };
-        // A trusted grant or claim right reads nothing: no key rotates.
-        let trust = matches!(target, Revoke::Trust(_) | Revoke::Claims(_));
+        // A claim right reads nothing: no key rotates.
+        let trust = matches!(target, Revoke::Claims(_));
         // Only nodes without any record use the full-rotation fallback.
         let recorded = !records.is_empty();
         let readable: Vec<Profile> = records
@@ -3496,14 +3585,22 @@ impl Settings {
             }
         }
         // Refused here, before anything is saved, when it is too large.
+        let links = match root {
+            Some(_) => CredentialChain::default(),
+            None => self.issuer_links(),
+        };
         if rocky_credentials::encode(&statement)?.len()
-            + rocky_credentials::encode(&self.issuer_links())?.len()
+            + rocky_credentials::encode(&links)?.len()
             + rocky_credentials::SIGNATURE_OVERHEAD
             > rocky_credentials::MAX_REVOCATION_BYTES
         {
             return Err("the revocation names too many keys".into());
         }
+        let signed = root
+            .map(|root| Authority::owner(root).revoke(statement.clone()))
+            .transpose()?;
         self.issuing("revokes devices")?.rotation = Some(Rotation {
+            signed,
             nodes,
             statements: {
                 let mut ids = self
@@ -3642,6 +3739,7 @@ impl Settings {
                 .into_iter()
                 .collect(),
             statement,
+            signed: None,
             statements,
             keys,
             groups,
@@ -3659,6 +3757,7 @@ impl Settings {
         let Some(Rotation {
             nodes,
             statement,
+            signed,
             statements: ids,
             keys: targets,
             groups,
@@ -3722,9 +3821,10 @@ impl Settings {
             self.groups.insert(address, record);
             fault::check(fault::Stage::Key)?;
         }
-        let signed = match self.revocations.get(&statement.id()?) {
-            Some(held) => held.clone(),
-            None => self.authority(&*identity, &links)?.revoke(statement)?,
+        let signed = match (self.revocations.get(&statement.id()?), signed) {
+            (Some(held), _) => held.clone(),
+            (None, Some(signed)) => signed,
+            (None, None) => self.authority(&*identity, &links)?.revoke(statement)?,
         };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;
@@ -4135,7 +4235,6 @@ impl Settings {
             granted_authors,
             author_high_water,
             deliveries,
-            trusted,
             claims,
             revocations_pushed,
         } = self;
@@ -4166,7 +4265,6 @@ impl Settings {
             && *minting == other.minting
             && *author_high_water == other.author_high_water
             && *deliveries == other.deliveries
-            && *trusted == other.trusted
             && *claims == other.claims
             && *revocations_pushed == other.revocations_pushed
             && self.saved_contacts() == other.saved_contacts()

@@ -133,7 +133,9 @@ async fn status_observation_does_not_block_commits_or_shutdown() -> Result<(), F
 async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let directory = root.path().join("a");
-    let Opened { database, network } = Database::create(open(&directory, None), None)?;
+    let Opened {
+        database, network, ..
+    } = Database::create(open(&directory, None), None)?;
     assert!(network.is_none());
     let client = Client::new(&database)?;
     let domain = client.ok(json!({"type": "domain"})).await;
@@ -217,7 +219,9 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     for (directory, handle) in [("a", 1), ("b", 2)] {
         let directory = root.path().join(directory);
         for round in 0..2 {
-            let Opened { database, network } = Database::open(open(&directory, None))?;
+            let Opened {
+                database, network, ..
+            } = Database::open(open(&directory, None))?;
             assert!(network.is_none());
             let client = Client::new(&database)?;
             // No network is attached, and the domain is bound to none.
@@ -359,6 +363,7 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     let Opened {
         database: member,
         network,
+        ..
     } = Database::join(
         open(&member_directory, Some(Network::Borrowed(dialing.clone()))),
         &invitation,
@@ -403,6 +408,7 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     let Opened {
         database: creator,
         network,
+        ..
     } = Database::open(open(
         &root.path().join("a"),
         Some(Network::Owned(memory(&hub, "a"))),
@@ -442,6 +448,7 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
     let Opened {
         database: member,
         network,
+        ..
     } = Database::join(
         open(&member_directory, Some(Network::Owned(memory(&hub, "b")))),
         &invitation,

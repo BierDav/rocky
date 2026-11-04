@@ -44,12 +44,20 @@ fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
 pub(super) struct Signer {
     pub(super) identity: Arc<dyn IdentityProvider>,
     pub(super) links: CredentialChain,
-    /// The owner or a trusted identity, which open tips.
+    /// A trusted identity, which opens tips.
     opens: bool,
 }
 
 impl Node {
+    #[cfg(test)]
     pub(super) async fn tips(&self, request: &Value) -> Result<Value, Failure> {
+        self.tips_with(request, &super::Root::default()).await
+    }
+    pub(super) async fn tips_with(
+        &self,
+        request: &Value,
+        root: &super::Root,
+    ) -> Result<Value, Failure> {
         let action = request["action"].as_str().unwrap_or_default();
         let scope = self.domain().scope;
         match action {
@@ -111,7 +119,7 @@ impl Node {
                 };
                 self.seal_followed(scope, close).await?;
             }
-            "recover" => self.recover_followed(scope).await?,
+            "recover" => self.recover_followed(scope, root).await?,
             "pull" => {
                 self.replica
                     .want_seal(scope, digest(request, "seal")?)
@@ -198,12 +206,21 @@ impl Node {
                     .parse()
                     .map_err(|_| refused("identity must be a hex key"))?;
                 let registry = self.registry().await?;
-                let link = self
+                let (link, changes) = self
                     .settings
                     .lock()
                     .await
-                    .issue_trust(&self.vault, &registry, identity)
-                    .map_err(refused)?;
+                    .trust(&registry, identity, root.signer())
+                    .map_err(|error| -> Failure {
+                        if error.is::<crate::enrollment::PublisherRequired>() {
+                            error
+                        } else {
+                            refused(error)
+                        }
+                    })?;
+                crate::registry::write(&self.replica, self.domain().registry(), &changes).await?;
+                self.observations.touch();
+                self.wake_sync();
                 return Ok(json!({
                     "identity": identity.to_hex(),
                     "capability": hex(&link.id()?),
@@ -224,10 +241,13 @@ impl Node {
                     .ok_or_else(|| refused("grant must be a hex trusted grant"))?;
                 let mut settings = self.settings.lock().await;
                 let mut draft = (**settings).clone();
-                draft.install_trust(&self.path, link).map_err(refused)?;
+                draft.install_trust(&self.vault, link).map_err(refused)?;
+                draft.save(&self.path)?;
                 *settings = Shared::new(draft);
+                self.apply(&mut settings, Vec::new()).await?;
                 drop(settings);
                 self.observations.touch();
+                self.wake_sync();
             }
             _ => return Err(refused("unknown tips action")),
         }
@@ -547,25 +567,26 @@ impl Node {
         Ok(())
     }
 
-    /// The owner signs as itself, a trusted identity through its trusted
-    /// grant and an issuer through its issuer links.
+    /// A trusted identity signs through its trusted grant and an issuer
+    /// through its issuer links; the root never signs tip statements here.
     pub(super) async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
         let settings = self.settings.lock().await.clone();
+        if let Some(statement) = settings.revocation(&self.path)? {
+            return Err(Box::new(crate::enrollment::Revoked(statement)));
+        }
         let identity = settings.identity(&self.vault)?;
-        let links = settings.identity_links();
-        let trusted =
-            links.0.len() == 1 && links.0[0].capability.extended()?.trusted == Some(scope);
-        let (links, opens) = if settings.owner() {
-            (CredentialChain::default(), true)
-        } else if let Some(trusted) = settings.trusted_links() {
+        let (links, opens) = if let Some(trusted) = settings.trusted_links().filter(|links| {
+            links.0[0]
+                .capability
+                .extended()
+                .is_ok_and(|e| e.trusted == Some(scope))
+        }) {
             (trusted, true)
-        } else if trusted {
-            (links, true)
         } else if settings.issuer() {
             (settings.issuer_links(), false)
         } else {
             return Err(refused(
-                "only the owner, a trusted identity or an issuer signs tip statements",
+                "only a trusted identity or an issuer signs tip statements",
             ));
         };
         Ok(Signer {
@@ -722,14 +743,16 @@ impl Node {
         self.list_checkpoints(scope).await
     }
 
-    /// The owner recovers the followed tip when no ordinary seal can end its
+    /// The root recovers the followed tip when no ordinary seal can end its
     /// log: it seals the tip with `continue`, replacing the log's exact
     /// head. Bookmarks on the tip follow the seal.
-    async fn recover_followed(&self, scope: Scope) -> Result<(), Failure> {
+    async fn recover_followed(&self, scope: Scope, root: &super::Root) -> Result<(), Failure> {
         let settings = self.settings.lock().await.clone();
-        if !settings.owner() {
-            return Err(refused("only the owner recovers a stuck tip"));
-        }
+        let root = crate::enrollment::root_signer(
+            root.signer(),
+            settings.publisher,
+            "recovering a stuck tip",
+        )?;
         let coordinator = self
             .replica
             .domain_log()
@@ -754,7 +777,6 @@ impl Node {
             .seal_frontier(scope, false)
             .await
             .map_err(refused)?;
-        let identity = settings.identity(&self.vault)?;
         let seal = SignedSeal::sign(
             SealStatement {
                 format: SEAL_FORMAT,
@@ -766,7 +788,7 @@ impl Node {
                 },
                 recovery: Some(recovery),
             },
-            &*identity,
+            root,
         )?;
         let id = seal.id()?;
         self.publish_tips(scope, vec![TipStatement::Seal(seal)], |graph| {
@@ -778,21 +800,23 @@ impl Node {
         .await
     }
 
-    /// The owner signs the minimum of trusted acknowledgments that makes a
-    /// seal on the genesis line final.
+    /// A trusted node signs the minimum of trusted acknowledgments that
+    /// makes a seal on the genesis line final.
     async fn sign_genesis_minimum(&self, scope: Scope, minimum: u32) -> Result<(), Failure> {
-        let settings = self.settings.lock().await.clone();
-        if !settings.owner() {
-            return Err(refused("only the owner signs the genesis line's minimum"));
+        let signer = self.tip_signer(scope).await?;
+        if !signer.opens {
+            return Err(refused(
+                "only a trusted node signs the genesis line's minimum",
+            ));
         }
-        let identity = settings.identity(&self.vault)?;
-        let line = SignedGenesisLine::sign(
+        let line = SignedGenesisLine::endorse(
             GenesisLineStatement {
                 format: GENESIS_LINE_FORMAT,
                 scope,
                 minimum_in_sync: minimum,
             },
-            &*identity,
+            &*signer.identity,
+            &signer.links,
         )?;
         self.publish_tips(scope, vec![TipStatement::GenesisLine(line)], |_| Ok(()))
             .await

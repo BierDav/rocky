@@ -79,7 +79,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         .try_into()
         .map_err(|_| "capability length")?;
     assert!(statement.statement.capabilities.contains(&capability));
-    assert!(set.ends(old_chain.0.last().ok_or("node leaf")?)?);
+    assert!(set.ends_chain(&old_chain)?);
     // The same verifier used for incoming frames refuses A's assigned author.
     let leaf = old_chain.0.last().ok_or("node leaf")?;
     let publisher = state["publisher"].as_str().ok_or("publisher")?.parse()?;
@@ -227,7 +227,15 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
     sync(&b).await?;
-    b.ok(json!({"type":"revoke","node":a.node().await})).await;
+    // A is the creating device's trusted node: an issuer revokes it only
+    // with the root, and without it the refusal is typed.
+    let refused = b
+        .call(json!({"type":"revoke","node":a.node().await}))
+        .await
+        .expect_err("needs the root");
+    assert_eq!(refused["code"], "publisher_required", "{refused}");
+    b.ok(json!({"type":"revoke","node":a.node().await,"root":a.root()}))
+        .await;
     assert_eq!(
         identity(root, "b")?["keys"]["issuer_registry"],
         json!([1, 2])

@@ -101,6 +101,14 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
         "b",
         &a.invite_as(json!({"kind": "issuer"})).await,
     )?;
+    // The root trusts the second issuer; only it may later revoke the creator.
+    let principal = session(&b).await["principal"].clone();
+    let grant = a
+        .ok(json!({"type":"tips","action":"trust","identity":principal,"root":a.root()}))
+        .await;
+    b.ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    let root_key = a.root();
     let (a_node, b_node) = (a.node().await, b.node().await);
     // Each issuer knows the other's routes; no keys or author numbers are
     // shared beyond the publisher key.
@@ -159,14 +167,23 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     drop(a);
     std::fs::remove_dir_all(root.join("a"))?;
 
-    // An issuer cannot revoke itself; it revokes the lost one.
+    // A trusted node revokes no trusted node, itself included, without
+    // the root; with it, it revokes the lost one.
     let error = b
         .call(json!({"type": "revoke", "node": b_node}))
         .await
         .err()
         .ok_or("revoked itself")?;
-    assert_eq!(error["code"], "rejected", "{error}");
-    let revoked = b.ok(json!({"type": "revoke", "node": a_node})).await;
+    assert_eq!(error["code"], "publisher_required", "{error}");
+    let error = b
+        .call(json!({"type": "revoke", "node": a_node}))
+        .await
+        .err()
+        .ok_or("revoked a trusted node without the root")?;
+    assert_eq!(error["code"], "publisher_required", "{error}");
+    let revoked = b
+        .ok(json!({"type": "revoke", "node": a_node, "root": root_key}))
+        .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     assert_issuers(root, "b", &[])?;
     assert!(
@@ -191,8 +208,16 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     early.ok(json!({"type": "renew"})).await;
     let after = session(&early).await;
     assert_eq!(after["revocations"]["statements"], 1);
-    // A chain through the second issuer expires no later than its own.
-    assert_eq!(after["expires"], session(&b).await["expires"]);
+    // A device chain keeps its own lifetime; the trusted grant above it
+    // never expires.
+    let expires = |session: &Value| -> u64 {
+        session["expires"]
+            .as_str()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    assert_eq!(expires(&session(&b).await), u64::MAX);
+    assert!(expires(&before) <= expires(&after) && expires(&after) < u64::MAX);
     assert_issuers(root, "early", &[&b_node])?;
     assert!(
         identity(root, "early")?["contact_refs"]

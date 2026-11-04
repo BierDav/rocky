@@ -17,6 +17,10 @@ enum Mode {
     Create {
         #[serde(default)]
         credential_ttl: Option<u64>,
+        /// The root's 24-word phrase; without one a fresh root is made and
+        /// handed out once by `Engine::take_root`.
+        #[serde(default)]
+        root_phrase: Option<String>,
     },
     Join {
         invitation: String,
@@ -40,6 +44,7 @@ pub struct Engine {
     database: Arc<Database>,
     session: Session,
     network: Option<NetworkService>,
+    root: std::sync::Mutex<Option<crate::RootKey>>,
 }
 impl Engine {
     /// Opens a database. Without `secrets`, keys are owner-only files in
@@ -95,8 +100,20 @@ impl Engine {
             network: Some(network),
             coordination,
         };
-        let Opened { database, network } = match &options.mode {
-            Mode::Create { credential_ttl } => Database::create(open, *credential_ttl)?,
+        let Opened {
+            database,
+            network,
+            root,
+        } = match &options.mode {
+            Mode::Create {
+                credential_ttl,
+                root_phrase: Some(phrase),
+            } => Database::create_with_root(
+                open,
+                *credential_ttl,
+                Arc::new(crate::RootKey::from_phrase(phrase)?),
+            )?,
+            Mode::Create { credential_ttl, .. } => Database::create(open, *credential_ttl)?,
             Mode::Join { invitation } => Database::join(open, invitation)?,
             Mode::Resume => Database::open(open)?,
         };
@@ -104,6 +121,7 @@ impl Engine {
             session: database.session(),
             database,
             network,
+            root: std::sync::Mutex::new(root),
         }))
     }
     pub fn scope(&self) -> String {
@@ -111,6 +129,14 @@ impl Engine {
     }
     pub async fn call(&self, request: String) -> Result<String, Failure> {
         self.session.call(request).await
+    }
+    /// The root key a create without `root_phrase` made, once: show its
+    /// phrase to the user. Rocky keeps no copy.
+    pub fn take_root(&self) -> Option<crate::RootKey> {
+        self.root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
     pub async fn close(&self) -> Result<(), Failure> {
         if let Some(network) = &self.network {

@@ -1009,3 +1009,69 @@ points, and the `board_cap` assertion bounds a board's points.
     rocky-sdk, rocky-secure and rocky-coordinator in Chromium 542 passed,
     1 ignored; release `relational_soak` 100 seeds from 20000 passed
     (389 s).
+
+## Offline root key
+
+- Model: the publisher key is the domain's offline root (`RootKey`: a
+  32-byte secret, e.g. a passkey's PRF output, or a 24-word phrase; or any
+  `IdentityProvider`). Create signs the genesis and a trusted grant to the
+  creating device's own identity, then drops the root. Root-only calls
+  (trust, revoking a trusted identity or its nodes) take it per call
+  (`"root": {"phrase"|"secret"}`, `Session::trust`/`revoke_trusted`) and
+  otherwise fail with `publisher_required`. Trusted nodes renew, invite,
+  revoke ordinary devices, seal and sign the genesis minimum; none revokes
+  another. Device credential lifetime stays configurable at create and per
+  invitation profile.
+- Grants and provenance: trusted grants never expire and are never
+  renewed; only a root statement (empty chain) ends one. Credential
+  extension v8 carries `origin`, the trusted identity that first enrolled
+  an identity, kept across renewals by any issuer. A root statement naming
+  a trusted identity ends every link whose origin it is; the revoking
+  node also lists the enrolled identities' recorded capabilities. A
+  trusted identity is the root's own enrollment and is never cascaded.
+  `verified_revocation.reason` says `node`, `identity`, `capability` or
+  `origin { trusted }`.
+- Staleness instead of expiry: each trusted node records when it last
+  heard from every other trusted identity (report, link, forwarded
+  report), saved in its issuer settings when it moved an hour (or an
+  eighth of the threshold). Past `trusted_stale_after` (30 days by
+  default) it raises `AlertKind::TrustedNodeStale`; `status_after` wakes
+  at the deadline; hearing the node clears it.
+- Sealing: a trusted node with a due seal that it cannot make (no followed
+  bookmark, no tip authority, a failed seal) raises
+  `AlertKind::SealSkipped { reason }` until a pass seals.
+- Trusted roster: devices learn every trusted node and its routes on
+  enrollment, renewal and sync, and renew through any of them.
+- Tests: `rocky-credentials` `tests/root.rs` (`a_trusted_grant_never_expires_and_only_the_root_signs_one`,
+  `a_trusted_identity_cannot_revoke_another_and_the_root_can`,
+  `revoking_a_trusted_identity_cascades_to_what_it_first_enrolled`) and
+  `root::tests::a_phrase_restores_the_same_root_and_a_wrong_phrase_is_refused`;
+  `simulation::health::a_trusted_node_flags_another_it_has_not_heard_from`;
+  rocky-sdk `application::a_due_seal_a_trusted_node_cannot_make_is_an_alert`,
+  `issuers::{revoking_a_trusted_identity_cascades_to_what_it_enrolled,
+  a_second_issuer_carries_the_domain_after_the_creator_is_lost}`,
+  `registry_revocation` (`publisher_required` without the root),
+  `credentials` (creator identity is not the root, no root stored).
+  Mutations: a no-op `hear` fails the stale test; removing both cascade
+  layers (registry listing and credential origin) fails the cascade test,
+  either alone keeps it passing.
+- Open: root recovery escrow (partition keys sealed to the root at
+  creation, recovery from root + descriptor) is not implemented. Root
+  revocation of a trusted identity that signed seals or bookmark moves
+  drops them (`TipGraph::exclude_revoked`), which leaves bookmarks it moved
+  unresolved; the cascade test revokes a trusted node that signed none.
+  Keeping history needs a root-signed cut, e.g. per-signer statement hash
+  chains whose heads the root statement names.
+- Formats: credential extension v8 (`origin`); issuer settings gain
+  `heard` and `stale_after`; status gains `RevocationReason`,
+  `TrustedNodeStale` and `SealSkipped`; frozen checkpoint vectors
+  regenerated (verify.py passes).
+- Checks: `./scripts/lint` 0; `./scripts/check --unit --integration`
+  259 unit and 1382 integration passed in 892 s wall, two batches over the
+  120 s limit (rocky-secure lib, rocky-sdk `migrations`) passed alone with
+  `cargo test` (533, 14). The same rocky-sdk timeouts
+  (`group_secrets`, `migrations`, `service rollback`) occur on `main` under
+  raw nextest; `rollback::a_compacted_member_waits…` takes 48.6 s alone
+  on `main` (two 15 s dials to its closed keeper). wasm32 clippy 0;
+  `./scripts/check-wasm-consumer` 0; Chromium browser tests: rocky-credentials
+  73, rocky-secure 463 (1 ignored), rocky-sdk 25 passed.

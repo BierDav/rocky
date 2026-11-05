@@ -130,26 +130,69 @@ impl Configuration {
         archive: &[u8],
         root: &crate::RootKey,
     ) -> Result<Opened, Failure> {
+        self.staged(archive, "recovery", |staged| async move {
+            self.recover(&staged, root).await
+        })
+        .await
+    }
+    /// Restores `archive`, a backup of a member or device, into an empty
+    /// directory under a fresh identity that `invitation` enrolls over the
+    /// configured network. The archive's operations keep their identities;
+    /// nothing is sent again as new work. In a browser `archive` names a
+    /// file in Rocky's storage; see [`Self::restore_archive`] for bytes. An
+    /// interrupted restore continues when called again with the same
+    /// archive, under the identity it enrolled.
+    pub async fn restore(
+        &self,
+        archive: &std::path::Path,
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        Database::launch_restore(self.options(), archive, invitation).await
+    }
+    /// As [`Self::restore`], from the archive's bytes, staged and removed
+    /// as for [`Self::recover_archive`].
+    pub async fn restore_archive(
+        &self,
+        archive: &[u8],
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        self.staged(archive, "restore", |staged| async move {
+            self.restore(&staged, invitation).await
+        })
+        .await
+    }
+    /// Runs `install` on `archive` staged in the directory as
+    /// `{install}.backup`, which is removed whether it finishes or stops.
+    async fn staged<F, Installing>(
+        &self,
+        archive: &[u8],
+        install: &str,
+        run: F,
+    ) -> Result<Opened, Failure>
+    where
+        F: FnOnce(PathBuf) -> Installing,
+        Installing: std::future::Future<Output = Result<Opened, Failure>>,
+    {
         rocky_platform::fs::create_dir_all(&self.directory)?;
-        let staged = self.directory.join("recovery.backup");
+        let staged = self.directory.join(format!("{install}.backup"));
         rocky_platform::fs::write(&staged, archive)?;
-        let recovered = self.recover(&staged, root).await;
+        let installed = run(staged.clone()).await;
         if let Err(error) = rocky_platform::fs::remove_file(&staged) {
-            if let Ok(opened) = &recovered {
+            if let Ok(opened) = &installed {
                 opened.database.close().await?;
             }
             return Err(format!(
                 "could not remove the staged archive {}: {error}{}",
                 staged.display(),
-                if recovered.is_ok() {
-                    "; the recovery finished: open the directory"
+                if installed.is_ok() {
+                    format!("; the {install} finished: open the directory")
                 } else {
-                    ""
+                    String::new()
                 }
             )
             .into());
         }
-        recovered
+        installed
     }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {

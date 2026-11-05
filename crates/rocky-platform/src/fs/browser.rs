@@ -183,6 +183,20 @@ pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+/// Replaces the database file at `path` with `bytes`, durable on return:
+/// a pool entry, where SQLite opens it.
+pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+    let key = key(path.as_ref())?;
+    table(|table| {
+        table
+            .execute("DELETE FROM files WHERE path=?", [&key])
+            .map(drop)
+    })?;
+    let pool = pool()?;
+    pool.delete_db(&key).map_err(unavailable)?;
+    pool.write(&key, bytes).map_err(unavailable)
+}
+
 pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let key = key(path.as_ref())?;
     if in_pool(&key)? {

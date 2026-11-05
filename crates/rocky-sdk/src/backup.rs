@@ -32,19 +32,31 @@ pub struct Inventory {
     pub revision: u64,
     pub files: Vec<Entry>,
 }
-/// The restore in progress in a directory.
+/// The restore or recovery in progress in a directory. It goes once the
+/// restored file is rebound and holds its keys.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Marker {
     pub predecessor: PublicKey,
     pub archive: String,
+    /// How far a recovery got; `None` for a restore.
+    pub recovery: Option<Recovery>,
+}
+/// A recovery's progress. Its identity is saved first, so resuming never
+/// takes another author slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Recovery {
+    /// The identity is saved; the archive's files may not be in place.
+    Placing,
+    /// The files are in place; the store opens without its keys, takes its
+    /// tables, then its keys.
+    Placed,
 }
 
-// Archives are files a user moves elsewhere: natively streamed, and not made
-// in a browser.
-#[cfg(not(target_family = "wasm"))]
+// Archives are files a user moves elsewhere: natively streamed from disk; in
+// a browser, whole files in Rocky's storage (`rocky_platform::fs`).
 pub(crate) use archive::{open, write};
-#[cfg(not(target_family = "wasm"))]
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};
@@ -52,10 +64,71 @@ mod archive {
     use rocky_credentials::{PrivateKey, Signature};
     use sha2::{Digest, Sha256};
     use std::{
-        fs::File,
-        io::{BufReader, BufWriter, Read, Write},
+        io::{Read, Write},
         path::{Path, PathBuf},
     };
+
+    /// Reads an archive or a staged file.
+    fn reader(path: &Path) -> Result<impl Read, Failure> {
+        #[cfg(not(target_family = "wasm"))]
+        return Ok(std::io::BufReader::new(std::fs::File::open(path)?));
+        #[cfg(target_family = "wasm")]
+        return Ok(std::io::Cursor::new(rocky_platform::fs::read(path)?));
+    }
+    /// A file written whole, durable on `finish`. A browser buffers it, and
+    /// puts a database where SQLite opens it.
+    struct Sink {
+        #[cfg(not(target_family = "wasm"))]
+        out: std::io::BufWriter<std::fs::File>,
+        #[cfg(target_family = "wasm")]
+        out: (PathBuf, Vec<u8>),
+    }
+    impl Sink {
+        fn create(path: &Path) -> Result<Self, Failure> {
+            #[cfg(not(target_family = "wasm"))]
+            return Ok(Self {
+                out: std::io::BufWriter::new(std::fs::File::create(path)?),
+            });
+            #[cfg(target_family = "wasm")]
+            return Ok(Self {
+                out: (path.to_path_buf(), Vec::new()),
+            });
+        }
+        fn finish(self, database: bool) -> Result<(), Failure> {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let _ = database;
+                self.out
+                    .into_inner()
+                    .map_err(|error| error.into_error())?
+                    .sync_all()?;
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                let (path, bytes) = self.out;
+                if database {
+                    rocky_platform::fs::write_database(path, &bytes)?;
+                } else {
+                    rocky_platform::fs::write(path, bytes)?;
+                }
+            }
+            Ok(())
+        }
+    }
+    impl Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            #[cfg(not(target_family = "wasm"))]
+            return self.out.write(bytes);
+            #[cfg(target_family = "wasm")]
+            return self.out.1.write(bytes);
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            #[cfg(not(target_family = "wasm"))]
+            return self.out.flush();
+            #[cfg(target_family = "wasm")]
+            return Ok(());
+        }
+    }
 
     const MAGIC: &[u8] = b"rocky.backup.v2\n";
     const FORMAT: u32 = 2;
@@ -68,7 +141,7 @@ mod archive {
         [b"rocky.backup.v2".as_slice(), inventory].concat()
     }
     fn digest(path: &Path) -> Result<(u64, String), Failure> {
-        let mut reader = BufReader::new(File::open(path)?);
+        let mut reader = reader(path)?;
         let (mut hash, mut length, mut buffer) = (Sha256::new(), 0u64, vec![0; 64 * 1024]);
         loop {
             let read = reader.read(&mut buffer)?;
@@ -114,19 +187,15 @@ mod archive {
         let header = serde_json::to_vec(&inventory)?;
         let signature = node.sign(&label(&header));
         let partial = target.with_extension("partial");
-        {
-            let mut out = BufWriter::new(File::create(&partial)?);
-            out.write_all(MAGIC)?;
-            out.write_all(&(header.len() as u32).to_le_bytes())?;
-            out.write_all(&header)?;
-            out.write_all(&signature.to_bytes())?;
-            for (_, path) in staged {
-                std::io::copy(&mut BufReader::new(File::open(path)?), &mut out)?;
-            }
-            out.into_inner()
-                .map_err(|error| error.into_error())?
-                .sync_all()?;
+        let mut out = Sink::create(&partial)?;
+        out.write_all(MAGIC)?;
+        out.write_all(&(header.len() as u32).to_le_bytes())?;
+        out.write_all(&header)?;
+        out.write_all(&signature.to_bytes())?;
+        for (_, path) in staged {
+            std::io::copy(&mut reader(path)?, &mut out)?;
         }
+        out.finish(false)?;
         rocky_platform::fs::rename(&partial, target)?;
         Ok(inventory)
     }
@@ -144,7 +213,7 @@ mod archive {
     /// The signature must be the exporter's, whose credentials the publisher
     /// issued for the manifest; every file must match its digest.
     pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
-        let mut input = BufReader::new(File::open(archive)?);
+        let mut input = reader(archive)?;
         let mut magic = vec![0; MAGIC.len()];
         input.read_exact(&mut magic)?;
         if magic != MAGIC {
@@ -182,11 +251,9 @@ mod archive {
         let mut files = Vec::new();
         for entry in &inventory.files {
             let path = staging.join(format!("{}.restore", entry.name));
-            let mut out = BufWriter::new(File::create(&path)?);
+            let mut out = Sink::create(&path)?;
             std::io::copy(&mut (&mut input).take(entry.length), &mut out)?;
-            out.into_inner()
-                .map_err(|error| error.into_error())?
-                .sync_all()?;
+            out.finish(entry.name == DATABASE)?;
             if digest(&path)? != (entry.length, entry.sha256.clone()) {
                 return Err(format!("{} differs from the backup inventory", entry.name).into());
             }

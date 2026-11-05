@@ -75,6 +75,14 @@ pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Replaces the database file at `path` with `bytes`, durable on return,
+/// where SQLite opens it.
+pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 /// The length of the file at `path`.
 pub fn len(path: impl AsRef<Path>) -> io::Result<u64> {
     let path = path.as_ref();

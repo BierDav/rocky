@@ -60,7 +60,7 @@ pub struct Opened {
 }
 
 // The blocking constructors make the other installs; a browser has create,
-// join and open (`Configuration`).
+// join, recover and open (`Configuration`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) enum Install {
     Create {
@@ -412,7 +412,6 @@ impl Database {
     ) -> Result<Opened, Failure> {
         Self::start(open, Self::recover_install(archive, root))
     }
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn launch_recover(
         open: Open<'_>,
         archive: &Path,
@@ -420,7 +419,6 @@ impl Database {
     ) -> Result<Opened, Failure> {
         Self::launch(open, Self::recover_install(archive, root), None).await
     }
-    #[cfg(not(target_family = "wasm"))]
     fn recover_install(archive: &Path, root: &crate::RootKey) -> Install {
         Install::Recover {
             archive: archive.to_path_buf(),
@@ -1287,9 +1285,15 @@ async fn identity(
         ..
     } = setup;
     let exists = rocky_platform::fs::exists(path);
-    // A restore interrupted after it enrolled continues.
-    let resuming = matches!(install, Install::Restore { .. })
-        && rocky_platform::fs::exists(directory.join(crate::backup::MARKER));
+    // A restore interrupted after it enrolled continues, as does a recovery
+    // interrupted after it saved its identity.
+    let resuming = match install {
+        Install::Restore { .. } => {
+            rocky_platform::fs::exists(directory.join(crate::backup::MARKER))
+        }
+        Install::Recover { .. } => crate::recovery::unfinished(directory)?.is_some(),
+        _ => false,
+    };
     if exists && !matches!(install, Install::Installed) && !resuming {
         return Err("a domain exists in this directory: open it instead".into());
     }
@@ -1381,7 +1385,6 @@ async fn identity(
             )
             .await
         }
-        #[cfg(not(target_family = "wasm"))]
         Install::Recover { archive, root } => {
             // The root stays for `run_inner` to revoke the lost identities.
             let root = root
@@ -1390,7 +1393,7 @@ async fn identity(
                 .as_deref()
                 .map(|root| crate::RootKey::from_secret(root.secret()))
                 .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
-            let settings = recover(
+            let settings = crate::recovery::recover(
                 path,
                 directory,
                 secrets,
@@ -1406,11 +1409,10 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(true, key).await?)))
         }
-        // Archives are not made or read in a browser.
+        // A restore enrolls through an invitation, which a browser takes
+        // only through `Configuration::join`.
         #[cfg(target_family = "wasm")]
-        Install::Restore { .. } | Install::Recover { .. } => {
-            Err("restoring a backup is unavailable in a browser".into())
-        }
+        Install::Restore { .. } => Err("restoring a backup is unavailable in a browser".into()),
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             settings.provider = setup.identity.clone();
@@ -1610,6 +1612,9 @@ async fn restore(
     let marker = directory.join(MARKER);
     if rocky_platform::fs::exists(&marker) {
         let saved: Marker = serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
+        if saved.recovery.is_some() {
+            return Err("a recovery is unfinished in this directory".into());
+        }
         if saved.archive != opened.id {
             return Err("another restore is unfinished in this directory".into());
         }
@@ -1622,6 +1627,7 @@ async fn restore(
             &serde_json::to_vec(&Marker {
                 predecessor: opened.inventory.node,
                 archive: opened.id.clone(),
+                recovery: None,
             })?,
         )?;
     }
@@ -1665,57 +1671,6 @@ async fn restore(
     }
     rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, Some(link)))
-}
-
-#[cfg(not(target_family = "wasm"))]
-/// Verifies the archive, opens the escrow records its store holds with the
-/// root, installs a fresh trusted identity holding those keys and puts the
-/// archive's files in place, behind the marker that rebinds them at open.
-/// Nothing is written until every key opened.
-async fn recover(
-    path: &Path,
-    directory: &Path,
-    secrets: &Arc<dyn SecretStore>,
-    archive: &Path,
-    root: &crate::RootKey,
-    provider: Option<Arc<dyn crate::IdentityProvider>>,
-) -> Result<Settings, Failure> {
-    use crate::backup::{MARKER, Marker};
-    let staging = directory.join("restore");
-    let opened = crate::backup::open(archive, &staging)?;
-    if root.public_key() != opened.inventory.publisher {
-        return Err("the root key is not the backup's domain root".into());
-    }
-    let store = opened
-        .files
-        .iter()
-        .find(|(name, _)| name == "rocky.sqlite")
-        .map(|(_, staged)| staged)
-        .ok_or("the backup holds no replica")?;
-    let escrowed = EncryptedReplica::<rocky_core::TypedRows>::archived_escrow(store).await?;
-    let recovered = crate::escrow::Recovered::open(&opened.identity, escrowed, root)?;
-    let settings = Settings::recover(
-        secrets,
-        (&opened.identity, opened.inventory.node),
-        &recovered,
-        provider,
-        root,
-    )?;
-    for (name, staged) in &opened.files {
-        if name != "identity.json" {
-            rocky_platform::fs::rename(staged, directory.join(name))?;
-        }
-    }
-    rocky_platform::fs::remove_dir_all(&staging)?;
-    crate::secrets::write_private(
-        &directory.join(MARKER),
-        &serde_json::to_vec(&Marker {
-            predecessor: opened.inventory.node,
-            archive: opened.id,
-        })?,
-    )?;
-    settings.save(path)?;
-    Ok(settings)
 }
 
 /// Serves a database on the calling thread: its tasks stay on it, and
@@ -1793,6 +1748,9 @@ async fn run_inner(
     ) && !rocky_platform::fs::exists(&path)
     {
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
+    }
+    if !matches!(setup.install, Install::Recover { .. }) {
+        crate::recovery::refuse_unfinished(&directory)?;
     }
     // A removal is confirmed before the network starts or anything changes.
     if matches!(setup.install, Install::Installed) {
@@ -1878,16 +1836,19 @@ async fn run_inner(
             settings.save(&path)?;
         }
         let domain = settings.domain()?;
-        // A restored file is rebound to this device's identity first.
+        // A restored file is rebound to this device's identity first. The
+        // marker goes once the file holds its tables and keys; until then
+        // each open repeats these steps.
         let marker = directory.join(crate::backup::MARKER);
+        let restored = rocky_platform::fs::exists(&marker);
         let mut deferred = Vec::new();
-        let replica = if rocky_platform::fs::exists(&marker) {
+        let replica = if restored {
             let restored: crate::backup::Marker =
                 serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
             let mut config = settings.config(&vault, &domain)?;
             // A recovered store may never have read its frames: its keys
             // apply them once `attach` installed the tables.
-            if matches!(setup.install, Install::Recover { .. }) {
+            if restored.recovery.is_some() {
                 deferred = std::mem::take(&mut config.keys);
             }
             let replica = EncryptedReplica::open_restored(
@@ -1897,7 +1858,7 @@ async fn run_inner(
                 restored.predecessor,
             )
             .await?;
-            rocky_platform::fs::remove_file(&marker)?;
+            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Rebound)?;
             replica
         } else if let Some(bootstrap) = &settings.bootstrap {
             bootstrap.verify(&settings)?;
@@ -1918,10 +1879,15 @@ async fn run_inner(
             .await?
         };
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
+        crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Attached)?;
         // Newest first: earlier epochs then join its history.
         deferred.sort_by_key(|key| std::cmp::Reverse(key.generation));
         for key in deferred {
             replica.install_key_epoch(key).await?;
+            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Keyed)?;
+        }
+        if restored {
+            rocky_platform::fs::remove_file(&marker)?;
         }
         replica
             .record_current_schema(
@@ -2014,7 +1980,6 @@ async fn run_inner(
     };
     // Recovery is for lost trusted nodes: the root revokes them before
     // anyone writes, and is dropped.
-    #[cfg(not(target_family = "wasm"))]
     let revoked = match &setup.install {
         Install::Recover { root, .. } => {
             let root: Arc<crate::RootKey> = root
@@ -2032,8 +1997,6 @@ async fn run_inner(
         }
         _ => Vec::new(),
     };
-    #[cfg(target_family = "wasm")]
-    let revoked = Vec::new();
     hello
         .send(Ok((scope, network, revoked)))
         .map_err(|_| "database opener abandoned")?;

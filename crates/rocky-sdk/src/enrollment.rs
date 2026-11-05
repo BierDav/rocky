@@ -1356,8 +1356,6 @@ impl Settings {
     /// fresh, `provider`'s or one made in the secret store; the root
     /// grants it trust over a recovery slot of the author numbers only the
     /// root grants (`recovery_authors`).
-    // Archives are native files.
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn recover(
         store: &std::sync::Arc<dyn crate::SecretStore>,
         (archived, predecessor): (&Self, PublicKey),
@@ -2496,7 +2494,6 @@ impl Settings {
     }
     /// Adds the contacts of another identity of this domain, such as the
     /// one a restored backup carried, without replacing known ones.
-    #[cfg(not(target_family = "wasm"))]
     pub fn learn_contacts(&mut self, other: &Settings, exclude: &[PublicKey]) {
         for (node, contact) in &other.peers {
             if exclude.contains(node) || self.peers.contains_key(node) {
@@ -2786,7 +2783,6 @@ impl Settings {
 /// grant used are skipped; among the rest one is random, so recoveries the
 /// copy never learned of collide only with probability 1 in
 /// `RECOVERY_SLOTS` each.
-#[cfg(not(target_family = "wasm"))]
 fn recovery_authors(archived: &Settings) -> Result<AuthorRange, Failure> {
     let used: BTreeSet<u32> = archived
         .credentials

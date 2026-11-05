@@ -108,9 +108,10 @@ impl Configuration {
     /// trusted node holding every key the archived node held, opened from
     /// its root escrow. The root then revokes every other trusted identity
     /// the archive knows, with the identities each first enrolled, and every
-    /// key rotates; `Opened::revoked` names them. Archives are native files;
-    /// a browser has no recovery.
-    #[cfg(not(target_family = "wasm"))]
+    /// key rotates; `Opened::revoked` names them. In a browser `archive`
+    /// names a file in Rocky's storage (`rocky_platform::fs`). A recovery
+    /// interrupted at any step is finished by calling this again with the
+    /// same archive and root; opening the directory meanwhile is refused.
     pub async fn recover(
         &self,
         archive: &std::path::Path,

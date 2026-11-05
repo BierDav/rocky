@@ -10,6 +10,7 @@ mod coordination;
 mod delivery;
 mod discovery;
 mod enroll;
+mod escrow;
 mod existence_base;
 mod extension;
 mod finality;
@@ -43,6 +44,7 @@ pub use enroll::{
     Admission, Exchange, IdentityAnswer, IdentityRequest, Invitation, PairRequest, RenewRequest,
     Renewal, open_enrollment, seal_enrollment,
 };
+pub use escrow::{MAX_ESCROW_PAYLOAD, RootEscrow, escrow_tag};
 pub use existence_base::{
     EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
     ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,

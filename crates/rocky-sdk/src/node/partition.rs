@@ -267,6 +267,8 @@ impl Node {
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
+        let secret = self.vault.get(&secret_role(&record.address, epoch))?;
+        draft.escrow(&crate::escrow::Escrowed::group(&record, epoch, secret))?;
         let ids = settings
             .revocations
             .statements()
@@ -374,6 +376,7 @@ impl Node {
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
+        draft.escrow(&crate::escrow::Escrowed::group(&record, epoch, secret))?;
         if draft
             .epoch_statements
             .get(&role)

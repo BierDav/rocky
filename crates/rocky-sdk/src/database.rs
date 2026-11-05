@@ -77,6 +77,13 @@ pub(crate) enum Install {
         archive: PathBuf,
         invitation: String,
     },
+    /// A trusted node's backup archive, under a fresh trusted identity the
+    /// root grants, with the keys the root opens from its escrow.
+    Recover {
+        archive: PathBuf,
+        /// Taken once, when the installation is written.
+        root: std::sync::Mutex<Option<Box<crate::RootKey>>>,
+    },
 }
 struct Setup {
     directory: PathBuf,
@@ -381,6 +388,36 @@ impl Database {
                 invitation: invitation.into(),
             },
         )
+    }
+    // Blocks the caller until the database is open, which a browser cannot.
+    #[cfg(not(target_family = "wasm"))]
+    /// The root recovers a domain from a backup archive of one of its
+    /// trusted nodes with every trusted node and device lost: into an empty
+    /// directory, under a fresh trusted identity the root grants, with every
+    /// key the archived node held opened from its root escrow. A key the
+    /// escrow lacks fails the recovery and is named. `root` signs and is
+    /// dropped. See `Configuration::recover`.
+    pub fn recover(
+        open: Open<'_>,
+        archive: &Path,
+        root: &crate::RootKey,
+    ) -> Result<Opened, Failure> {
+        Self::start(open, Self::recover_install(archive, root))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn launch_recover(
+        open: Open<'_>,
+        archive: &Path,
+        root: &crate::RootKey,
+    ) -> Result<Opened, Failure> {
+        Self::launch(open, Self::recover_install(archive, root), None).await
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn recover_install(archive: &Path, root: &crate::RootKey) -> Install {
+        Install::Recover {
+            archive: archive.to_path_buf(),
+            root: std::sync::Mutex::new(Some(Box::new(crate::RootKey::from_secret(root.secret())))),
+        }
     }
     /// Writes a signed backup archive of this database to `target`; see
     /// `restore`. It returns the archive's inventory as JSON.
@@ -1321,9 +1358,33 @@ async fn identity(
             )
             .await
         }
+        #[cfg(not(target_family = "wasm"))]
+        Install::Recover { archive, root } => {
+            let root = root
+                .lock()
+                .map_err(|_| "root poisoned")?
+                .take()
+                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
+            let settings = recover(
+                path,
+                directory,
+                secrets,
+                archive,
+                &root,
+                setup.identity.clone(),
+            )?;
+            drop(root);
+            let Some(network) = network else {
+                return Ok((settings, None));
+            };
+            let key = Settings::transport_key(&settings.vault(secrets))?;
+            Ok((settings, Some(network.start(true, key).await?)))
+        }
         // Archives are not made or read in a browser.
         #[cfg(target_family = "wasm")]
-        Install::Restore { .. } => Err("restoring a backup is unavailable in a browser".into()),
+        Install::Restore { .. } | Install::Recover { .. } => {
+            Err("restoring a backup is unavailable in a browser".into())
+        }
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             settings.provider = setup.identity.clone();
@@ -1578,6 +1639,50 @@ async fn restore(
     }
     rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, Some(link)))
+}
+
+#[cfg(not(target_family = "wasm"))]
+/// Verifies the archive, opens its escrow with the root, installs a fresh
+/// trusted identity holding those keys and puts the archive's files in
+/// place, behind the marker that rebinds them at open. Nothing is written
+/// until every key opened.
+fn recover(
+    path: &Path,
+    directory: &Path,
+    secrets: &Arc<dyn SecretStore>,
+    archive: &Path,
+    root: &crate::RootKey,
+    provider: Option<Arc<dyn crate::IdentityProvider>>,
+) -> Result<Settings, Failure> {
+    use crate::backup::{MARKER, Marker};
+    let staging = directory.join("restore");
+    let opened = crate::backup::open(archive, &staging)?;
+    if root.public_key() != opened.inventory.publisher {
+        return Err("the root key is not the backup's domain root".into());
+    }
+    let recovered = crate::escrow::Recovered::open(&opened.identity, root)?;
+    let settings = Settings::recover(
+        secrets,
+        (&opened.identity, opened.inventory.node),
+        &recovered,
+        provider,
+        root,
+    )?;
+    for (name, staged) in &opened.files {
+        if name != "identity.json" {
+            rocky_platform::fs::rename(staged, directory.join(name))?;
+        }
+    }
+    rocky_platform::fs::remove_dir_all(&staging)?;
+    crate::secrets::write_private(
+        &directory.join(MARKER),
+        &serde_json::to_vec(&Marker {
+            predecessor: opened.inventory.node,
+            archive: opened.id,
+        })?,
+    )?;
+    settings.save(path)?;
+    Ok(settings)
 }
 
 /// Serves a database on the calling thread: its tasks stay on it, and

@@ -153,6 +153,7 @@ mod domain;
 #[cfg(not(target_family = "wasm"))]
 mod engine;
 mod enrollment;
+mod escrow;
 mod generation;
 mod groups;
 mod identities;

@@ -103,6 +103,20 @@ impl Configuration {
         }
         Ok(opened)
     }
+    /// The root recovers the domain from `archive`, a backup of one of its
+    /// trusted nodes, with every trusted node and device lost: a fresh
+    /// trusted node holding every key the archived node held, opened from
+    /// its root escrow. Revoke the lost trusted identities with
+    /// `Session::revoke_trusted` next, which rotates every key. Archives are
+    /// native files; a browser has no recovery.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn recover(
+        &self,
+        archive: &std::path::Path,
+        root: &crate::RootKey,
+    ) -> Result<Opened, Failure> {
+        Database::launch_recover(self.options(), archive, root).await
+    }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {
         Database::launch_open(self.options()).await

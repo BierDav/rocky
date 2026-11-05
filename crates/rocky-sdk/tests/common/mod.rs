@@ -56,6 +56,10 @@ impl Device {
             .as_ref()
             .map_or(Value::Null, |phrase| json!({ "phrase": phrase }))
     }
+    /// The domain scope calls name.
+    pub fn scope(&self) -> &Value {
+        &self.scope
+    }
     /// The value of a successful call, or its error object.
     pub async fn call(&self, request: Value) -> Result<Value, Value> {
         identity::call(&self.scope, request, |request| self.raw_call(request)).await

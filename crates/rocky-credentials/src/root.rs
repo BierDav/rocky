@@ -42,6 +42,9 @@ impl RootKey {
     pub fn public_key(&self) -> PublicKey {
         self.0.public_key()
     }
+    pub(crate) fn private(&self) -> &PrivateKey {
+        &self.0
+    }
 }
 impl IdentityProvider for RootKey {
     fn public_key(&self) -> Result<PublicKey, Error> {

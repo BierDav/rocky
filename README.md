@@ -42,6 +42,9 @@ expire, and the others raise `TrustedNodeStale` for one they have not
 heard from. Revoking a trusted node keeps the seals and bookmark moves it
 signed up to the latest ones the revoking node holds; the rest raise
 `TipStatementsPastCut`.
+Every data key is also sealed to the root's public key in each
+installation's identity record, so with every device lost the root and a
+trusted node's backup restore its data (`Configuration::recover`).
 
 The todo app shares ordered lists between trusted, full and partial
 devices. Run several installations in one window, or one per device over

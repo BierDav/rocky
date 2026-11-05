@@ -1162,13 +1162,25 @@ points, and the `board_cap` assertion bounds a board's points.
   (a forged tag, a borrowed seal's tag and a move opening a branch are
   refused; a twin at a staged place is an equivocation); admitting any
   stage tag fails it.
+  Incremental pruning: the chain index also keeps each chain's statement
+  IDs and every statement's references both ways, and a cut head's walk
+  back is built once, so `prunable` judges only the chains a cut names
+  and finds what kept statements need through referrers; only statements
+  admitted since are hashed and indexed, and `strip_finalities` returns
+  at once when no record holds an acknowledgment of a cut chain.
+  rocky-credentials unit test
+  `tips::tests::pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since`
+  counts statement IDs computed: 109 on the old full scan, at most 6
+  warm and 8 after an admission now; the existing pruning tests keep the
+  results.
 - Limits: A node can still open several stage branches off one place,
   each with its own signed schema seal, as an honest withdraw and restage
   does; they are not equivocations, and a cut keeps only named heads. A cut of a
   node with many stage branches signed alongside live statements needs a
   head per such branch (64 in all).
   Deleting a past-cut fork also deletes its equivocation record; the alert
-  keeps the count. A statement an honest node built on a past-cut one is
+  keeps the count. Pruning still runs `exclude_revoked` over the whole
+  graph, and deleting statements rebuilds the chain index. A statement an honest node built on a past-cut one is
   refused where the cut is held. Past-cut records stop at 256 per chain;
   the count goes on.
 - Checks (on `main` cd58e1f6): `./scripts/lint` 0; `./scripts/check --unit

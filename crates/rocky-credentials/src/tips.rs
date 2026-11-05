@@ -372,6 +372,8 @@ macro_rules! signed_statement {
                 &self.endorsement
             }
             pub fn id(&self) -> Result<Commitment, Error> {
+                #[cfg(test)]
+                $crate::tips::tests::count_id();
                 Ok(rocky_core::commitment($id, &self.to_bytes()?))
             }
             pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
@@ -545,37 +547,61 @@ fn kept(
     kept
 }
 
-/// Whether `heads` of a cut leave out the chain item `id` at `link` for
-/// good, over the held `links`: at or after a head's place without being
-/// it, or before one and off the path the held items lead back along.
-fn beyond(
+/// A cut head's walk back through the held items, to judge many items
+/// against it without walking again.
+struct Walk {
+    head: Head,
+    /// Each held item from the head back: the lowest sequence so far, and
+    /// its predecessor. Ends at the first item without one, or before the
+    /// first one not held.
+    held: Vec<(u64, Option<Commitment>)>,
+}
+impl Walk {
+    fn new(links: &BTreeMap<Commitment, (PublicKey, ChainLink)>, head: &Head) -> Self {
+        let mut held = Vec::new();
+        let mut cursor = Some(head.id);
+        let mut lowest = u64::MAX;
+        // IDs are hashes, so a walk cannot cycle; the bound only stops a hang.
+        while let Some(id) = cursor.filter(|_| held.len() <= links.len()) {
+            let Some((_, link)) = links.get(&id) else {
+                break;
+            };
+            lowest = lowest.min(link.sequence);
+            held.push((lowest, link.previous));
+            cursor = link.previous;
+        }
+        Self { head: *head, held }
+    }
+    /// Whether the walk, from the head, leads to `id` at `sequence` below
+    /// it, or stops at an item not held: undecided until it arrives.
+    fn reaches(&self, sequence: u64, id: Commitment) -> bool {
+        let next = sequence.saturating_add(1);
+        let stop = self
+            .held
+            .partition_point(|(lowest, previous)| *lowest > next && previous.is_some());
+        match self.held.get(stop) {
+            Some((_, previous)) => *previous == Some(id),
+            None => true,
+        }
+    }
+}
+fn walks(
     links: &BTreeMap<Commitment, (PublicKey, ChainLink)>,
     heads: &BTreeSet<Head>,
-    link: &ChainLink,
-    id: Commitment,
-) -> bool {
-    for head in heads {
-        if head.id == id {
+) -> Vec<Walk> {
+    heads.iter().map(|head| Walk::new(links, head)).collect()
+}
+
+/// Whether a cut's head `walks` leave out the chain item `id` at `link`
+/// for good: at or after a head's place without being it, or before one
+/// and off the path the held items lead back along.
+fn beyond(walks: &[Walk], link: &ChainLink, id: Commitment) -> bool {
+    for walk in walks {
+        if walk.head.id == id {
             return false;
         }
         // A head reaches only lower places.
-        if link.sequence >= head.sequence {
-            continue;
-        }
-        // Walk back from the head while the graph holds it.
-        let mut cursor = head.id;
-        let reached = loop {
-            let Some((_, held)) = links.get(&cursor) else {
-                // Not held: undecided until it arrives.
-                break true;
-            };
-            match held.previous {
-                Some(previous) if held.sequence > link.sequence + 1 => cursor = previous,
-                Some(previous) => break previous == id,
-                None => break false,
-            }
-        };
-        if reached {
+        if link.sequence < walk.head.sequence && walk.reaches(link.sequence, id) {
             return false;
         }
     }
@@ -595,6 +621,22 @@ struct Places {
     links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
     /// Each acknowledgment's identity and link, by ID.
     acks: BTreeMap<Commitment, (PublicKey, ChainLink)>,
+    /// Each chained statement's ID, by identity and lane.
+    lanes: BTreeMap<(PublicKey, PublicKey), BTreeSet<Commitment>>,
+    /// What each statement and finality record refers to: its
+    /// predecessor, sealed tip, opened seal, a bookmark's tips or a
+    /// record's seal.
+    refs: BTreeMap<Commitment, Vec<Commitment>>,
+    /// The reverse of `refs`.
+    referrers: BTreeMap<Commitment, BTreeSet<Commitment>>,
+}
+impl Places {
+    fn refer(&mut self, id: Commitment, refs: Vec<Commitment>) {
+        for target in &refs {
+            self.referrers.entry(*target).or_default().insert(id);
+        }
+        self.refs.entry(id).or_default().extend(refs);
+    }
 }
 impl Clone for ChainIndex {
     fn clone(&self) -> Self {
@@ -617,18 +659,23 @@ impl ChainIndex {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
-/// What a graph list's item adds to the chain index.
+/// What a graph list's item, with ID `id`, adds to the chain index.
 trait Indexed {
-    fn index(&self, places: &mut Places) -> Result<(), Error>;
+    fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error>;
 }
 macro_rules! indexed_statement {
-    ($($signed:ty),*) => {$(
+    ($($signed:ty => |$s:ident| $refs:expr),* $(,)?) => {$(
         impl Indexed for $signed {
-            fn index(&self, places: &mut Places) -> Result<(), Error> {
+            fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error> {
+                let $s = self;
+                let mut refs: Vec<Commitment> = $refs;
+                refs.extend(self.link.and_then(|link| link.previous));
+                places.refer(id, refs);
                 if let (Some(link), Some(signer)) =
                     (self.link, Endorsement::signer_of(&self.endorsement().chain))
                 {
-                    places.links.insert(self.id()?, (signer, link));
+                    places.links.insert(id, (signer, link));
+                    places.lanes.entry((signer, link.lane)).or_default().insert(id);
                 }
                 Ok(())
             }
@@ -636,14 +683,19 @@ macro_rules! indexed_statement {
     )*};
 }
 indexed_statement!(
-    SignedSeal,
-    SignedTipOpening,
-    SignedBookmarkMove,
-    SignedGenesisLine,
-    SignedCheckpointRecord
+    SignedSeal => |s| vec![s.statement.tip.0],
+    SignedTipOpening => |s| vec![s.statement.seal],
+    SignedBookmarkMove => |s| [s.statement.from, s.statement.to]
+        .into_iter()
+        .flatten()
+        .map(|tip| tip.0)
+        .collect(),
+    SignedGenesisLine => |_s| Vec::new(),
+    SignedCheckpointRecord => |s| vec![s.statement.seal],
 );
 impl Indexed for SealFinality {
-    fn index(&self, places: &mut Places) -> Result<(), Error> {
+    fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error> {
+        places.refer(id, vec![self.seal]);
         for ack in &self.acknowledgments {
             if let Some(identity) = ack.identity() {
                 places.acks.insert(ack.id()?, (identity, ack.link));
@@ -799,7 +851,7 @@ impl TipGraph {
                     let from = index.built[$n].0;
                     for signed in self.$list.iter().skip(from) {
                         let id = signed.id()?;
-                        signed.index(&mut index)?;
+                        signed.index(id, &mut index)?;
                         index.built[$n] = (from.max(index.built[$n].0) + 1, Some(id));
                     }
                 )*
@@ -972,7 +1024,8 @@ impl TipGraph {
         let Some(heads) = revocations.cut(identity, &link.lane) else {
             return Ok(false);
         };
-        Ok(beyond(&self.indexed()?.links, &heads.statements, link, id))
+        let index = self.indexed()?;
+        Ok(beyond(&walks(&index.links, &heads.statements), link, id))
     }
     /// Whether a root statement's cut leaves out `ack` for good, as
     /// [`Self::beyond_cut`] judges statements against its acknowledgment head.
@@ -987,9 +1040,9 @@ impl TipGraph {
         else {
             return Ok(false);
         };
+        let index = self.indexed()?;
         Ok(beyond(
-            &self.indexed()?.acks,
-            &heads.acknowledgments,
+            &walks(&index.acks, &heads.acknowledgments),
             &ack.link,
             ack.id()?,
         ))
@@ -1030,6 +1083,17 @@ impl TipGraph {
         &mut self,
         revocations: &RevocationSet,
     ) -> Result<Vec<StrippedFinality>, Error> {
+        let cut = |ack: &TerminalAck| {
+            ack.identity()
+                .is_some_and(|identity| revocations.cut(&identity, &ack.link.lane).is_some())
+        };
+        if !self
+            .finalities
+            .iter()
+            .any(|record| record.acknowledgments.iter().any(cut))
+        {
+            return Ok(Vec::new());
+        }
         let mut changed = Vec::new();
         let mut finalities = Vec::with_capacity(self.finalities.len());
         let mut held = BTreeSet::new();
@@ -1071,52 +1135,46 @@ impl TipGraph {
         revocations: &RevocationSet,
         pinned: &BTreeSet<Commitment>,
     ) -> Result<BTreeSet<Commitment>, Error> {
-        let (statements, _) = self.chained()?;
+        let index = self.indexed()?;
+        // Only the chains a cut names hold statements past it.
         let mut prunable = BTreeSet::new();
-        for item in &statements {
-            if self.beyond_cut(revocations, &item.identity, &item.link, item.id)? {
-                prunable.insert(item.id);
-            }
-        }
-        if prunable.is_empty() {
-            return Ok(prunable);
-        }
-        let mut references: Vec<(Commitment, Vec<Commitment>)> = Vec::new();
-        macro_rules! refer {
-            ($list:expr, |$s:ident| $refs:expr) => {
-                for $s in &$list {
-                    let mut refs: Vec<Commitment> = $refs;
-                    refs.extend($s.link.and_then(|link| link.previous));
-                    references.push(($s.id()?, refs));
-                }
+        for ((identity, lane), heads) in revocations.cut_lanes() {
+            let Some(ids) = index.lanes.get(&(*identity, *lane)) else {
+                continue;
             };
-        }
-        refer!(self.seals, |s| vec![s.statement.tip.0]);
-        refer!(self.openings, |s| vec![s.statement.seal]);
-        refer!(self.moves, |s| [s.statement.from, s.statement.to]
-            .into_iter()
-            .flatten()
-            .map(|tip| tip.0)
-            .collect());
-        refer!(self.genesis_lines, |s| Vec::new());
-        refer!(self.checkpoints, |s| vec![s.statement.seal]);
-        for record in &self.finalities {
-            references.push((record.id()?, vec![record.seal]));
-        }
-        prunable.retain(|id| !pinned.contains(id));
-        // What a kept statement refers to stays, and so on.
-        loop {
-            let needed: BTreeSet<Commitment> = references
-                .iter()
-                .filter(|(id, _)| !prunable.contains(id))
-                .flat_map(|(_, refs)| refs.iter().copied())
-                .filter(|id| prunable.contains(id))
-                .collect();
-            if needed.is_empty() {
-                return Ok(prunable);
+            let walks = walks(&index.links, &heads.statements);
+            for id in ids.iter().filter(|id| !pinned.contains(*id)) {
+                if let Some((_, link)) = index.links.get(id)
+                    && beyond(&walks, link, *id)
+                {
+                    prunable.insert(*id);
+                }
             }
-            prunable.retain(|id| !needed.contains(id));
         }
+        // What a kept statement refers to stays, and so on.
+        let mut needed: Vec<Commitment> = prunable
+            .iter()
+            .filter(|id| {
+                index
+                    .referrers
+                    .get(*id)
+                    .is_some_and(|by| by.iter().any(|referrer| !prunable.contains(referrer)))
+            })
+            .copied()
+            .collect();
+        while let Some(id) = needed.pop() {
+            if prunable.remove(&id) {
+                needed.extend(
+                    index
+                        .refs
+                        .get(&id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|target| prunable.contains(*target)),
+                );
+            }
+        }
+        Ok(prunable)
     }
     /// Deletes `ids` from the graph's statement lists.
     pub fn remove_statements(&mut self, ids: &BTreeSet<Commitment>) -> Result<(), Error> {
@@ -1679,3 +1737,6 @@ impl TipGraph {
         Ok((cursor, losers, path))
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -4030,6 +4030,26 @@ fn subscription(request: &Value) -> Result<u64, Failure> {
         .ok_or("subscription must be a string")?
         .parse()?)
 }
+/// A key a request supplies as `{"phrase": ...}` or `{"secret": hex}`,
+/// as a root or an identity key.
+fn supplied_key<K>(
+    given: &Value,
+    name: &str,
+    phrase: fn(&str) -> Result<K, rocky_credentials::Error>,
+    secret: fn([u8; 32]) -> K,
+) -> Result<K, Failure> {
+    Ok(match (given["phrase"].as_str(), given["secret"].as_str()) {
+        (Some(words), None) => phrase(words)?,
+        (None, Some(hex)) => secret(
+            HEXLOWER
+                .decode(hex.as_bytes())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| refused(format!("{name} secret must be 64 hexadecimal digits")))?,
+        ),
+        _ => return Err(refused(format!("{name} names one phrase or one secret"))),
+    })
+}
 /// The root signer one call carries: the application's signer, or a
 /// `"root"` of the request, `{"phrase": ...}` or `{"secret": hex}`. It is
 /// dropped when the call ends; only root-only actions look at it.
@@ -4044,18 +4064,15 @@ impl Root {
             return Ok(Self(Some(supplied)));
         }
         let given = &request["root"];
-        let key = match (given["phrase"].as_str(), given["secret"].as_str()) {
-            (None, None) if given.is_null() => return Ok(Self(None)),
-            (Some(phrase), None) => rocky_credentials::RootKey::from_phrase(phrase)?,
-            (None, Some(secret)) => rocky_credentials::RootKey::from_secret(
-                HEXLOWER
-                    .decode(secret.as_bytes())
-                    .ok()
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or_else(|| refused("root secret must be 64 hexadecimal digits"))?,
-            ),
-            _ => return Err(refused("root names one phrase or one secret")),
-        };
+        if given.is_null() {
+            return Ok(Self(None));
+        }
+        let key = supplied_key(
+            given,
+            "root",
+            rocky_credentials::RootKey::from_phrase,
+            rocky_credentials::RootKey::from_secret,
+        )?;
         Ok(Self(Some(Arc::new(key))))
     }
     pub(crate) fn signer(&self) -> Option<&dyn rocky_credentials::IdentityProvider> {
@@ -4064,6 +4081,29 @@ impl Root {
     pub(crate) fn shared(&self) -> Option<Arc<dyn rocky_credentials::IdentityProvider>> {
         self.0.clone()
     }
+}
+/// The identity one call carries: the application's provider, or an
+/// `"identity"` object of the request, `{"phrase": ...}` or
+/// `{"secret": hex}`. A string `"identity"` names a request's target, not
+/// a key. It is dropped when the call ends.
+pub(crate) fn call_identity(
+    request: &Value,
+    supplied: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+) -> Result<Option<Arc<dyn rocky_credentials::IdentityProvider>>, Failure> {
+    if supplied.is_some() {
+        return Ok(supplied);
+    }
+    let given = &request["identity"];
+    if !given.is_object() {
+        return Ok(None);
+    }
+    let key = supplied_key(
+        given,
+        "identity",
+        rocky_credentials::IdentityKey::from_phrase,
+        rocky_credentials::IdentityKey::from_secret,
+    )?;
+    Ok(Some(Arc::new(key)))
 }
 /// The statement that revokes this device, when a session ended on it.
 fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {

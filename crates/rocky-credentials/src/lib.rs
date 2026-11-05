@@ -16,12 +16,14 @@ mod extension;
 mod finality;
 mod group;
 mod identity;
+mod identity_key;
 mod issue;
 mod keys;
 mod migration;
 pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
 mod peer;
+mod phrase_key;
 mod revocation;
 mod root;
 mod signed;
@@ -62,6 +64,7 @@ pub use identity::{
     CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
     LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,
 };
+pub use identity_key::IdentityKey;
 pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};

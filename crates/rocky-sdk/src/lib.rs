@@ -221,7 +221,9 @@ pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
-pub use rocky_credentials::{FileIdentityProvider, IdentityProvider, Purpose, RootKey};
+pub use rocky_credentials::{
+    FileIdentityProvider, IdentityKey, IdentityProvider, Purpose, RootKey,
+};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};

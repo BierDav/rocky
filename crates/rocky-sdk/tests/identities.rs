@@ -5,7 +5,8 @@
 #![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
 use rocky_sdk::{
-    Database, FileIdentityProvider, IdentityProvider, Network, Open, transport::memory::Hub,
+    Database, FileIdentityProvider, IdentityKey, IdentityProvider, Network, Open,
+    transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -222,5 +223,88 @@ async fn revoking_a_node_stops_it_alone_and_revoking_the_identity_stops_all_its_
     for device in nodes.iter().chain([owner]) {
         device.close().await;
     }
+    Ok(())
+}
+
+/// The `status` and error message of `request` on `session`, with `identity`
+/// supplied for the call.
+async fn answer(
+    database: &Database,
+    request: Value,
+    identity: Option<Arc<dyn IdentityProvider>>,
+) -> Result<(String, String), Failure> {
+    let session = database.session();
+    let call = json!({
+        "version": 1,
+        "scope": serde_json::from_str::<Value>(&database.scope())?,
+        "request": request,
+    })
+    .to_string();
+    let reply: Value = serde_json::from_str(&match identity {
+        Some(identity) => session.call_with_identity(call, identity).await?,
+        None => session.call(call).await?,
+    })?;
+    Ok((
+        reply["status"].as_str().unwrap_or_default().to_owned(),
+        reply["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_signs_with_the_identity_it_supplies() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let path = root.path().join("a");
+    let key = IdentityKey::generate();
+    // Installed through a provider holding the same key, which reserves the
+    // node's author number; an identity key keeps none.
+    let held = root.path().join("person");
+    std::fs::create_dir_all(&held)?;
+    std::fs::write(held.join("identity"), key.secret())?;
+    let created = Database::create(open(&path, &hub, "a", Some(person(&held)?)), None)?;
+    created.database.close().await?;
+    // Opened without its provider, the node holds no identity key.
+    let database = Database::open(open(&path, &hub, "a", None))?.database;
+    let member = IdentityKey::generate().public_key().to_hex();
+    let grant = json!({"type": "claims", "action": "grant", "identity": member});
+    let (status, message) = answer(&database, grant.clone(), None).await?;
+    assert_eq!(status, "error");
+    assert!(message.contains("identity provider"), "{message}");
+    let other: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
+    let (status, message) = answer(&database, grant.clone(), Some(other)).await?;
+    assert_eq!(
+        (status.as_str(), message.as_str()),
+        ("error", "the identity provider supplies another identity")
+    );
+    // A string `identity` names the grant's target; the provider signs it.
+    let supplied: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&key.phrase())?);
+    assert_eq!(answer(&database, grant, Some(supplied)).await?.0, "ok");
+    // A request carries the identity's phrase or secret for that call alone.
+    let bookmark = |name: &str| json!({"type": "tips", "action": "create", "name": name});
+    assert_eq!(answer(&database, bookmark("none"), None).await?.0, "error");
+    let secret: String = key
+        .secret()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    for (name, identity) in [
+        ("phrase", json!({"phrase": key.phrase()})),
+        ("secret", json!({"secret": secret})),
+        ("other", json!({"phrase": IdentityKey::generate().phrase()})),
+    ] {
+        let mut request = bookmark(name);
+        request["identity"] = identity;
+        let (status, message) = answer(&database, request, None).await?;
+        assert_eq!(
+            status,
+            if name == "other" { "error" } else { "ok" },
+            "{name}: {message}"
+        );
+    }
+    assert_eq!(answer(&database, bookmark("after"), None).await?.0, "error");
+    database.close().await?;
     Ok(())
 }

@@ -40,7 +40,7 @@ fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     outer.finalize().into()
 }
 /// HKDF-SHA256 (RFC 5869) with one 32-byte output block.
-fn hkdf(salt: &[u8], secret: &[u8], info: &[u8]) -> [u8; 32] {
+pub(crate) fn hkdf(salt: &[u8], secret: &[u8], info: &[u8]) -> [u8; 32] {
     hmac(&hmac(salt, &[secret]), &[info, &[1]])
 }
 

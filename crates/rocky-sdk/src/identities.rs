@@ -1,7 +1,8 @@
-//! The identity a database's node belongs to: held in the secret store, or
-//! supplied by the application's `IdentityProvider`. The identity signs
-//! node certificates only; with issuer authority, its nodes sign what an
-//! issuer signs under them. No identity is the root.
+//! The identity a database's node belongs to: held in the secret store,
+//! supplied by the application's `IdentityProvider`, or supplied for one
+//! call. The identity signs
+//! node certificates and, with issuer authority, what an issuer signs. No
+//! identity is the root.
 use crate::{Failure, domain::Domain, enrollment::Settings, secrets::Vault};
 use rocky_credentials::{
     AuthorRange, Authority, CredentialChain, IdentityProvider, PrivateKey, PublicKey, Purpose,
@@ -11,6 +12,23 @@ use std::sync::Arc;
 
 /// Secret-store role of an identity the SDK holds itself.
 pub(crate) const ROLE: &str = "identity";
+
+tokio::task_local! {
+    /// The identity one call supplied, in memory until the call ends.
+    static SUPPLIED: Arc<dyn IdentityProvider>;
+}
+
+/// Runs `call` with `identity`, when given, as the identity it signs with.
+/// Work the call hands to another task does not see it.
+pub(crate) async fn supplying<T>(
+    identity: Option<Arc<dyn IdentityProvider>>,
+    call: impl std::future::Future<Output = T>,
+) -> T {
+    match identity {
+        Some(identity) => SUPPLIED.scope(identity, call).await,
+        None => call.await,
+    }
+}
 
 /// An identity whose key is in an installation's secret store. That
 /// installation is its only node; nodes of another installation need the
@@ -31,10 +49,15 @@ impl IdentityProvider for StoredIdentity {
 }
 
 impl Settings {
-    /// This node's identity: the stored one, or the application's provider,
-    /// which must supply the key this database was installed under.
+    /// This node's identity: the one the current call supplied, the stored
+    /// one, or the application's provider. It must be the key this database
+    /// was installed under.
     pub(crate) fn identity(&self, vault: &Vault) -> Result<Arc<dyn IdentityProvider>, Failure> {
-        let provider: Arc<dyn IdentityProvider> = if self.stored_identity {
+        let provider: Arc<dyn IdentityProvider> = if let Ok(supplied) =
+            SUPPLIED.try_with(Arc::clone)
+        {
+            supplied
+        } else if self.stored_identity {
             Arc::new(StoredIdentity(vault.clone()))
         } else {
             self.provider.clone().ok_or(

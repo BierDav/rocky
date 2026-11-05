@@ -4,8 +4,8 @@
 //! cascade by that origin.
 use rocky_core::{AppId, DomainId, MeshId, Scope};
 use rocky_credentials::{
-    AuthorRange, Authority, CredentialChain, DAY, MAX_CHAIN_LIFETIME, NEVER, Origin, PrivateKey,
-    Revocation, RevocationSet, RootKey, RootRecovery, SignedCapability,
+    AuthorRange, Authority, CredentialChain, DAY, IdentityKey, MAX_CHAIN_LIFETIME, NEVER, Origin,
+    PrivateKey, Revocation, RevocationSet, RootKey, RootRecovery, SignedCapability,
 };
 
 const APP: AppId = AppId([3; 16]);
@@ -461,4 +461,51 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
         ..r
     });
     assert!(Authority::owner(&root).revoke(statement).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_identity_key_never_signs_as_the_root() {
+    let root = RootKey::generate();
+    let restored = RootKey::from_phrase(&root.phrase()).unwrap();
+    for identity in [root.identity(), IdentityKey::generate()] {
+        // Even derived from the root's secret, a trusted grant an identity
+        // key signs names no trusted identity under the root.
+        let grant = Authority::owner(&identity)
+            .issue_trusted(PrivateKey::new().public_key(), SCOPE, AuthorRange::ALL, NOW)
+            .unwrap();
+        let chain = CredentialChain(vec![grant]);
+        assert!(
+            chain
+                .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
+                .is_err()
+        );
+    }
+    // The root's own grant does, so the refusal above is the signer's.
+    let (key, chain) = trusted(&restored, AuthorRange::ALL);
+    assert_eq!(
+        chain
+            .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
+            .unwrap(),
+        key.public_key()
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_identity_phrase_and_secret_restore_the_same_signer() {
+    let identity = IdentityKey::generate();
+    let by_phrase = IdentityKey::from_phrase(&identity.phrase()).unwrap();
+    let by_secret = IdentityKey::from_secret(identity.secret());
+    let node = PrivateKey::new().public_key();
+    let grant = CredentialChain(vec![
+        Authority::owner(&RootKey::generate())
+            .issue_trusted(identity.public_key(), SCOPE, AuthorRange::ALL, NOW)
+            .unwrap(),
+    ]);
+    let certify = |signer: &IdentityKey| {
+        // Ed25519 is deterministic: the same key signs the same bytes.
+        grant.clone().certify(signer, node, 1).unwrap()
+    };
+    assert_eq!(certify(&by_phrase), certify(&identity));
+    assert_eq!(certify(&by_secret), certify(&identity));
+    assert_eq!(identity.phrase().split(' ').count(), 24);
 }

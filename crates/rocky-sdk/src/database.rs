@@ -118,6 +118,8 @@ enum Command {
         ending: Arc<AtomicBool>,
         /// The root signer of a root-only call, dropped when it ends.
         root: Option<Arc<dyn crate::IdentityProvider>>,
+        /// The identity the call signs with, dropped when it ends.
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
         reply: oneshot::Sender<Vec<u8>>,
     },
     End(u64, oneshot::Sender<()>),
@@ -1214,6 +1216,26 @@ impl Session {
         request: String,
         root: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<String, Failure> {
+        self.call_supplied(request, root, None).await
+    }
+    /// As `call`, with the identity this database's node belongs to, for a
+    /// call that signs as it. It must be the identity the database was
+    /// installed under; it signs inside this call and is dropped when the
+    /// call ends. A request may instead carry `"identity": {"phrase": ...}`
+    /// or `{"secret": ...}`.
+    pub async fn call_with_identity(
+        &self,
+        request: String,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<String, Failure> {
+        self.call_supplied(request, None, Some(identity)).await
+    }
+    async fn call_supplied(
+        &self,
+        request: String,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<String, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
         }
@@ -1237,6 +1259,7 @@ impl Session {
                 bytes,
                 ending: self.closed.clone(),
                 root,
+                identity,
                 reply,
             })
             .await?;
@@ -2100,6 +2123,7 @@ async fn run_inner(
                 bytes,
                 ending,
                 root,
+                identity,
                 mut reply,
             } => {
                 let Ok(permit) = budget.clone().try_acquire_owned() else {
@@ -2124,11 +2148,11 @@ async fn run_inner(
                     let _permit = permit;
                     let response = if waits {
                         tokio::select! {
-                            response = dispatch(&bytes, client, &node, None) => response,
+                            response = dispatch(&bytes, client, &node, (None, None)) => response,
                             () = reply.closed() => return,
                         }
                     } else {
-                        dispatch(&bytes, client, &node, root).await
+                        dispatch(&bytes, client, &node, (root, identity)).await
                     };
                     if ending.load(Ordering::SeqCst) {
                         node.end_sessions(Some(session));
@@ -2374,7 +2398,10 @@ async fn dispatch(
     bytes: &[u8],
     client: Result<Arc<Client>, Failure>,
     node: &Node,
-    root: Option<Arc<dyn crate::IdentityProvider>>,
+    (root, identity): (
+        Option<Arc<dyn crate::IdentityProvider>>,
+        Option<Arc<dyn crate::IdentityProvider>>,
+    ),
 ) -> Vec<u8> {
     let result: Result<Value, Failure> = async {
         let call: Value = serde_json::from_slice(bytes)?;
@@ -2382,7 +2409,10 @@ async fn dispatch(
             return Err("foreign scope or SDK version".into());
         }
         let root = node::Root::of(&call["request"], root)?;
-        Box::pin(node.dispatch_with(&*client?, &call["request"], &root)).await
+        let identity = node::call_identity(&call["request"], identity)?;
+        let client = client?;
+        let call = node.dispatch_with(&client, &call["request"], &root);
+        Box::pin(crate::identities::supplying(identity, call)).await
     }
     .await;
     let response = match result {
@@ -2694,6 +2724,7 @@ mod tests {
                     bytes: bytes.clone(),
                     ending: session.closed.clone(),
                     root: None,
+                    identity: None,
                     reply,
                 })
                 .await?;

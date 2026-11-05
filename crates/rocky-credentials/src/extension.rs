@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
+/// The root keeps the upper half of the author numbers for recoveries:
+/// a domain's creator mints below it, so no trusted node hands one out.
+pub const RECOVERY_FIRST: u32 = 1 << 30;
+/// Author numbers of one recovery's trusted identity.
+pub const RECOVERY_SLOT: u32 = 1 << 16;
+/// Recoveries the reserved numbers hold.
+pub const RECOVERY_SLOTS: u32 = (MAX_AUTHOR - RECOVERY_FIRST + 1) / RECOVERY_SLOT;
 const EXTENSION_VERSION: u32 = 8;
 const MAX_EXTENSION: usize = 64 * 1024;
 
@@ -20,6 +27,28 @@ impl AuthorRange {
         first: 1,
         last: MAX_AUTHOR,
     };
+    /// What a domain's creator is trusted with: every number below the
+    /// recovery reserve.
+    pub const DOMAIN: Self = Self {
+        first: 1,
+        last: RECOVERY_FIRST - 1,
+    };
+    /// The numbers of recovery `slot`, which only the root grants.
+    pub fn recovery(slot: u32) -> Result<Self, Error> {
+        if slot >= RECOVERY_SLOTS {
+            return Err(denied("no such recovery slot"));
+        }
+        let first = RECOVERY_FIRST + slot * RECOVERY_SLOT;
+        Self::new(first, first + (RECOVERY_SLOT - 1))
+    }
+    /// The recovery slot whose numbers include this range, if any.
+    pub fn recovery_slot(&self) -> Option<u32> {
+        let slot = self.first.checked_sub(RECOVERY_FIRST)? / RECOVERY_SLOT;
+        Self::recovery(slot)
+            .ok()
+            .filter(|range| range.includes(self))
+            .map(|_| slot)
+    }
     pub fn new(first: u32, last: u32) -> Result<Self, Error> {
         let range = Self { first, last };
         if !range.valid() {

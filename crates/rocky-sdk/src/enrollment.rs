@@ -1343,7 +1343,7 @@ impl Settings {
         let grant = Authority::owner(root).issue_trusted(
             identity.public_key()?,
             bound.scope,
-            AuthorRange::ALL,
+            AuthorRange::DOMAIN,
             now()?,
         )?;
         let mut settings = Self::installed(
@@ -1361,7 +1361,7 @@ impl Settings {
             settings.escrow(item)?;
         }
         settings.authority = Some(Issuing::default());
-        settings.minting = Some(settings.minting_of(AuthorRange::ALL));
+        settings.minting = Some(settings.minting_of(AuthorRange::DOMAIN));
         let links = CredentialChain(vec![grant]);
         crate::mesh::create_root(&vault, (&*identity, &links), bound.scope)?;
         settings.credentials = settings.certify(&vault, links, &bound)?;
@@ -1371,8 +1371,8 @@ impl Settings {
     /// `archived`, the node `predecessor` of the domain whose backup it
     /// restores, with the keys `recovered` opened from that record's escrow. Its
     /// identity is fresh, `provider`'s or one made in the secret store; the
-    /// root grants it trust over the upper half of the free author numbers
-    /// `archived` held, as a split to an issuer it enrolled would.
+    /// root grants it trust over a recovery slot of the author numbers only
+    /// the root grants (`recovery_authors`).
     // Archives are native files.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn recover(
@@ -1386,11 +1386,7 @@ impl Settings {
         if publisher != archived.publisher {
             return Err("the root key is not this domain's root".into());
         }
-        let mut minting = archived.minting.ok_or(
-            "root recovery needs the backup of a trusted node: only it records which author \
-             numbers are free",
-        )?;
-        let authors = minting.split().ok_or("not enough free author numbers")?;
+        let authors = recovery_authors(archived)?;
         let naming = recovered
             .naming
             .ok_or("the backup's escrow holds no partition naming root")?;
@@ -2786,6 +2782,34 @@ impl Settings {
     }
 }
 
+/// The author numbers of a recovery: a slot of the root's reserve, which
+/// no trusted node's range reaches, so nothing a lost node handed out
+/// before or after the backup collides. Slots the archived identity's
+/// grant used are skipped; among the rest one is random, so recoveries the
+/// copy never learned of collide only with probability 1 in
+/// `RECOVERY_SLOTS` each.
+#[cfg(not(target_family = "wasm"))]
+fn recovery_authors(archived: &Settings) -> Result<AuthorRange, Failure> {
+    let used: BTreeSet<u32> = archived
+        .credentials
+        .0
+        .iter()
+        .filter_map(|link| link.capability.authors().ok().flatten())
+        .filter_map(|range| range.recovery_slot())
+        .collect();
+    let free = rocky_credentials::RECOVERY_SLOTS - u32::try_from(used.len())?;
+    let mut pick = u32::from_le_bytes(random::<4>()) % free.max(1);
+    for slot in 0..rocky_credentials::RECOVERY_SLOTS {
+        if used.contains(&slot) {
+            continue;
+        }
+        if pick == 0 {
+            return Ok(AuthorRange::recovery(slot)?);
+        }
+        pick -= 1;
+    }
+    Err("every recovery slot of author numbers is used".into())
+}
 /// A join whose keys exist and whose enrollment is still to be fetched.
 pub struct Joining {
     pub vault: Vault,

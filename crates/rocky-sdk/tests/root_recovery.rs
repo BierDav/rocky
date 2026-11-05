@@ -362,3 +362,59 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     issuer.close().await;
     Ok(())
 }
+
+fn minting(directory: &Path) -> Result<(u64, u64), Failure> {
+    let range = &identity(directory)?["minting"]["range"];
+    Ok((
+        range["first"].as_u64().ok_or("first")?,
+        range["last"].as_u64().ok_or("last")?,
+    ))
+}
+
+/// The backup predates an issuer its node enrolled: the recovered identity
+/// still takes numbers no trusted node handed out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_takes_author_numbers_no_trusted_node_handed_out() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    write_note(&issuer, "before").await;
+    let archive = root.path().join("creator.backup");
+    issuer.database.backup(&archive).await?;
+    let later = root.path().join("later");
+    let enrolled = Device::new(Database::join(
+        open(&later, &hub),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let handed = minting(&later)?;
+    let kept = minting(&creator)?;
+    enrolled.close().await;
+    issuer.close().await;
+    std::fs::remove_dir_all(&creator)?;
+
+    let recovered = root.path().join("recovered");
+    let device = Device::new(Database::recover(
+        open(&recovered, &hub),
+        &archive,
+        &RootKey::from_phrase(&phrase)?,
+    )?)?;
+    let taken = minting(&recovered)?;
+    for other in [handed, kept] {
+        assert!(
+            taken.1 < other.0 || other.1 < taken.0,
+            "{taken:?} overlaps {other:?}"
+        );
+    }
+    assert!(taken.0 >= u64::from(rocky_credentials::RECOVERY_FIRST));
+    assert!(handed.1 < u64::from(rocky_credentials::RECOVERY_FIRST));
+    write_note(&device, "recovered").await;
+    assert_eq!(
+        column(&device, "SELECT key FROM notes ORDER BY key").await,
+        ["before", "recovered"]
+    );
+    device.close().await;
+    Ok(())
+}

@@ -49,7 +49,9 @@ pub use existence_base::{
     EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
     ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
 };
-pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
+pub use extension::{
+    AuthorRange, Extended, Extension, MAX_AUTHOR, RECOVERY_FIRST, RECOVERY_SLOT, RECOVERY_SLOTS,
+};
 pub use finality::{
     MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
     SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,

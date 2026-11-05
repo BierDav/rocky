@@ -1756,3 +1756,65 @@ fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
     assert!(graph.is_final(committed.id().unwrap()).unwrap());
     assert!(graph.strip_finalities(&revocations).unwrap().is_empty());
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let lanes = [trusted.public_key()].into();
+    let mut graph = graph();
+    // A live chain of 70 moves; off each of the first 69 a stage branch
+    // opens with its own schema seal, and the live chain signs past it.
+    let mut link = rocky_credentials::ChainLink::first(trusted.public_key());
+    let mut stages = Vec::new();
+    for n in 0..70u64 {
+        let live = linked_move(&graph, &format!("live{n}"), &trusted, &chain, link);
+        graph.moves.push(live.clone());
+        link = link.next(live.id().unwrap());
+        if n < 69 {
+            let mut statement = seal(&graph, graph.genesis(), n, &owner).statement;
+            statement.action = rocky_credentials::SealAction::Continue { schema: [8; 32] };
+            let branch = link.branch(&statement).unwrap();
+            let sealed =
+                SignedSeal::endorse_linked(statement, &trusted, &chain, Some(branch)).unwrap();
+            graph.seals.push(sealed.clone());
+            stages.push(rocky_credentials::Head {
+                sequence: branch.sequence,
+                id: sealed.id().unwrap(),
+            });
+        }
+    }
+    let (cut, dropped) = graph.proposed_cut(&trusted.public_key(), &lanes).unwrap();
+    let [cut] = cut.as_slice() else {
+        panic!("one chain")
+    };
+    assert_eq!(cut.statements.len(), rocky_credentials::MAX_CUT_HEADS);
+    // The six oldest stages go; the live head and the newest stages stay.
+    assert_eq!(
+        dropped,
+        stages[..6]
+            .iter()
+            .map(|head| (trusted.public_key(), *head))
+            .collect::<Vec<_>>()
+    );
+    assert!(stages[6..].iter().all(|head| cut.statements.contains(head)));
+    assert!(cut.statements.iter().any(|head| head.sequence == 69));
+
+    // Live forks are never left out: 65 of them refuse the cut.
+    let mut forked = self::graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&forked, "base", &trusted, &chain, first);
+    forked.moves.push(base.clone());
+    for n in 0..65 {
+        let fork = linked_move(
+            &forked,
+            &format!("fork{n}"),
+            &trusted,
+            &chain,
+            first.next(base.id().unwrap()),
+        );
+        forked.moves.push(fork);
+    }
+    assert!(forked.proposed_cut(&trusted.public_key(), &lanes).is_err());
+}

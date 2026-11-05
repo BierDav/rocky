@@ -1122,7 +1122,15 @@ points, and the `board_cap` assertion bounds a board's points.
   identical statement again reuses its link, so a retry keeps its bytes.
 - Proposal: `revoke` with the root (`Session::revoke_trusted`) cuts each
   node of the revoked identity at every head the calling node holds;
-  `"cut": false` keeps none.
+  `"cut": false` keeps none. Over 64 heads the proposal leaves out
+  stage-branch heads, oldest first, rather than refusing: a refusal left
+  the root only `"cut": false`, which loses the whole chain, while a left
+  out stage loses only what it signed past the live chain (a released
+  stage's seal then resolves as a revoked one; another trusted node seals
+  again). The response's `cut_dropped_stages` and the
+  `revocation_cut_dropped_stages` activity name them. More than 32 nodes,
+  or more live leaves (forks) than 64, still refuse; forks are the
+  revoked node's own equivocation, and `"cut": false` remains.
 - Transparency: status and health reports carry
   `AlertKind::TipStatementsPastCut { signer, node, statements,
   acknowledgments }` (held, refused and deleted) and
@@ -1173,11 +1181,15 @@ points, and the `board_cap` assertion bounds a board's points.
   counts statement IDs computed: 109 on the old full scan, at most 6
   warm and 8 after an admission now; the existing pruning tests keep the
   results.
+  Cut size, rocky-credentials
+  `tips::a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks`
+  (70 leaves keep the live head and the 63 newest stages; 65 live forks
+  refuse); refusing every cut over 64 heads fails it.
 - Limits: A node can still open several stage branches off one place,
   each with its own signed schema seal, as an honest withdraw and restage
   does; they are not equivocations, and a cut keeps only named heads. A cut of a
-  node with many stage branches signed alongside live statements needs a
-  head per such branch (64 in all).
+  node with more than 64 stage branches signed alongside live statements
+  leaves the oldest out; those stages' own statements are lost.
   Deleting a past-cut fork also deletes its equivocation record; the alert
   keeps the count. Pruning still runs `exclude_revoked` over the whole
   graph, and deleting statements rebuilds the chain index. A statement an honest node built on a past-cut one is

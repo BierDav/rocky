@@ -1231,6 +1231,64 @@ impl TipGraph {
             acknowledgments: head(&acknowledgments),
         })
     }
+    /// The cut a root proposal keeps of `identity`'s chains through
+    /// `lanes`: every leaf of each, as [`Self::heads`]. Over
+    /// [`crate::MAX_CUT_HEADS`] it leaves out stage-branch leaves, oldest
+    /// first, and returns them; a stage the cut leaves out loses only what
+    /// it signed past the live chain. Refuses more chains than a cut names,
+    /// or more live leaves (forks) than fit.
+    #[allow(clippy::type_complexity)]
+    pub fn proposed_cut(
+        &self,
+        identity: &PublicKey,
+        lanes: &BTreeSet<PublicKey>,
+    ) -> Result<(Vec<Cut>, Vec<(PublicKey, Head)>), Error> {
+        let mut cut = Vec::new();
+        for lane in lanes {
+            let heads = self.heads(identity, lane)?;
+            if !heads.statements.is_empty() || heads.acknowledgments.is_some() {
+                cut.push(heads);
+            }
+        }
+        if cut.len() > crate::MAX_CUT_LANES {
+            return Err(denied(
+                "the revoked identity signed through more nodes than a cut names",
+            ));
+        }
+        let mut staged = Vec::new();
+        let index = self.indexed()?;
+        for (chain, heads) in cut.iter().enumerate() {
+            for head in &heads.statements {
+                if index
+                    .links
+                    .get(&head.id)
+                    .is_some_and(|(_, link)| link.stage.is_some())
+                {
+                    staged.push((*head, chain));
+                }
+            }
+        }
+        drop(index);
+        let excess = cut
+            .iter()
+            .map(|heads| heads.statements.len())
+            .sum::<usize>()
+            .saturating_sub(crate::MAX_CUT_HEADS);
+        if excess > staged.len() {
+            return Err(denied(
+                "a revoked node forked its live chain more often than a cut names",
+            ));
+        }
+        staged.sort();
+        let mut dropped = Vec::new();
+        for (head, chain) in staged.into_iter().take(excess) {
+            if let Some(heads) = cut.get_mut(chain) {
+                heads.statements.retain(|kept| *kept != head);
+                dropped.push((heads.lane, head));
+            }
+        }
+        Ok((cut, dropped))
+    }
     /// The live link `signer` signs its next statement at through its node
     /// `lane`: after the highest place this graph holds on any branch, so no
     /// place repeats, or the first.

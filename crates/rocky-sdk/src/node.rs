@@ -1715,14 +1715,13 @@ impl Node {
     }
     /// The cut a root revocation of `target` carries: for each node of the
     /// revoked trusted identity, or the revoked node, the latest heads of
-    /// its chains this node's tip graph holds.
-    /// The chains a root revocation of `target` keeps: each node of the
-    /// revoked trusted identity up to the latest heads this node holds.
+    /// its chains this node's tip graph holds, and the stage-branch heads
+    /// left out to fit (see `TipGraph::proposed_cut`).
     async fn revocation_cut(
         &self,
         target: crate::enrollment::Revoke,
         registry: &crate::registry::Registry,
-    ) -> Result<Vec<rocky_credentials::Cut>, Failure> {
+    ) -> Result<RevocationCut, Failure> {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let user_of = |node: &PublicKey| {
             registry
@@ -1740,26 +1739,11 @@ impl Node {
             }
             crate::enrollment::Revoke::Node(node) => match user_of(&node) {
                 Some(identity) => (identity, [node].into()),
-                None => return Ok(Vec::new()),
+                None => return Ok(Default::default()),
             },
-            crate::enrollment::Revoke::Claims(_) => return Ok(Vec::new()),
+            crate::enrollment::Revoke::Claims(_) => return Ok(Default::default()),
         };
-        let mut cut = Vec::new();
-        for lane in lanes {
-            let heads = graph.heads(&identity, &lane)?;
-            if !heads.statements.is_empty() || heads.acknowledgments.is_some() {
-                cut.push(heads);
-            }
-        }
-        if cut.len() > rocky_credentials::MAX_CUT_LANES
-            || cut.iter().map(|cut| cut.statements.len()).sum::<usize>()
-                > rocky_credentials::MAX_CUT_HEADS
-        {
-            return Err(refused(
-                "the revoked identity signed through too many nodes to cut",
-            ));
-        }
-        Ok(cut)
+        graph.proposed_cut(&identity, &lanes).map_err(refused)
     }
     async fn revoke_with(
         &self,
@@ -1768,11 +1752,24 @@ impl Node {
         keep: bool,
     ) -> Result<Value, Failure> {
         let registry = self.registry().await?;
-        let cut = if keep && root.signer().is_some() {
+        let (cut, dropped) = if keep && root.signer().is_some() {
             self.revocation_cut(target, &registry).await?
         } else {
-            Vec::new()
+            Default::default()
         };
+        // Stage-branch heads a full cut left out: what they signed past
+        // the live chain is past the cut.
+        let dropped: Vec<Value> = dropped
+            .iter()
+            .map(|(lane, head)| {
+                json!({"node": HEXLOWER.encode(lane.as_bytes()), "sequence": head.sequence,
+                    "head": HEXLOWER.encode(&head.id)})
+            })
+            .collect();
+        if !dropped.is_empty() {
+            self.activity
+                .record("revocation_cut_dropped_stages", json!({"heads": dropped}));
+        }
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         draft
@@ -1828,6 +1825,7 @@ impl Node {
         Ok(json!({
             "statement": HEXLOWER.encode(&rotation.statement.id()?),
             "revocations": status,
+            "cut_dropped_stages": dropped,
         }))
     }
     /// Teaches the replica what the identity already records: the
@@ -4068,6 +4066,11 @@ fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bo
     }
 }
 
+/// A proposed cut and the stage-branch heads it left out, by node.
+type RevocationCut = (
+    Vec<rocky_credentials::Cut>,
+    Vec<(PublicKey, rocky_credentials::Head)>,
+);
 #[cfg(test)]
 mod error_tests {
     use super::*;

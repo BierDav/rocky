@@ -362,9 +362,19 @@ impl Fixture {
         node: &PrivateKey,
         grants: Vec<ResourceGrant>,
         root: &PrivateKey,
+        lifetime: (u64, u64),
+    ) -> CredentialChain {
+        self.chain_under(node, grants, root, &PrivateKey::new(), lifetime)
+    }
+    /// A node chain under the identity `user`, which `root` signs first.
+    fn chain_under(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        root: &PrivateKey,
+        user: &PrivateKey,
         (not_before, expires): (u64, u64),
     ) -> CredentialChain {
-        let user = PrivateKey::new();
         let deployment = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -393,7 +403,7 @@ impl Fixture {
                 .unwrap(),
             SignedCapability::sign(
                 capability(deployment.public_key(), PrincipalKind::Deployment, 1),
-                &user,
+                user,
             )
             .unwrap(),
             SignedCapability::sign(

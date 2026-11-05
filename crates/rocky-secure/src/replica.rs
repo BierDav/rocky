@@ -1738,6 +1738,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             inner.resolve_revoked(&merged).await?;
+            inner.drop_revoked_escrow().await?;
             Ok(())
         });
         if let Err(error) = result {

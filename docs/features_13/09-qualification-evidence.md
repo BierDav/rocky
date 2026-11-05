@@ -1249,19 +1249,27 @@ points, and the `board_cap` assertion bounds a board's points.
     is at most `MAX_CLOCK_AHEAD` ahead, and the chain, at the signing time
     and under the current revocations, grants the signer Read on the
     whole scope. Frame authors are judged the same way.
-  - Records are stored one per vouching key holder (primary key: scope,
-    epoch, signer), and a signer replaces only its own. Unverified
-    records are never stored, and nothing is first-come, so a forged
-    record cannot displace a genuine one. A compromised key holder adds at
-    most its own row, and recovery skips any record that does not open to
-    its epoch's key.
-  - At most `MAX_ESCROW_SIGNERS` (32) holders are kept per epoch; a
-    further one is refused.
-  - Each refusal is counted durably against the peer that carried it
-    (`secure_escrow_refused`). The app sees it as
+  - Records are stored one per issuer: the root-issued identity at the
+    top of the vouching chain, which the root alone signs (primary key:
+    scope, epoch, issuer). A record from any device under that issuer
+    replaces it. The bound is structural: a domain has at most
+    `MAX_TRUSTED` (32) live trusted identities, and nothing is
+    first-come. Unverified records are never stored, so a forged record
+    cannot displace a genuine one. A compromised issuer, through any
+    number of its devices, fills only its own slot, and recovery skips
+    any record that does not open to its epoch's key.
+  - When revocations change (`learn_revocations`), kept carried records
+    are judged again in the same commit. A refused one is deleted, which
+    frees its issuer's slot, unless no other record of its epoch is
+    accepted (or the node's own). Revoking a lost holder must not leave
+    an epoch with no way back to the root.
+  - Each refusal, and each record dropped on revocation, is counted
+    durably against the peer that carried it (`secure_escrow_refused`;
+    the replica keeps the carrier beside each record). The app sees it as
     `AlertKind::EscrowRefused { node, records, reason }` in status and
     health.
-  - A node's own records are signed when sealed (`keep_escrow`), and the
+  - A node's own records are signed when sealed (`keep_escrow`) and fill
+    its issuer's slot. A carried record never replaces them, and the
     SDK's dedupe (`escrowed`) counts only its own.
 - Derivation: the root's Ed25519 key mapped to X25519 (birational map;
   secret scalar = clamped first half of SHA-512 of the root secret, as
@@ -1306,7 +1314,10 @@ points, and the `board_cap` assertion bounds a board's points.
   a_recovery_takes_author_numbers_no_trusted_node_handed_out,
   a_recovery_revokes_every_lost_trusted_identity_it_knows,
   a_custodians_store_and_the_root_recover_what_it_holds}`;
-  rocky-secure `tests::escrow::forged_escrow_records_sent_first_never_displace_the_genuine_one`;
+  rocky-secure `tests::escrow::{forged_escrow_records_sent_first_never_displace_the_genuine_one,
+  an_issuers_devices_fill_only_its_own_escrow_slot,
+  revoking_an_issuer_drops_its_kept_escrow_records,
+  revoking_an_epochs_only_holder_keeps_its_record}`;
   `escrow::tests::recovery_opens_the_records_of_held_epochs_skips_forgeries_and_names_a_gap`;
   rocky-credentials `escrow::tests::only_the_root_opens_a_record_and_it_names_nothing`.
   - Custodian test: a keyless custodian of the notes and of one list
@@ -1340,16 +1351,28 @@ points, and the `board_cap` assertion bounds a board's points.
   - Two recoveries from copies that never learned of each other share a
     slot with probability 1/16384.
   - Records of an evicted partition stay, opaque, in the evicting store.
-  - A compromised issuer can enroll devices of its own that can read the
-    scope and fill an epoch's `MAX_ESCROW_SIGNERS` with junk; a later
-    holder's record is then refused, but the refusal is reported. A
-    revoked signer's records are refused when carried again; other
-    holders' records still travel.
+  - Closed (issuer slots, v55): a compromised issuer could enroll devices
+    and fill an epoch's 32 signer slots with junk, which was never
+    deleted. Its devices now share one issuer slot, and revoking it
+    deletes its records. Flood test: 33 records from one issuer's
+    devices, then a genuine record under another issuer. Both slots are
+    kept and nothing is refused; under the old per-signer cap the genuine
+    record is refused. Revocation test: revoking the issuer deletes its
+    record, reports the drop against the carrier, and refuses its records
+    when they are carried again. With the re-judge disabled, the test
+    fails. An epoch's only record stays when its holder is revoked. After
+    a recovery, the revoked creator's records give way to the recovered
+    node's records of the same keys, so the recovery test compares tags.
+  - Devices under one issuer share its slot, so the last record carried
+    replaces a sibling's. Any record that opens recovers the epoch.
+  - A revoked issuer's junk stays as an epoch's only record until another
+    holder's record arrives. That costs one slot, and recovery skips it.
+    The next revocation change re-judges it.
   - A crash between recovery's first open and its key install leaves a
     file that needs the recovery redone.
   - A browser has no recovery; opening needs the root secret (`RootKey`).
-- Formats: replica `rocky.encrypted-replica.v54` (`secure_escrow` keyed by
-  signer, `secure_escrow_refused`); link `HANDSHAKE_VERSION` 24 (it also
+- Formats: replica `rocky.encrypted-replica.v55` (`secure_escrow` keyed by
+  issuer, with its carrier; `secure_escrow_refused`); link `HANDSHAKE_VERSION` 24 (it also
   covers the `Escrow` message, which v53 added without a bump); identity
   `VERSION` 27.
 - Checks on 580d3446:

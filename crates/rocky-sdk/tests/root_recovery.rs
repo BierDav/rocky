@@ -241,8 +241,11 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     let saved = identity(&recovered)?;
     assert_eq!(generations(&saved, "notes"), [1, 2, 3]);
     let now = escrow(&recovered)?;
+    // Every escrowed key stays sealed to the root, though the revoked
+    // creator's copies give way to the recovered node's (same tag).
     assert!(
-        kept.iter().all(|record| now.contains(record)),
+        kept.iter()
+            .all(|(tag, _)| now.iter().any(|(held, _)| held == tag)),
         "the records stay sealed to the root"
     );
     assert!(now.len() > kept.len(), "the rotated epochs are escrowed");

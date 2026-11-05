@@ -7,13 +7,14 @@ pub(super) const SCHEMA: &[&str] = &[
     // Earlier epochs of a scope; `secure_keys` holds the current one.
     "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))",
     // Root escrow records, opaque here, by the key epoch whose frames they
-    // travel with and the key holder that vouched for them; empty scope
-    // and epoch for a record of the whole domain, which stays local.
-    "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,signer BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,signer))",
+    // travel with and the root-issued identity atop the vouching chain, so
+    // an issuer fills one slot per epoch; empty scope and epoch for a
+    // record of the whole domain, which stays local. `carrier` is the peer
+    // that carried it, this node for its own.
+    "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,issuer BLOB NOT NULL,carrier BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,issuer))",
     // Carried records refused, by the peer that carried them.
     "CREATE TABLE IF NOT EXISTS secure_escrow_refused(peer BLOB PRIMARY KEY,records INTEGER NOT NULL,reason TEXT NOT NULL)",
 ];
-use crate::wire::MAX_ESCROW_SIGNERS;
 use rocky_credentials::{RootEscrow, VouchedEscrow};
 type Slot = Option<(ResourceScope, rocky_core::KeyEpoch)>;
 fn slot_values(slot: &Slot) -> Result<[SqlValue; 2], Error> {
@@ -59,6 +60,13 @@ fn escrow_row(row: &[SqlValue]) -> Result<(Slot, Stored), Error> {
     ))
 }
 
+/// The root-issued identity atop `chain`, whose escrow slot its records fill.
+fn issuer_of(chain: &CredentialChain) -> Option<Vec<u8>> {
+    chain
+        .0
+        .first()
+        .map(|link| link.capability.subject.as_bytes().to_vec())
+}
 fn key_hash(key: &[u8; 32]) -> Vec<u8> {
     rocky_core::commitment("rocky.scope-key.v1", key).to_vec()
 }
@@ -74,15 +82,16 @@ pub(super) fn split(keys: Vec<KeyMaterial>) -> (Vec<KeyMaterial>, Vec<KeyMateria
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Why a carried record is refused: it must be signed by a node whose
-    /// chain, at the signing time and under the current revocations, let
-    /// it read the whole scope, as a frame's author is judged.
-    fn judge_escrow(&self, vouched: &VouchedEscrow, time: u64) -> Option<&'static str> {
+    /// The issuer slot a carried record is kept in, or why it is refused:
+    /// it must be signed by a node whose chain, at the signing time and
+    /// under the current revocations, let it read the whole scope, as a
+    /// frame's author is judged.
+    fn judge_escrow(&self, vouched: &VouchedEscrow, time: u64) -> Result<Vec<u8>, &'static str> {
         if vouched.verify().is_err() {
-            return Some("its vouch signature does not verify");
+            return Err("its vouch signature does not verify");
         }
         if vouched.signed_at() > time.saturating_add(rocky_core::MAX_CLOCK_AHEAD.as_secs()) {
-            return Some("it is vouched for in the future");
+            return Err("it is vouched for in the future");
         }
         let (scope, _) = vouched.slot();
         match self.resolve_chain(
@@ -91,9 +100,126 @@ impl<A: RowApplication> Inner<A> {
             &self.config.revocations,
             vouched.signed_at(),
         ) {
-            Ok(grants) if self.can_read_key(scope, &grants) => None,
-            _ => Some("its signer could not read the scope's key"),
+            Ok(grants) if self.can_read_key(scope, &grants) => {
+                issuer_of(vouched.chain()).ok_or("its signer could not read the scope's key")
+            }
+            _ => Err("its signer could not read the scope's key"),
         }
+    }
+    /// Keeps a record in its issuer's slot of `slot`. A carried record
+    /// never replaces one this node sealed.
+    async fn store_escrow(
+        &self,
+        slot: &Slot,
+        issuer: Vec<u8>,
+        carrier: PublicKey,
+        record: Vec<u8>,
+    ) -> Result<(), Error> {
+        let [scope, generation] = slot_values(slot)?;
+        self.conn
+            .execute(
+                "INSERT INTO secure_escrow VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope,generation,issuer) DO UPDATE SET carrier=excluded.carrier,record=excluded.record WHERE excluded.carrier=?6 OR secure_escrow.carrier<>?6",
+                bindings(vec![
+                    scope,
+                    generation,
+                    SqlValue::Blob(issuer),
+                    SqlValue::Blob(carrier.as_bytes().to_vec()),
+                    SqlValue::Blob(record),
+                    SqlValue::Blob(self.config.node.public_key().as_bytes().to_vec()),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Counts `records` refused against the peer that carried them.
+    async fn refuse_escrow(&self, peer: &[u8], records: u64, reason: &str) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT INTO secure_escrow_refused VALUES(?,?,?) ON CONFLICT(peer) DO UPDATE SET records=records+excluded.records,reason=excluded.reason",
+                bindings(vec![
+                    SqlValue::Blob(peer.to_vec()),
+                    SqlValue::Integer(i64::try_from(records).unwrap_or(i64::MAX)),
+                    SqlValue::Text(reason.into()),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Re-judges the kept carried records under the current revocations,
+    /// inside the caller's transaction: a refused one is deleted, freeing
+    /// its issuer's slot, and counted against the peer that carried it.
+    /// The last records of an epoch stay when none other is accepted:
+    /// revoking a lost holder must not leave the epoch unrecoverable.
+    pub(super) async fn drop_revoked_escrow(&self) -> Result<(), Error> {
+        let time = now()?;
+        let own = self.config.node.public_key().as_bytes().to_vec();
+        let kept = collect_rows(
+            self.conn
+                .query(
+                    "SELECT scope,generation,issuer,carrier,record FROM secure_escrow WHERE scope<>x''",
+                    (),
+                )
+                .await?,
+        )
+        .await?;
+        type Epoch = (Vec<u8>, Vec<u8>);
+        let mut epochs: BTreeMap<Epoch, (bool, Vec<Epoch>)> = BTreeMap::new();
+        for row in kept {
+            let [
+                SqlValue::Blob(scope),
+                SqlValue::Blob(generation),
+                SqlValue::Blob(issuer),
+                SqlValue::Blob(carrier),
+                record,
+            ] = row.as_slice()
+            else {
+                return Err(Error::Corrupt("escrow record".into()));
+            };
+            let (_, Stored::Vouched(vouched)) = escrow_row(&[
+                SqlValue::Blob(scope.clone()),
+                SqlValue::Blob(generation.clone()),
+                record.clone(),
+            ])?
+            else {
+                return Err(Error::Corrupt("escrow record".into()));
+            };
+            let (accepted, refused) = epochs
+                .entry((scope.clone(), generation.clone()))
+                .or_default();
+            if *carrier == own || self.judge_escrow(&vouched, time).is_ok() {
+                *accepted = true;
+            } else {
+                refused.push((issuer.clone(), carrier.clone()));
+            }
+        }
+        let mut dropped: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        for ((scope, generation), (accepted, refused)) in epochs {
+            if !accepted {
+                continue;
+            }
+            for (issuer, carrier) in refused {
+                self.conn
+                    .execute(
+                        "DELETE FROM secure_escrow WHERE scope=? AND generation=? AND issuer=?",
+                        bindings(vec![
+                            SqlValue::Blob(scope.clone()),
+                            SqlValue::Blob(generation.clone()),
+                            SqlValue::Blob(issuer),
+                        ]),
+                    )
+                    .await?;
+                *dropped.entry(carrier).or_default() += 1;
+            }
+        }
+        for (carrier, records) in dropped {
+            self.refuse_escrow(
+                &carrier,
+                records,
+                "a revocation refused its signer after it was kept",
+            )
+            .await?;
+        }
+        Ok(())
     }
     /// The key that opens ciphertext of `scope` sealed at `generation`:
     /// the current key or a retained earlier epoch.
@@ -411,7 +537,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .query(
-                    "SELECT scope,generation,record FROM secure_escrow WHERE signer=?",
+                    "SELECT scope,generation,record FROM secure_escrow WHERE carrier=?",
                     [inner.config.node.public_key().as_bytes().to_vec()],
                 )
                 .await?,
@@ -431,9 +557,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(@cache_neutral inner, |inner| {
-            let signer = inner.config.node.public_key().as_bytes().to_vec();
+            let own = inner.config.node.public_key();
+            let issuer = issuer_of(&inner.config.credentials)
+                .unwrap_or_else(|| own.as_bytes().to_vec());
             for (slot, record) in &records {
-                let [scope, generation] = slot_values(slot)?;
                 let bytes = match slot {
                     Some(slot) => VouchedEscrow::sign(
                         &inner.config.node,
@@ -446,21 +573,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     None => record.to_bytes(),
                 }
                 .map_err(credential)?;
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_escrow VALUES(?,?,?,?) ON CONFLICT(scope,generation,signer) DO UPDATE SET record=excluded.record",
-                        bindings(vec![scope, generation, SqlValue::Blob(signer.clone()), SqlValue::Blob(bytes)]),
-                    )
-                    .await?;
+                inner.store_escrow(slot, issuer.clone(), own, bytes).await?;
             }
             Ok(())
         })
     }
     /// Keeps the vouched records `peer` carried with frames of their key
-    /// epoch: one per vouching key holder, which replaces only its own,
-    /// for at most `MAX_ESCROW_SIGNERS` holders. Any other record is
-    /// refused and counted against `peer` (`escrow_refusals`).
+    /// epoch: one per issuer, the root-issued identity atop the vouching
+    /// chain, which a record under the same issuer replaces. Any other
+    /// record is refused and counted against `peer` (`escrow_refusals`).
     pub(crate) async fn keep_carried_escrow(
         &self,
         peer: PublicKey,
@@ -475,62 +596,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
         transaction!(@cache_neutral inner, |inner| {
             let mut refused: Option<(u64, &'static str)> = None;
             for vouched in &records {
-                let mut reason = inner.judge_escrow(vouched, time);
-                if reason.is_none() && vouched.signer() == own {
-                    continue;
-                }
-                let [scope, generation] = slot_values(&Some(vouched.slot()))?;
-                let signer = SqlValue::Blob(vouched.signer().as_bytes().to_vec());
-                if reason.is_none() {
-                    let held = collect_rows(
+                match inner.judge_escrow(vouched, time) {
+                    Err(reason) => {
+                        refused = Some((refused.map_or(0, |(count, _)| count) + 1, reason));
+                    }
+                    Ok(_) if vouched.signer() == own => {}
+                    Ok(issuer) => {
+                        let bytes = vouched.to_bytes().map_err(credential)?;
                         inner
-                            .conn
-                            .query(
-                                "SELECT count(*),COALESCE(SUM(signer=?3),0) FROM secure_escrow WHERE scope=?1 AND generation=?2",
-                                bindings(vec![scope.clone(), generation.clone(), signer.clone()]),
-                            )
-                            .await?,
-                    )
-                    .await?;
-                    let full = matches!(
-                        held.first().map(Vec::as_slice),
-                        Some([SqlValue::Integer(count), SqlValue::Integer(0)])
-                            if *count >= MAX_ESCROW_SIGNERS as i64
-                    );
-                    if full {
-                        reason = Some("its key epoch has the most vouching key holders kept");
+                            .store_escrow(&Some(vouched.slot()), issuer, peer, bytes)
+                            .await?;
                     }
                 }
-                if let Some(reason) = reason {
-                    let count = refused.map_or(0, |(count, _)| count) + 1;
-                    refused = Some((count, reason));
-                    continue;
-                }
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_escrow VALUES(?,?,?,?) ON CONFLICT(scope,generation,signer) DO UPDATE SET record=excluded.record",
-                        bindings(vec![
-                            scope,
-                            generation,
-                            signer,
-                            SqlValue::Blob(vouched.to_bytes().map_err(credential)?),
-                        ]),
-                    )
-                    .await?;
             }
             if let Some((count, reason)) = refused {
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_escrow_refused VALUES(?,?,?) ON CONFLICT(peer) DO UPDATE SET records=records+excluded.records,reason=excluded.reason",
-                        bindings(vec![
-                            SqlValue::Blob(peer.as_bytes().to_vec()),
-                            SqlValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
-                            SqlValue::Text(reason.into()),
-                        ]),
-                    )
-                    .await?;
+                inner.refuse_escrow(peer.as_bytes(), count, reason).await?;
             }
             Ok(())
         })

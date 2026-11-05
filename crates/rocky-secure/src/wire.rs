@@ -40,9 +40,6 @@ pub(crate) struct Extensions {
     pub births: Vec<serde_bytes::ByteArray<32>>,
 }
 
-/// Key holders whose vouched root escrow records a replica keeps for one
-/// key epoch; a further one is refused.
-pub(crate) const MAX_ESCROW_SIGNERS: usize = 32;
 /// Source-schema ordinals and frame-bound birth statements, without
 /// existence counts; a partition's tuple only inside the sealed body.
 pub(crate) const ROW_FORMAT: u8 = 16;

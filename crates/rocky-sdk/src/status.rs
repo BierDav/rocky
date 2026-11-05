@@ -461,7 +461,8 @@ pub enum AlertKind {
     },
     /// The peer `node` carried `records` root escrow records this device
     /// refused, the latest because `reason`: no key holder of their scope
-    /// vouched for them. A genuine record is never displaced by one.
+    /// vouched for them, or a later revocation refused the one that did.
+    /// A genuine record is never displaced by one.
     EscrowRefused {
         node: String,
         records: u64,

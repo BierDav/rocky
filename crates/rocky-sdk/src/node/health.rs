@@ -586,7 +586,24 @@ impl Node {
         peer: PublicKey,
         chain: &CredentialChain,
     ) -> Result<bool, Failure> {
-        Ok(chain
+        // Link credentials include the issuer self-link so the peer can use
+        // its grants. Collector proof intentionally checks the compact
+        // trusted-grant plus node-certificate form.
+        let compact = if chain.0.len() == 2 {
+            chain.clone()
+        } else {
+            let trusted = chain
+                .0
+                .first()
+                .cloned()
+                .ok_or("collector credentials are empty")?;
+            let certificate = chain
+                .certificate()
+                .cloned()
+                .ok_or("collector credentials have no node certificate")?;
+            CredentialChain(vec![trusted, certificate])
+        };
+        Ok(compact
             .trusted_node(
                 settings.publisher,
                 self.domain().scope,

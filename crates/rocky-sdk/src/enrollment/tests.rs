@@ -52,9 +52,9 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         user: user.public_key(),
         node: node.public_key(),
     };
-    let identity = PrivateKey::from_bytes(&vault.get("identity")?);
     let issuer_links = issuer.issuer_links();
-    let capability = Authority::issuer(&identity, &issuer_links).issue_partition_terms(
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
+    let capability = Authority::issuer(&issuer_node, &issuer.credentials)?.issue_partition_terms(
         user.public_key(),
         vec![],
         grants.clone(),
@@ -215,7 +215,7 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         &Registry::default(),
     )?;
     let domain = issuer.domain()?;
-    let chain = member_chain(&supplied.credentials.chain, &user, node.public_key())?;
+    let chain = member_chain(&supplied.credentials.chain(), &user, node.public_key())?;
     let (_, selectors) = chain.verify_selectors(
         issuer.publisher,
         node.public_key(),
@@ -399,6 +399,8 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
     let (mut issuer, vault, _) = issuer_at(TWO, directory.path())?;
     let publisher = PrivateKey::from_bytes(&vault.get("identity")?);
     let links = issuer.issuer_links();
+    let credentials = issuer.credentials.clone();
+    let node = PrivateKey::from_bytes(&vault.get("node")?);
     let app = issuer.domain()?.manifest().app;
     let time = now()?;
     let full = RevocationSet::try_from(
@@ -418,7 +420,7 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                         cut: Default::default(),
                         recovery: None,
                     },
-                    &publisher,
+                    rocky_credentials::Signer::node(&node, &credentials)?,
                     &links,
                 )
             })
@@ -476,11 +478,7 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
             registry,
         )?;
         *registry = Registry::merged(&mut rows, &changes)?;
-        Ok((
-            user,
-            node.public_key(),
-            CredentialChain(supplied.credentials.chain.0),
-        ))
+        Ok((user, node.public_key(), supplied.credentials.chain()))
     };
     let (revoked_user, revoked_node, revoked_root) = enroll(&mut a, &mut registry)?;
     let (kept_user, _, kept_root) = enroll(&mut a, &mut registry)?;
@@ -837,17 +835,16 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let profile = Profile::Reader {
         scopes: ["lists".into()].into(),
     };
-    let identity = issuer.identity(&vault)?;
-    let links = issuer.issuer_links();
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
     let capability = issuer.issue(
-        &issuer.authority(&*identity, &links)?,
+        &issuer.authority(&issuer_node)?,
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,
         (false, Some(AuthorRange::new(2, 1025)?)),
     )?;
     let chain = member_chain(
-        &issuer.authority(&*identity, &links)?.chain_of(capability),
+        &issuer.authority(&issuer_node)?.chain_of(capability),
         &user,
         node.public_key(),
     )?;
@@ -1025,6 +1022,8 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let owner = PrivateKey::from_bytes(&vault.get("identity")?);
     let owner_links = a.issuer_links();
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
+    let credentials = a.credentials.clone();
     let mut rows = BTreeMap::new();
     let mut registry = Registry::default();
     let mut holders = Vec::new();
@@ -1053,7 +1052,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
             1,
         )?;
         registry = Registry::merged(&mut rows, &changes)?;
-        holders.push((user, CredentialChain(supplied.credentials.chain.0), grant));
+        holders.push((user, supplied.credentials.chain(), grant));
     }
     // B is another issuer that granted nothing: it renews from the registry
     // alone, after A's links lapsed.
@@ -1099,7 +1098,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
                 cut: Default::default(),
                 recovery: None,
             },
-            &owner,
+            rocky_credentials::Signer::node(&issuer_node, &credentials)?,
             &owner_links,
         )?;
         Ok::<_, Failure>(RevocationSet::try_from(vec![statement])?)

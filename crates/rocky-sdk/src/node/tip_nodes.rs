@@ -121,8 +121,7 @@ impl Node {
             return Err("unsupported line node format".into());
         }
         let identity = settings.identity(&self.vault)?;
-        let grants =
-            |chain: &CredentialChain| chain.0.last().map(|leaf| leaf.capability.grants.clone());
+        let grants = |chain: &CredentialChain| chain.grants().to_vec();
         let indexes: Vec<_> = (0..saved.nodes.len())
             .rev()
             .filter(|index| saved.nodes[*index].line == line)
@@ -131,16 +130,16 @@ impl Node {
             let key = PrivateKey::from_bytes(&saved.nodes[index].key);
             // A schema change may grant new tables: the same node and
             // number are certified again for the installed definition.
-            if let Some(author) = saved.nodes[index]
-                .credentials
-                .authors()?
-                .and_then(|range| range.single())
-            {
-                let current = settings.certify_node(
-                    &*identity,
+            if saved.nodes[index].credentials.certificate().is_some() {
+                let certificate = saved.nodes[index]
+                    .credentials
+                    .certificate()
+                    .ok_or("saved line node has no certificate")?;
+                let current = settings.chain_for(
+                    &key,
                     settings.identity_links(),
+                    certificate.clone(),
                     &self.domain(),
-                    (key.public_key(), author),
                 )?;
                 if grants(&current) != grants(&saved.nodes[index].credentials) {
                     saved.nodes[index].credentials = current;
@@ -170,12 +169,10 @@ impl Node {
             identity.reserve_author(settings.node_numbers(range))?
         };
         let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-        let credentials = settings.certify_node(
-            &*identity,
-            settings.identity_links(),
-            &self.domain(),
-            (key.public_key(), author),
-        )?;
+        let links = settings.identity_links();
+        let certificate =
+            crate::identities::certificate(&*identity, &links, key.public_key(), author)?;
+        let credentials = settings.chain_for(&key, links, certificate, &self.domain())?;
         let node = rocky_secure::LineNode { key, credentials };
         saved.nodes.push(SavedNode {
             line,

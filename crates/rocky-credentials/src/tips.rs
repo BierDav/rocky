@@ -285,24 +285,29 @@ macro_rules! signed_statement {
             ) -> Result<Self, Error> {
                 Self::endorse(statement, owner, &CredentialChain::default())
             }
-            /// The owner or an issuer signs; neither has a chain link.
-            pub fn endorse(
+            /// The owner or an issuer's node signs; neither has a chain link.
+            pub fn endorse<'s>(
                 statement: $statement,
-                signer: &dyn IdentityProvider,
+                signer: impl Into<$crate::Signer<'s>>,
                 chain: &CredentialChain,
             ) -> Result<Self, Error> {
                 Self::endorse_linked(statement, signer, chain, None)
             }
-            /// A trusted identity signs at `link` of its node's chain.
-            pub fn endorse_linked(
+            /// A trusted identity's node signs at `link` of its own chain:
+            /// the lane is the signing node.
+            pub fn endorse_linked<'s>(
                 statement: $statement,
-                signer: &dyn IdentityProvider,
+                signer: impl Into<$crate::Signer<'s>>,
                 chain: &CredentialChain,
                 link: Option<$crate::tips::ChainLink>,
             ) -> Result<Self, Error> {
+                let signer = signer.into();
                 statement.validate()?;
                 if let Some(link) = &link {
                     link.validate()?;
+                    if signer.signing_node() != Some(link.lane) {
+                        return Err(denied("a chained statement's lane is its signing node"));
+                    }
                 }
                 let signed = Self {
                     endorsement: Endorsement::sign(signer, chain, $label, &(&statement, &link))?,
@@ -342,13 +347,16 @@ macro_rules! signed_statement {
                     self.link
                         .is_none_or(|link| revocations.cut(&signer, &link.lane).is_none())
                 });
-                let trusted = self.endorsement.verify_tip_statement(
+                let (trusted, node) = self.endorsement.verify_tip_statement(
                     publisher,
                     self.statement.scope,
                     $label,
                     &(&self.statement, &self.link),
                     current,
                 )?;
+                if self.link.is_some_and(|link| Some(link.lane) != node) {
+                    return Err(denied("a chained statement's lane is its signing node"));
+                }
                 let unlinked = self.endorsement.chain.0.is_empty() || !trusted;
                 match (unlinked, &self.link) {
                     (true, Some(_)) => {

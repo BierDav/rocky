@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 27;
+pub const VERSION: u32 = 28;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -959,17 +959,11 @@ impl Settings {
         tuple: &rocky_core::PartitionTuple,
     ) -> Vec<ResourceGrant> {
         self.credentials
-            .0
-            .last()
-            .and_then(|leaf| leaf.capability.extended().ok())
-            .map(|extended| {
-                extended
-                    .partitions
-                    .iter()
-                    .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
-                    .collect()
-            })
+            .partitions()
             .unwrap_or_default()
+            .iter()
+            .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
+            .collect()
     }
     /// Whether this device may read a partition in whole, as its key needs.
     pub(crate) fn reads_partition(&self, member: &Member) -> bool {
@@ -1348,8 +1342,18 @@ impl Settings {
         settings.authority = Some(Issuing::default());
         settings.minting = Some(settings.minting_of(AuthorRange::DOMAIN));
         let links = CredentialChain(vec![grant]);
-        crate::mesh::create_root(&vault, (&*identity, &links), bound.scope)?;
         settings.credentials = settings.certify(&vault, links, &bound)?;
+        let node = Settings::node_key(&vault)?;
+        let credentials = settings.credentials.clone();
+        let links = credentials.capabilities();
+        crate::mesh::create_root(
+            &vault,
+            (
+                rocky_credentials::Signer::node(&node, &credentials)?,
+                &links,
+            ),
+            bound.scope,
+        )?;
         Ok(settings)
     }
     /// A trusted node the root installs from the identity record of
@@ -1453,8 +1457,18 @@ impl Settings {
         settings.authority = Some(Issuing::default());
         settings.minting = Some(settings.minting_of(authors));
         let links = CredentialChain(vec![grant]);
-        crate::mesh::create_root(&vault, (&*identity, &links), bound.scope)?;
         settings.credentials = settings.certify(&vault, links, &bound)?;
+        let node = Settings::node_key(&vault)?;
+        let credentials = settings.credentials.clone();
+        let links = credentials.capabilities();
+        crate::mesh::create_root(
+            &vault,
+            (
+                rocky_credentials::Signer::node(&node, &credentials)?,
+                &links,
+            ),
+            bound.scope,
+        )?;
         let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         settings.learn_contacts(archived, &[node, predecessor]);
         Ok(settings)
@@ -1509,7 +1523,7 @@ impl Settings {
             epoch_statements: BTreeMap::new(),
         }
     }
-    fn validity(&self) -> Result<(u64, u64, u64), Failure> {
+    pub(crate) fn validity(&self) -> Result<(u64, u64, u64), Failure> {
         Ok((now()?, self.ttl, SKEW))
     }
     /// The root's trusted grant to `identity`, an issuer identity a device
@@ -2057,8 +2071,6 @@ impl Settings {
         let domain = self.domain()?;
         let token = vault.get("invitation")?;
         let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let identity = self.identity(vault)?;
-        let links = self.issuer_links();
         let expected = context(&self.schema);
         let time = now()?;
         let authority = self.issuing("enrolls devices")?;
@@ -2091,6 +2103,8 @@ impl Settings {
             _ => {}
         }
         let profile = active.profile.clone();
+        let node = Self::node_key(vault)?;
+        let links = self.issuer_links();
         let grants = grants_of(&profile, &domain)?;
         // A retry carves nothing again: the first answer's range is kept.
         let authors = match &claimed {
@@ -2112,7 +2126,7 @@ impl Settings {
             user: request.user,
             authors,
         });
-        let authority = self.authority(&*identity, &links)?;
+        let authority = self.authority(&node)?;
         let issued = self.issue(
             &authority,
             &domain,
@@ -2222,9 +2236,8 @@ impl Settings {
             _ => {}
         }
         let authors = Some(self.reserve_authors(device.user, Some(registry), terms.authors)?);
-        let identity = self.identity(vault)?;
-        let links = self.issuer_links();
-        let authority = self.authority(&*identity, &links)?;
+        let node = Self::node_key(vault)?;
+        let authority = self.authority(&node)?;
         let time = now()?;
         let capability = authority.issue_partition_terms(
             device.user,
@@ -2280,11 +2293,11 @@ impl Settings {
             mesh: self.mesh,
             domain: self.domain,
             manifest: self.manifest()?,
-            credentials: Credentials {
-                publisher: self.publisher,
-                revocations: self.revocations.clone(),
-                chain: authority.chain_of(capability),
-            },
+            credentials: Credentials::of(
+                self.publisher,
+                self.revocations.clone(),
+                &authority.chain_of(capability),
+            ),
             keys,
             issuers: contact
                 .into_iter()
@@ -2382,11 +2395,7 @@ impl Settings {
             mesh: self.mesh,
             domain: self.domain,
             manifest: self.manifest()?,
-            credentials: Credentials {
-                publisher: self.publisher,
-                revocations: self.revocations.clone(),
-                chain,
-            },
+            credentials: Credentials::of(self.publisher, self.revocations.clone(), &chain),
             keys,
             issuers: Vec::new(),
         };
@@ -2477,7 +2486,7 @@ impl Settings {
         domain: &Domain,
         credentials: &Credentials,
     ) -> Result<CredentialChain, Failure> {
-        let mut chain = credentials.chain.clone();
+        let mut chain = credentials.chain();
         let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         if chain
             .0
@@ -2751,7 +2760,7 @@ impl Settings {
             pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
-            credentials: credentials.chain.clone(),
+            credentials: credentials.chain(),
             ttl: DEFAULT_TTL,
             profile: Profile::Issuer,
             keys: BTreeMap::new(),
@@ -3101,10 +3110,9 @@ impl Settings {
             issuers: self.issuer_contacts(&[request.node])?,
             claims: None,
         };
-        let identity = self.identity(vault)?;
-        let links = self.issuer_links();
+        let node = Self::node_key(vault)?;
         Ok(Renewal::seal_current(
-            &self.authority(&*identity, &links)?,
+            &self.authority(&node)?,
             self.publisher,
             &request,
             self.revocations.clone(),
@@ -3353,10 +3361,7 @@ impl Settings {
     pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
         let held = self.grants();
         let wanted = profile_grants(&self.profile, domain)?;
-        let partitions = match self.credentials.0.last() {
-            Some(leaf) => leaf.capability.extended()?.partitions,
-            None => Vec::new(),
-        };
+        let partitions = self.credentials.partitions()?;
         Ok(domain.effective_partitions(&partitions) != partitions
             || (held
                 .iter()
@@ -3507,9 +3512,8 @@ impl Settings {
         {
             return Err(Box::new(RegistryFull));
         }
-        let identity = self.identity(vault)?;
-        let links = self.issuer_links();
-        let authority = self.authority(&*identity, &links)?;
+        let node = Self::node_key(vault)?;
+        let authority = self.authority(&node)?;
         let sealed = Sealed {
             groups: self.groups_for(vault, request.node, &held_by, false)?,
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
@@ -4032,11 +4036,15 @@ impl Settings {
         else {
             return Ok(None);
         };
-        let identity = self.identity(vault)?;
-        let links = self.issuer_links();
+        let node = Self::node_key(vault)?;
+        let credentials = self.credentials.clone();
+        let links = credentials.capabilities();
         crate::mesh::mint_value(
             vault,
-            (&*identity, &links),
+            (
+                rocky_credentials::Signer::node(&node, &credentials)?,
+                &links,
+            ),
             self.domain()?.scope,
             &self.revocations,
             &statement,
@@ -4088,7 +4096,7 @@ impl Settings {
         let signed = match (self.revocations.get(&statement.id()?), signed) {
             (Some(held), _) => held.clone(),
             (None, Some(signed)) => signed,
-            (None, None) => self.authority(&*identity, &links)?.revoke(statement)?,
+            (None, None) => self.authority(&node)?.revoke(statement)?,
         };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;

@@ -444,12 +444,8 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         origin: None,
     })
     .unwrap();
-    chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());
-    assert!(
-        chain
-            .verify_selectors(prefix.0[0].issuer, node_signer.public_key(), &policy(), NOW)
-            .is_err()
-    );
+    // A node certificate holds no partitions of its own.
+    assert!(SignedCapability::sign(leaf, &holder).is_err());
     assert!(
         prefix
             .complete(&holder, node_signer.public_key(), 21)
@@ -624,24 +620,10 @@ fn partition_selectors_cannot_be_dropped() {
         .unwrap();
     let mut leaf = chain.0[1].capability.clone();
     leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();
-    let dropped = CredentialChain(vec![
-        chain.0[0].clone(),
-        SignedCapability::sign(leaf, &user).unwrap(),
-    ]);
+    // A certificate is no place for selectors: it names its node alone.
+    assert!(SignedCapability::sign(leaf, &user).is_err());
     let t = tuple("x", "w");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
-    assert!(
-        dropped
-            .verify_partition(
-                publisher.public_key(),
-                node.public_key(),
-                scope,
-                &t,
-                &policy(),
-                NOW
-            )
-            .is_err()
-    );
     let mut parent = chain.0[0].capability.clone();
     parent.extension = crate::Extension::new(crate::Extended::default()).unwrap();
     let dropped = CredentialChain(vec![

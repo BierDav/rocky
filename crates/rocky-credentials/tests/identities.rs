@@ -153,7 +153,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     let (issuer, issuing) = domain
         .issuer(AuthorRange::new(100, 199).expect("range"))
         .await;
-    let authority = Authority::issuer(&issuer.provider, &issuing);
+    let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     // The issuer grants a member identity a range and its grants; it signs
     // through its own chain, never with the publisher key.
     let member = FileIdentity::new().await;
@@ -187,20 +187,12 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
         authors.insert(chain.author_number().expect("number"));
     }
     assert_eq!(authors, (120..=122).collect());
-    // A certificate adds no rights and keeps to the identity's range.
-    let mut wider = domain.grant();
-    wider.rights.insert(Right::Delete);
+    // A certificate holds no rights of its own, never expires and keeps
+    // to the identity's range.
+    let certificate = first.1.certificate().expect("certificate");
+    assert!(certificate.capability.grants.is_empty());
+    assert_eq!(certificate.capability.expires, rocky_credentials::NEVER);
     let stranger = PrivateKey::new();
-    assert!(
-        identity_chain
-            .clone()
-            .certify_with(
-                &member.provider,
-                (stranger.public_key(), 129),
-                (vec![wider], Vec::new()),
-            )
-            .is_ok_and(|chain| !domain.verify(&chain, &stranger, &set))
-    );
     assert!(
         identity_chain
             .clone()
@@ -217,7 +209,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     );
     // A member holds no issuer authority: it neither appoints issuers nor
     // grants through an authority.
-    let member_authority = Authority::issuer(&member.provider, &identity_chain);
+    let member_authority = rocky_credentials::testing::authority(&member.provider, &identity_chain);
     assert!(
         member_authority
             .issue(
@@ -303,12 +295,13 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let (issuer, issuing) = domain
         .issuer(AuthorRange::new(100, 199).expect("range"))
         .await;
-    let authority = Authority::issuer(&issuer.provider, &issuing);
+    let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     let none = RevocationSet::new();
     // Before revocation the issuer endorses a manifest through its chain.
     let mut next = domain.manifest.clone();
     next.schema = 2;
-    let earlier = SignedManifest::endorse(&next, &issuer.provider, &issuing).expect("endorsed");
+    let earlier =
+        SignedManifest::endorse(&next, authority.signer.clone(), &issuing).expect("endorsed");
     assert_ne!(issuer.key(), domain.publisher());
     assert_eq!(
         earlier.endorsement().signer(domain.publisher()),
@@ -347,7 +340,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
             .is_err()
     );
     next.schema = 3;
-    let later = SignedManifest::endorse(&next, &issuer.provider, &issuing).expect("signed");
+    let later = SignedManifest::endorse(&next, authority.signer.clone(), &issuing).expect("signed");
     assert!(
         later
             .verify_current(domain.publisher(), &revoked, NOW)
@@ -364,7 +357,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let (other, other_chain) = domain
         .issuer(AuthorRange::new(200, 299).expect("range"))
         .await;
-    let renewer = Authority::issuer(&other.provider, &other_chain);
+    let renewer = rocky_credentials::testing::authority(&other.provider, &other_chain);
     let (request, secret) =
         RenewRequest::sign(&member_node, other.key(), member_chain.clone(), NOW).expect("request");
     let prior = request

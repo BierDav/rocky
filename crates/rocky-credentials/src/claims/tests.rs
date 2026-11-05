@@ -259,10 +259,14 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
         PrivateKey::new(),
     );
     let issuer_link = Authority::owner(&owner)
-        .issue_issuer(issuer.public_key(), None, (NOW, 86_400 * 30, 60))
+        .issue_issuer(
+            issuer.public_key(),
+            Some(crate::AuthorRange::ALL),
+            (NOW, 86_400 * 30, 60),
+        )
         .unwrap();
     let links = CredentialChain(vec![issuer_link]);
-    let authority = Authority::issuer(&issuer, &links);
+    let authority = crate::testing::authority(&issuer, &links);
     let link = authority
         .issue_claims(holder.public_key(), every(), 1, (NOW, CLAIM_LIFETIME))
         .unwrap();
@@ -287,9 +291,7 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
     let mut extended = leaf.extended().unwrap();
     extended.claims = Some(every());
     leaf.extension = Extension::new(extended).unwrap();
-    let mut forged = chain.clone();
-    forged.0[2] = SignedCapability::sign(leaf, &holder).unwrap();
-    assert!(forged.links(owner.public_key(), None).is_err());
+    assert!(SignedCapability::sign(leaf, &holder).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -299,10 +301,14 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
     let chain = |issuer: &PrivateKey, right: ClaimRight, time: u64| {
         let links = CredentialChain(vec![
             Authority::owner(&owner)
-                .issue_issuer(issuer.public_key(), None, (NOW, 86_400 * 30, 60))
+                .issue_issuer(
+                    issuer.public_key(),
+                    Some(crate::AuthorRange::ALL),
+                    (NOW, 86_400 * 30, 60),
+                )
                 .unwrap(),
         ]);
-        let authority = Authority::issuer(issuer, &links);
+        let authority = crate::testing::authority(issuer, &links);
         let link = authority
             .issue_claims(holder.public_key(), right, 1, (time, CLAIM_LIFETIME))
             .unwrap();

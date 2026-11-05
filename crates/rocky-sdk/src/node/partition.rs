@@ -195,6 +195,7 @@ impl Node {
                 let authors = settings.reserve_authors(device.user, Some(&registry), None)?;
                 let terms = (delegations, Some(authors));
                 let identity = settings.identity(&self.vault)?;
+                let node = Settings::node_key(&self.vault)?;
                 if kind == "partition_delegate" && !settings.issuer() {
                     Ok(settings.credentials.delegable().delegate_partitions(
                         &*identity,
@@ -207,8 +208,7 @@ impl Node {
                     )?)
                 } else {
                     // An issuer grants and delegates through its authority.
-                    let links = settings.issuer_links();
-                    let authority = settings.authority(&*identity, &links)?;
+                    let authority = settings.authority(&node)?;
                     Ok(authority.chain_of(authority.issue_partition_terms(
                         device.user,
                         vec![],
@@ -228,11 +228,11 @@ impl Node {
             mesh: settings.mesh,
             domain: settings.domain,
             manifest: settings.manifest()?,
-            credentials: rocky_credentials::Credentials {
-                publisher: settings.publisher,
-                revocations: settings.revocations.clone(),
-                chain,
-            },
+            credentials: rocky_credentials::Credentials::of(
+                settings.publisher,
+                settings.revocations.clone(),
+                &chain,
+            ),
             keys: vec![],
             issuers: vec![],
         };

@@ -376,13 +376,16 @@ impl Fixture {
         user: &PrivateKey,
         (not_before, expires): (u64, u64),
     ) -> CredentialChain {
-        let deployment = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: grants.clone(),
+            grants: (kind != PrincipalKind::Node)
+                .then_some(grants.clone())
+                .unwrap_or_default(),
             not_before,
-            expires,
+            expires: (kind == PrincipalKind::Node)
+                .then_some(rocky_credentials::NEVER)
+                .unwrap_or(expires),
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {
@@ -400,18 +403,10 @@ impl Fixture {
             .unwrap(),
         };
         CredentialChain(vec![
-            SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 2), root)
+            SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 1), root)
                 .unwrap(),
-            SignedCapability::sign(
-                capability(deployment.public_key(), PrincipalKind::Deployment, 1),
-                user,
-            )
-            .unwrap(),
-            SignedCapability::sign(
-                capability(node.public_key(), PrincipalKind::Node, 0),
-                &deployment,
-            )
-            .unwrap(),
+            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), user)
+                .unwrap(),
         ])
     }
     fn config(

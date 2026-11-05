@@ -502,9 +502,13 @@ impl Lineage {
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: self.grants_of(generation, tables),
+            grants: (kind != PrincipalKind::Node)
+                .then(|| self.grants_of(generation, tables))
+                .unwrap_or_default(),
             not_before,
-            expires,
+            expires: (kind == PrincipalKind::Node)
+                .then_some(rocky_credentials::NEVER)
+                .unwrap_or(expires),
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {

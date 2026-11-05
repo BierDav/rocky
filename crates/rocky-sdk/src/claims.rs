@@ -98,10 +98,10 @@ impl Settings {
         right.validate()?;
         let time = now()?;
         let signer = self.identity(vault)?;
+        let node = Self::node_key(vault)?;
         let mut changes = Changes::default();
         let (links, issuer) = if self.issuer() {
-            let prefix = self.issuer_links();
-            let authority = self.authority(&*signer, &prefix)?;
+            let authority = self.authority(&node)?;
             let link = authority.issue_claims(
                 identity,
                 right.clone(),
@@ -187,9 +187,8 @@ impl Settings {
         {
             return Ok(None);
         }
-        let signer = self.identity(vault)?;
-        let prefix = self.issuer_links();
-        let authority = self.authority(&*signer, &prefix)?;
+        let node = Self::node_key(vault)?;
+        let authority = self.authority(&node)?;
         let link = authority.issue_claims(
             identity,
             record.right.clone(),

@@ -1,14 +1,13 @@
 //! Portable author provenance without partition selectors or extra signing keys.
 use crate::{
-    AuthorRange, Capability, Error, IdentityProvider, PublicKey, Purpose, Signature, denied,
-    signing_bytes,
+    Attestation, AuthorRange, Capability, Error, PublicKey, Purpose, Signer, denied, signing_bytes,
 };
 use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// The current author binding format; others are refused.
-const BINDING_VERSION: u8 = 2;
+const BINDING_VERSION: u8 = 3;
 
 /// A separately signed projection of assignment authority, revealing no tuples.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,14 +21,11 @@ pub struct AuthorBinding {
     tables: BTreeSet<Commitment>,
     /// Issuer authority: every table.
     issues: bool,
-    signature: Signature,
+    attestation: Attestation,
 }
-const LABEL: &str = "rocky.credentials.author-binding.v2";
+const LABEL: &str = "rocky.credentials.author-binding.v3";
 impl AuthorBinding {
-    pub(crate) fn sign(
-        capability: &Capability,
-        issuer: &dyn IdentityProvider,
-    ) -> Result<Self, Error> {
+    pub(crate) fn sign(capability: &Capability, signer: &Signer<'_>) -> Result<Self, Error> {
         let extended = capability.extended()?;
         let tables = capability
             .grants
@@ -37,32 +33,55 @@ impl AuthorBinding {
             .map(|grant| grant.scope.table)
             .chain(extended.partitions.iter().map(|grant| grant.table))
             .collect();
-        let mut binding = Self {
+        let issuer = signer.principal()?;
+        let bytes = Self::body(
+            issuer,
+            capability.subject,
+            capability.kind,
+            extended.authors,
+            &tables,
+            extended.issues,
+        )?;
+        Ok(Self {
             version: BINDING_VERSION,
-            issuer: issuer.public_key()?,
+            issuer,
             subject: capability.subject,
             kind: capability.kind,
             authors: extended.authors,
             tables,
             issues: extended.issues,
-            // Replaced below: the signature covers every other field.
-            signature: crate::PrivateKey::new().sign(b""),
-        };
-        binding.signature = issuer.sign(Purpose::Capability, &binding.bytes()?)?;
-        Ok(binding)
+            attestation: signer.attest(Purpose::Capability, &bytes)?,
+        })
     }
-    fn bytes(&self) -> Result<Vec<u8>, Error> {
+    fn body(
+        issuer: PublicKey,
+        subject: PublicKey,
+        kind: PrincipalKind,
+        authors: Option<AuthorRange>,
+        tables: &BTreeSet<Commitment>,
+        issues: bool,
+    ) -> Result<Vec<u8>, Error> {
         signing_bytes(
             LABEL,
             &(
-                self.version,
-                self.issuer,
-                self.subject,
-                self.kind,
-                self.authors,
-                &self.tables,
-                self.issues,
+                BINDING_VERSION,
+                issuer,
+                subject,
+                kind,
+                authors,
+                tables,
+                issues,
             ),
+        )
+    }
+    fn bytes(&self) -> Result<Vec<u8>, Error> {
+        Self::body(
+            self.issuer,
+            self.subject,
+            self.kind,
+            self.authors,
+            &self.tables,
+            self.issues,
         )
     }
     /// Certifies a node's author assignment by one exact identity, without
@@ -79,7 +98,8 @@ impl AuthorBinding {
             || self.kind != PrincipalKind::Node
             || self.issues
             || self.authors.and_then(|range| range.single()) != Some(author)
-            || !issuer.verify(&self.bytes()?, &self.signature)
+            || self.attestation.certificate().is_some()
+            || self.attestation.verify(issuer, &self.bytes()?).is_err()
         {
             return Err(denied("migration writer assignment"));
         }
@@ -110,7 +130,12 @@ impl AuthorBinding {
                 || !range.includes(&assigned)
                 || !(binding.issues || binding.tables.contains(&table))
                 || (binding.issues && (binding.kind != PrincipalKind::User || !authority))
-                || !issuer.verify(&binding.bytes()?, &binding.signature)
+                || binding
+                    .attestation
+                    .verify(issuer, &binding.bytes()?)
+                    .is_err()
+                || (binding.kind == PrincipalKind::Node
+                    && binding.attestation.certificate().is_some())
                 || (index + 1 < chain.len() && binding.kind == PrincipalKind::Node)
             {
                 return Err(denied("invalid portable author binding"));

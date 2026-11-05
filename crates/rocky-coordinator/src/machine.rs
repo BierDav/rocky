@@ -172,21 +172,23 @@ pub struct Request {
 pub(crate) fn self_certificate(
     key: &p2panda_core::PrivateKey,
 ) -> rocky_credentials::SignedCapability {
-    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    use rocky_credentials::{AuthorRange, Capability, Extended, Extension, PeerId, PrivateKey};
+    let identity = PrivateKey::new();
     let capability = Capability {
         subject: key.public_key(),
         kind: rocky_core::PrincipalKind::Node,
         grants: Vec::new(),
         not_before: 0,
-        expires: u64::MAX,
+        expires: rocky_credentials::NEVER,
         delegations: 0,
         extension: Extension::new(Extended {
             node: Some(PeerId::of(key.public_key())),
+            authors: Some(AuthorRange::new(1, 1).expect("author range")),
             ..Extended::default()
         })
         .expect("extension"),
     };
-    rocky_credentials::SignedCapability::sign(capability, key).expect("certificate")
+    rocky_credentials::SignedCapability::sign(capability, &identity).expect("certificate")
 }
 /// The one tip unit tests coordinate in `scope`.
 #[cfg(test)]

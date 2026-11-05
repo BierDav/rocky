@@ -2,8 +2,8 @@
 //! identity with issuer authority signs.
 use crate::{
     AuthorRange, Capability, CredentialChain, Endorsement, Error, Extended, Extension,
-    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PublicKey,
-    Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
+    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PrivateKey,
+    PublicKey, Revocation, RevocationSet, SignedCapability, SignedRevocation, Signer, denied,
 };
 use rocky_core::{
     Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
@@ -295,31 +295,40 @@ fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
 }
 
 /// What an identity with issuer authority signs: the root's, whose key is
-/// the publisher key, or an issuer's through its chain of issuer links from
-/// the root's trusted grant. The provider signs; no key is copied. What it
-/// signs holds in every generation of the domain.
+/// the publisher key, or an issuer's, signed by one of its nodes through
+/// the identity's chain of issuer links from the root's trusted grant. No
+/// issuer identity key signs here. What it signs holds in every generation
+/// of the domain.
 pub struct Authority<'a> {
-    pub identity: &'a dyn IdentityProvider,
-    /// The issuer links from the publisher to `identity`; empty for the owner.
-    pub chain: &'a CredentialChain,
+    pub signer: Signer<'a>,
+    /// The issuer links from the publisher to the signing identity; empty
+    /// for the owner.
+    pub chain: CredentialChain,
 }
-static OWNER: CredentialChain = CredentialChain(Vec::new());
 impl<'a> Authority<'a> {
     /// The root: its key is the publisher key. It is offline and signs only
     /// the domain's genesis, trusted grants and their revocations.
-    pub fn owner(identity: &'a dyn IdentityProvider) -> Self {
+    pub fn owner(root: &'a dyn IdentityProvider) -> Self {
         Self {
-            identity,
-            chain: &OWNER,
+            signer: Signer::Key(root),
+            chain: CredentialChain::default(),
         }
     }
-    /// An issuer whose issuer links `chain` ends at `identity`.
-    pub fn issuer(identity: &'a dyn IdentityProvider, chain: &'a CredentialChain) -> Self {
-        Self { identity, chain }
+    /// An issuer's node `node`, whose chain `credentials` ends at its
+    /// certificate under the identity's issuer links.
+    pub fn issuer(node: &'a PrivateKey, credentials: &CredentialChain) -> Result<Self, Error> {
+        Ok(Self {
+            signer: Signer::node(node, credentials)?,
+            chain: credentials.capabilities(),
+        })
     }
     /// The links a capability this authority signs follows.
     pub fn prefix(&self) -> &CredentialChain {
-        self.chain
+        &self.chain
+    }
+    /// The identity this authority signs for.
+    pub fn identity(&self) -> Result<PublicKey, Error> {
+        self.signer.principal()
     }
     /// A capability this authority signed, with the links it follows.
     pub fn chain_of(&self, capability: SignedCapability) -> CredentialChain {
@@ -427,7 +436,57 @@ impl<'a> Authority<'a> {
                     ..Extended::default()
                 })?,
             },
-            self.identity,
+            self.signer.clone(),
+        )
+    }
+    /// The grants and partitions this authority's identity holds itself,
+    /// signed by its node: an issuer identity's link names authority, not
+    /// grants, so its nodes read and write by this one. Under a trusted
+    /// grant it never expires; otherwise it lives inside its parent.
+    pub fn hold(
+        &self,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        (time, ttl, skew): (u64, u64, u64),
+    ) -> Result<SignedCapability, Error> {
+        let parent = &self
+            .chain
+            .0
+            .last()
+            .ok_or_else(|| denied("the root holds no grants"))?
+            .capability;
+        let held = parent.extended()?;
+        if !held.issues || self.signer.signing_node().is_none() || parent.delegations < 2 {
+            return Err(denied(
+                "only an issuer's node signs what its identity holds",
+            ));
+        }
+        let not_before = time.saturating_sub(skew).max(parent.not_before);
+        let expires = match parent.expires {
+            NEVER => NEVER,
+            expires => time
+                .saturating_add(ttl.min(MAX_CHAIN_LIFETIME))
+                .min(expires),
+        };
+        if not_before >= expires {
+            return Err(denied("delegation outlives its parent"));
+        }
+        SignedCapability::sign(
+            Capability {
+                subject: self.identity()?,
+                kind: PrincipalKind::User,
+                grants,
+                not_before,
+                expires,
+                delegations: 1,
+                extension: Extension::new(Extended {
+                    authors: held.authors,
+                    partitions,
+                    origin: self.origin()?,
+                    ..Extended::default()
+                })?,
+            },
+            self.signer.clone(),
         )
     }
     /// The trusted identity a link this authority signs descends from: its
@@ -482,7 +541,7 @@ impl<'a> Authority<'a> {
             // Ranges between issuers are an allocation discipline, as
             // between the owner and its issuers.
             if !held.issues
-                || parent.subject != self.identity.public_key()?
+                || parent.subject != self.identity()?
                 || delegations >= parent.delegations
                 || self.chain.0.len() + usize::from(delegations) >= MAX_CREDENTIAL_DEPTH
             {
@@ -504,7 +563,7 @@ impl<'a> Authority<'a> {
                 delegations,
                 extension: Extension::new(extended)?,
             },
-            self.identity,
+            self.signer.clone(),
         )?;
         Ok(signed)
     }
@@ -551,7 +610,7 @@ impl<'a> Authority<'a> {
     }
     /// Signs `statement`, which names this authority's identity as issuer.
     pub fn revoke(&self, statement: Revocation) -> Result<SignedRevocation, Error> {
-        SignedRevocation::sign(statement, self.identity, self.chain)
+        SignedRevocation::sign(statement, self.signer.clone(), &self.chain)
     }
     /// Endorses a domain statement under `label`.
     pub fn endorse<T: serde::Serialize>(
@@ -559,7 +618,7 @@ impl<'a> Authority<'a> {
         label: &str,
         value: &T,
     ) -> Result<Endorsement, Error> {
-        Endorsement::sign(self.identity, self.chain, label, value)
+        Endorsement::sign(self.signer.clone(), &self.chain, label, value)
     }
 }
 
@@ -593,43 +652,15 @@ impl CredentialChain {
     ) -> Result<Self, Error> {
         self.certify(holder, node, author)
     }
-    /// Completes a node leaf; the signing key must be the node key.
-    pub fn complete_with_alias(
-        self,
-        holder: &dyn IdentityProvider,
-        node: PublicKey,
-        alias: PublicKey,
-        author: u32,
-    ) -> Result<Self, Error> {
-        if alias != node {
-            return Err(denied("the node signs as its own key"));
-        }
-        self.certify(holder, node, author)
-    }
-    /// The identity `holder` signs a node certificate for `node` with one
-    /// `author` number of its range. It adds no rights: it carries the
-    /// identity's grants.
+    /// The identity `holder` signs a certificate for `node` with one
+    /// `author` number of its range. It holds no grants and never expires:
+    /// the node acts with whatever its identity's link grants, while it
+    /// does. A renewal of that link needs no new certificate.
     pub fn certify(
-        self,
-        holder: &dyn IdentityProvider,
-        node: PublicKey,
-        author: u32,
-    ) -> Result<Self, Error> {
-        let last = self.holder(holder)?.clone();
-        let extended = last.extended()?;
-        self.certify_with(
-            holder,
-            (node, author),
-            (last.grants.clone(), extended.partitions),
-        )
-    }
-    /// As `certify`, with `grants` and `partitions` of the identity's: an
-    /// issuer identity's certificate names what its node holds.
-    pub fn certify_with(
         mut self,
         holder: &dyn IdentityProvider,
-        (node, author): (PublicKey, u32),
-        (grants, partitions): (Vec<ResourceGrant>, Vec<PartitionGrant>),
+        node: PublicKey,
+        author: u32,
     ) -> Result<Self, Error> {
         let last = self.holder(holder)?;
         let authors = AuthorRange::new(author, author)?;
@@ -646,14 +677,14 @@ impl CredentialChain {
             subject: node,
             kind: PrincipalKind::Node,
             delegations: 0,
-            grants,
+            grants: Vec::new(),
+            not_before: last.not_before,
+            expires: NEVER,
             extension: Extension::new(Extended {
-                partitions,
                 node: Some(crate::PeerId::of(node)),
                 authors: Some(authors),
                 ..Extended::default()
             })?,
-            ..last.clone()
         };
         self.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(self)
@@ -744,10 +775,24 @@ impl CredentialChain {
         }
         prefix
     }
-    /// The grants of the leaf: what the chain's node may do.
+    /// The link a node certificate leaf names, or the leaf itself: what
+    /// the chain grants.
+    pub fn held(&self) -> Option<&Capability> {
+        let index = match self.certificate() {
+            Some(_) => self.0.len().checked_sub(2)?,
+            None => self.0.len().checked_sub(1)?,
+        };
+        Some(&self.0[index].capability)
+    }
+    /// The grants of the identity link: what the chain's node may do.
     pub fn grants(&self) -> &[ResourceGrant] {
-        self.0
-            .last()
-            .map_or(&[], |leaf| leaf.capability.grants.as_slice())
+        self.held().map_or(&[], |held| held.grants.as_slice())
+    }
+    /// The partition grants of the identity link.
+    pub fn partitions(&self) -> Result<Vec<PartitionGrant>, Error> {
+        Ok(match self.held() {
+            Some(held) => held.extended()?.partitions,
+            None => Vec::new(),
+        })
     }
 }

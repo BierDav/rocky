@@ -23,10 +23,11 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             )
             .await?;
             // 64 devices of the domain, none of them a contact of A.
-            let publisher = PrivateKey::from_bytes(&a.vault.get("identity")?);
+            let issuer_node = PrivateKey::from_bytes(&a.vault.get("node")?);
             let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
             let issuer_links = a.settings.lock().await.issuer_links();
-            let authority = Authority::issuer(&publisher, &issuer_links);
+            let credentials = a.settings.lock().await.credentials.clone();
+            let authority = Authority::issuer(&issuer_node, &credentials)?;
             let strangers = (0..64)
                 .map(|_| {
                     let (user, node) = (PrivateKey::new(), PrivateKey::new());

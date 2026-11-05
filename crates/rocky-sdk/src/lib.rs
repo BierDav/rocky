@@ -161,6 +161,7 @@ mod mesh;
 mod node;
 mod owner;
 mod reactor;
+mod recovery;
 mod registry;
 mod rollout;
 mod scheduling;

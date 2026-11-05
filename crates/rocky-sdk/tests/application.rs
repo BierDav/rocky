@@ -425,3 +425,51 @@ async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() ->
     assert!(db.flush().await.is_ok());
     db.close().await
 }
+
+/// Every device is lost: the root and a backup archive recover the
+/// installation, in a browser as natively, its archive a file in Rocky's
+/// storage there.
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_root_and_a_backup_recover_a_lost_installation() -> Result<(), Failure> {
+    let directory = Scratch::new().await;
+    let creator = directory.path().join("creator");
+    let created = Configuration::new(&creator, &schema()?)?.create().await?;
+    let root = created.root.ok_or("the root is handed back once")?;
+    let db = created.database;
+    let mut tx = db.transaction().await?;
+    let id = tx.next_id("notes", vec![]).await?;
+    tx.execute(
+        "INSERT INTO notes(id,body) VALUES(?,?)",
+        params![id, "kept"],
+    )
+    .await?;
+    tx.commit().await?;
+    let archive = directory.path().join("creator.backup");
+    db.backup(&archive).await?;
+    db.close().await?;
+    rocky_platform::fs::remove_dir_all(&creator)?;
+
+    let recovered = Configuration::new(directory.path().join("recovered"), &schema()?)?;
+    let db = recovered.recover(&archive, &root).await?.database;
+    let mut tx = db.transaction().await?;
+    let id = tx.next_id("notes", vec![]).await?;
+    tx.execute(
+        "INSERT INTO notes(id,body) VALUES(?,?)",
+        params![id, "recovered"],
+    )
+    .await?;
+    tx.commit().await?;
+    db.close().await?;
+    let db = recovered.open().await?.database;
+    let rows = db
+        .query("SELECT body FROM notes ORDER BY body", params![])
+        .await?
+        .collect()
+        .await?;
+    let bodies: Vec<String> = rows
+        .iter()
+        .map(|row| row.get::<String>("body"))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(bodies, ["kept", "recovered"]);
+    db.close().await
+}

@@ -124,9 +124,7 @@ pub(crate) async fn keep(
     Ok(())
 }
 
-/// Keys a root opened from a store's escrow records. Recovery reads native
-/// archives only.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+/// Keys a root opened from a store's escrow records.
 #[derive(Default)]
 pub(crate) struct Recovered {
     pub readers: BTreeMap<(String, KeyEpoch), [u8; 32]>,
@@ -136,7 +134,6 @@ pub(crate) struct Recovered {
     pub secrets: BTreeMap<(Commitment, KeyEpoch), [u8; 32]>,
     pub naming: Option<[u8; 32]>,
 }
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
 impl Recovered {
     /// Opens the `records` of a store of `archived`'s domain with `root`.
     /// Anyone can seal to the root, so a record that opens to no key of

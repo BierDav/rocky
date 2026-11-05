@@ -1382,9 +1382,45 @@ points, and the `board_cap` assertion bounds a board's points.
   - A revoked issuer's junk stays as an epoch's only record until another
     holder's record arrives. That costs one slot, and recovery skips it.
     The next revocation change re-judges it.
-  - A crash between recovery's first open and its key install leaves a
-    file that needs the recovery redone.
-  - A browser has no recovery; opening needs the root secret (`RootKey`).
+  - Closed (crash-safe recovery): the restore marker (`restore.json`)
+    carries `recovery: placing | placed`. Recovery saves the marker, then
+    the identity (so its author slot), then moves the archive's files and
+    advances it to `placed`. The marker goes only once the store is
+    rebound, holds its tables and has taken every key. Until then
+    `open` is refused ("a recovery is unfinished"), and `recover` with
+    the same archive and root resumes under the saved identity: before
+    `placed` it puts the archive's never-opened files in place again,
+    after it repeats the idempotent rebind, attach and key install. A
+    different archive, or a restore's marker, is refused. Sweep test
+    `recovery::tests::a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slot`
+    (native and Chromium) stops a recovery once at each of seven steps
+    (`recovery::fault`): marker saved, identity saved, files moved,
+    marked placed, rebound, attached, one of two keys taken. Each time
+    `open` is refused, a second `recover` returns every row under the
+    identity and minting range first saved, and the finished store opens
+    and refuses a third `recover`. Removing the marker right after the
+    rebind (the old order) fails it, and so does a resume that does not
+    reuse the saved identity ("another slot").
+  - Closed (browser recovery): `Configuration::recover` is the same code
+    on wasm32. Archives are read and written through `rocky_platform::fs`
+    (natively streamed files; in a browser whole files in Rocky's OPFS
+    storage, the staged store imported into the SQLite pool by
+    `write_database`), so `Database::backup` works in a browser too and
+    writes its archive there. Test
+    `application::the_root_and_a_backup_recover_a_lost_installation`
+    (native and Chromium): create, back up, delete the installation,
+    recover with the root, write and reopen.
+  - A crash after the keys are installed but before the root revokes the
+    lost identities leaves a store that opens with them unrevoked; the
+    revoke step owns finishing that (`Session::revoke_trusted`).
+  - A browser holds an archive whole in memory, and an app moves archive
+    bytes in or out of Rocky's storage with `rocky_platform::fs`; the SDK
+    offers no download or upload.
+  - Checks (crash-safe and browser recovery): `./scripts/lint` 0;
+    `./scripts/check --unit --integration` 249 unit and 1125 integration
+    passed; `./scripts/check --wasm` clippy 0 and 68 of 68 browser runs
+    passed. No persisted version changed: the marker is an in-progress
+    file, and one without `recovery` reads as a restore's.
 - Formats: replica `rocky.encrypted-replica.v55` (`secure_escrow` keyed by
   issuer, with its carrier; `secure_escrow_refused`); link `HANDSHAKE_VERSION` 24 (it also
   covers the `Escrow` message, which v53 added without a bump); identity

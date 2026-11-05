@@ -1627,16 +1627,9 @@ impl Node {
             }
         }
     }
-    /// An archive is a file the user moves elsewhere; a browser would have
-    /// to offer it as a download, which the SDK does not.
-    #[cfg(target_family = "wasm")]
-    async fn backup(&self, _target: &std::path::Path) -> Result<Value, Failure> {
-        Err("backups are unavailable in a browser".into())
-    }
-    #[cfg(not(target_family = "wasm"))]
     /// Writes a signed backup archive to `target`: a coherent copy of the
-    /// file and the identity, which holds no
-    /// key. See `docs/runtime/backup-and-restore.md`.
+    /// file and the identity, which holds no key. In a browser `target` is a
+    /// file in Rocky's storage (`rocky_platform::fs`).
     async fn backup(&self, target: &std::path::Path) -> Result<Value, Failure> {
         let _backup = self.backups.lock().await;
         if rocky_platform::fs::exists(target) {
@@ -1716,7 +1709,6 @@ impl Node {
     /// A recovery's root revokes every other trusted identity this node
     /// knows, lost with its devices, with the identities it first enrolled;
     /// every key rotates. Returns the revoked identities in order.
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn revoke_lost(
         &self,
         root: Arc<dyn rocky_credentials::IdentityProvider>,

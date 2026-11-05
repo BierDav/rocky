@@ -1,7 +1,7 @@
 # 4. Identity registry
 
-Status: planned (2026-11-05). Needs phase 1; uses phase 3's membership view
-when present.
+Status: implementation complete; self-reported node names remain deferred
+(2026-11-06). Uses the phase 3 membership view when present.
 
 ## Registry
 
@@ -29,6 +29,11 @@ when present.
   and `device_of` become `node_keys` and `node_keys_of`.
 - A node's self-reported name travels in its contact (discovery
   announcement), at most `MAX_LABEL` bytes. It is not issuer-written.
+
+The current contact wire format carries routes and the node key but has no
+name field. Adding an unsigned display name would require a discovery-format
+decision, so the registry reports linked node keys and last-seen data and
+defers the name until admission and discovery (phase 5).
 
 ## Done when
 

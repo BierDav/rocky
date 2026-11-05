@@ -13,7 +13,7 @@ async fn supplied_numbered_node_writes_offline_reopens_and_keeps_its_granted_ran
     let directory = tempfile::tempdir()?;
     let issuer = Device::create(&directory.path().join("issuer"), None)?;
     let path = directory.path().join("writer");
-    let keys = Database::device(&path, None)?;
+    let keys = Database::node_keys(&path, None)?;
     let profile = json!({"kind":"writer","scopes":["items"]});
     let grant = json!({"type":"grant","device":keys,"profile":profile,"authors":2});
     let supplied = issuer.ok(grant.clone()).await["supplied"].clone();

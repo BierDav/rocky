@@ -3,7 +3,7 @@
 use crate::{
     Failure,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
-    enrollment::{DEFAULT_TTL, DeviceKeys, Settings, Supplied, now},
+    enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
     node::{self, Client, Node},
     schema::Schema,
     secrets::{FileSecretStore, SecretStore},
@@ -338,21 +338,21 @@ impl Database {
             },
         )
     }
-    /// Makes the keys of a device that will receive credentials from
+    /// Makes the keys of a node that will receive credentials from
     /// outside the SDK, and returns their public halves for whoever issues
     /// them. Asking again returns the same keys. Nothing is contacted.
-    pub fn device(
+    pub fn node_keys(
         directory: &Path,
         secrets: Option<Arc<dyn SecretStore>>,
-    ) -> Result<DeviceKeys, Failure> {
-        Self::device_of(directory, secrets, None)
+    ) -> Result<NodeKeys, Failure> {
+        Self::node_keys_of(directory, secrets, None)
     }
-    /// As `device`, for a node of the identity `identity` supplies.
-    pub fn device_of(
+    /// As `node_keys`, for a node of the identity `identity` supplies.
+    pub fn node_keys_of(
         directory: &Path,
         secrets: Option<Arc<dyn SecretStore>>,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<DeviceKeys, Failure> {
+    ) -> Result<NodeKeys, Failure> {
         rocky_platform::fs::create_dir_all(directory)?;
         let path = directory.join("identity.json");
         if rocky_platform::fs::exists(&path) {
@@ -2394,14 +2394,15 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
+type CallProviders = (
+    Option<Arc<dyn crate::IdentityProvider>>,
+    Option<Arc<dyn crate::IdentityProvider>>,
+);
 async fn dispatch(
     bytes: &[u8],
     client: Result<Arc<Client>, Failure>,
     node: &Node,
-    (root, identity): (
-        Option<Arc<dyn crate::IdentityProvider>>,
-        Option<Arc<dyn crate::IdentityProvider>>,
-    ),
+    (root, identity): CallProviders,
 ) -> Vec<u8> {
     let result: Result<Value, Failure> = async {
         let call: Value = serde_json::from_slice(bytes)?;

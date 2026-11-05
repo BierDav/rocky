@@ -70,12 +70,10 @@ impl Settings {
                 ));
             }
         }
-        let leaf = &self
+        let leaf = self
             .credentials
-            .0
-            .last()
-            .ok_or("missing node credential")?
-            .capability;
+            .held()
+            .ok_or("missing identity capability")?;
         let bundle = Bundle {
             format: 3,
             mesh: self.mesh,
@@ -188,10 +186,10 @@ impl Settings {
             .is_some_and(|extended| extended.issues);
         settings.profile = bundle.profile;
         settings.credentials = settings.certify(&vault, bundle.links, &domain)?;
-        let grants = settings.credentials.grants().to_vec();
         settings.epoch_statements = bundle.epoch_statements;
+        settings.adopt_groups(&vault, &bundle.groups)?;
         for (name, scope) in domain.scopes() {
-            if !crate::enrollment::reads(&grants, scope) {
+            if !settings.reads_whole(&domain, &scope) {
                 continue;
             }
             for (epoch, key) in bundle.keys.get(name).into_iter().flatten() {
@@ -207,7 +205,6 @@ impl Settings {
             settings.learn_revocations(&RevocationSet::new())?;
             crate::enrollment::hold_naming(&vault, bundle.naming.as_deref())?;
         }
-        settings.adopt_groups(&vault, &bundle.groups)?;
         settings.add_peer(&vault, contact)?;
         settings.learn_issuers(&vault, &bundle.issuers);
         settings.save(path)?;

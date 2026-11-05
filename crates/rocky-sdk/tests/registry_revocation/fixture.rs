@@ -93,12 +93,12 @@ pub(super) async fn join(
     settle(&device).await;
     Ok(device)
 }
-pub(super) async fn listed(device: &Device, node: &str) -> Value {
-    device.ok(json!({"type":"devices"})).await["devices"]
+pub(super) async fn listed(device: &Device, identity: &str) -> Value {
+    device.ok(json!({"type":"identities"})).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|record| record["node"] == node)
+        .find(|record| record["identity"] == identity)
         .cloned()
         .unwrap_or_default()
 }

@@ -187,7 +187,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.add_peer(&c.contact().await)
         .await
         .map_err(|e| e.to_string())?;
-    a.ok(json!({"type": "revoke", "node": c.node().await}))
+    a.ok(json!({"type": "revoke", "identity": c.identity().await}))
         .await;
     // Revoking forgets the device's contact and refuses it again.
     assert_eq!(a.peer(&c.node().await).await, Value::Null);

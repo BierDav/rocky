@@ -175,7 +175,9 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             // others come to hold the statement and its discovery value.
             let c_port = c.current().ok_or("link")?.transport.clone();
             c_port.listen(false);
-            a.revoke(crate::enrollment::Revoke::Node(key(&c)?)).await?;
+            let c_identity = c.settings.lock().await.identity;
+            a.revoke(crate::enrollment::Revoke::Identity(c_identity))
+                .await?;
             pass(&b).await?;
             until(async || hub.topics("a").len() == 2 && hub.topics("b").len() == 2).await?;
             let current = hub.topics("a")[0];

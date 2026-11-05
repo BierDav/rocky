@@ -136,7 +136,22 @@ impl Todos {
         if node == self.node().await? {
             return Err("a device cannot remove itself; reset it instead".into());
         }
-        self.call(json!({"type": "revoke", "node": node})).await?;
+        let identities = self.call(json!({"type": "identities"})).await?;
+        let identity = identities["identities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|record| {
+                record["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|linked| linked["node"] == node)
+                    .and_then(|_| record["identity"].as_str())
+            })
+            .ok_or("the node is not linked to a recorded identity")?;
+        self.call(json!({"type": "revoke", "identity": identity}))
+            .await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])

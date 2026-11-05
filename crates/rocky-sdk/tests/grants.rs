@@ -97,7 +97,7 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
     let directory = root.join("s");
-    let keys = Database::device(&directory, None)?;
+    let keys = Database::node_keys(&directory, None)?;
     let grant = |grants: Value| json!({"type": "grant", "device": keys, "grants": grants});
     // Command rights where no command is, unknown names and empty sets.
     for refused in [
@@ -145,10 +145,16 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
     assert_eq!(rows(&a, items).await, [["Milk", "1"]]);
     assert!(rows(&s, "SELECT text FROM notes").await.is_empty());
 
-    // The issuer lists the device with its raw grants and can revoke it.
-    let devices = a.ok(json!({"type": "devices"})).await;
-    assert_eq!(devices["devices"][0]["profile"]["kind"], "grants");
-    a.ok(json!({"type": "revoke", "node": keys.node.to_hex()}))
+    // The issuer lists the identity with its raw grants and can revoke it.
+    let identities = a.ok(json!({"type": "identities"})).await;
+    let granted_identity = identities["identities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|record| record["identity"] == json!(keys.identity))
+        .ok_or("the granted identity")?;
+    assert_eq!(granted_identity["profile"]["kind"], "grants");
+    a.ok(json!({"type": "revoke", "identity": keys.identity.to_hex()}))
         .await;
     assert!(a.call(grant(granted)).await.is_err());
     for device in [&a, &s] {
@@ -203,7 +209,7 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
-    let s_keys = Database::device(&root.join("s"), None)?;
+    let s_keys = Database::node_keys(&root.join("s"), None)?;
     let held = json!([
         {"scope": "items", "rights": ["read", "insert", "update", "delete", "custody"]},
         {"scope": "notes", "rights": ["read", "custody"]},
@@ -213,7 +219,7 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         .await["supplied"]
         .clone();
     let s = install(root, &hub, "s", &supplied)?;
-    let d_keys = Database::device(&root.join("d"), None)?;
+    let d_keys = Database::node_keys(&root.join("d"), None)?;
     let delegate = |grants: Value, extra: Value| {
         let mut request = json!({"type": "delegate", "device": d_keys, "grants": grants});
         for (name, value) in extra.as_object().into_iter().flatten() {
@@ -247,7 +253,7 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
             .await
             .is_err()
     );
-    let plain_keys = Database::device(&root.join("p"), None)?;
+    let plain_keys = Database::node_keys(&root.join("p"), None)?;
     let plain = a
         .ok(json!({"type": "grant", "device": plain_keys, "grants": insert_only}))
         .await["supplied"]

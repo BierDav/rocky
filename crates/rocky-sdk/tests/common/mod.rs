@@ -157,6 +157,10 @@ impl Device {
     pub async fn node(&self) -> String {
         self.text("session", "node").await
     }
+    /// The identity this device's node belongs to.
+    pub async fn identity(&self) -> String {
+        self.text("session", "principal").await
+    }
     async fn text(&self, request: &str, field: &str) -> String {
         self.ok(json!({"type": request})).await[field]
             .as_str()

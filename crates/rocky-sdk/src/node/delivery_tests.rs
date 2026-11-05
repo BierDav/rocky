@@ -106,6 +106,12 @@ impl Device {
             .ok_or("node")?
             .to_owned())
     }
+    async fn identity(&self) -> Result<String, Failure> {
+        Ok(self.ok(json!({"type":"session"})).await?["principal"]
+            .as_str()
+            .ok_or("principal")?
+            .to_owned())
+    }
     async fn online(&self, online: bool) -> Result<(), Failure> {
         self.ok(json!({"type":"networking_control","enabled":online}))
             .await
@@ -329,7 +335,8 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     let removed_node = removed.node().await?;
     a.ok(share(&[&node, &third.node().await?, &removed_node]))
         .await?;
-    a.ok(json!({"type":"revoke","node":removed_node})).await?;
+    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
+        .await?;
     assert_eq!(a.state(&node).await?, "pending");
     relay(a, b).await?;
     assert_eq!(a.state(&node).await?, "deposited");
@@ -487,7 +494,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         })
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
-    a.ok(json!({"type":"revoke","node":removed.node().await?}))
+    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
         .await?;
     // Every round refuses the rotation alike while custody is full.
     relay(&a, &b).await?;
@@ -573,7 +580,8 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
     // A restarted mailbox keeps the deposit.
     let custody = custody.restart_with(|_| Ok(())).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
-    a.ok(json!({"type":"revoke","node":node})).await?;
+    a.ok(json!({"type":"revoke","identity":b.identity().await?}))
+        .await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     // Custody learns the statement from A and removes B's deposit.
     a.ok(json!({"type":"sync"})).await?;

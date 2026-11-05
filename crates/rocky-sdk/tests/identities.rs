@@ -182,8 +182,7 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn revoking_a_node_stops_it_alone_and_revoking_the_identity_stops_all_its_nodes()
--> Result<(), Failure> {
+async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), Failure> {
     let household = household().await?;
     let Household { owner, nodes, .. } = &household;
     for node in nodes {
@@ -192,23 +191,25 @@ async fn revoking_a_node_stops_it_alone_and_revoking_the_identity_stops_all_its_
     let key = person(&household._root.path().join("person"))?
         .public_key()?
         .to_hex();
-    // One node certificate.
-    owner
-        .ok(json!({"type": "revoke", "node": nodes[1].node().await}))
-        .await;
+    // A node is its identity's to unlink, never an issuer's to revoke.
+    let refused = owner
+        .call(json!({"type": "revoke", "node": nodes[1].node().await}))
+        .await
+        .err()
+        .ok_or("an issuer revoked a node")?;
+    assert_eq!(refused["code"], "rejected", "{refused}");
     let synced = async |device: &Device| {
         device
             .sync()
             .await
             .is_ok_and(|report| common::reconciled(&report))
     };
-    assert!(synced(&nodes[0]).await);
-    assert!(synced(&nodes[2]).await);
-    let refused = nodes[1].sync().await.err().ok_or("a revoked node synced")?;
-    assert_eq!(refused["code"], "revoked", "{refused}");
+    for node in nodes {
+        assert!(synced(node).await);
+    }
     // The identity: every node of it, those the owner never recorded too.
     owner.ok(json!({"type": "revoke", "identity": key})).await;
-    for node in [&nodes[0], &nodes[2]] {
+    for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
         assert_eq!(refused["code"], "revoked", "{refused}");
     }

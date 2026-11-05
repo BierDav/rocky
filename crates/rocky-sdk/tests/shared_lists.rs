@@ -531,7 +531,8 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let served = kinds(&issuer.call(json!({"type":"activity"})).await?);
     for kind in [
         "invitation_created",
-        "device_enrolled",
+        "identity_admitted",
+        "node_linked",
         "partition_created",
         "partition_shared",
     ] {

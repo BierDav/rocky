@@ -105,7 +105,7 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM issuer_registry WHERE node=? AND entry='revoked'",
+        "SELECT COUNT(*) FROM issuer_registry WHERE identity=? AND entry='revoked'",
         [node.to_hex()],
         |row| row.get(0),
     )?)
@@ -209,7 +209,7 @@ async fn stop_at(
     let revoked = PrivateKey::new().public_key();
     fault::STOP.with(|at| at.set(Some(stop)));
     assert!(
-        node.revoke(crate::enrollment::Revoke::Node(revoked))
+        node.revoke(crate::enrollment::Revoke::Identity(revoked))
             .await
             .is_err(),
         "{stop:?}"

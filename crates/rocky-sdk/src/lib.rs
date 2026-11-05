@@ -157,6 +157,7 @@ mod escrow;
 mod generation;
 mod groups;
 mod identities;
+mod membership;
 mod mesh;
 mod node;
 mod owner;
@@ -196,7 +197,7 @@ pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
 #[cfg(not(target_family = "wasm"))]
 pub use engine::Engine;
-pub use enrollment::{DeviceKeys, PublisherRequired, Supplied, route_enrollment};
+pub use enrollment::{NodeKeys, PublisherRequired, Supplied, route_enrollment};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// Named domain counters whose idempotent claims hand out unique,

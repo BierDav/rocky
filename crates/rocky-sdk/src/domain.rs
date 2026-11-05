@@ -349,17 +349,17 @@ pub(crate) fn logical(schema: &Schema, publisher: [u8; 32]) -> Result<LogicalSch
     definition.tables.push(registry_table()?);
     Ok(definition.build()?)
 }
-/// One row per entry of a device's record, keyed by node and entry.
+/// One row per entry of an identity's record, keyed by identity and entry.
 pub(crate) fn registry_table() -> Result<rocky_core::TableDefinition, Failure> {
     Ok(serde_json::from_value(serde_json::json!({
         "name": REGISTRY,
         "class": "replayed",
         "columns": [
-            {"name": "node", "type": "text", "not_null": true},
+            {"name": "identity", "type": "text", "not_null": true},
             {"name": "entry", "type": "text", "not_null": true},
             {"name": "value", "type": "text", "not_null": true},
         ],
-        "primary_key": ["node", "entry"],
+        "primary_key": ["identity", "entry"],
     }))?)
 }
 

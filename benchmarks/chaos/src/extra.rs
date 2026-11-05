@@ -90,12 +90,12 @@ pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
         .n()
         .call(json!({"type":"networking_control","enabled":false}))
         .await;
-    let bid = b.n().node_id().await;
+    let bid = b.n().identity_id().await;
     println!(
         "  revoke b on a: {}",
         short(
             &a.n()
-                .call(json!({"type":"revoke","node":bid}))
+                .call(json!({"type":"revoke","identity":bid}))
                 .await
                 .is_ok()
         )
@@ -908,7 +908,7 @@ pub async fn orphaned_second_issuer() -> Result<(), Failure> {
             ));
             let renew = t
                 .n()
-                .call(json!({"type":"revoke","node": f.n().node_id().await}))
+                .call(json!({"type":"revoke","identity": f.n().identity_id().await}))
                 .await;
             println!("    revoke from it: {}", short(&renew.map(|_| "ok")));
         }

@@ -110,7 +110,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let parts = address["tuple"].as_array().unwrap();
     let selector = json!([[parts[0][0],{"Only":[parts[0][1]]}]]);
     let reader_path = root.path().join("reader");
-    let device = Database::device(&reader_path, None).unwrap();
+    let device = Database::node_keys(&reader_path, None).unwrap();
     let supplied=call(&session,&scope,json!({"type":"partition_grant","device":device,"partitions":[{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}]})).await;
     let reader = Database::install(
         open(&reader_path, &hub),
@@ -197,7 +197,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let revoked = call(
         &session,
         &scope,
-        json!({"type":"revoke","node":device.node.to_string()}),
+        json!({"type":"revoke","identity":device.identity.to_string()}),
     )
     .await;
     assert_eq!(revoked["revocations"]["statements"], 1);

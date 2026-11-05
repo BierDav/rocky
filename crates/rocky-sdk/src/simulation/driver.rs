@@ -554,12 +554,13 @@ impl Simulation {
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
             Action::Revoke(node) => {
-                let key = self.members[*node]
-                    .node_key
-                    .clone()
-                    .ok_or("skipped: never joined")?;
+                let identity = self
+                    .running(*node)?
+                    .call(json!({"type": "session"}))
+                    .await?["principal"]
+                    .clone();
                 self.running(0)?
-                    .call(json!({"type": "revoke", "node": key}))
+                    .call(json!({"type": "revoke", "identity": identity}))
                     .await?;
                 self.members[*node].revoked = true;
                 self.members[*node].close().await?;

@@ -130,10 +130,10 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
 
     // Partitioned: neither issuer syncs while both revoke.
     let by_a = a
-        .ok(json!({"type": "revoke", "node": x.node().await}))
+        .ok(json!({"type": "revoke", "identity": x.identity().await}))
         .await;
     let by_b = b
-        .ok(json!({"type": "revoke", "node": y.node().await}))
+        .ok(json!({"type": "revoke", "identity": y.identity().await}))
         .await;
     assert_ne!(by_a["statement"], by_b["statement"]);
     assert_eq!(by_a["revocations"]["statements"], 1);

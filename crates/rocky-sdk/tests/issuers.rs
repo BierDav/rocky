@@ -123,6 +123,7 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
         .await;
     let root_key = a.root();
     let (a_node, b_node) = (a.node().await, b.node().await);
+    let (a_identity, b_identity) = (a.identity().await, b.identity().await);
     // Each issuer knows the other's routes; no keys or author numbers are
     // shared beyond the publisher key.
     assert_issuers(root, "a", &[&b_node])?;
@@ -183,19 +184,19 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     // A trusted node revokes no trusted node, itself included, without
     // the root; with it, it revokes the lost one.
     let error = b
-        .call(json!({"type": "revoke", "node": b_node}))
+        .call(json!({"type": "revoke", "identity": b_identity}))
         .await
         .err()
         .ok_or("revoked itself")?;
     assert_eq!(error["code"], "publisher_required", "{error}");
     let error = b
-        .call(json!({"type": "revoke", "node": a_node}))
+        .call(json!({"type": "revoke", "identity": a_identity}))
         .await
         .err()
         .ok_or("revoked a trusted node without the root")?;
     assert_eq!(error["code"], "publisher_required", "{error}");
     let revoked = b
-        .ok(json!({"type": "revoke", "node": a_node, "root": root_key}))
+        .ok(json!({"type": "revoke", "identity": a_identity, "root": root_key}))
         .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     assert_issuers(root, "b", &[])?;
@@ -290,7 +291,7 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
     )?;
     // Finish the second issuer's key bootstrap before destroying its source.
     synced(&b).await?;
-    let keys = Database::device(&root.join("g"), None)?;
+    let keys = Database::node_keys(&root.join("g"), None)?;
     let supplied = a
         .ok(json!({"type": "grant", "device": keys, "profile": {"kind": "writer", "scopes": ["items"]}, "ttl": 60}))
         .await["supplied"]

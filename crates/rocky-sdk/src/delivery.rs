@@ -5,7 +5,7 @@ use crate::{
     Failure,
     enrollment::Settings,
     groups::{GroupPartition, GroupRecord, record_key, secret_role},
-    registry::Record,
+    registry::IdentityRecord,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, KeyEpoch, PartitionValue};
@@ -196,13 +196,14 @@ impl Settings {
             .retain(|_, pending| !revocations.revokes_reference(&pending.recipient));
     }
     /// Seals the epoch a rotation made of each group partition to every
-    /// unrevoked device whose registry record reads it whole: the sender's
-    /// own intent, saved with the rotation's completion.
+    /// other linked node of an unrevoked identity whose registry record
+    /// reads it whole: the sender's own intent, saved with the rotation's
+    /// completion.
     pub(crate) fn queue_rotation(
         &mut self,
         vault: &crate::secrets::Vault,
         domain: &crate::domain::Domain,
-        registry: &crate::registry::Registry,
+        (registry, membership): (&crate::registry::Registry, &crate::membership::Membership),
     ) -> Result<(), Failure> {
         let Some(rotation) = self
             .authority
@@ -212,14 +213,19 @@ impl Settings {
             return Ok(());
         };
         let own = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let candidates: Vec<(&PublicKey, &Record)> = registry
+        let candidates: Vec<(&PublicKey, &IdentityRecord)> = registry
             .records
             .iter()
-            .filter(|(node, _)| {
-                **node != own
-                    && !rotation.nodes.contains(node)
-                    && !self.revoked_device(node, registry)
+            .filter(|(identity, _)| {
+                !rotation.identities.contains(identity)
+                    && !self.revoked_identity(identity, registry)
             })
+            .flat_map(|(identity, record)| {
+                membership
+                    .nodes(identity)
+                    .map(move |linked| (&linked.node, record))
+            })
+            .filter(|(node, _)| **node != own && !self.tombstoned(node))
             .collect();
         if rotation.groups.is_empty() || candidates.is_empty() {
             return Ok(());
@@ -285,7 +291,7 @@ impl Settings {
 /// its profile, or by one recorded grant.
 fn reads_group(
     domain: &crate::domain::Domain,
-    record: &Record,
+    record: &IdentityRecord,
     partition: &GroupPartition,
 ) -> bool {
     let whole = |grant: &rocky_core::ResourceGrant| {

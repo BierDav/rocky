@@ -28,27 +28,24 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         json!({"kind":"writer","scopes":["items"]}),
     )
     .await?;
-    let node = m.node().await;
+    let (node, member) = (m.node().await, m.identity().await);
     let before = m.add(1, "before").await;
     assert!(!before.is_empty());
     sync(&m)
         .await
         .map_err(|error| format!("member before revocation: {error}"))?;
-    let record = listed(&a, &node).await;
-    a.ok(json!({"type":"partition_grant","device":{"node":node,"user":record["user"]},"partitions":[grant(&a,"L").await]})).await;
+    a.ok(json!({"type":"partition_grant","device":{"node":node,"identity":member},"partitions":[grant(&a,"L").await]})).await;
     common::introduce(&m, &b).await;
     sync(&b)
         .await
         .map_err(|error| format!("registry before revocation: {error}"))?;
-    let recorded = listed(&b, &node).await;
+    let recorded = listed(&b, &member).await;
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
     // Revoking the identity names it, its recorded node and capability, so
     // no node of it renews again.
-    let response = b
-        .ok(json!({"type":"revoke","identity":recorded["user"]}))
-        .await;
+    let response = b.ok(json!({"type":"revoke","identity":member})).await;
     let state = identity(root, "b")?;
     assert_eq!(
         state["keys"],
@@ -63,12 +60,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         data_encoding::HEXLOWER.encode(&statement.id()?),
         response["statement"]
     );
-    assert!(
-        statement
-            .statement
-            .identities
-            .contains(&recorded["user"].as_str().ok_or("user")?.parse()?)
-    );
+    assert!(statement.statement.identities.contains(&member.parse()?));
     let capability: [u8; 32] = data_encoding::HEXLOWER
         .decode(
             recorded["capability"]
@@ -81,19 +73,19 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     assert!(statement.statement.capabilities.contains(&capability));
     assert!(set.ends_chain(&old_chain)?);
     // The same verifier used for incoming frames refuses A's assigned author.
-    let leaf = old_chain.0.last().ok_or("node leaf")?;
+    let leaf = old_chain.held().ok_or("identity capability")?;
     let publisher = state["publisher"].as_str().ok_or("publisher")?.parse()?;
     let author = old_chain
         .authors()?
         .and_then(|range| range.single())
         .ok_or("author")?;
-    let table = leaf.capability.grants.first().ok_or("grant")?.scope.table;
+    let table = leaf.grants.first().ok_or("grant")?.scope.table;
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     old_chain.verify_author(
         publisher,
-        leaf.capability.subject,
+        leaf.subject,
         author,
         table,
         &Default::default(),
@@ -101,19 +93,18 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     )?;
     assert!(
         old_chain
-            .verify_author(
-                publisher,
-                leaf.capability.subject,
-                author,
-                table,
-                &set,
-                time
-            )
+            .verify_author(publisher, leaf.subject, author, table, &set, time)
             .is_err()
     );
 
-    assert_eq!(listed(&b, &node).await["revoked"], true);
+    assert_eq!(listed(&b, &member).await["revoked"], true);
+    // An issuer never revokes a node, nor the identity twice.
     assert!(b.call(json!({"type":"revoke","node":node})).await.is_err());
+    assert!(
+        b.call(json!({"type":"revoke","identity":member}))
+            .await
+            .is_err()
+    );
     // A device joining after the rotation reads earlier rows from a base
     // at a seal, without the rotated-out key.
     b.seal_and_compact().await;
@@ -140,8 +131,8 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     sync(&a)
         .await
         .map_err(|error| format!("enrolling issuer after revocation: {error}"))?;
-    assert_eq!(listed(&a, &node).await["revoked"], true);
-    assert!(a.call(json!({"type":"grant","device":{"node":node,"user":recorded["user"]},"profile":{"kind":"reader","scopes":["items"]}})).await.is_err());
+    assert_eq!(listed(&a, &member).await["revoked"], true);
+    assert!(a.call(json!({"type":"grant","device":{"node":node,"identity":member},"profile":{"kind":"reader","scopes":["items"]}})).await.is_err());
     for device in [&a, &b, &m, &w] {
         device.close().await;
     }
@@ -154,18 +145,18 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = Database::device(&root.join("m"), Some(keys(&root.join("m"))))?;
+    let keys = Database::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
     a.ok(json!({"type":"partition_grant","device":keys,"partitions":[grant(&a,"L").await]}))
         .await;
     sync(&b).await?;
     a.close().await;
     let before = identity(root, "b")?["keys"].clone();
-    b.ok(json!({"type":"revoke","node":keys.node.to_hex()}))
+    b.ok(json!({"type":"revoke","identity":keys.identity.to_hex()}))
         .await;
     assert_eq!(identity(root, "b")?["keys"], before);
     assert_eq!(epoch(&b, "L").await, json!([1, 2]));
     assert_eq!(epoch(&b, "M").await, json!([1]));
-    assert_eq!(listed(&b, &keys.node.to_hex()).await["revoked"], true);
+    assert_eq!(listed(&b, &keys.identity.to_hex()).await["revoked"], true);
     b.close().await;
     Ok(())
 }
@@ -177,13 +168,13 @@ async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let member = Database::device(&root.join("m"), Some(keys(&root.join("m"))))?;
+    let member = Database::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
     let supplied = a.ok(json!({"type":"grant","device":member,"profile":{"kind":"reader","scopes":["items"]},"delegations":2})).await["supplied"].clone();
     let m = Device::new(Database::install(
         open(&root.join("m"), &hub, "m"),
         serde_json::from_value(supplied)?,
     )?)?;
-    let delegate = Database::device(&root.join("d"), Some(keys(&root.join("d"))))?;
+    let delegate = Database::node_keys(&root.join("d"), Some(keys(&root.join("d"))))?;
     m.ok(
         json!({"type":"delegate","device":delegate,"profile":{"kind":"reader","scopes":["items"]}}),
     )
@@ -191,8 +182,8 @@ async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its
     sync(&b).await?;
     common::introduce(&m, &b).await;
     a.close().await;
-    assert_eq!(listed(&b, &delegate.node.to_hex()).await, Value::Null);
-    b.ok(json!({"type":"revoke","node":delegate.node.to_hex()}))
+    assert_eq!(listed(&b, &delegate.identity.to_hex()).await, Value::Null);
+    b.ok(json!({"type":"revoke","identity":delegate.identity.to_hex()}))
         .await;
     for epochs in identity(root, "b")?["keys"]
         .as_object()
@@ -204,11 +195,14 @@ async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its
     for list in ["L", "M"] {
         assert_eq!(epoch(&b, list).await, json!([1, 2]));
     }
-    assert_eq!(listed(&b, &member.node.to_hex()).await["revoked"], false);
+    assert_eq!(
+        listed(&b, &member.identity.to_hex()).await["revoked"],
+        false
+    );
     let set: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(identity(root, "b")?["revocations"].clone())?;
     assert!(!set.revokes(&member.node));
-    assert!(!set.revokes(&member.user));
+    assert!(!set.revokes(&member.identity));
     sync(&m).await?;
     assert_eq!(identity(root, "m")?["keys"]["items"], json!([1, 2]));
     // Learning the statement also prevents handing the new key back to that node.
@@ -230,11 +224,11 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     // A is the creating device's trusted node: an issuer revokes it only
     // with the root, and without it the refusal is typed.
     let refused = b
-        .call(json!({"type":"revoke","node":a.node().await}))
+        .call(json!({"type": "revoke", "identity": a.identity().await}))
         .await
         .expect_err("needs the root");
     assert_eq!(refused["code"], "publisher_required", "{refused}");
-    b.ok(json!({"type":"revoke","node":a.node().await,"root":a.root()}))
+    b.ok(json!({"type": "revoke", "identity": a.identity().await,"root":a.root()}))
         .await;
     assert_eq!(
         identity(root, "b")?["keys"]["issuer_registry"],
@@ -260,7 +254,7 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = Database::device(&root.join("m"), Some(keys(&root.join("m"))))?;
+    let keys = Database::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
     a.ok(json!({"type":"grant","device":keys,"profile":{"kind":"custody","scopes":["items"]}}))
         .await;
     sync(&b).await?;
@@ -268,10 +262,10 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let before_b = identity(root, "b")?["keys"].clone();
     // No sync between the two calls: both decide from an unrevoked record.
     let by_a = a
-        .ok(json!({"type":"revoke","node":keys.node.to_hex()}))
+        .ok(json!({"type":"revoke","identity":keys.identity.to_hex()}))
         .await;
     let by_b = b
-        .ok(json!({"type":"revoke","node":keys.node.to_hex()}))
+        .ok(json!({"type":"revoke","identity":keys.identity.to_hex()}))
         .await;
     assert_ne!(by_a["statement"], by_b["statement"]);
     assert_eq!(identity(root, "a")?["keys"], before_a);
@@ -289,14 +283,17 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
             device.ok(json!({"type":"session"})).await["revocations"]["statements"],
             2
         );
-        assert_eq!(listed(device, &keys.node.to_hex()).await["revoked"], true);
+        assert_eq!(
+            listed(device, &keys.identity.to_hex()).await["revoked"],
+            true
+        );
         let conn = rusqlite::Connection::open_with_flags(
             root.join(name).join("rocky.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM issuer_registry WHERE node=? AND entry='revoked'",
-            [keys.node.to_hex()],
+            "SELECT COUNT(*) FROM issuer_registry WHERE identity=? AND entry='revoked'",
+            [keys.identity.to_hex()],
             |row| row.get(0),
         )?;
         assert_eq!(count, 1);

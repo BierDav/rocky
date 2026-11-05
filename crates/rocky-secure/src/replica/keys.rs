@@ -145,22 +145,34 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Re-judges the kept carried records under the current revocations,
-    /// inside the caller's transaction: a refused one is deleted, freeing
-    /// its issuer's slot, and counted against the peer that carried it.
-    /// The last records of an epoch stay when none other is accepted:
-    /// revoking a lost holder must not leave the epoch unrecoverable.
-    pub(super) async fn drop_revoked_escrow(&self) -> Result<(), Error> {
+    /// Re-judges the kept carried records of `epoch`, or of every epoch,
+    /// under the current revocations, inside the caller's transaction: a
+    /// refused one is deleted, freeing its issuer's slot, and counted
+    /// against the peer that carried it. The last records of an epoch stay
+    /// when none other is accepted: revoking a lost holder must not leave
+    /// the epoch unrecoverable.
+    pub(super) async fn drop_revoked_escrow(
+        &self,
+        epoch: Option<(ResourceScope, rocky_core::KeyEpoch)>,
+    ) -> Result<(), Error> {
         let time = now()?;
         let own = self.config.node.public_key().as_bytes().to_vec();
-        let kept = collect_rows(
-            self.conn
-                .query(
-                    "SELECT scope,generation,issuer,carrier,record FROM secure_escrow WHERE scope<>x''",
-                    (),
-                )
-                .await?,
-        )
+        let select = "SELECT scope,generation,issuer,carrier,record FROM secure_escrow";
+        let kept = collect_rows(match epoch {
+            Some(epoch) => {
+                self.conn
+                    .query(
+                        format!("{select} WHERE scope=? AND generation=?"),
+                        bindings(slot_values(&Some(epoch))?.into()),
+                    )
+                    .await?
+            }
+            None => {
+                self.conn
+                    .query(format!("{select} WHERE scope<>x''"), ())
+                    .await?
+            }
+        })
         .await?;
         type Epoch = (Vec<u8>, Vec<u8>);
         let mut epochs: BTreeMap<Epoch, (bool, Vec<Epoch>)> = BTreeMap::new();
@@ -219,6 +231,23 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         }
+        Ok(())
+    }
+    /// Deletes the carried records of an evicted `scope`, inside the
+    /// caller's transaction, unless frames of it are still kept here: a
+    /// record stays wherever ciphertext it recovers stays. This node's own
+    /// records stay; it still holds the key, and they recover it.
+    pub(super) async fn forget_evicted_escrow(&self, scope: ResourceScope) -> Result<(), Error> {
+        let blob = encode(&scope)?;
+        self.conn
+            .execute(
+                "DELETE FROM secure_escrow WHERE scope=?1 AND carrier<>?2 AND NOT EXISTS(SELECT 1 FROM secure_operations WHERE scope=?1) AND NOT EXISTS(SELECT 1 FROM secure_held_frames WHERE scope=?1)",
+                bindings(vec![
+                    SqlValue::Blob(blob),
+                    SqlValue::Blob(self.config.node.public_key().as_bytes().to_vec()),
+                ]),
+            )
+            .await?;
         Ok(())
     }
     /// The key that opens ciphertext of `scope` sealed at `generation`:
@@ -595,6 +624,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let own = inner.config.node.public_key();
         transaction!(@cache_neutral inner, |inner| {
             let mut refused: Option<(u64, &'static str)> = None;
+            let mut accepted = BTreeSet::new();
             for vouched in &records {
                 match inner.judge_escrow(vouched, time) {
                     Err(reason) => {
@@ -606,11 +636,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         inner
                             .store_escrow(&Some(vouched.slot()), issuer, peer, bytes)
                             .await?;
+                        accepted.insert(vouched.slot());
                     }
                 }
             }
             if let Some((count, reason)) = refused {
                 inner.refuse_escrow(peer.as_bytes(), count, reason).await?;
+            }
+            // A revoked issuer's record kept as its epoch's only one goes
+            // once an accepted record arrives.
+            for epoch in accepted {
+                inner.drop_revoked_escrow(Some(epoch)).await?;
             }
             Ok(())
         })

@@ -253,6 +253,7 @@ impl<A: RowApplication> Inner<A> {
                         .execute(format!("DELETE FROM {table} WHERE scope=?"), [blob.clone()])
                         .await?;
                 }
+                inner.forget_evicted_escrow(scope).await?;
                 inner.mark_evicting(scope, true).await?;
                 inner
                     .conn

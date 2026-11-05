@@ -5,6 +5,7 @@
 use super::*;
 use crate::network::NativeSession;
 use crate::wire::Chain;
+use rocky_core::SqlValue;
 use rocky_credentials::{RootEscrow, RootKey, VouchedEscrow, escrow_tag};
 
 type Replica = EncryptedReplica<Employees>;
@@ -212,4 +213,116 @@ async fn revoking_an_epochs_only_holder_keeps_its_record() {
     // A lost holder's record is the epoch's only way back to the root.
     assert_eq!(b.escrow_of(&[slot].into()).await.unwrap(), records);
     assert!(b.escrow_refusals().await.unwrap().is_empty());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_accepted_record_drops_a_revoked_epochs_only_record() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (b, _) = open(&f, &dir, &PrivateKey::new()).await;
+    let slot = (f.public, *b.key_epochs(f.public).await.last().unwrap());
+    let (lost, carrier) = (PrivateKey::new(), PrivateKey::new());
+    b.keep_carried_escrow(carrier.public_key(), vouched_under(&f, &lost, slot, 1))
+        .await
+        .unwrap();
+    b.learn_revocations(&crate::tests::revoking(
+        &f.publisher,
+        f.app().definition().app,
+        &[lost.public_key()],
+        &[],
+    ))
+    .await
+    .unwrap();
+    // A genuine record arrives: the revoked one goes without waiting for
+    // another revocation, counted against the peer that carried it.
+    let genuine = vouched_under(&f, &PrivateKey::new(), slot, 1);
+    b.keep_carried_escrow(PrivateKey::new().public_key(), genuine.clone())
+        .await
+        .unwrap();
+    assert_eq!(b.escrow_of(&[slot].into()).await.unwrap(), genuine);
+    let refusals = b.escrow_refusals().await.unwrap();
+    assert_eq!(refusals.len(), 1);
+    let (peer, records, reason) = &refusals[0];
+    assert_eq!((*peer, *records), (carrier.public_key(), 1));
+    assert!(reason.contains("revocation"), "{reason}");
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (b, _) = open(&f, &dir, &PrivateKey::new()).await;
+    b.set_role(crate::replica::RoleConfig {
+        role: crate::replica::ReplicaRole::Partial,
+        full_nodes: [rocky_credentials::PeerId::of(
+            PrivateKey::new().public_key(),
+        )]
+        .into(),
+        custody: 1,
+    })
+    .await
+    .unwrap();
+    b.subscribe(f.public).await.unwrap();
+    let slot = (f.public, *b.key_epochs(f.public).await.last().unwrap());
+    let root = RootKey::generate();
+    let own = RootEscrow::seal(
+        root.public_key(),
+        escrow_tag(root.public_key(), &[9; 32]),
+        &[9; 32],
+    )
+    .unwrap();
+    b.keep_escrow(vec![(Some(slot), own.clone())])
+        .await
+        .unwrap();
+    let carry = || async {
+        b.keep_carried_escrow(
+            PrivateKey::new().public_key(),
+            vouched_under(&f, &PrivateKey::new(), slot, 1),
+        )
+        .await
+        .unwrap();
+    };
+    let kept = || async { b.escrow_of(&[slot].into()).await.unwrap() };
+
+    // A frame of the scope still kept here keeps the records it needs.
+    carry().await;
+    {
+        let mut inner = b.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@commit inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "INSERT INTO secure_held_frames VALUES(?,?,?,?,0)",
+                    crate::storage::bindings(vec![
+                        SqlValue::Blob(vec![1; 32]),
+                        SqlValue::Blob(vec![0xff; 32]),
+                        SqlValue::Blob(crate::encode(&f.public)?),
+                        SqlValue::Blob(vec![]),
+                    ]),
+                )
+                .await?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    b.evict(f.public).await.unwrap();
+    assert_eq!(kept().await.len(), 2);
+
+    // With no frame left, the carried record goes; this node's own stays.
+    {
+        let mut inner = b.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@commit inner, |inner| {
+            inner
+                .conn
+                .execute("DELETE FROM secure_held_frames", ())
+                .await?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    b.subscribe(f.public).await.unwrap();
+    b.evict(f.public).await.unwrap();
+    let kept = kept().await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].record(), &own);
 }

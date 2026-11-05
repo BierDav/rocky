@@ -1317,7 +1317,9 @@ points, and the `board_cap` assertion bounds a board's points.
   rocky-secure `tests::escrow::{forged_escrow_records_sent_first_never_displace_the_genuine_one,
   an_issuers_devices_fill_only_its_own_escrow_slot,
   revoking_an_issuer_drops_its_kept_escrow_records,
-  revoking_an_epochs_only_holder_keeps_its_record}`;
+  revoking_an_epochs_only_holder_keeps_its_record,
+  an_accepted_record_drops_a_revoked_epochs_only_record,
+  evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay}`;
   `escrow::tests::recovery_opens_the_records_of_held_epochs_skips_forgeries_and_names_a_gap`;
   rocky-credentials `escrow::tests::only_the_root_opens_a_record_and_it_names_nothing`.
   - Custodian test: a keyless custodian of the notes and of one list
@@ -1350,7 +1352,6 @@ points, and the `board_cap` assertion bounds a board's points.
     enrolled; they enroll again.
   - Two recoveries from copies that never learned of each other share a
     slot with probability 1/16384.
-  - Records of an evicted partition stay, opaque, in the evicting store.
   - Closed (issuer slots, v55): a compromised issuer could enroll devices
     and fill an epoch's 32 signer slots with junk, which was never
     deleted. Its devices now share one issuer slot, and revoking it
@@ -1363,6 +1364,19 @@ points, and the `board_cap` assertion bounds a board's points.
     fails. An epoch's only record stays when its holder is revoked. After
     a recovery, the revoked creator's records give way to the recovered
     node's records of the same keys, so the recovery test compares tags.
+  - Closed (escrow housekeeping): keeping a carried record re-judges its
+    epoch's stored carried records in the same commit, so a revoked
+    issuer's record that was the epoch's only one is deleted, and counted
+    against its carrier, once an accepted record arrives. Eviction's last
+    step deletes the scope's carried records in the same commit, unless
+    frames of the scope are still retained or held there. The node's own
+    records stay: it still holds the key, and they recover it. Unsubscribe
+    keeps the data, so it keeps the records too. Tests: rocky-secure
+    `tests::escrow::{an_accepted_record_drops_a_revoked_epochs_only_record,
+    evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay}`.
+    Mutations: without the per-epoch re-judge the first fails; without
+    the eviction delete, or with the held-frame guard dropped, the second
+    fails.
   - Devices under one issuer share its slot, so the last record carried
     replaces a sibling's. Any record that opens recovers the epoch.
   - A revoked issuer's junk stays as an epoch's only record until another

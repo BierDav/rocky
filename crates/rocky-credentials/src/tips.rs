@@ -52,12 +52,21 @@ impl ChainLink {
             stage: self.stage,
         }
     }
-    /// This link on the branch `stage`.
-    pub fn staged(self, stage: Commitment) -> Self {
-        Self {
-            stage: Some(stage),
+    /// This link on the branch the staged schema seal `seal` opens, whose
+    /// first statement it is.
+    pub fn branch(self, seal: &SealStatement) -> Result<Self, Error> {
+        Ok(Self {
+            stage: Some(Self::stage_of(seal)?),
             ..self
-        }
+        })
+    }
+    /// The stage tag of the branch `seal` opens: bound to the seal, so a
+    /// node cannot branch its chain without signing a schema seal there.
+    pub fn stage_of(seal: &SealStatement) -> Result<Commitment, Error> {
+        Ok(rocky_core::commitment(
+            "rocky.stage-branch.v1",
+            &encode(seal)?,
+        ))
     }
     pub fn validate(&self) -> Result<(), Error> {
         if (self.sequence == 0) != self.previous.is_none() || self.sequence == u64::MAX {
@@ -66,6 +75,23 @@ impl ChainLink {
         Ok(())
     }
 }
+/// A statement kind that may open a stage branch of its signer's chain:
+/// only a seal does.
+pub trait OpensStage {
+    /// The stage tag of the branch this statement opens as its first link.
+    fn opened_stage(&self) -> Result<Option<Commitment>, Error> {
+        Ok(None)
+    }
+}
+impl OpensStage for SealStatement {
+    fn opened_stage(&self) -> Result<Option<Commitment>, Error> {
+        ChainLink::stage_of(self).map(Some)
+    }
+}
+impl OpensStage for TipOpeningStatement {}
+impl OpensStage for BookmarkMoveStatement {}
+impl OpensStage for GenesisLineStatement {}
+
 /// Two statements of one node's chain at the same place: a signer whose
 /// key signed both, which no honest node does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -333,7 +359,11 @@ macro_rules! signed_statement {
                             "a trusted identity's statement names its chain link",
                         ));
                     }
-                    (_, Some(link)) => graph.check_predecessor(signer, link)?,
+                    (_, Some(link)) => graph.check_predecessor(
+                        signer,
+                        link,
+                        $crate::tips::OpensStage::opened_stage(&self.statement)?,
+                    )?,
                     (true, None) => {}
                 }
                 self.check_graph(graph, trusted)
@@ -711,32 +741,47 @@ impl TipGraph {
         }
     }
     /// Refuses a chained statement whose predecessor in its lane, signed
-    /// by the same identity one place before, the graph lacks.
+    /// by the same identity one place before, the graph lacks, or that
+    /// enters a stage branch other than by continuing it or by being the
+    /// seal `opens` names its tag.
     pub(crate) fn check_predecessor(
         &self,
         signer: PublicKey,
         link: &ChainLink,
+        opens: Option<Commitment>,
     ) -> Result<(), Error> {
+        // A stage branch starts at its own schema seal; a statement enters
+        // it only by continuing it.
+        let enters = |held: Option<Commitment>| {
+            link.stage
+                .is_none_or(|stage| held == Some(stage) || opens == Some(stage))
+        };
         let Some(previous) = link.previous else {
-            return Ok(());
+            return match enters(None) {
+                true => Ok(()),
+                false => Err(denied("a stage branch opens with its own schema seal")),
+            };
         };
         // On any branch of the same identity's lane: a stage branches off
         // the live chain, which continues after a published stage.
-        if self
-            .indexed()?
-            .links
-            .get(&previous)
-            .is_some_and(|(identity, held)| {
-                *identity == signer
-                    && held.lane == link.lane
-                    && held.sequence.saturating_add(1) == link.sequence
-            })
+        let index = self.indexed()?;
+        let Some((identity, held)) = index.links.get(&previous) else {
+            return Err(denied(
+                "a tip statement's predecessor is missing or does not match",
+            ));
+        };
+        if *identity != signer
+            || held.lane != link.lane
+            || held.sequence.saturating_add(1) != link.sequence
         {
-            return Ok(());
+            return Err(denied(
+                "a tip statement's predecessor is missing or does not match",
+            ));
         }
-        Err(denied(
-            "a tip statement's predecessor is missing or does not match",
-        ))
+        if !enters(held.stage) {
+            return Err(denied("a stage branch opens with its own schema seal"));
+        }
+        Ok(())
     }
     /// The chain index, brought up to the graph's lists.
     fn indexed(&self) -> Result<MutexGuard<'_, Places>, Error> {

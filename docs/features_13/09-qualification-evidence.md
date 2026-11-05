@@ -1084,11 +1084,15 @@ points, and the `board_cap` assertion bounds a board's points.
   branch are recorded as `TipGraph::equivocations`. Terminal
   acknowledgments carry their own per-node chain (no stage) and are not
   checked for a predecessor on admission.
-- Stage branches: a staged schema switch signs on a branch of its own
-  (`stage: Some(random)`) off the live head; the live chain ignores staged
-  statements and goes on signing while a stage waits, so a withdrawn stage
-  orphans only its branch and its tip IDs never change. After a release the
-  live chain continues past the highest place on any branch.
+- Stage branches: a staged schema switch signs on a branch of its own off
+  the live head, tagged `stage: Some(commitment("rocky.stage-branch.v1",
+  seal))` by the schema seal that opens it. Admission takes a staged
+  statement only as that seal or as a continuation of the same branch, so
+  a fresh tag cannot fork the chain unseen: a second statement at a staged
+  place is an equivocation. The live chain ignores staged statements and
+  goes on signing while a stage waits, so a withdrawn stage orphans only
+  its branch and its tip IDs never change. After a release the live chain
+  continues past the highest place on any branch.
 - Cut: a root revocation (`rocky.revocation.v4`) may carry `cut: [{identity,
   lane, statements: [Head], acknowledgments}]`, ordered, at most 32 chains
   and 64 heads, each naming an identity or node the same statement
@@ -1153,9 +1157,14 @@ points, and the `board_cap` assertion bounds a board's points.
   cut first both keep the seal final on the other two nodes'
   acknowledgments); judging no acknowledgment past its cut fails it.
   `secure_past_cut` gains `ack`; file identity `rocky.encrypted-replica.v52`.
-- Limits: A stage branch tag is unauthenticated within the
-  identity: a node of a trusted identity can branch its own chain without
-  an equivocation alert; a cut still keeps only named heads. A cut of a
+  Stage binding, rocky-credentials
+  `tips::a_stage_branch_opens_only_with_the_schema_seal_its_tag_names`
+  (a forged tag, a borrowed seal's tag and a move opening a branch are
+  refused; a twin at a staged place is an equivocation); admitting any
+  stage tag fails it.
+- Limits: A node can still open several stage branches off one place,
+  each with its own signed schema seal, as an honest withdraw and restage
+  does; they are not equivocations, and a cut keeps only named heads. A cut of a
   node with many stage branches signed alongside live statements needs a
   head per such branch (64 in all).
   Deleting a past-cut fork also deletes its equivocation record; the alert

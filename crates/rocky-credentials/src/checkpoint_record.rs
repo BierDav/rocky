@@ -54,3 +54,5 @@ impl SignedCheckpointRecord {
         Ok(())
     }
 }
+
+impl crate::tips::OpensStage for CheckpointRecordStatement {}

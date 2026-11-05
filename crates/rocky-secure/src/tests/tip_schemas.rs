@@ -492,7 +492,6 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
 
     // The stage branches off the live head.
     let (link, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
-    let staged = link.staged([9; 32]);
     let mut statement = sign_seal(
         &lineage,
         source,
@@ -502,6 +501,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
     statement.action = SealAction::Continue {
         schema: lineage.definition(3).hash(),
     };
+    let staged = link.branch(&statement).unwrap();
     let seal = SignedSeal::endorse_linked(statement, &trusted, &chain, Some(staged)).unwrap();
     let target = seal.successor().unwrap().unwrap();
     let movement = SignedBookmarkMove::endorse_linked(

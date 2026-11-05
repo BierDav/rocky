@@ -1534,11 +1534,13 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     let first = rocky_credentials::ChainLink::first(trusted.public_key());
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     graph.moves.push(base.clone());
-    // A stage and the live chain both continue from the base, at the same
-    // sequence: two branches, no fork.
+    // A stage, opened by its schema seal, and the live chain both continue
+    // from the base, at the same sequence: two branches, no fork.
     let after = first.next(base.id().unwrap());
-    let staged = linked_move(&graph, "staged", &trusted, &chain, after.staged([5; 32]));
+    let (stage_seal, staged) = stage(&graph, &trusted, &chain, after);
     let live = linked_move(&graph, "live", &trusted, &chain, after);
+    stage_seal.verify(owner.public_key(), &graph).unwrap();
+    graph.seals.push(stage_seal.clone());
     for statement in [&staged, &live] {
         statement.verify(owner.public_key(), &graph).unwrap();
         graph.moves.push(statement.clone());
@@ -1551,7 +1553,7 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
             .next_link(&trusted.public_key(), &trusted.public_key())
             .unwrap()
             .sequence,
-        2
+        3
     );
     // The proposer's cut names both heads and keeps both.
     let heads = graph
@@ -1582,7 +1584,69 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
         ..heads
     };
     graph.exclude_revoked(&keep(live_only)).unwrap();
-    assert_eq!(graph.revoked, ids(&[&staged]));
+    let mut left_out = ids(&[&staged]);
+    left_out.insert(stage_seal.id().unwrap());
+    assert_eq!(graph.revoked, left_out);
+}
+
+/// A schema seal of the genesis tip that `trusted` stages at `link`,
+/// opening its branch, and a move continuing that branch.
+fn stage(
+    graph: &TipGraph,
+    trusted: &PrivateKey,
+    chain: &CredentialChain,
+    link: rocky_credentials::ChainLink,
+) -> (SignedSeal, SignedBookmarkMove) {
+    let mut statement = seal(graph, graph.genesis(), 1, &PrivateKey::new()).statement;
+    statement.action = rocky_credentials::SealAction::Continue { schema: [8; 32] };
+    let opened = link.branch(&statement).unwrap();
+    let sealed = SignedSeal::endorse_linked(statement, trusted, chain, Some(opened)).unwrap();
+    let staged = linked_move(
+        graph,
+        "staged",
+        trusted,
+        chain,
+        opened.next(sealed.id().unwrap()),
+    );
+    (sealed, staged)
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
+    let owner = PrivateKey::new();
+    let trusted = PrivateKey::new();
+    let chain = trusted_chain(&graph(), &owner, &trusted);
+    let mut graph = graph();
+    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let base = linked_move(&graph, "base", &trusted, &chain, first);
+    graph.moves.push(base.clone());
+    let after = first.next(base.id().unwrap());
+    let (stage_seal, staged) = stage(&graph, &trusted, &chain, after);
+    // A fork under a fresh tag: a move the tag names no seal of.
+    let forged = rocky_credentials::ChainLink {
+        stage: Some([5; 32]),
+        ..after
+    };
+    let fork = linked_move(&graph, "fork", &trusted, &chain, forged);
+    assert!(fork.verify(owner.public_key(), &graph).is_err());
+    // Nor may a seal carry another seal's tag, or a move open the branch.
+    let mut other = stage_seal.statement.clone();
+    other.action = rocky_credentials::SealAction::Continue { schema: [7; 32] };
+    let borrowed = SignedSeal::endorse_linked(other, &trusted, &chain, stage_seal.link).unwrap();
+    assert!(borrowed.verify(owner.public_key(), &graph).is_err());
+    let opening_move = linked_move(&graph, "open", &trusted, &chain, stage_seal.link.unwrap());
+    assert!(opening_move.verify(owner.public_key(), &graph).is_err());
+    // The seal opens it, and the branch continues from there.
+    stage_seal.verify(owner.public_key(), &graph).unwrap();
+    graph.seals.push(stage_seal.clone());
+    staged.verify(owner.public_key(), &graph).unwrap();
+    graph.moves.push(staged.clone());
+    // Two statements at one place of the branch are a fork.
+    let twin = linked_move(&graph, "twin", &trusted, &chain, staged.link.unwrap());
+    twin.verify(owner.public_key(), &graph).unwrap();
+    graph.moves.push(twin);
+    graph.exclude_revoked(&RevocationSet::new()).unwrap();
+    assert_eq!(graph.equivocations.len(), 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

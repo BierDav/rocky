@@ -107,3 +107,5 @@ impl SignedExistenceBase {
         Ok(())
     }
 }
+
+impl crate::tips::OpensStage for ExistenceBaseStatement {}

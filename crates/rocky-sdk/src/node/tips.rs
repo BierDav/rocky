@@ -56,10 +56,13 @@ pub(super) struct Chain {
     /// This chain's statements, held or journaled: one signed again keeps
     /// its link, so a retry has the same bytes and never takes a new place.
     known: Vec<TipStatement>,
+    /// Set by `hold_stage_chain`: the next statement, its schema seal,
+    /// opens a stage branch tagged by that seal.
+    branch: std::sync::atomic::AtomicBool,
 }
 /// A signed tip statement a trusted identity chains.
 pub(super) trait Linked: Sized {
-    type Statement;
+    type Statement: rocky_credentials::OpensStage;
     fn endorse_linked(
         statement: Self::Statement,
         signer: &dyn IdentityProvider,
@@ -128,7 +131,17 @@ impl Signer {
             .chain
             .as_ref()
             .map(|chain| chain.next.lock().unwrap_or_else(PoisonError::into_inner));
-        let link = next.as_deref().copied();
+        let mut link = next.as_deref().copied();
+        if let (Some(chain), Some(live)) = (self.chain.as_ref(), link.as_mut())
+            && chain
+                .branch
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            live.stage = Some(
+                rocky_credentials::OpensStage::opened_stage(&statement)?
+                    .ok_or("a staged schema switch signs its seal first")?,
+            );
+        }
         let signed = T::endorse_linked(statement, &*self.identity, &self.links, link)?;
         if let (Some(next), Some(link)) = (next.as_mut(), link) {
             **next = link.next(signed.id()?);
@@ -703,6 +716,7 @@ impl Node {
             _held: held,
             next: std::sync::Mutex::new(next),
             known,
+            branch: std::sync::atomic::AtomicBool::new(false),
         });
         Ok(())
     }
@@ -717,12 +731,7 @@ impl Node {
     ) -> Result<(), Failure> {
         self.hold_chain(signer, scope).await?;
         if let Some(chain) = signer.chain.as_mut() {
-            let stage = rocky_core::commitment(
-                "rocky.sdk.stage-branch.v1",
-                PrivateKey::new().public_key().as_bytes(),
-            );
-            let next = chain.next.get_mut().unwrap_or_else(PoisonError::into_inner);
-            *next = next.staged(stage);
+            *chain.branch.get_mut() = true;
             chain.known.clear();
         }
         Ok(())

@@ -77,9 +77,9 @@ pub use signed::{
 
 pub use tips::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, ChainLink, Equivocation,
-    GENESIS_LINE_FORMAT, GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, PastCut, Recovery,
-    SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedGenesisLine, SignedSeal,
-    SignedTipOpening, StrippedFinality, TIP_OPENING_FORMAT, TipAuthority, TipGraph,
+    GENESIS_LINE_FORMAT, GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, OpensStage, PastCut,
+    Recovery, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedGenesisLine,
+    SignedSeal, SignedTipOpening, StrippedFinality, TIP_OPENING_FORMAT, TipAuthority, TipGraph,
     TipOpeningStatement, genesis_tip,
 };
 

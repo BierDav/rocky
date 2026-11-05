@@ -52,6 +52,9 @@ pub(crate) enum Recovery {
     /// The files are in place; the store opens without its keys, takes its
     /// tables, then its keys.
     Placed,
+    /// The store holds its tables and keys; the root has yet to revoke the
+    /// lost trusted identities.
+    Keyed,
 }
 
 // Archives are files a user moves elsewhere: natively streamed from disk; in

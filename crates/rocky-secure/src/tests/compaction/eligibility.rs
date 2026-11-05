@@ -35,6 +35,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
         identities: [PrivateKey::from_bytes(&[252; 32]).public_key()].into(),
         capabilities: BTreeSet::new(),
         cut: Default::default(),
+        recovery: None,
     };
     assert!(!expired.live(now().unwrap()));
     let expired = RevocationSet::try_from(vec![

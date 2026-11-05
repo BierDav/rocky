@@ -576,6 +576,22 @@ impl CredentialChain {
                 {
                     return Err(denied("delegation expands authority"));
                 }
+                // An origin naming the signer, or the signer's origin, has
+                // that grant's time: a recovery judges the origin by it.
+                let named = if parent_extended.trusted.is_some() {
+                    Some((parent.subject, parent.not_before))
+                } else {
+                    parent_extended
+                        .origin
+                        .map(|held| (held.identity, held.since))
+                };
+                if extended.origin.is_some_and(|origin| {
+                    named.is_some_and(|(identity, since)| {
+                        identity == origin.identity && since != origin.since
+                    })
+                }) {
+                    return Err(denied("an origin misstates its trusted grant"));
+                }
             } else if capability.kind != PrincipalKind::User {
                 return Err(denied("publisher must delegate to user"));
             }

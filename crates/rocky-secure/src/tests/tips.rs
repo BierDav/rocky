@@ -1480,6 +1480,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
             }],
             acknowledgments: None,
         }],
+        recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, &f.publisher, &CredentialChain::default()).unwrap(),

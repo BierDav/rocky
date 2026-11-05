@@ -382,6 +382,26 @@ impl Node {
             })
             .collect())
     }
+    /// Root recoveries that met: the latest ended the others.
+    pub(super) async fn recovery_alerts(&self) -> Result<Vec<Alert>, Failure> {
+        let revocations = &self.settings.lock().await.revocations;
+        let Some(latest) = revocations.recovery().copied() else {
+            return Ok(Vec::new());
+        };
+        Ok(revocations
+            .recoveries()
+            .into_iter()
+            .filter(|recovery| *recovery != latest)
+            .map(|ended| Alert {
+                kind: AlertKind::RecoveriesMet {
+                    kept: latest.keep.to_hex(),
+                    ended: ended.keep.to_hex(),
+                    shared_slot: ended.slot == latest.slot,
+                },
+                since: None,
+            })
+            .collect())
+    }
     /// Reloads the other trusted identities from the registry, merges the
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
@@ -550,6 +570,7 @@ impl Node {
         let mut alerts = self.alerts();
         alerts.extend(self.tip_chain_alerts().await?);
         alerts.extend(self.escrow_alerts().await?);
+        alerts.extend(self.recovery_alerts().await?);
         alerts.sort();
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {

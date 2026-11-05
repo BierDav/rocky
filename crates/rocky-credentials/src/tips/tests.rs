@@ -81,6 +81,7 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
             }],
             acknowledgments: None,
         }],
+        recovery: None,
     };
     let revocations =
         RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();

@@ -145,6 +145,11 @@ pub enum RevocationReason {
     /// this identity: this device did nothing wrong and may enroll again
     /// through another trusted node.
     Origin { trusted: String },
+    /// A root recovery that kept the trusted identity `recovered` ended
+    /// every trusted grant before its own: this device's, or that of the
+    /// trusted identity that first enrolled it. It may enroll again
+    /// through a trusted node the recovery kept or the root added since.
+    Recovery { recovered: String },
     /// A capability or an issuer above it.
     Capability,
 }
@@ -467,6 +472,16 @@ pub enum AlertKind {
         node: String,
         records: u64,
         reason: String,
+    },
+    /// Two root recoveries met: the later, which kept the identity `kept`,
+    /// ended every trusted grant before it, the earlier recovered identity
+    /// `ended` too, whose writes every holder refuses from then on. With
+    /// `shared_slot` both took the same author numbers. Recover once; a
+    /// device of `ended` enrolls again through `kept`.
+    RecoveriesMet {
+        kept: String,
+        ended: String,
+        shared_slot: bool,
     },
 }
 /// How long a trusted node may stay unheard before the others flag it.

@@ -767,6 +767,10 @@ impl Settings {
             crate::RevocationReason::Node
         } else if revoked.identities.contains(&self.identity) {
             crate::RevocationReason::Identity
+        } else if let Some(recovery) = revoked.recovery.filter(|_| statement.root()) {
+            crate::RevocationReason::Recovery {
+                recovered: recovery.keep.to_hex(),
+            }
         } else if let Some(origin) = self
             .link_origin()?
             .filter(|origin| statement.root() && revoked.identities.contains(origin))
@@ -1421,11 +1425,12 @@ impl Settings {
                 None => drop(groups.insert(key.clone(), record.clone())),
             }
         }
+        // A second ahead, so a grant signed in the same second precedes it.
         let grant = Authority::owner(root).issue_trusted(
             identity.public_key()?,
             bound.scope,
             authors,
-            now()?,
+            after_recovery(&archived.revocations, now()? + 1),
         )?;
         let mut settings = Self::installed(
             (installation, stored_identity),
@@ -1554,7 +1559,7 @@ impl Settings {
             identity,
             self.domain()?.scope,
             authors,
-            now()?,
+            after_recovery(&self.revocations, now()?),
         )?;
         let mut changes = Changes::default();
         changes.trusted(
@@ -1565,6 +1570,68 @@ impl Settings {
             },
         )?;
         Ok((grant, changes))
+    }
+    /// A recovered identity's own statements: the root ends every trusted
+    /// grant valid before this identity's, with what those identities
+    /// first enrolled, wherever a store learns of them. `cut` keeps the
+    /// held heads of the chains it ends, split over as many statements as
+    /// the cut bounds need. Returns whether they were signed now rather
+    /// than held.
+    pub(crate) fn revoke_before_recovery(
+        &mut self,
+        root: Option<&dyn IdentityProvider>,
+        mut cut: Vec<rocky_credentials::Cut>,
+    ) -> Result<bool, Failure> {
+        let root = root_signer(root, self.publisher, "recovering a domain")?;
+        let links = self.identity_links();
+        let grant = &links
+            .0
+            .first()
+            .filter(|_| links.0.len() == 1)
+            .ok_or("a recovered identity holds one trusted grant")?
+            .capability;
+        let slot = grant
+            .authors()?
+            .and_then(|authors| authors.recovery_slot())
+            .ok_or("not a recovered identity")?;
+        let recovery = rocky_credentials::RootRecovery {
+            since: grant.not_before,
+            keep: self.identity,
+            slot,
+        };
+        if self.revocations.recoveries().contains(&recovery) {
+            return Ok(false);
+        }
+        cut.sort();
+        let mut parts: Vec<Vec<rocky_credentials::Cut>> = vec![Vec::new()];
+        for chain in cut {
+            let last = parts.last_mut().ok_or("no statement")?;
+            let heads: usize = last.iter().map(|held| held.statements.len()).sum();
+            if last.len() == rocky_credentials::MAX_CUT_LANES
+                || heads + chain.statements.len() > rocky_credentials::MAX_CUT_HEADS
+            {
+                parts.push(Vec::new());
+            }
+            parts.last_mut().ok_or("no statement")?.push(chain);
+        }
+        let (app, time) = (self.domain()?.manifest().app, now()?);
+        let statements = parts
+            .into_iter()
+            .map(|cut| {
+                Authority::owner(root).revoke(Revocation {
+                    app,
+                    issuer: self.publisher,
+                    time,
+                    nodes: BTreeSet::new(),
+                    identities: BTreeSet::new(),
+                    capabilities: BTreeSet::new(),
+                    cut,
+                    recovery: Some(recovery),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.learn_revocations(&RevocationSet::try_from(statements)?)?;
+        Ok(true)
     }
     /// Takes `link` as this issuer identity's credentials once it is the
     /// root's current trusted grant to it: its nodes are trusted nodes.
@@ -1626,7 +1693,11 @@ impl Settings {
     /// identity, which the root enrolled.
     pub(crate) fn link_origin(&self) -> Result<Option<PublicKey>, Failure> {
         Ok(match self.identity_links().0.last() {
-            Some(link) => link.capability.extended()?.origin,
+            Some(link) => link
+                .capability
+                .extended()?
+                .origin
+                .map(|origin| origin.identity),
             None => None,
         })
     }
@@ -2058,7 +2129,11 @@ impl Settings {
                 kind: registry::Kind::Paired,
                 profile: Some(profile.clone()),
                 issuer,
-                origin: issued.capability.extended()?.origin,
+                origin: issued
+                    .capability
+                    .extended()?
+                    .origin
+                    .map(|origin| origin.identity),
 
                 enrolled: time,
                 invitation: Some(HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token))),
@@ -2177,7 +2252,11 @@ impl Settings {
                 kind: registry::Kind::Granted,
                 profile: Some(profile),
                 issuer,
-                origin: capability.capability.extended()?.origin,
+                origin: capability
+                    .capability
+                    .extended()?
+                    .origin
+                    .map(|origin| origin.identity),
 
                 enrolled: time,
                 invitation: None,
@@ -2803,6 +2882,13 @@ fn recovery_authors(archived: &Settings) -> Result<AuthorRange, Failure> {
         pick -= 1;
     }
     Err("every recovery slot of author numbers is used".into())
+}
+/// A trusted grant's time: `time`, or later when a recovery would end a
+/// grant valid from then.
+fn after_recovery(revocations: &RevocationSet, time: u64) -> u64 {
+    revocations.recovery().map_or(time, |recovery| {
+        time.max(recovery.since + rocky_credentials::LIFETIME_SKEW + 1)
+    })
 }
 /// A join whose keys exist and whose enrollment is still to be fetched.
 pub struct Joining {
@@ -3450,7 +3536,7 @@ impl Settings {
                 kind: registry::Kind::Renewed,
                 profile: Some(profile_of(&granted, &domain)),
                 issuer: me,
-                origin: prior.extended()?.origin,
+                origin: prior.extended()?.origin.map(|origin| origin.identity),
 
                 enrolled: time,
                 invitation: None,
@@ -3668,6 +3754,7 @@ impl Settings {
                 identities: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
                 cut: if root.is_some() { cut } else { Vec::new() },
+                recovery: None,
             },
             // The cascade is the root statement's: it names the trusted
             // identity alone, whose origin the enrolled ones carry.
@@ -3692,6 +3779,7 @@ impl Settings {
                     )
                     .collect(),
                 cut: if root.is_some() { cut } else { Vec::new() },
+                recovery: None,
             },
             Revoke::Claims(capability) => Revocation {
                 app: domain.manifest().app,
@@ -3701,6 +3789,7 @@ impl Settings {
                 identities: BTreeSet::new(),
                 capabilities: [capability].into(),
                 cut: Default::default(),
+                recovery: None,
             },
         };
         // A claim right reads nothing: no key rotates.

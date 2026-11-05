@@ -76,6 +76,8 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         Stage::Rebound,
         Stage::Attached,
         Stage::Keyed,
+        Stage::Revoking,
+        Stage::Named,
     ] {
         let directory = root.path().join(format!("{stage:?}"));
         STOPS
@@ -108,6 +110,13 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         }
         write(&opened.database, "notes", "recovered").await?;
         opened.database.close().await?;
+        // Finished only once the root revoked what came before it.
+        let settings = crate::enrollment::Settings::load(&directory.join("identity.json"))?;
+        let kept = settings
+            .revocations
+            .recovery()
+            .map(|recovery| recovery.keep);
+        assert_eq!(kept, Some(settings.identity), "{stage:?}");
         // Finished: it opens, and is no longer recovered.
         let reopened = config.open().await?;
         assert_eq!(rows(&reopened.database).await?.len(), 3, "{stage:?}");

@@ -48,6 +48,28 @@ pub struct Revocation {
     /// revokes, the heads of its chains that stay valid. A chain without
     /// an entry keeps nothing once its signer is revoked.
     pub cut: Vec<Cut>,
+    /// Only in a root statement: the recovery that signed it.
+    pub recovery: Option<RootRecovery>,
+}
+/// A root recovery's statement: it ends every trusted grant valid before
+/// the recovered identity's own, with what those identities first
+/// enrolled, whether or not the recovering store knew them. Grants the
+/// root signs later stay. Ordered by time, then key: of two recoveries
+/// the later ends the earlier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RootRecovery {
+    /// The `not_before` of the recovered identity's trusted grant.
+    pub since: u64,
+    /// The recovered identity.
+    pub keep: PublicKey,
+    /// The recovery slot of author numbers its grant holds.
+    pub slot: u32,
+}
+impl RootRecovery {
+    /// Whether it ends a trusted grant to `identity` valid from `since`.
+    pub fn ends(&self, since: u64, identity: &PublicKey) -> bool {
+        (since, *identity) < (self.since, self.keep)
+    }
 }
 /// The heads a root statement keeps of one node's chains: the tip
 /// statements `identity` signed through `lane`, every branch's head in
@@ -73,7 +95,7 @@ pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v3",
+            "rocky.revocation.id.v4",
             &encode(self)?,
         ))
     }
@@ -94,10 +116,20 @@ impl Revocation {
         self.identities.iter()
     }
     fn empty(&self) -> bool {
-        self.nodes.is_empty() && self.identities.is_empty() && self.capabilities.is_empty()
+        self.nodes.is_empty()
+            && self.identities.is_empty()
+            && self.capabilities.is_empty()
+            && self.recovery.is_none()
+    }
+    /// A recovery only in a root statement, naming a slot that exists.
+    fn valid_recovery(&self, root: bool) -> bool {
+        self.recovery
+            .is_none_or(|recovery| root && recovery.slot < crate::RECOVERY_SLOTS)
     }
     /// A cut only in a root statement, ordered without repeats, naming
-    /// chains of identities or nodes the statement revokes.
+    /// chains of identities or nodes the statement revokes; a recovery's
+    /// may name any identity but the one it keeps, since it ends grants
+    /// its signer never saw.
     fn valid_cut(&self, root: bool) -> bool {
         (root || self.cut.is_empty())
             && self.cut.len() <= MAX_CUT_LANES
@@ -113,7 +145,10 @@ impl Revocation {
                 <= MAX_CUT_HEADS
             && self.cut.iter().all(|cut| {
                 (self.identities.contains(&cut.identity)
-                    || self.nodes.contains(&crate::PeerId::of(cut.lane)))
+                    || self.nodes.contains(&crate::PeerId::of(cut.lane))
+                    || self
+                        .recovery
+                        .is_some_and(|recovery| recovery.keep != cut.identity))
                     && cut.statements.windows(2).all(|pair| pair[0] < pair[1])
             })
     }
@@ -128,7 +163,7 @@ pub struct SignedRevocation {
     pub chain: CredentialChain,
     signature: Signature,
 }
-const SIGNED: &str = "rocky.revocation.v4";
+const SIGNED: &str = "rocky.revocation.v5";
 impl SignedRevocation {
     pub fn sign(
         statement: Revocation,
@@ -138,6 +173,7 @@ impl SignedRevocation {
         if statement.issuer != signer.public_key()?
             || statement.empty()
             || !statement.valid_cut(chain.0.is_empty())
+            || !statement.valid_recovery(chain.0.is_empty())
         {
             return Err(denied("invalid revocation"));
         }
@@ -175,6 +211,10 @@ impl SignedRevocation {
         if statement.app != app
             || statement.empty()
             || !statement.valid_cut(self.chain.0.is_empty())
+            || !statement.valid_recovery(self.chain.0.is_empty())
+            || statement
+                .recovery
+                .is_some_and(|recovery| recovery.keep == publisher)
             || statement.identities.contains(&publisher)
             || encode(self)?.len() > MAX_REVOCATION_BYTES
             || signer.ok() != Some(statement.issuer)
@@ -209,7 +249,8 @@ impl SignedRevocation {
     /// Whether this statement ends a chain through `link`, a `protected`
     /// one (see `CredentialChain::protected`) only when the root signed
     /// it. A root statement naming an identity also ends every link that
-    /// identity first enrolled.
+    /// identity first enrolled; a recovery's, every trusted grant before
+    /// its own and what those first enrolled.
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         if protected && !self.root() {
             return Ok(false);
@@ -217,11 +258,15 @@ impl SignedRevocation {
         let subject = &link.capability.subject;
         let extended = link.capability.extended()?;
         let capabilities = &self.statement.capabilities;
+        let recovery = self.statement.recovery.filter(|_| self.root());
         Ok(self.statement.subjects().any(|key| key == subject)
             || (self.root()
-                && extended
-                    .origin
-                    .is_some_and(|origin| self.statement.identities.contains(&origin)))
+                && extended.origin.is_some_and(|origin| {
+                    self.statement.identities.contains(&origin.identity)
+                        || recovery.is_some_and(|r| r.ends(origin.since, &origin.identity))
+                }))
+            || (extended.trusted.is_some()
+                && recovery.is_some_and(|r| r.ends(link.capability.not_before, subject)))
             || extended
                 .node
                 .is_some_and(|node| self.statement.nodes.contains(&node))
@@ -252,6 +297,8 @@ pub struct RevocationSet {
     root: Ended,
     /// The heads root statements keep, by signing identity and lane.
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
+    /// The latest recovery: it ends every trusted grant an earlier one does.
+    recovery: Option<RootRecovery>,
 }
 /// Every head root statements keep of one node's two chains.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -308,6 +355,7 @@ impl RevocationSet {
                 heads.statements.extend(cut.statements.iter().copied());
                 heads.acknowledgments.extend(cut.acknowledgments);
             }
+            self.recovery = self.recovery.max(signed.statement.recovery);
         }
         self.statements.insert(id, signed);
         Ok(true)
@@ -423,6 +471,38 @@ impl RevocationSet {
     pub fn revokes_origin(&self, origin: &PublicKey) -> bool {
         self.root.subjects.contains(origin)
     }
+    /// Whether a root statement ends what `origin` first enrolled: it
+    /// revoked the identity, or a recovery ended its grant.
+    pub fn ends_origin(&self, origin: &crate::Origin) -> bool {
+        self.revokes_origin(&origin.identity) || self.recovery_ends(origin.since, &origin.identity)
+    }
+    /// Whether a root statement ends the trusted grant `grant`.
+    pub fn ends_trusted(&self, grant: &crate::Capability) -> bool {
+        self.revokes_origin(&grant.subject) || self.recovery_ends(grant.not_before, &grant.subject)
+    }
+    /// Whether a recovery ends a trusted grant to `identity` valid from
+    /// `since`.
+    pub fn recovery_ends(&self, since: u64, identity: &PublicKey) -> bool {
+        self.recovery
+            .is_some_and(|recovery| recovery.ends(since, identity))
+    }
+    /// The latest recovery: of the recovered identities only its own
+    /// stays trusted.
+    pub fn recovery(&self) -> Option<&RootRecovery> {
+        self.recovery.as_ref()
+    }
+    /// Every recovery the root signed, oldest first.
+    pub fn recoveries(&self) -> Vec<RootRecovery> {
+        let mut recoveries: Vec<RootRecovery> = self
+            .statements
+            .values()
+            .filter(|signed| signed.root())
+            .filter_map(|signed| signed.statement.recovery)
+            .collect();
+        recoveries.sort_unstable();
+        recoveries.dedup();
+        recoveries
+    }
     /// Whether some statement ends a chain through `link`: its subject,
     /// node, capability ID, on a claim link its grant, or a root
     /// statement its origin. A `protected` link only a root statement ends.
@@ -440,9 +520,11 @@ impl RevocationSet {
             || extended
                 .claims
                 .is_some_and(|right| capabilities.contains(&right.grant))
+            || (extended.trusted.is_some()
+                && self.recovery_ends(link.capability.not_before, &link.capability.subject))
             || extended
                 .origin
-                .is_some_and(|origin| self.revokes_origin(&origin)))
+                .is_some_and(|origin| self.ends_origin(&origin)))
     }
     /// The first statement that revokes the holder of `chain`: its node
     /// certificate or the identity that signed it. A statement ending an

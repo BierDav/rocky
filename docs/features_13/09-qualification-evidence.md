@@ -1309,6 +1309,72 @@ points, and the `board_cap` assertion bounds a board's points.
   registry, with the identities each first enrolled, and every key
   rotates. `Opened::revoked` names them. A revocation that fails fails the
   recovery and says how to finish it with `Session::revoke_trusted`.
+- Recovery statement: then the root signs one more statement,
+  `Revocation::recovery = RootRecovery { since, keep, slot }`: `keep` is
+  the recovered identity, `since` its trusted grant's `not_before`, `slot`
+  its author slot. It ends every trusted grant ordered before
+  `(since, keep)`, by `not_before` then key, and every link whose origin's
+  grant is ordered so: the usual cascade, for identities the archived
+  registry never named (promoted after the backup, or a creator whose own
+  record the backup lacks). Any holder applies it to a chain it sees later,
+  and the statement travels like any other. A set keeps only the latest
+  recovery, since it ends all an earlier one does.
+  - Origin time: credential extension v9 makes `origin` an
+    `Origin { identity, since }`, `since` being the origin's trusted grant's
+    `not_before`. Where the chain shows that grant, or a parent naming the
+    same origin, verification refuses another time ("an origin misstates
+    its trusted grant"), so a lost node cannot date its enrollments past a
+    recovery. A survivor's renewal keeps the time; `Authority::renew`
+    refuses an ended origin.
+  - Later trust: the recovered grant is dated one second ahead, so a grant
+    signed in the recovery's second precedes it. `trust` dates a new grant
+    past the latest recovery (`since + LIFETIME_SKEW + 1`), so a trusted
+    node the user re-adds afterwards keeps its grant; its devices from
+    before the recovery enroll again.
+  - History: identities the registry named are still revoked by name
+    first, with a cut at the heads this store holds. The recovery
+    statement cuts every other identity whose chain the store holds (a
+    recovery's cut may name any identity but the one it keeps), split over
+    several statements when the cut bounds need it. Sealed history
+    therefore keeps resolving: a creator whose own registry record an
+    early backup lacks keeps its seals and bookmark moves. Statements the
+    store never held are past the cut, as for any cut.
+  - Resumable: the recovery marker goes only after the revocations are
+    applied. Once the store holds its keys, the marker says `keyed`, and
+    recovering again opens the store as installed and repeats the revoke
+    step, which skips what is already held. Until then the directory
+    opens only by recovering again. The fault sweep stops at `Revoking`
+    (keyed, nothing revoked) and `Named` (named identities revoked, the
+    recovery statement not yet signed).
+  - Transparency: a device the statement ends, a trusted node or one it
+    first enrolled, learns it on its next session or renewal and reports
+    `RevocationReason::Recovery { recovered }`. An issuer no longer takes
+    from an epoch request the statement that ends it: it records the
+    revocation as a session does. Before, it held the statement and its
+    own status failed.
+- Two recoveries: two recoveries from copies that never learned of each
+  other each sign a recovery statement. The later one, by `(since, keep)`,
+  ends the earlier recovered identity, which is just a trusted grant before
+  it; the earlier statement ends nothing the later one holds. Mutual
+  revocation cannot happen, and every holder reaches the same result
+  whichever statement arrives first.
+  - The alternative, sparing recovered identities from each other's
+    statements, was rejected. It keeps both alive with colliding author
+    numbers, and a recovery could not end a lost earlier recovered node
+    that the backup never knew. Refusing the later recovery's writes was
+    rejected too: the later recovery is the one the user ran last, and
+    only ending the earlier keeps a recovery's promise that nothing
+    before it stays trusted.
+  - Alert: a holder of both statements reports
+    `AlertKind::RecoveriesMet { kept, ended, shared_slot }`. The ended node
+    reports `RevocationReason::Recovery { recovered: kept }`. Both name
+    the two identities.
+  - Author numbers: once the later statement is held, the earlier
+    identity's frames are refused, and frames it already applied are
+    restored from a checkpoint, as for any revoked author. Only one
+    holder of a shared slot's numbers remains, so no holder takes two
+    writes under one author number. Before they meet, each writes only to
+    stores that do not yet hold the other's statement.
 - Tests: rocky-sdk `root_recovery::{the_root_phrase_and_a_backup_recover_every_partition_with_every_device_lost,
   a_revoked_trusted_node_gains_nothing_from_escrow_records,
   a_recovery_takes_author_numbers_no_trusted_node_handed_out,
@@ -1345,13 +1411,61 @@ points, and the `board_cap` assertion bounds a board's points.
   - A store that took a scope only from a checkpoint, without frames,
     carries no records of it until a frame arrives; a key holder seals its
     own.
-  - A recovered store whose registry lacks a trusted identity, for example
-    one promoted after the backup, cannot revoke it. The app revokes it
-    with `Session::revoke_trusted` once it appears.
-  - Revoking a lost trusted identity also revokes the devices it first
-    enrolled; they enroll again.
-  - Two recoveries from copies that never learned of each other share a
-    slot with probability 1/16384.
+  - Revoking a lost trusted identity, by name or through the recovery
+    statement, also revokes the devices it first enrolled; they enroll
+    again.
+  - A trusted node that sealed the earlier recovered identity's rows into
+    a checkpoint before it held the later statement keeps those rows in
+    that checkpoint. If the two shared a slot, the later identity's
+    writes can then share author numbers with them. This needs a trusted
+    node the later recovery kept or the root added that still lacks the
+    statement, and the alert shows `shared_slot`.
+  - Grants signed from a clock more than a day behind the recovery's can
+    fall before it. `Opened::revoked` names only what the finishing
+    attempt revoked by name.
+  - Closed (recovery statement, v9): a recovered store whose registry
+    lacked a trusted identity could not revoke it, and the app revoked it
+    with `Session::revoke_trusted` once it appeared. The recovery
+    statement now ends it wherever it is seen. rocky-credentials
+    `root::{a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled,
+    an_origin_states_its_trusted_grants_time}` cover a grant unknown at
+    signing, a device it enrolled, an issuer below it, a survivor's
+    renewal, a later grant and a forged origin time. rocky-sdk
+    `root_recovery::a_recovery_ends_trusted_identities_its_backup_never_knew`:
+    a trusted node promoted after the backup, and a device it enrolled,
+    learn after one session with the recovered node that the recovery
+    ended them. A node the root trusts afterwards writes to the recovered
+    node. Mutations: without the statement (`revoke_before_recovery`
+    skipped) the SDK test fails, because the promoted node is never
+    revoked. Without the trusted-grant check in `RevocationSet::ends_at`,
+    the credentials test fails.
+  - Closed (two recoveries): two recoveries from copies that never learned
+    of each other share a slot with probability 1/16384. They now resolve
+    as described under "Two recoveries". rocky-credentials
+    `root::the_later_of_two_recoveries_ends_the_earlier` covers either
+    merge order, a shared slot (only the later node's chain holds the
+    numbers), a same-second tie broken by key, and refusals of a
+    non-root or out-of-range recovery. rocky-sdk
+    `root_recovery::of_two_recoveries_that_meet_the_later_ends_the_earlier`:
+    two recoveries of one backup meet. The kept node raises
+    `RecoveriesMet` naming both, the ended node reports the kept one, and
+    the ended node's writes from before and after the meeting never reach
+    the kept node. Mutation: a recovery that spares grants within a day of
+    its own (no ordering between recoveries) fails both. Without the
+    epoch-request fix, the ended node's status fails in the SDK test.
+  - Closed (revoke step resumable): a crash after the keys were installed
+    but before the root revoked the lost identities left a store that
+    opened normally, with them unrevoked. rocky-sdk
+    `recovery::tests::a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slot`
+    now also stops at `Revoking` and `Named`. Each finished recovery must
+    hold its recovery statement. Mutation: removing the marker once the
+    keys are in fails it ("opened half-recovered"). Without the recovery
+    statement's cut, the same sweep fails: the creator, whose record the
+    early backup lacks, loses its bookmark moves and the workspace is
+    read-only.
+  - Checks (on main 85c3c386): `./scripts/lint` 0; `./scripts/check --unit
+    --integration` 249 unit and 1132 integration passed (integration wall
+    66 s); `./scripts/check --wasm` 0 (68 of 68 browser runs).
   - Closed (issuer slots, v55): a compromised issuer could enroll devices
     and fill an epoch's 32 signer slots with junk, which was never
     deleted. Its devices now share one issuer slot, and revoking it
@@ -1424,7 +1538,12 @@ points, and the `board_cap` assertion bounds a board's points.
 - Formats: replica `rocky.encrypted-replica.v55` (`secure_escrow` keyed by
   issuer, with its carrier; `secure_escrow_refused`); link `HANDSHAKE_VERSION` 24 (it also
   covers the `Escrow` message, which v53 added without a bump); identity
-  `VERSION` 27.
+  `VERSION` 27. Recovery statement: revocation `rocky.revocation.v5`
+  (id `rocky.revocation.id.v4`) gains `recovery`; credential extension v9
+  (`origin: Origin { identity, since }`). Both are self-versioned, and
+  older statements and chains fail verification, as with v4 and v8, so
+  file identities and the handshake are unchanged. Frozen checkpoint
+  vectors are regenerated (verify.py passes).
 - Checks on 580d3446:
   - `./scripts/lint`: 0.
   - `./scripts/check --unit --integration`: 248 unit and 1121 integration

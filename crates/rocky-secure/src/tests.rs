@@ -321,6 +321,7 @@ pub(crate) fn revoking(
         identities: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
         cut: Default::default(),
+        recovery: None,
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),

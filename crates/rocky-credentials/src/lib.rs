@@ -50,7 +50,8 @@ pub use existence_base::{
     ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
 };
 pub use extension::{
-    AuthorRange, Extended, Extension, MAX_AUTHOR, RECOVERY_FIRST, RECOVERY_SLOT, RECOVERY_SLOTS,
+    AuthorRange, Extended, Extension, MAX_AUTHOR, Origin, RECOVERY_FIRST, RECOVERY_SLOT,
+    RECOVERY_SLOTS,
 };
 pub use finality::{
     MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
@@ -69,7 +70,7 @@ pub use peer::PeerId;
 pub use revocation::{
     Cut, DAY, Head, Heads, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_CUT_HEADS, MAX_CUT_LANES,
     MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL,
-    Revocation, RevocationSet, SIGNATURE_OVERHEAD, SignedRevocation,
+    Revocation, RevocationSet, RootRecovery, SIGNATURE_OVERHEAD, SignedRevocation,
 };
 pub use root::RootKey;
 pub use signed::{

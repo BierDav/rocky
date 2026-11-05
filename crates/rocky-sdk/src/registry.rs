@@ -186,9 +186,9 @@ impl Registry {
         revocations: &rocky_credentials::RevocationSet,
     ) -> Vec<PublicKey> {
         self.trusted
-            .keys()
-            .filter(|identity| !revocations.revokes_origin(identity))
-            .copied()
+            .iter()
+            .filter(|(_, record)| !revocations.ends_trusted(&record.grant.capability))
+            .map(|(identity, _)| *identity)
             .collect()
     }
 

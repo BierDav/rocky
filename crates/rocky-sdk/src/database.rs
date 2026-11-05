@@ -1837,14 +1837,21 @@ async fn run_inner(
         }
         let domain = settings.domain()?;
         // A restored file is rebound to this device's identity first. The
-        // marker goes once the file holds its tables and keys; until then
-        // each open repeats these steps.
+        // marker goes once the file holds its tables and keys, a recovery's
+        // once the root revoked the lost identities too; until then each
+        // open repeats these steps. A recovery whose store took its keys
+        // opens it as installed.
         let marker = directory.join(crate::backup::MARKER);
-        let restored = rocky_platform::fs::exists(&marker);
+        let restored = if rocky_platform::fs::exists(&marker) {
+            Some(serde_json::from_slice::<crate::backup::Marker>(
+                &rocky_platform::fs::read(&marker)?,
+            )?)
+        } else {
+            None
+        }
+        .filter(|saved| saved.recovery != Some(crate::backup::Recovery::Keyed));
         let mut deferred = Vec::new();
-        let replica = if restored {
-            let restored: crate::backup::Marker =
-                serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
+        let replica = if let Some(restored) = &restored {
             let mut config = settings.config(&vault, &domain)?;
             // A recovered store may never have read its frames: its keys
             // apply them once `attach` installed the tables.
@@ -1886,8 +1893,16 @@ async fn run_inner(
             replica.install_key_epoch(key).await?;
             crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Keyed)?;
         }
-        if restored {
-            rocky_platform::fs::remove_file(&marker)?;
+        match restored {
+            Some(saved) if saved.recovery.is_some() => crate::recovery::mark(
+                &directory,
+                &crate::backup::Marker {
+                    recovery: Some(crate::backup::Recovery::Keyed),
+                    ..saved
+                },
+            )?,
+            Some(_) => rocky_platform::fs::remove_file(&marker)?,
+            None => {}
         }
         replica
             .record_current_schema(
@@ -1988,12 +2003,16 @@ async fn run_inner(
                 .take()
                 .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?
                 .into();
-            node.revoke_lost(root).await.map_err(|error| {
-                format!(
-                    "recovered, but {error}; open the installation and revoke it with \
-                     `Session::revoke_trusted`"
-                )
-            })?
+            // The marker stays until the revocations are applied: until
+            // then the directory opens only by recovering again.
+            let unfinished = |error: Failure| -> Failure {
+                format!("recovered, but {error}; recover again with its backup and the root").into()
+            };
+            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Revoking)
+                .map_err(unfinished)?;
+            let revoked = node.revoke_lost(root).await.map_err(unfinished)?;
+            rocky_platform::fs::remove_file(directory.join(crate::backup::MARKER))?;
+            revoked
         }
         _ => Vec::new(),
     };

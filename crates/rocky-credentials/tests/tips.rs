@@ -556,6 +556,7 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
         identities: identities.iter().copied().collect(),
         capabilities: Default::default(),
         cut: Default::default(),
+        recovery: None,
     };
     let signed = Authority::owner(owner).revoke(statement).unwrap();
     RevocationSet::try_from(vec![signed]).unwrap()
@@ -1268,6 +1269,7 @@ fn cutting(
         identities: [identity].into(),
         capabilities: Default::default(),
         cut: cut.into_iter().collect(),
+        recovery: None,
     };
     RevocationSet::try_from(vec![Authority::owner(owner).revoke(statement).unwrap()]).unwrap()
 }
@@ -1441,6 +1443,7 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             }],
             acknowledgments: None,
         }],
+        recovery: None,
     };
     let revocations =
         RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
@@ -1473,6 +1476,7 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             statements: Vec::new(),
             acknowledgments: None,
         }],
+        recovery: None,
     };
     assert!(Authority::owner(&owner).revoke(unrevoked).is_err());
 }
@@ -1570,6 +1574,7 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
             identities: [trusted.public_key()].into(),
             capabilities: Default::default(),
             cut: vec![cut],
+            recovery: None,
         };
         RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap()
     };
@@ -1713,6 +1718,7 @@ fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
                 id: kept.id().unwrap(),
             }),
         }],
+        recovery: None,
     };
     let revocations =
         RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();

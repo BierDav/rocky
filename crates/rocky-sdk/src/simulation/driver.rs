@@ -755,6 +755,9 @@ impl Simulation {
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)
                 ),
+                crate::AlertKind::RecoveriesMet { shared_slot, .. } => {
+                    format!("recoveries met shared slot {shared_slot}")
+                }
             })
             .collect();
         format!("alerts {described:?}")

@@ -433,13 +433,16 @@ impl<'a> Authority<'a> {
     /// The trusted identity a link this authority signs descends from: its
     /// own when it holds a trusted grant, else the one its links name.
     /// The root's links descend from none.
-    pub fn origin(&self) -> Result<Option<PublicKey>, Error> {
+    pub fn origin(&self) -> Result<Option<crate::Origin>, Error> {
         let Some(last) = self.chain.0.last() else {
             return Ok(None);
         };
         let extended = last.capability.extended()?;
         Ok(match extended.trusted {
-            Some(_) => Some(last.capability.subject),
+            Some(_) => Some(crate::Origin {
+                identity: last.capability.subject,
+                since: last.capability.not_before,
+            }),
             None => extended.origin,
         })
     }
@@ -520,7 +523,7 @@ impl<'a> Authority<'a> {
             || revocations.revokes(&prior.subject)
             || extended
                 .origin
-                .is_some_and(|origin| revocations.revokes_origin(&origin))
+                .is_some_and(|origin| revocations.ends_origin(&origin))
         {
             return Err(denied("invalid or revoked credential"));
         }

@@ -86,6 +86,7 @@ impl Domain {
             identities: subjects.iter().copied().collect(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
+            recovery: None,
         };
         let signed = self.authority().revoke(statement).expect("revocation");
         RevocationSet::try_from(vec![signed]).expect("set")
@@ -964,7 +965,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 9,
+        version: 10,
         authors: range,
         rotation: 9,
     })

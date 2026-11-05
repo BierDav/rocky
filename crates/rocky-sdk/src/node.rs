@@ -1717,18 +1717,21 @@ impl Node {
         let mut revoked = Vec::new();
         loop {
             let registry = self.registry().await?;
+            // Named ones are revoked with a cut, which keeps their history.
             let lost = {
                 let settings = self.settings.lock().await;
-                registry
-                    .trusted_identities(&settings.revocations)
-                    .into_iter()
-                    .find(|identity| {
-                        *identity != settings.identity
-                            && !settings.tombstoned(identity)
-                            && !revoked.contains(identity)
-                    })
+                registry.trusted.keys().copied().find(|identity| {
+                    *identity != settings.identity
+                        && !settings.revocations.revokes_origin(identity)
+                        && !settings.tombstoned(identity)
+                        && !revoked.contains(identity)
+                })
             };
             let Some(identity) = lost else {
+                if let Some(directory) = self.path.parent() {
+                    crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Named)?;
+                }
+                self.revoke_before_recovery(&root).await?;
                 return Ok(revoked);
             };
             let target = crate::enrollment::Revoke::Identity(identity);
@@ -1739,6 +1742,43 @@ impl Node {
                 .record("device_revoked", json!({"identity": identity.to_hex()}));
             revoked.push(identity);
         }
+    }
+    /// The recovery's own root statements, for the trusted identities its
+    /// store never named: each keeps the heads this node holds of the
+    /// chains it ends, as a revocation by name does. Sent like any
+    /// revocation once applied.
+    async fn revoke_before_recovery(&self, root: &Root) -> Result<(), Failure> {
+        let graph = self.replica.tip_graph(self.domain().scope).await?;
+        let mut settings = self.settings.lock().await;
+        let mut cut = Vec::new();
+        for identity in graph.chain_identities().map_err(refused)? {
+            if identity == settings.identity || settings.revocations.revokes_origin(&identity) {
+                continue;
+            }
+            let lanes = graph.lanes_of(&identity).map_err(refused)?;
+            let (kept, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
+            if !dropped.is_empty() {
+                self.activity.record(
+                    "revocation_cut_dropped_stages",
+                    json!({"identity": identity.to_hex(), "heads": dropped.len()}),
+                );
+            }
+            cut.extend(kept);
+        }
+        let mut draft = settings.clone();
+        if !draft.revoke_before_recovery(root.signer(), cut)? {
+            return Ok(());
+        }
+        draft.save(&self.path)?;
+        *settings = draft;
+        self.apply(&mut settings, Vec::new()).await?;
+        drop(settings);
+        #[cfg(feature = "iroh")]
+        if let Err(error) = self.push_revocations().await {
+            self.activity
+                .record("revocations_unpushed", json!({"error": error.to_string()}));
+        }
+        Ok(())
     }
     /// The cut a root revocation of `target` carries: for each node of the
     /// revoked trusted identity, or the revoked node, the latest heads of
@@ -3492,6 +3532,21 @@ impl Node {
                         )?;
                         let registry = self.registry().await?;
                         let mut current = self.settings.lock().await;
+                        // Like a session, the requester may carry the
+                        // statement that ends this node: it is recorded,
+                        // never held.
+                        if let Some(statement) = current.revoking(&request.revocations)? {
+                            if current.revocation(&self.path)?.is_none() {
+                                current.record_revocation(&self.path, statement.clone())?;
+                                self.activity.record(
+                                    "device_revoked",
+                                    json!({"node": PrivateKey::from_bytes(&self.vault.get("node")?)
+                                        .public_key()
+                                        .to_hex()}),
+                                );
+                            }
+                            return Err(Box::new(crate::enrollment::Revoked(statement)));
+                        }
                         let mut draft = current.clone();
                         let added = draft.learn_revocations(&request.revocations)?;
                         if !added.is_empty() {

@@ -1185,6 +1185,7 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
             identities: Default::default(),
             capabilities: Default::default(),
             cut: Default::default(),
+            recovery: None,
         },
         &publisher,
         &links,

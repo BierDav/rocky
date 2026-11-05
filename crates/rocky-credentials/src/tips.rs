@@ -1317,6 +1317,15 @@ impl TipGraph {
     }
     /// The lanes `identity` signed chained statements or acknowledgments
     /// through.
+    /// Every identity a chained statement or acknowledgment names.
+    pub fn chain_identities(&self) -> Result<BTreeSet<PublicKey>, Error> {
+        let (statements, acknowledgments) = self.chained()?;
+        Ok(statements
+            .iter()
+            .chain(&acknowledgments)
+            .map(|item| item.identity)
+            .collect())
+    }
     pub fn lanes_of(&self, identity: &PublicKey) -> Result<BTreeSet<PublicKey>, Error> {
         let (statements, acknowledgments) = self.chained()?;
         Ok(statements

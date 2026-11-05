@@ -591,3 +591,176 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
     device.close().await;
     Ok(())
 }
+
+/// Why `device`'s status says a verified revocation ends it, if one does.
+async fn revocation_reason(device: &Device) -> Value {
+    device.ok(json!({"type":"status"})).await["authority"]["verified_revocation"]["reason"].clone()
+}
+/// Alerts of `kind` in `device`'s status.
+async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
+    device.ok(json!({"type":"status"})).await["alerts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|alert| alert["kind"]["type"] == kind)
+        .map(|alert| alert["kind"].clone())
+        .collect()
+}
+
+/// A trusted identity promoted after the backup is in no registry the
+/// recovery reads: its statement still ends it, and the device it
+/// enrolled, once they meet any holder, and each says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    let lost = principal(&issuer).await;
+    write_note(&issuer, "before").await;
+    let archive = root.path().join("creator.backup");
+    issuer.database.backup(&archive).await?;
+    let trusted = Device::new(Database::join(
+        open(&root.path().join("trusted"), &hub),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let promoted = principal(&trusted).await;
+    let grant = issuer
+        .ok(json!({"type":"tips","action":"trust","identity":promoted,"root":issuer.root()}))
+        .await;
+    trusted
+        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    let member = Device::new(Database::join(
+        open(&root.path().join("member"), &hub),
+        &trusted
+            .invite_as(json!({"kind":"reader","scopes":["notes"]}))
+            .await,
+    )?)?;
+    issuer.close().await;
+    drop(issuer);
+    std::fs::remove_dir_all(&creator)?;
+
+    let opened = Database::recover(
+        open(&root.path().join("recovered"), &hub),
+        &archive,
+        &RootKey::from_phrase(&phrase)?,
+    )?;
+    // Only what the backup's registry names is revoked by name: the
+    // creator at most, whose own record a backup this early may lack.
+    assert!(names(&opened.revoked).iter().all(|name| *name == lost));
+    let device = Device::new(opened)?;
+    let kept = principal(&device).await;
+    for ended in [&trusted, &member] {
+        common::introduce(&device, ended).await;
+        let _ = ended.sync().await;
+        let _ = ended.call(json!({"type": "renew"})).await;
+        assert_eq!(
+            revocation_reason(ended).await,
+            json!({"type":"recovery","recovered":kept})
+        );
+    }
+    // The root adds trust again afterwards: a grant the recovery leaves.
+    let again = Device::new(Database::join(
+        open(&root.path().join("again"), &hub),
+        &device.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let identity = principal(&again).await;
+    let grant = device
+        .ok(json!({"type":"tips","action":"trust","identity":identity,
+            "root":{"phrase":phrase}}))
+        .await;
+    again
+        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    write_note(&again, "again").await;
+    common::introduce(&device, &again).await;
+    again.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(revocation_reason(&again).await, Value::Null);
+    assert_eq!(
+        column(&device, "SELECT key FROM notes ORDER BY key").await,
+        ["again", "before"]
+    );
+    for device in [&trusted, &member, &again, &device] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+/// Two recoveries from copies that never learned of each other: when
+/// they meet, the later keeps its trust and ends the earlier, whose writes
+/// it never takes, and both say so, naming each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    write_note(&issuer, "before").await;
+    let archive = root.path().join("creator.backup");
+    issuer.database.backup(&archive).await?;
+    issuer.close().await;
+    drop(issuer);
+    std::fs::remove_dir_all(&creator)?;
+    let mut recovered = Vec::new();
+    for name in ["first", "second"] {
+        let directory = root.path().join(name);
+        let device = Device::new(Database::recover(
+            open(&directory, &hub),
+            &archive,
+            &RootKey::from_phrase(&phrase)?,
+        )?)?;
+        write_note(&device, name).await;
+        recovered.push((device, minting(&directory)?));
+    }
+    let shared_slot = recovered[0].1 == recovered[1].1;
+    let [(first, _), (second, _)] = &recovered[..] else {
+        return Err("two recoveries".into());
+    };
+    common::introduce(first, second).await;
+    for _ in 0..2 {
+        let _ = first.sync().await;
+        let _ = second.sync().await;
+    }
+    let (first_reason, second_reason) = (
+        revocation_reason(first).await,
+        revocation_reason(second).await,
+    );
+    let (kept, ended, written) = match (first_reason.is_null(), second_reason.is_null()) {
+        (true, false) => (first, second, "first"),
+        (false, true) => (second, first, "second"),
+        _ => return Err(format!("{first_reason} {second_reason}").into()),
+    };
+    let (kept_identity, ended_identity) = (principal(kept).await, principal(ended).await);
+    assert_eq!(
+        revocation_reason(ended).await,
+        json!({"type":"recovery","recovered":kept_identity})
+    );
+    assert_eq!(
+        alerts(kept, "recoveries_met").await,
+        [
+            json!({"type":"recoveries_met","kept":kept_identity,"ended":ended_identity,
+            "shared_slot":shared_slot})
+        ]
+    );
+    // The earlier recovered node's writes, before or after they met, never
+    // reach the kept one, so no author number of a shared slot is taken
+    // twice there.
+    write_note(ended, "late").await;
+    let _ = ended.sync().await;
+    let _ = kept.sync().await;
+    let notes = column(kept, "SELECT key FROM notes ORDER BY key").await;
+    let own = if written == "first" {
+        "first"
+    } else {
+        "second"
+    };
+    assert_eq!(notes, ["before", own], "{notes:?}");
+    first.close().await;
+    second.close().await;
+    Ok(())
+}

@@ -11,7 +11,7 @@ pub const RECOVERY_FIRST: u32 = 1 << 30;
 pub const RECOVERY_SLOT: u32 = 1 << 16;
 /// Recoveries the reserved numbers hold.
 pub const RECOVERY_SLOTS: u32 = (MAX_AUTHOR - RECOVERY_FIRST + 1) / RECOVERY_SLOT;
-const EXTENSION_VERSION: u32 = 8;
+const EXTENSION_VERSION: u32 = 9;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -85,7 +85,7 @@ struct Body {
     issues: bool,
     trusted: Option<rocky_core::Scope>,
     claims: Option<crate::ClaimRight>,
-    origin: Option<crate::PublicKey>,
+    origin: Option<Origin>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -110,7 +110,16 @@ pub struct Extended {
     pub claims: Option<crate::ClaimRight>,
     /// The trusted identity that first enrolled this identity, kept by every
     /// renewal: the root's revocation of it ends this link too.
-    pub origin: Option<crate::PublicKey>,
+    pub origin: Option<Origin>,
+}
+/// A trusted identity and when its root grant became valid: a recovery
+/// ends every link whose origin's grant predates its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Origin {
+    pub identity: crate::PublicKey,
+    /// The `not_before` of the origin's trusted grant.
+    pub since: u64,
 }
 impl Extension {
     pub fn new(extended: Extended) -> Result<Self, Error> {
@@ -173,7 +182,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,

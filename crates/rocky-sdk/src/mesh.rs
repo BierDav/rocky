@@ -491,6 +491,7 @@ mod tests {
             identities: BTreeSet::new(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
+            recovery: None,
         };
         let signed = SignedRevocation::sign(statement.clone(), &publisher, &owner)?;
         a.revocations.merge(

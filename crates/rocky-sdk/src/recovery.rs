@@ -33,7 +33,7 @@ pub(crate) fn refuse_unfinished(directory: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
-fn mark(directory: &Path, marker: &Marker) -> Result<(), Failure> {
+pub(crate) fn mark(directory: &Path, marker: &Marker) -> Result<(), Failure> {
     crate::secrets::write_private(&directory.join(MARKER), &serde_json::to_vec(marker)?)?;
     Ok(())
 }
@@ -148,6 +148,11 @@ pub(crate) mod fault {
         Attached,
         /// The store took one of its keys.
         Keyed,
+        /// The marker says keyed; the root revoked no lost identity yet.
+        Revoking,
+        /// The root revoked the lost identities the store names, not yet
+        /// those granted before the recovery that it does not.
+        Named,
     }
     /// The directories and stages at which a recovery stops once.
     /// Process-wide, since each database runs on a thread of its own;

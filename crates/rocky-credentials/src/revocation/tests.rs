@@ -30,6 +30,7 @@ fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
         identities: [PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
         cut: Default::default(),
+        recovery: None,
     }
 }
 fn single(signed: &SignedRevocation) -> RevocationSet {

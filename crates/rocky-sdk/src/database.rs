@@ -71,6 +71,8 @@ pub(crate) enum Install {
     },
     Join {
         invitation: String,
+        /// What the device calls itself in its join request.
+        name: String,
     },
     Supplied(Box<Supplied>),
     /// Another node of the identity `open.identity` supplies, from a node
@@ -307,15 +309,16 @@ impl Database {
     /// Enrolls this device with the issuer an invitation names, as the
     /// grant profile it names, over `open.network`, which stays attached.
     pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation)?;
+        let install = Self::join_install(&open, invitation, "")?;
         Self::start(open, install)
     }
-    fn join_install(open: &Open<'_>, invitation: &str) -> Result<Install, Failure> {
+    fn join_install(open: &Open<'_>, invitation: &str, name: &str) -> Result<Install, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("join").into());
         }
         Ok(Install::Join {
             invitation: invitation.into(),
+            name: name.into(),
         })
     }
     // Blocks the caller until the database is open, which a browser cannot.
@@ -536,8 +539,12 @@ impl Database {
     ) -> Result<Opened, Failure> {
         Self::launch(open, Self::create_install(credential_ttl, root)?, None).await
     }
-    pub(crate) async fn launch_join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation)?;
+    pub(crate) async fn launch_join(
+        open: Open<'_>,
+        invitation: &str,
+        name: &str,
+    ) -> Result<Opened, Failure> {
+        let install = Self::join_install(&open, invitation, name)?;
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
@@ -549,7 +556,7 @@ impl Database {
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
         let directory = open.directory.to_path_buf();
-        if let Install::Join { invitation } = &install {
+        if let Install::Join { invitation, .. } = &install {
             crate::enrollment::Invite::parse(invitation)?;
         }
         let setup = Setup {
@@ -1384,10 +1391,10 @@ async fn identity(
                 }
             }
         }
-        Install::Join { invitation } => {
+        Install::Join { invitation, name } => {
             let network = network.ok_or(ServiceError::NetworkRequired("join"))?;
             let joining =
-                Settings::prepare_join(path, invitation, secrets, setup.identity.clone())?;
+                Settings::prepare_join(path, (invitation, name), secrets, setup.identity.clone())?;
             let key = Settings::transport_key(&joining.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match joining.enroll(path, schema, &*transport).await {
@@ -1693,7 +1700,7 @@ async fn restore(
         (settings, link)
     } else {
         // A restored node's identity is made in the secret store.
-        let joining = Settings::prepare_join(path, invitation, secrets, None)?;
+        let joining = Settings::prepare_join(path, (invitation, ""), secrets, None)?;
         let key = Settings::transport_key(&joining.vault)?;
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {

@@ -67,7 +67,7 @@ impl Peer {
             json!({"kind":kind,"scopes":["counts"]})
         };
         Ok(self
-            .call(json!({"type":"pairing", "profile":profile}))
+            .call(json!({"type": "invitation", "profile":profile}))
             .await?["uri"]
             .as_str()
             .ok_or("invitation")?

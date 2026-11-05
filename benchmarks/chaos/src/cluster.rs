@@ -189,7 +189,7 @@ impl Node {
             .into()
     }
     pub async fn invite(&self, profile: Value) -> String {
-        self.ok(json!({"type":"pairing","profile":profile})).await["uri"]
+        self.ok(json!({"type": "invitation","profile":profile})).await["uri"]
             .as_str()
             .unwrap_or_default()
             .into()

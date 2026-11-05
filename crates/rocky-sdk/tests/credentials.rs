@@ -188,9 +188,10 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         json!({"kind": "writer", "scopes": ["unknown"]}),
         json!({"kind": "writer", "scopes": ["items"], "rights": ["execute"]}),
         json!({"kind": "admin"}),
-        Value::Null,
     ] {
-        let refused = a.call(json!({"type": "pairing", "profile": profile})).await;
+        let refused = a
+            .call(json!({"type": "invitation", "profile": profile}))
+            .await;
         assert!(refused.is_err(), "{profile}");
     }
     item(&a, 1, "Milk").await?;
@@ -209,7 +210,7 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         assert!(item(&r, 10, "Forged").await.is_err());
         assert!(note(&r, 11, "Forged").await.is_err());
         assert!(
-            r.call(json!({"type": "pairing", "profile": reader}))
+            r.call(json!({"type": "invitation", "profile": reader}))
                 .await
                 .is_err()
         );
@@ -536,7 +537,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
 }
 
 /// Credentials an issuer outside the SDK made for `user`, from the
-/// creator's identity and publisher key.
+/// creator's node under its certified issuer authority.
 fn issued(
     root: &Path,
     user: rocky_sdk::credentials::PublicKey,
@@ -544,9 +545,9 @@ fn issued(
 ) -> Result<Credentials, Failure> {
     // The creating device's trusted identity issues, below its grant.
     let creator = identity(root, "a")?;
-    let owner = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
+    let node = PrivateKey::from_bytes(&secret(root, "a", "node")?.ok_or("node")?);
     let held: CredentialChain = serde_json::from_value(creator["credentials"].clone())?;
-    let issuer = CredentialChain(vec![held.0.first().ok_or("trusted grant")?.clone()]);
+    let issuer = held.capabilities();
     let revocations: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(creator["revocations"].clone())?;
     // The grants of an enrolled device's profile, without its keys.
@@ -561,7 +562,7 @@ fn issued(
         .capability
         .grants
         .clone();
-    let authority = Authority::issuer(&owner, &issuer)?;
+    let authority = Authority::issuer(&node, &held)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();

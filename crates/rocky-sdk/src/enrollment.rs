@@ -10,6 +10,7 @@ use crate::{
     Failure,
     domain::Domain,
     groups::{GroupPartition, GroupRecord, Member, secret_role},
+    join_requests::{Dropped, Note, State},
     membership::Membership,
     registry::{self, Changes, Registry, RegistryFull},
     schema::Schema,
@@ -38,10 +39,14 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
-/// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 28;
-/// Current invitation format, with an explicit custody routing flag.
-const INVITE_VERSION: u32 = 5;
+/// revocations are a set of statements, envelopes wait in `deliveries`,
+/// join requests wait in `Issuing::requests`.
+pub const VERSION: u32 = 29;
+/// Current invitation format: the issuer's node key, and a profile only
+/// when the invited device is admitted on arrival.
+const INVITE_VERSION: u32 = 6;
+/// Current format of what an issuer seals to a joining device.
+const ANSWER_FORMAT: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
 /// Contacts one device keeps: routes to peers, which grant nothing.
 pub const MAX_CONTACTS: usize = 64;
@@ -116,6 +121,34 @@ impl std::fmt::Display for PublisherRequired {
     }
 }
 impl std::error::Error for PublisherRequired {}
+
+/// A join through `Session::invitation()` that the issuer has not admitted
+/// yet. Both devices show `code`; ask again with the same directory, keys
+/// and nonce once the issuer admitted it, before `expires_epoch_seconds`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingAdmission {
+    pub code: String,
+    pub expires_epoch_seconds: u64,
+}
+impl std::fmt::Display for AwaitingAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "awaiting_admission: the issuer admits this device after confirming code {}",
+            self.code
+        )
+    }
+}
+impl std::error::Error for AwaitingAdmission {}
+/// The issuer refused this device's join request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinRefused;
+impl std::fmt::Display for JoinRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("join_refused: the issuer refused this device's join request")
+    }
+}
+impl std::error::Error for JoinRefused {}
 /// The root signer one call carries, checked against the pinned publisher
 /// key; never stored.
 pub(crate) fn root_signer<'a>(
@@ -275,9 +308,11 @@ impl Minting {
 pub struct Issuing {
     pub invitation: Option<Invitation>,
     pub invitation_label: Option<Vec<u8>>,
-    /// The device that consumed the invitation, so its retry is answered
-    /// alike. Replaced with the invitation.
+    /// The device that consumed a pre-approved invitation, so its retry is
+    /// answered alike. Replaced with the invitation.
     pub claimed: Option<Claim>,
+    /// The devices that answered an approval invitation.
+    pub requests: crate::join_requests::Requests,
     /// Saved before the rotation's keys are made, so an interrupted
     /// revocation completes at the next open.
     pub rotation: Option<Rotation>,
@@ -448,15 +483,34 @@ pub(crate) struct Invite {
     routes: Vec<Route>,
     token: String,
     publisher: PublicKey,
+    /// The issuing node, whose key the admission code covers.
+    node: PublicKey,
     expires: u64,
-    pub(crate) profile: Profile,
+    /// Absent when the issuer admits each requesting device.
+    pub(crate) profile: Option<Profile>,
     via_custody: bool,
 }
-/// Sealed under a key derived from the invitation token.
+/// What an issuer seals to a joining device under a key derived from the
+/// invitation token.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    format: u32,
+    outcome: Outcome,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum Outcome {
+    Enrolled(Box<Enrollment>),
+    /// Held until an issuer admits it, at most until `expires`.
+    Awaiting {
+        expires: u64,
+    },
+    Refused,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enrollment {
-    format: u32,
     mesh: MeshId,
     domain: DomainId,
     /// The domain's current schema, which the device installs whatever
@@ -1981,23 +2035,26 @@ impl Settings {
             })
             .collect()
     }
-    /// Opens a new invitation for `profile`, replacing an earlier one.
+    /// Opens a new invitation, replacing an earlier one and ending its
+    /// join requests. With `profile` the invited device is admitted on
+    /// arrival; without, it waits for `admit`.
     pub async fn invite(
         &mut self,
         path: &Path,
         vault: &Vault,
         transport: &dyn Transport,
-        (profile, label): (Profile, Option<Vec<u8>>),
+        (profile, label): (Option<Profile>, Option<Vec<u8>>),
         registry: &Registry,
-    ) -> Result<(String, u64), Failure> {
+    ) -> Result<(String, u64, Vec<Note>), Failure> {
         if label
             .as_ref()
             .is_some_and(|label| label.len() > registry::MAX_LABEL)
         {
             return Err("invitation label exceeds 256 bytes".into());
         }
-        profile.grants(&self.domain()?.resources())?;
-        grants_of(&profile, &self.domain()?)?;
+        if let Some(profile) = &profile {
+            self.check_profile(profile)?;
+        }
         self.issuing("invites devices")?;
         if registry.identities() >= registry::MAX_IDENTITIES {
             return Err(Box::new(RegistryFull));
@@ -2010,6 +2067,7 @@ impl Settings {
         issuing.invitation_label = label;
         issuing.invitation = Some(Invitation::open(&token, profile.clone(), expires));
         issuing.claimed = None;
+        let notes = issuing.requests.end(Dropped::Replaced);
         self.save(path)?;
         let invite = Invite {
             v: INVITE_VERSION,
@@ -2019,6 +2077,7 @@ impl Settings {
             }],
             token: HEXLOWER.encode(&token),
             publisher: self.publisher,
+            node: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
             expires,
             profile,
             via_custody: false,
@@ -2027,7 +2086,70 @@ impl Settings {
             "rocky://join/{}",
             BASE64URL_NOPAD.encode(&serde_json::to_vec(&invite)?)
         );
-        Ok((uri, expires))
+        Ok((uri, expires, notes))
+    }
+    /// Refuses a profile no device of this domain may be granted.
+    fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
+        let domain = self.domain()?;
+        profile.grants(&domain.resources())?;
+        grants_of(profile, &domain)?;
+        Ok(())
+    }
+    /// When the invitation that requests answered expired: ends them.
+    pub(crate) fn expire_requests(&mut self, time: u64) -> Vec<Note> {
+        let Some(issuing) = self.authority.as_mut() else {
+            return Vec::new();
+        };
+        let ended = issuing
+            .invitation
+            .as_ref()
+            .is_none_or(|invitation| invitation.expires < time);
+        if ended && issuing.requests.invitation.is_some() {
+            issuing.requests.end(Dropped::Expired)
+        } else {
+            Vec::new()
+        }
+    }
+    /// The pending join requests and the time their invitation expires.
+    pub(crate) fn pending_requests(&self) -> (Vec<crate::join_requests::Request>, u64) {
+        self.authority
+            .as_ref()
+            .map(|issuing| {
+                (
+                    issuing.requests.pending().cloned().collect(),
+                    issuing
+                        .invitation
+                        .as_ref()
+                        .map_or(0, |invitation| invitation.expires),
+                )
+            })
+            .unwrap_or_default()
+    }
+    /// Admits `node`'s pending request as `profile` once `code` matches
+    /// the code its device shows. It enrolls at the device's next retry.
+    pub(crate) fn admit(
+        &mut self,
+        node: &PublicKey,
+        code: &str,
+        (profile, label): (Profile, Option<Vec<u8>>),
+        registry: &Registry,
+    ) -> Result<Vec<Note>, Failure> {
+        if label
+            .as_ref()
+            .is_some_and(|label| label.len() > registry::MAX_LABEL)
+        {
+            return Err("device label exceeds 256 bytes".into());
+        }
+        self.check_profile(&profile)?;
+        if registry.identities() >= registry::MAX_IDENTITIES {
+            return Err(Box::new(RegistryFull));
+        }
+        self.issuing("admits devices")?
+            .requests
+            .admit(node, code, (profile, label))
+    }
+    pub(crate) fn refuse(&mut self, node: &PublicKey) -> Result<Vec<Note>, Failure> {
+        self.issuing("refuses devices")?.requests.refuse(node)
     }
 
     pub(crate) fn invitation_identity(uri: &str) -> Result<(String, u64), Failure> {
@@ -2058,34 +2180,129 @@ impl Settings {
                 .is_some_and(|invitation| invitation.is_open(&token, time)))
     }
 
-    /// Answers one pairing request with the sealed enrollment and the
-    /// registry rows to commit before it leaves. Save the identity first,
-    /// even on failure: it counts the invitation's attempts.
+    /// Answers one pairing request with what is sealed to its device and
+    /// the registry rows to commit before it leaves. Save the identity
+    /// first, even on failure: it counts the invitation's attempts.
     pub fn pair(
         &mut self,
         vault: &Vault,
         request: &[u8],
         registry: &Registry,
-    ) -> Result<(Vec<u8>, Changes), Failure> {
+    ) -> Result<(Vec<u8>, Changes, Vec<Note>), Failure> {
         let request = PairRequest::from_bytes(request)?;
-        let domain = self.domain()?;
         let token = vault.get("invitation")?;
-        let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let node = Self::node_key(vault)?;
-        let links = self.issuer_links();
         let expected = context(&self.schema);
         let time = now()?;
-        let authority = self.issuing("enrolls devices")?;
-        let active = authority
+        let active = self
+            .issuing("enrolls devices")?
             .invitation
             .as_mut()
             .ok_or("no active invitation")?;
         let admission = active.admit(&token, &request, time)?;
+        let (profile, expires) = (active.profile.clone(), active.expires);
         // Another application does not consume the invitation. Any version
         // of this one joins: the device installs the domain's schema.
         if request.context != expected {
             return Err("application mismatch".into());
         }
+        if self.revoked_node(
+            &NodeKeys {
+                identity: request.user,
+                node: request.node,
+            },
+            registry,
+        ) {
+            return Err("the node or its identity was revoked".into());
+        }
+        let seal = |outcome| {
+            let answer = Answer {
+                format: ANSWER_FORMAT,
+                outcome,
+            };
+            Ok::<_, Failure>(seal_enrollment(
+                &token,
+                &request,
+                &serde_json::to_vec(&answer)?,
+            )?)
+        };
+        if let Some(profile) = profile {
+            return self.pair_invited(vault, &request, registry, (&token, profile, admission));
+        }
+        let held = self
+            .issuing("enrolls devices")?
+            .requests
+            .of(&request)
+            .map(|held| held.state.clone());
+        match held {
+            Some(State::Pending) => Ok((
+                seal(Outcome::Awaiting { expires })?,
+                Changes::default(),
+                Vec::new(),
+            )),
+            Some(State::Refused) => Ok((seal(Outcome::Refused)?, Changes::default(), Vec::new())),
+            Some(State::Admitted {
+                profile,
+                label,
+                authors,
+            }) => {
+                let authors = match authors {
+                    Some(authors) => authors,
+                    None => self.carve_authors(&profile)?,
+                };
+                if let Some(held) = self
+                    .issuing("enrolls devices")?
+                    .requests
+                    .of_mut(&request.node)
+                    && let State::Admitted { authors: kept, .. } = &mut held.state
+                {
+                    *kept = Some(authors);
+                }
+                let (enrollment, changes) = self.enroll(
+                    vault,
+                    &request,
+                    registry,
+                    (&token, profile.clone(), label),
+                    authors,
+                )?;
+                let enrolled = Note::Enrolled {
+                    node: request.node,
+                    profile,
+                };
+                Ok((
+                    seal(Outcome::Enrolled(Box::new(enrollment)))?,
+                    changes,
+                    vec![enrolled],
+                ))
+            }
+            None => {
+                if registry.admitted(&request.user) {
+                    return Err("device already enrolled".into());
+                }
+                let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
+                let notes = self.issuing("enrolls devices")?.requests.receive(
+                    &crate::join_requests::invitation_digest(&token),
+                    &issuer,
+                    &request,
+                    time,
+                )?;
+                Ok((
+                    seal(Outcome::Awaiting { expires })?,
+                    Changes::default(),
+                    notes,
+                ))
+            }
+        }
+    }
+    /// Answers a pre-approved invitation: its first device enrolls at once
+    /// and consumes it; that device's retry is answered alike.
+    fn pair_invited(
+        &mut self,
+        vault: &Vault,
+        request: &PairRequest,
+        registry: &Registry,
+        (token, profile, admission): (&[u8; 32], Profile, Admission),
+    ) -> Result<(Vec<u8>, Changes, Vec<Note>), Failure> {
+        let authority = self.issuing("enrolls devices")?;
         let claimed = authority
             .claimed
             .as_ref()
@@ -2107,35 +2324,79 @@ impl Settings {
             }
             _ => {}
         }
-        let profile = active.profile.clone();
-        let grants = grants_of(&profile, &domain)?;
         // A retry carves nothing again: the first answer's range is kept.
-        let authors = match &claimed {
-            Some(claim) => claim.authors,
-            None if profile.issues() => Some(
-                self.minting()?
-                    .split()
-                    .ok_or("not enough free author numbers")?,
-            ),
-            None => Some(self.minting()?.grant(None)?),
+        let authors = match claimed.and_then(|claim| claim.authors) {
+            Some(authors) => authors,
+            None => self.carve_authors(&profile)?,
         };
-        self.issuing("enrolls devices")?
+        let authority = self.issuing("enrolls devices")?;
+        authority
             .invitation
             .as_mut()
             .ok_or("no active invitation")?
-            .claim(&request);
-        self.issuing("enrolls devices")?.claimed = Some(Claim {
+            .claim(request);
+        authority.claimed = Some(Claim {
             node: request.node,
             user: request.user,
-            authors,
+            authors: Some(authors),
         });
+        let label = authority.invitation_label.clone();
+        let (enrollment, changes) = self.enroll(
+            vault,
+            request,
+            registry,
+            (token, profile.clone(), label),
+            authors,
+        )?;
+        let answer = Answer {
+            format: ANSWER_FORMAT,
+            outcome: Outcome::Enrolled(Box::new(enrollment)),
+        };
+        let sealed = seal_enrollment(token, request, &serde_json::to_vec(&answer)?)?;
+        let enrolled = Note::Enrolled {
+            node: request.node,
+            profile,
+        };
+        Ok((sealed, changes, vec![enrolled]))
+    }
+    /// The author numbers a device enrolled as `profile` gets: an issuer
+    /// half of the free ones, any other device a grant of them.
+    fn carve_authors(&mut self, profile: &Profile) -> Result<AuthorRange, Failure> {
+        if profile.issues() {
+            self.minting()?
+                .split()
+                .ok_or_else(|| "not enough free author numbers".into())
+        } else {
+            self.minting()?.grant(None)
+        }
+    }
+    /// What admitting a device creates: its capability as `profile`, the
+    /// enrollment that carries it and the registry rows recording it. The
+    /// one place admission makes a device's credentials.
+    fn enroll(
+        &mut self,
+        vault: &Vault,
+        request: &PairRequest,
+        registry: &Registry,
+        (token, profile, label): (&[u8; 32], Profile, Option<Vec<u8>>),
+        authors: AuthorRange,
+    ) -> Result<(Enrollment, Changes), Failure> {
+        if !registry.admitted(&request.user) && registry.identities() >= registry::MAX_IDENTITIES {
+            return Err(Box::new(RegistryFull));
+        }
+        let domain = self.domain()?;
+        let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
+        let node = Self::node_key(vault)?;
+        let links = self.issuer_links();
+        let time = now()?;
+        let grants = grants_of(&profile, &domain)?;
         let authority = self.authority(&node)?;
         let issued = self.issue(
             &authority,
             &domain,
             request.user,
             grants.clone(),
-            (profile.issues(), authors),
+            (profile.issues(), Some(authors)),
         )?;
         self.learn_joined_peer(request.node, &request.routes, profile.issues());
         let mut changes = Changes::default();
@@ -2151,7 +2412,7 @@ impl Settings {
                     .origin
                     .map(|origin| origin.identity),
                 enrolled: time,
-                invitation: Some(HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token))),
+                invitation: Some(crate::join_requests::invitation_digest(token)),
                 single_use: false,
             },
             false,
@@ -2160,7 +2421,7 @@ impl Settings {
             .get(&request.user)
             .and_then(|record| record.label.as_ref())
             .is_none()
-            && let Some(label) = &self.issuing("enrolls devices")?.invitation_label
+            && let Some(label) = &label
         {
             // The label and enrollment record commit together, including after a claimed join restarts.
             changes.label(&request.user, label)?;
@@ -2177,11 +2438,11 @@ impl Settings {
             },
             registry.get(&request.user),
         )?;
+        let keys = self.keys_for(vault, &domain, &grants)?;
         let enrollment = Enrollment {
-            format: 3,
             groups: self.groups_for(vault, request.node, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
-            epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
+            epoch_statements: self.statements_for(&keys),
             mesh: self.mesh,
             domain: self.domain,
             record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
@@ -2189,17 +2450,16 @@ impl Settings {
             bootstrap: self.schema_bootstrap()?,
             revocations: self.revocations.clone(),
             capability: issued,
-            keys: self.keys_for(vault, &domain, &grants)?,
+            keys,
             issuer,
             // An issuer signs through its own chain; no key travels.
             chain: links.clone(),
             ttl: self.ttl,
             profile,
-            authors,
+            authors: Some(authors),
             issuers: self.issuer_contacts(&[request.node])?,
         };
-        let sealed = seal_enrollment(&token, &request, &serde_json::to_vec(&enrollment)?)?;
-        Ok((sealed, changes))
+        Ok((enrollment, changes))
     }
 
     /// Issues `profile`, raw grants included, to the device whose public
@@ -2677,10 +2937,15 @@ impl Settings {
     /// exist once it returns, and nothing was sent.
     pub fn prepare_join(
         path: &Path,
-        invitation: &str,
+        (invitation, name): (&str, &str),
         store: &std::sync::Arc<dyn crate::SecretStore>,
         provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Result<Joining, Failure> {
+        if name.len() > registry::MAX_LABEL {
+            return Err(
+                format!("a device name holds at most {} bytes", registry::MAX_LABEL).into(),
+            );
+        }
         let invite = Invite::parse(invitation)?;
         let token = hex32(&invite.token)?;
         let digest = commitment("rocky.sdk.invitation.v1", &token);
@@ -2695,6 +2960,7 @@ impl Settings {
             invite,
             intent,
             token,
+            name: name.into(),
             provider,
         })
     }
@@ -2891,10 +3157,14 @@ pub struct Joining {
     invite: Invite,
     intent: Intent,
     token: [u8; 32],
+    /// What this device calls itself in its join request.
+    name: String,
     provider: Option<Arc<dyn IdentityProvider>>,
 }
 impl Joining {
-    /// Enrolls with the issuer over `transport` and stores what it sealed.
+    /// Enrolls with the issuer over `transport` and stores what it sealed,
+    /// or fails with `AwaitingAdmission` until the issuer admits this
+    /// device, or with `JoinRefused`.
     pub async fn enroll(
         self,
         path: &Path,
@@ -2906,6 +3176,7 @@ impl Joining {
             invite,
             intent,
             token,
+            name,
             provider,
         } = self;
         let issuer = Contact {
@@ -2924,8 +3195,8 @@ impl Joining {
         let mut request = PairRequest::new(
             &token,
             intent.nonce.clone(),
-            node.public_key(),
-            identity,
+            (node.public_key(), identity),
+            name,
             context(schema),
         );
         // Every joining device supplies a return route for later commits.
@@ -2935,11 +3206,25 @@ impl Joining {
             request = request.with_routes(&token, vec![(transport.kind().into(), address)]);
         }
         let sealed = exchange(transport, &addresses, Protocol::Pair, &request.to_bytes()?).await?;
-        let enrollment: Enrollment =
+        let answer: serde_json::Value =
             serde_json::from_slice(&open_enrollment(&token, &request, &sealed)?)?;
-        if enrollment.format != 3 {
+        if answer["format"].as_u64() != Some(u64::from(ANSWER_FORMAT)) {
             return Err("unsupported enrollment format".into());
         }
+        let enrollment = match serde_json::from_value::<Answer>(answer)?.outcome {
+            Outcome::Enrolled(enrollment) => *enrollment,
+            Outcome::Awaiting { expires } => {
+                return Err(Box::new(AwaitingAdmission {
+                    code: crate::join_requests::admission_code(
+                        &invite.node,
+                        &node.public_key(),
+                        &intent.nonce,
+                    ),
+                    expires_epoch_seconds: expires,
+                }));
+            }
+            Outcome::Refused => return Err(Box::new(JoinRefused)),
+        };
         enrollment.record.bytes()?;
         let mut settings = Settings {
             version: VERSION,
@@ -2997,9 +3282,10 @@ impl Joining {
         let domain = settings.domain()?;
         settings.epoch_statements = enrollment.epoch_statements.clone();
         settings.learn_revocations(&enrollment.revocations)?;
-        // The identity receives what the invitation said, no more and no
-        // less, from the owner or an issuer through its chain.
-        let grants = grants_of(&invite.profile, &domain)?;
+        // The identity receives what the invitation said, or what the
+        // admitting issuer chose, no more and no less, from the owner or an
+        // issuer through its chain.
+        let grants = grants_of(&settings.profile, &domain)?;
         let signer = if enrollment.chain.0.is_empty() {
             settings.publisher
         } else {
@@ -3008,8 +3294,11 @@ impl Joining {
         let issues = enrollment.capability.capability.extended()?.issues;
         if enrollment.capability.issuer != signer
             || enrollment.capability.capability.subject != identity
-            || settings.profile != invite.profile
-            || issues != invite.profile.issues()
+            || invite
+                .profile
+                .as_ref()
+                .is_some_and(|invited| *invited != settings.profile)
+            || issues != settings.profile.issues()
             || (!issues && enrollment.capability.capability.grants != grants)
         {
             return Err("the enrollment differs from its invitation".into());

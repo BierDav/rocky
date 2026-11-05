@@ -896,7 +896,7 @@ impl Simulation {
         }
         let uri = self
             .running(by)?
-            .call(json!({"type": "pairing", "profile": profile}))
+            .call(json!({"type": "invitation", "profile": profile}))
             .await?["uri"]
             .as_str()
             .ok_or("pairing uri")?

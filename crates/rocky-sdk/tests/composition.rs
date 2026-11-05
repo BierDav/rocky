@@ -148,7 +148,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     let writer = json!({"kind": "writer", "scopes": ["items"]});
     for request in [
         json!({"type": "sync"}),
-        json!({"type": "pairing", "profile": writer}),
+        json!({"type": "invitation", "profile": writer}),
     ] {
         let error = client.call(request).await.err().ok_or("needs a network")?;
         assert_eq!(error["code"], "network_required", "{error}");
@@ -195,7 +195,7 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let creator = engine("a", json!({"mode": "create"}), "a")?;
     let invitation = call(
         &creator,
-        json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}),
+        json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}),
     )
     .await?["value"]["uri"]
         .as_str()
@@ -353,7 +353,7 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
         "memory"
     );
     let invitation = creator_client
-        .ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}))
+        .ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
         .await["uri"]
         .as_str()
         .ok_or("invitation")?
@@ -439,7 +439,7 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
     )?;
     let creator_client = Client::new(&creator)?;
     let invitation = creator_client
-        .ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}))
+        .ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
         .await["uri"]
         .as_str()
         .ok_or("invitation")?

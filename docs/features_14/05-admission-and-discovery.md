@@ -1,6 +1,27 @@
 # 5. Admission and discovery
 
-Status: planned (2026-11-05). Needs phases 3 and 4.
+Status: Phase 5a implemented; workspace gate limitations recorded (2026-11-06), based on
+main `cec2ad1d78393e4ebee6366fefa6dda9f44df8ed` (phases 1, 2a and 4).
+[Phase 5a evidence](05-admission-and-discovery-evidence.md) records checks and
+remaining scope. Phase 3 membership remains a prerequisite for linking and
+the later discovery work.
+
+## Phase 5a
+
+Approval invitations, pending requests, code-confirmed `admit` and `refuse`
+are implemented. Requests survive issuer restarts, retain their keys and nonce
+on retry, expire with the invitation, and evict the oldest above 32 pending.
+Pre-approved `invitation_with(profile)` still enrolls immediately. Admission
+writes identity-keyed registry rows and labels under node-signed issuer
+authority before returning the enrollment. Retries reuse their author range
+and refuse a revoked node or identity.
+
+The settings format is v29, invitations v6, enrollment answers v4 and pairing
+requests v4; each accepts only its current format. Custody routing preserves
+the original issuer node used by the code. `discovered` currently lists only
+pending requests. Certified seen-node discovery, membership linking,
+linkable/single-use identity creation and Paperless integration are not part
+of Phase 5a; the remaining sections describe the full phase destination.
 
 ## Discovered devices
 

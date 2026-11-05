@@ -145,7 +145,7 @@ impl Device {
             .await
     }
     pub async fn invite_as(&self, profile: Value) -> String {
-        self.ok(json!({"type": "pairing", "profile": profile}))
+        self.ok(json!({"type": "invitation", "profile": profile}))
             .await["uri"]
             .as_str()
             .unwrap_or_default()

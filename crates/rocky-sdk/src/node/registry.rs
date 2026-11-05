@@ -67,9 +67,10 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer enrolls devices"));
         }
+        self.expire_requests().await?;
         let registry = self.registry().await?;
         let bootstrap = self.enrollment_bootstrap().await?;
-        let (reply, changes) = {
+        let (reply, changes, notes) = {
             let mut settings = self.settings.lock().await;
             let mut draft = settings.clone();
             draft.bootstrap = Some(bootstrap);
@@ -81,33 +82,85 @@ impl Node {
             answer?
         };
         self.commit(changes).await?;
-        if let Ok(paired) = rocky_credentials::PairRequest::from_bytes(request) {
-            let known = registry.admitted(&paired.user);
-            self.see(paired.user, paired.node).await?;
-            let profile = self
-                .settings
-                .lock()
-                .await
-                .authority
-                .as_ref()
-                .and_then(|authority| {
-                    authority
-                        .invitation
-                        .as_ref()
-                        .map(|invitation| invitation.profile.clone())
-                });
-            if !known {
+        for note in &notes {
+            if let crate::join_requests::Note::Enrolled { node, profile } = note {
+                let paired = rocky_credentials::PairRequest::from_bytes(request)?;
+                let known = registry.admitted(&paired.user);
+                self.see(paired.user, *node).await?;
+                if !known {
+                    self.activity.record(
+                        "identity_admitted",
+                        json!({"identity": paired.user.to_hex(), "profile": profile}),
+                    );
+                }
                 self.activity.record(
-                    "identity_admitted",
-                    json!({"identity": paired.user.to_hex(), "profile": profile}),
+                    "node_linked",
+                    json!({"identity": paired.user.to_hex(), "node": node.to_hex()}),
                 );
             }
-            self.activity.record(
-                "node_linked",
-                json!({"identity": paired.user.to_hex(), "node": paired.node.to_hex()}),
-            );
         }
+        self.note(&notes).await;
         Ok(reply)
+    }
+    /// Surfaces join request changes as activity events.
+    pub(super) async fn note(&self, notes: &[crate::join_requests::Note]) {
+        let expires = self.settings.lock().await.pending_requests().1;
+        for note in notes {
+            if let Some((kind, detail)) = note.event(expires) {
+                self.activity.record(kind, detail);
+            }
+        }
+    }
+    /// Ends the requests of an expired invitation and reports them.
+    async fn expire_requests(&self) -> Result<(), Failure> {
+        let notes = self
+            .configure(|settings| Ok(settings.expire_requests(now()?)))
+            .await?;
+        self.note(&notes).await;
+        Ok(())
+    }
+    /// The devices this node knows of without having enrolled them: the
+    /// join requests waiting on it.
+    pub(super) async fn discovered(&self) -> Result<Value, Failure> {
+        self.expire_requests().await?;
+        let (pending, expires) = self.settings.lock().await.pending_requests();
+        let pending: Vec<Value> = pending
+            .iter()
+            .map(|request| request.view(expires))
+            .collect();
+        Ok(json!({"pending": pending}))
+    }
+    /// Admits a pending join request whose device shows `code`.
+    pub(super) async fn admit(&self, request: &Value) -> Result<Value, Failure> {
+        let node = node_of(request)?;
+        let code = request["code"]
+            .as_str()
+            .ok_or_else(|| refused("code must be the 6 digits the device shows"))?;
+        let profile: Profile = serde_json::from_value(request["profile"].clone())
+            .map_err(|_| refused("admitting needs a grant profile: reader, writer or issuer"))?;
+        let label: Option<Vec<u8>> = serde_json::from_value(request["label"].clone())
+            .map_err(|_| refused("label must be bytes"))?;
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer admits devices"));
+        }
+        self.expire_requests().await?;
+        let registry = self.registry().await?;
+        let notes = self
+            .configure(|settings| settings.admit(&node, code, (profile, label), &registry))
+            .await?;
+        self.note(&notes).await;
+        Ok(json!({}))
+    }
+    /// Refuses a pending join request.
+    pub(super) async fn refuse(&self, request: &Value) -> Result<Value, Failure> {
+        let node = node_of(request)?;
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer refuses devices"));
+        }
+        self.expire_requests().await?;
+        let notes = self.configure(|settings| settings.refuse(&node)).await?;
+        self.note(&notes).await;
+        Ok(json!({}))
     }
     /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
@@ -316,4 +369,12 @@ impl Node {
         self.commit(changes).await?;
         Ok(json!({}))
     }
+}
+
+fn node_of(request: &Value) -> Result<PublicKey, Failure> {
+    request["node"]
+        .as_str()
+        .ok_or_else(|| refused("node must be a public key"))?
+        .parse()
+        .map_err(refused)
 }

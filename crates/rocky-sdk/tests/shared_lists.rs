@@ -149,7 +149,7 @@ async fn checkpoint_writer(
         .call(json!({"type":"tips","action":"compact"}))
         .await?;
     let invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?;
     let writer_path = root.join("writer");
     let mut options = open(&writer_path, hub, "writer");
@@ -198,7 +198,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )
         .await?;
     let invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?;
     let writer = Peer::new(
         Database::join(
@@ -339,7 +339,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         [json!("Base list"), json!("Member list")]
     );
     let read_invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"reader","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"reader","scopes":TABLES}}))
         .await?;
     let reader = Peer::new(
         Database::join(
@@ -367,7 +367,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -484,7 +484,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .await?;
     }
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -601,7 +601,7 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             .await?;
     }
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -739,7 +739,7 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -827,7 +827,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         )
         .await?;
     let invitation = a
-        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -867,7 +867,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = a
-        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -930,7 +930,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -1060,7 +1060,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?

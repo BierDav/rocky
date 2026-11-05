@@ -54,7 +54,7 @@ impl Peer {
     }
     async fn invite(&self, profile: Value) -> Result<String, Failure> {
         Ok(self
-            .call(json!({"type":"pairing","profile":profile}))
+            .call(json!({"type": "invitation","profile":profile}))
             .await?["uri"]
             .as_str()
             .ok_or("uri")?

@@ -62,7 +62,10 @@ impl CustodyPeer {
                 .invitation
                 .as_deref()
                 .ok_or("custody enrollment needs an invitation")?;
-            if !matches!(Invite::parse(invitation)?.profile, Profile::Custody { .. }) {
+            if !matches!(
+                Invite::parse(invitation)?.profile,
+                Some(Profile::Custody { .. })
+            ) {
                 return Err("custody enrollment requires a custody invitation".into());
             }
         }

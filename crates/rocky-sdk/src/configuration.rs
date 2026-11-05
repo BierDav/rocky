@@ -12,6 +12,7 @@ pub struct Configuration {
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
     coordination: Option<Coordination>,
+    name: String,
 }
 impl Configuration {
     /// The bookmark `create` makes and follows on the genesis tip.
@@ -27,6 +28,7 @@ impl Configuration {
             identity: None,
             network: None,
             coordination: None,
+            name: String::new(),
         })
     }
     #[must_use]
@@ -43,6 +45,13 @@ impl Configuration {
     #[must_use]
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
+        self
+    }
+    /// What this device calls itself in a join request, for the issuer
+    /// that admits it; at most 256 bytes.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
     #[must_use]
@@ -199,7 +208,10 @@ impl Configuration {
         Database::launch_open(self.options()).await
     }
     /// Enrolls using the configured network. Enrollment runs off the caller's async executor.
+    /// Through an approval invitation this fails with
+    /// [`crate::AwaitingAdmission`] until an issuer admits the device:
+    /// call it again with the same configuration.
     pub async fn join(&self, invitation: &str) -> Result<Opened, Failure> {
-        Database::launch_join(self.options(), invitation).await
+        Database::launch_join(self.options(), invitation, &self.name).await
     }
 }

@@ -97,7 +97,11 @@ impl Todos {
     /// An invitation code for a new device with `role`; only trusted
     /// devices invite.
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
-        let invitation = self.database.session().pairing(role.profile()).await?;
+        let invitation = self
+            .database
+            .session()
+            .invitation_with(role.profile())
+            .await?;
         Ok(format!("{role}:{}", invitation.uri))
     }
     /// Records this device's role and name.

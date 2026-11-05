@@ -90,7 +90,7 @@ impl Db {
         }
     }
     async fn invite(&self) -> String {
-        self.ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}))
+        self.ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
             .await["uri"]
             .as_str()
             .unwrap_or_default()

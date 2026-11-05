@@ -130,6 +130,7 @@ impl Member {
             hub,
             Install::Join {
                 invitation: invitation.into(),
+                name: self.name.clone(),
             },
         )
         .await

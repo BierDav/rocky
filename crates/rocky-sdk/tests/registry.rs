@@ -637,10 +637,43 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let issuing = Arc::new(Faults::default());
     let a = create(&root.join("a"), faulty(&hub, "a", &issuing))?;
     let mut members = Vec::new();
-    for (name, issuer_side) in [("m", true), ("n", false)] {
+    for (name, issuer_side, approval) in [
+        ("m", true, false),
+        ("n", false, false),
+        ("p", true, true),
+        ("q", false, true),
+    ] {
         let directory = root.join(name);
         let requesting = Arc::new(Faults::default());
-        let invitation = a.invite().await;
+        let invitation = if approval {
+            let session = a.database.session();
+            let invitation = session.invitation().await?;
+            assert!(invitation.profile.is_none());
+            let error = join(&directory, faulty(&hub, name, &requesting), &invitation.uri)
+                .err()
+                .ok_or("joined without admission")?;
+            let awaiting = error
+                .downcast_ref::<rocky_sdk::AwaitingAdmission>()
+                .ok_or("not awaiting admission")?;
+            let pending = session.discovered().await?.pending;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].code, awaiting.code);
+            assert_eq!(pending[0].invitation, invitation.id);
+            session
+                .admit(rocky_sdk::Admit {
+                    node: pending[0].node.clone(),
+                    code: awaiting.code.clone(),
+                    profile: rocky_sdk::GrantProfile::Writer {
+                        scopes: ["items".into()].into_iter().collect(),
+                    },
+                    label: Some(name.as_bytes().to_vec()),
+                })
+                .await?;
+            session.close().await;
+            invitation.uri
+        } else {
+            a.invite().await
+        };
         if issuer_side {
             *issuing.answer.lock().unwrap() = Some(Protocol::Pair);
         } else {
@@ -658,6 +691,9 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             .collect();
         assert_eq!(fresh.len(), 1, "{name}: {recorded:?}");
         let identity = fresh[0].clone();
+        if approval {
+            assert_eq!(recorded[&identity]["label"], json!(name.as_bytes()));
+        }
         assert!(!directory.join("identity.json").exists(), "{name}");
         let member = join(&directory, faulty(&hub, name, &requesting), &invitation)?;
         assert_eq!(member.identity().await, identity, "{name}");
@@ -765,7 +801,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         .ok_or("granted a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let refused = a
-        .call(json!({"type": "pairing", "profile": reader}))
+        .call(json!({"type": "invitation", "profile": reader}))
         .await
         .err()
         .ok_or("invited a 257th device")?;
@@ -843,7 +879,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let owner = create(&path, memory(&hub, "issuer"))?;
     let label = b"application-defined label";
     let invitation = owner
-        .ok(json!({"type":"pairing", "profile":issuer(), "label":label}))
+        .ok(json!({"type": "invitation", "profile":issuer(), "label":label}))
         .await;
     let member = join(
         &root.path().join("member"),
@@ -856,7 +892,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     assert_eq!(record["label"], json!(label));
     // The next invitation cannot erase the association of the earlier enrollment.
     owner
-        .ok(json!({"type":"pairing", "profile":issuer()}))
+        .ok(json!({"type": "invitation", "profile":issuer()}))
         .await;
     member.database.close().await?;
     owner.database.close().await?;
@@ -868,5 +904,64 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
     reopened.database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer = create(&root.path().join("issuer"), memory(&hub, "issuer"))?;
+    let session = issuer.database.session();
+    let invitation = session.invitation().await?;
+    let directory = root.path().join("joining");
+    let faults = Arc::new(Faults::default());
+    let error = join(
+        &directory,
+        faulty(&hub, "joining", &faults),
+        &invitation.uri,
+    )
+    .err()
+    .ok_or("joined without admission")?;
+    let awaiting = error
+        .downcast_ref::<rocky_sdk::AwaitingAdmission>()
+        .ok_or("not awaiting admission")?;
+    let pending = session.discovered().await?.pending;
+    session
+        .admit(rocky_sdk::Admit {
+            node: pending[0].node.clone(),
+            code: awaiting.code.clone(),
+            profile: rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".into()].into_iter().collect(),
+            },
+            label: None,
+        })
+        .await?;
+    *faults.receipt.lock().unwrap() = Some(Protocol::Pair);
+    assert!(
+        join(
+            &directory,
+            faulty(&hub, "joining", &faults),
+            &invitation.uri
+        )
+        .is_err()
+    );
+    let records = identities(&issuer).await;
+    assert_eq!(records.len(), 1);
+    let identity = records.keys().next().ok_or("missing admitted identity")?;
+    issuer
+        .ok(json!({"type": "revoke", "identity": identity}))
+        .await;
+    let error = join(
+        &directory,
+        faulty(&hub, "joining", &faults),
+        &invitation.uri,
+    )
+    .err()
+    .ok_or("revoked identity joined")?;
+    assert!(error.to_string().contains("revoked"), "{error}");
+    session.close().await;
+    issuer.close().await;
     Ok(())
 }

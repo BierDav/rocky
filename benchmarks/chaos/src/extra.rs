@@ -889,7 +889,7 @@ pub async fn orphaned_second_issuer() -> Result<(), Failure> {
             let _ = t.n().sync().await;
             let r = t
                 .n()
-                .call(json!({"type":"pairing","profile":writer_all()}))
+                .call(json!({"type": "invitation","profile":writer_all()}))
                 .await;
             outcome = format!(
                 "round {round}: pending={} pairing {}",

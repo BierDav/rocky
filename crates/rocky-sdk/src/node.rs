@@ -818,11 +818,11 @@ impl Node {
         let transport = attached.as_ref().map(|link| &*link.transport);
         let work = async {
             match kind {
-                "pairing" => {
-                    // There is no default grant: the issuer names a profile.
-                    let profile: Profile = serde_json::from_value(request["profile"].clone())
-                        .map_err(|_| {
-                            refused("pairing needs a grant profile: reader, writer or issuer")
+                "invitation" => {
+                    // Without a profile the issuer admits each device.
+                    let profile: Option<Profile> =
+                        serde_json::from_value(request["profile"].clone()).map_err(|_| {
+                            refused("an invitation's grant profile is reader, writer or issuer")
                         })?;
                     let label: Option<Vec<u8>> = request
                         .get("label")
@@ -834,19 +834,23 @@ impl Node {
                     {
                         return Err(refused("invitation label exceeds 256 bytes"));
                     }
-                    let transport = transport.ok_or(ServiceError::NetworkRequired("pairing"))?;
+                    let transport =
+                        transport.ok_or(ServiceError::NetworkRequired("an invitation"))?;
                     let registry = self.registry().await?;
-                    let mut settings = self.settings.lock().await;
-                    let (uri, expires) = settings
-                        .invite(
-                            &self.path,
-                            &self.vault,
-                            transport,
-                            (profile.clone(), label),
-                            &registry,
-                        )
-                        .await
-                        .map_err(named)?;
+                    let (uri, expires, notes) = {
+                        let mut settings = self.settings.lock().await;
+                        settings
+                            .invite(
+                                &self.path,
+                                &self.vault,
+                                transport,
+                                (profile.clone(), label),
+                                &registry,
+                            )
+                            .await
+                            .map_err(named)?
+                    };
+                    self.note(&notes).await;
                     let sequence = self.activity.record(
                         "invitation_created",
                         json!({"profile": profile, "expires": expires.to_string()}),
@@ -1061,7 +1065,9 @@ impl Node {
                 Ok(json!({}))
             }
             "network" => Ok(serde_json::to_value(self.observed_network().await?)?),
-            "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
+            "invitation" | "renew" | "sync" | "contact" => {
+                self.networked(client, kind, request).await
+            }
             "sql" | "next_id" => {
                 let begins = kind == "sql"
                     && request["sql"]
@@ -1080,6 +1086,9 @@ impl Node {
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "identities" => self.identities().await,
             "identity_label" => self.label(request).await,
+            "discovered" => self.discovered().await,
+            "admit" => self.admit(request).await,
+            "refuse" => self.refuse(request).await,
             "grant" | "delegate" => self.grant(request).await,
 
             "install" => self.install_supplied(client, request).await,

@@ -134,12 +134,12 @@ impl Device {
         Ok(Self::new(database, directory, &name, &hub))
     }
     async fn invite(&self, profile: Value) -> Result<String, Failure> {
-        Ok(
-            self.ok(json!({"type":"pairing","profile":profile})).await?["uri"]
-                .as_str()
-                .ok_or("uri")?
-                .to_owned(),
-        )
+        Ok(self
+            .ok(json!({"type": "invitation","profile":profile}))
+            .await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned())
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
         Ok(self

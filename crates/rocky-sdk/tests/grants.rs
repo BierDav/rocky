@@ -170,7 +170,9 @@ async fn an_invitation_carries_raw_grants() -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
     let profile = json!({"kind": "grants", "grants": [{"scope": "notes", "rights": ["read", "insert", "custody"]}]});
-    let invitation = a.ok(json!({"type": "pairing", "profile": profile})).await["uri"]
+    let invitation = a
+        .ok(json!({"type": "invitation", "profile": profile}))
+        .await["uri"]
         .as_str()
         .unwrap_or_default()
         .to_owned();

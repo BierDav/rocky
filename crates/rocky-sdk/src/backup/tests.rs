@@ -37,7 +37,7 @@ async fn invite(owner: &Database) -> Result<String, Failure> {
     let profile = GrantProfile::Writer {
         scopes: ["notes".into()].into(),
     };
-    Ok(owner.session().pairing(profile).await?.uri)
+    Ok(owner.session().invitation_with(profile).await?.uri)
 }
 /// Staged archives left in a directory.
 fn staged(directory: &Path) -> Result<Vec<String>, Failure> {

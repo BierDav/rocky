@@ -58,8 +58,9 @@ pub struct Invitation {
     attempts: u8,
     /// The pairing nonce that consumed it; that device may retry.
     consumed: Option<String>,
-    /// What the invited device is granted.
-    pub profile: Profile,
+    /// What the invited device is granted; `None` when an issuer admits
+    /// each requesting device with a profile of its choice.
+    pub profile: Option<Profile>,
 }
 /// How a verified pairing request relates to its invitation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +79,7 @@ impl Invitation {
             && commitment("rocky.credentials.invitation.v1", token) == self.digest
     }
 
-    pub fn open(token: &[u8; 32], profile: Profile, expires: u64) -> Self {
+    pub fn open(token: &[u8; 32], profile: Option<Profile>, expires: u64) -> Self {
         Self {
             digest: commitment("rocky.credentials.invitation.v1", token),
             expires,
@@ -122,7 +123,8 @@ impl Invitation {
 }
 
 /// What a joining node sends: its node key, the identity the invitation
-/// grants to, a retry nonce and proof that it holds the invitation token.
+/// grants to, its self-reported name, a retry nonce and proof that it holds
+/// the invitation token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairRequest {
     pub version: u32,
@@ -131,6 +133,9 @@ pub struct PairRequest {
     pub node: PublicKey,
     /// The identity the invitation grants to.
     pub user: PublicKey,
+    /// What the device calls itself, for the issuer that admits it. Not
+    /// verified by anyone.
+    pub name: String,
     proof: Commitment,
     /// What the device expects to join, such as its application schema.
     pub context: Commitment,
@@ -140,12 +145,12 @@ pub struct PairRequest {
     pub routes: Vec<(String, String)>,
 }
 impl PairRequest {
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     pub fn new(
         token: &[u8; 32],
         nonce: String,
-        node: PublicKey,
-        user: PublicKey,
+        (node, user): (PublicKey, PublicKey),
+        name: String,
         context: Commitment,
     ) -> Self {
         let mut request = Self {
@@ -153,6 +158,7 @@ impl PairRequest {
             nonce,
             node,
             user,
+            name,
             proof: [0; 32],
             context,
             routes: Vec::new(),
@@ -175,18 +181,19 @@ impl PairRequest {
             &self.context,
         ]
         .concat();
-        // A request without routes keeps the proof of earlier versions.
-        for (transport, address) in &self.routes {
-            for part in [transport, address] {
-                bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
-                bound.extend_from_slice(part.as_bytes());
-            }
+        for part in std::iter::once(&self.name).chain(
+            self.routes
+                .iter()
+                .flat_map(|(transport, address)| [transport, address]),
+        ) {
+            bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bound.extend_from_slice(part.as_bytes());
         }
-        commitment("rocky.credentials.pair-proof.v3", &bound)
+        commitment("rocky.credentials.pair-proof.v4", &bound)
     }
     fn aad(&self) -> Vec<u8> {
         [
-            b"rocky.credentials.pairing.v3".as_slice(),
+            b"rocky.credentials.pairing.v4".as_slice(),
             self.nonce.as_bytes(),
             self.node.as_bytes(),
             self.user.as_bytes(),
@@ -195,7 +202,7 @@ impl PairRequest {
     }
     fn key(&self, token: &[u8; 32]) -> Commitment {
         commitment(
-            "rocky.credentials.pair-key.v3",
+            "rocky.credentials.pair-key.v4",
             &[token.as_slice(), self.nonce.as_bytes()].concat(),
         )
     }

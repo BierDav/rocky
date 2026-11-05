@@ -349,8 +349,8 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     let profile = Profile::Reader {
         scopes: Domain::names(&["notes"]),
     };
-    let mut invitation = Invitation::open(&token, profile.clone(), NOW + 600);
-    assert_eq!(invitation.profile, profile);
+    let mut invitation = Invitation::open(&token, Some(profile.clone()), NOW + 600);
+    assert_eq!(invitation.profile, Some(profile.clone()));
     assert!(invitation.is_open(&token, NOW));
     assert!(invitation.is_open(&token, NOW + 600));
     assert!(!invitation.is_open(&token, NOW + 601));
@@ -359,8 +359,11 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
         PairRequest::new(
             token,
             format!("{nonce:02x}").repeat(32),
-            PrivateKey::new().public_key(),
-            PrivateKey::new().public_key(),
+            (
+                PrivateKey::new().public_key(),
+                PrivateKey::new().public_key(),
+            ),
+            "laptop".into(),
             [3; 32],
         )
     };
@@ -392,7 +395,7 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     assert!(open_enrollment(&[6; 32], &first, &sealed).is_err());
     assert!(open_enrollment(&token, &request(&token, 1), &sealed).is_err());
     // Ten wrong tokens lock the invitation, also for the right one.
-    let mut locked = Invitation::open(&token, profile, NOW + 600);
+    let mut locked = Invitation::open(&token, Some(profile), NOW + 600);
     for attempt in 0..10 {
         assert!(
             locked
@@ -405,15 +408,18 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_joining_issuers_routes_are_bound_by_its_proof() {
+fn a_joining_devices_routes_and_name_are_bound_by_its_proof() {
     let token = [5; 32];
-    let mut invitation = Invitation::open(&token, Profile::Issuer, NOW + 600);
+    let mut invitation = Invitation::open(&token, None, NOW + 600);
     let routes = vec![("tcp".to_owned(), "127.0.0.1:4000".to_owned())];
     let request = PairRequest::new(
         &token,
         "01".repeat(32),
-        PrivateKey::new().public_key(),
-        PrivateKey::new().public_key(),
+        (
+            PrivateKey::new().public_key(),
+            PrivateKey::new().public_key(),
+        ),
+        "laptop".into(),
         [3; 32],
     )
     .with_routes(&token, routes.clone());
@@ -422,6 +428,9 @@ fn a_joining_issuers_routes_are_bound_by_its_proof() {
     let mut moved = round.clone();
     moved.routes[0].1 = "127.0.0.1:4001".into();
     assert!(invitation.admit(&token, &moved, NOW).is_err());
+    let mut renamed = round.clone();
+    renamed.name = "phone".into();
+    assert!(invitation.admit(&token, &renamed, NOW).is_err());
     assert_eq!(
         invitation.admit(&token, &round, NOW).expect("admitted"),
         Admission::First

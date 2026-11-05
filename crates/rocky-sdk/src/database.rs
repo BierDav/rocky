@@ -1384,20 +1384,22 @@ async fn identity(
         #[cfg(not(target_family = "wasm"))]
         Install::Recover { archive, root } => {
             // The root stays for `run_inner` to revoke the lost identities.
-            let settings = {
-                let root = root.lock().map_err(|_| "root poisoned")?;
-                let root = root
-                    .as_deref()
-                    .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
-                recover(
-                    path,
-                    directory,
-                    secrets,
-                    archive,
-                    root,
-                    setup.identity.clone(),
-                )?
-            };
+            let root = root
+                .lock()
+                .map_err(|_| "root poisoned")?
+                .as_deref()
+                .map(|root| crate::RootKey::from_secret(root.secret()))
+                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
+            let settings = recover(
+                path,
+                directory,
+                secrets,
+                archive,
+                &root,
+                setup.identity.clone(),
+            )
+            .await?;
+            drop(root);
             let Some(network) = network else {
                 return Ok((settings, None));
             };
@@ -1494,7 +1496,7 @@ pub(crate) async fn attach(
             &vault.get("node")?,
         ))
         .await?;
-    Ok(())
+    crate::escrow::keep(replica, settings, vault, domain).await
 }
 
 /// Gives every granted scope without one the default retention policy.
@@ -1666,11 +1668,11 @@ async fn restore(
 }
 
 #[cfg(not(target_family = "wasm"))]
-/// Verifies the archive, opens its escrow with the root, installs a fresh
-/// trusted identity holding those keys and puts the archive's files in
-/// place, behind the marker that rebinds them at open. Nothing is written
-/// until every key opened.
-fn recover(
+/// Verifies the archive, opens the escrow records its store holds with the
+/// root, installs a fresh trusted identity holding those keys and puts the
+/// archive's files in place, behind the marker that rebinds them at open.
+/// Nothing is written until every key opened.
+async fn recover(
     path: &Path,
     directory: &Path,
     secrets: &Arc<dyn SecretStore>,
@@ -1684,7 +1686,14 @@ fn recover(
     if root.public_key() != opened.inventory.publisher {
         return Err("the root key is not the backup's domain root".into());
     }
-    let recovered = crate::escrow::Recovered::open(&opened.identity, root)?;
+    let store = opened
+        .files
+        .iter()
+        .find(|(name, _)| name == "rocky.sqlite")
+        .map(|(_, staged)| staged)
+        .ok_or("the backup holds no replica")?;
+    let escrowed = EncryptedReplica::<rocky_core::TypedRows>::archived_escrow(store).await?;
+    let recovered = crate::escrow::Recovered::open(&opened.identity, escrowed, root)?;
     let settings = Settings::recover(
         secrets,
         (&opened.identity, opened.inventory.node),
@@ -1871,13 +1880,20 @@ async fn run_inner(
         let domain = settings.domain()?;
         // A restored file is rebound to this device's identity first.
         let marker = directory.join(crate::backup::MARKER);
+        let mut deferred = Vec::new();
         let replica = if rocky_platform::fs::exists(&marker) {
             let restored: crate::backup::Marker =
                 serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
+            let mut config = settings.config(&vault, &domain)?;
+            // A recovered store may never have read its frames: its keys
+            // apply them once `attach` installed the tables.
+            if matches!(setup.install, Install::Recover { .. }) {
+                deferred = std::mem::take(&mut config.keys);
+            }
             let replica = EncryptedReplica::open_restored(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
-                settings.config(&vault, &domain)?,
+                config,
                 restored.predecessor,
             )
             .await?;
@@ -1902,6 +1918,11 @@ async fn run_inner(
             .await?
         };
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
+        // Newest first: earlier epochs then join its history.
+        deferred.sort_by_key(|key| std::cmp::Reverse(key.generation));
+        for key in deferred {
+            replica.install_key_epoch(key).await?;
+        }
         replica
             .record_current_schema(
                 crate::tip_schemas::Record::new(

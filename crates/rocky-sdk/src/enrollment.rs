@@ -9,7 +9,6 @@
 use crate::{
     Failure,
     domain::Domain,
-    escrow::Escrowed,
     groups::{GroupPartition, GroupRecord, Member, secret_role},
     registry::{self, Changes, Registry, RegistryFull},
     schema::Schema,
@@ -39,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 26;
+pub const VERSION: u32 = 27;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -75,23 +74,17 @@ pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<Stri
         ),
     ))
 }
-impl Settings {
-    /// Stores and escrows the naming root an issuer's enrollment carried.
-    pub(crate) fn hold_naming(
-        &mut self,
-        vault: &Vault,
-        naming: Option<&str>,
-    ) -> Result<(), Failure> {
-        let root = hex32(naming.ok_or("an issuer enrollment carries the partition naming root")?)?;
-        if vault
-            .find(crate::groups::NAMING_ROLE)?
-            .is_some_and(|held| held != root)
-        {
-            return Err("a different partition naming root is held".into());
-        }
-        vault.put(crate::groups::NAMING_ROLE, &root)?;
-        self.escrow(&Escrowed::Naming { root })
+/// Stores the naming root an issuer's enrollment carried.
+pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Failure> {
+    let root = hex32(naming.ok_or("an issuer enrollment carries the partition naming root")?)?;
+    if vault
+        .find(crate::groups::NAMING_ROLE)?
+        .is_some_and(|held| held != root)
+    {
+        return Err("a different partition naming root is held".into());
     }
+    vault.put(crate::groups::NAMING_ROLE, &root)?;
+    Ok(())
 }
 pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
 /// A new node of an identity asks a node of the same identity for it.
@@ -231,9 +224,6 @@ pub struct Settings {
     /// acknowledged holding. Until it matches the held set's, any node
     /// holding them pushes them again.
     pub revocations_pushed: Option<Commitment>,
-    /// Every data key this installation held, sealed to the root by its
-    /// blinded tag (hex): see `crate::escrow`.
-    pub escrow: BTreeMap<String, String>,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -1322,22 +1312,16 @@ impl Settings {
         vault.create("node")?;
         vault.create("transport")?;
         vault.create("credential")?;
-        let naming = vault.create(crate::groups::NAMING_ROLE)?;
+        vault.create(crate::groups::NAMING_ROLE)?;
         let (mesh, domain) = (MeshId(random()), DomainId(random()));
         let bound = Domain::new(schema, *publisher.as_bytes(), mesh, domain)?;
         // The registry's key is made like any collection's.
         let mut keys = BTreeMap::new();
-        let mut escrowed = vec![Escrowed::Naming { root: naming }];
         for (name, _) in bound.scopes() {
             let key = random::<32>();
             let epoch = rocky_core::KeyEpoch::new(1, &key);
             vault.put(&key_role(name, epoch), &key)?;
             keys.insert(name.to_owned(), vec![epoch]);
-            escrowed.push(Escrowed::Reader {
-                collection: name.to_owned(),
-                epoch,
-                key,
-            });
         }
         let manifest = SignedManifest::sign(&bound.manifest(), root)?;
         let grant = Authority::owner(root).issue_trusted(
@@ -1357,9 +1341,6 @@ impl Settings {
             settings.provider = None;
         }
         settings.keys = keys;
-        for item in &escrowed {
-            settings.escrow(item)?;
-        }
         settings.authority = Some(Issuing::default());
         settings.minting = Some(settings.minting_of(AuthorRange::DOMAIN));
         let links = CredentialChain(vec![grant]);
@@ -1369,10 +1350,12 @@ impl Settings {
     }
     /// A trusted node the root installs from the identity record of
     /// `archived`, the node `predecessor` of the domain whose backup it
-    /// restores, with the keys `recovered` opened from that record's escrow. Its
-    /// identity is fresh, `provider`'s or one made in the secret store; the
-    /// root grants it trust over a recovery slot of the author numbers only
-    /// the root grants (`recovery_authors`).
+    /// restores, any node, with the keys `recovered` opened from its
+    /// store's escrow records. A collection none opened gets a fresh key,
+    /// and a store without the naming root a fresh one. Its identity is
+    /// fresh, `provider`'s or one made in the secret store; the root
+    /// grants it trust over a recovery slot of the author numbers only the
+    /// root grants (`recovery_authors`).
     // Archives are native files.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn recover(
@@ -1387,9 +1370,6 @@ impl Settings {
             return Err("the root key is not this domain's root".into());
         }
         let authors = recovery_authors(archived)?;
-        let naming = recovered
-            .naming
-            .ok_or("the backup's escrow holds no partition naming root")?;
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
         let stored_identity = provider.is_none();
@@ -1406,14 +1386,43 @@ impl Settings {
         vault.create("node")?;
         vault.create("transport")?;
         vault.create("credential")?;
-        vault.put(crate::groups::NAMING_ROLE, &naming)?;
-        for ((name, epoch), key) in &recovered.readers {
-            vault.put(&key_role(name, *epoch), key)?;
-        }
-        for ((address, epoch), (_, secret)) in &recovered.groups {
-            vault.put(&secret_role(address, *epoch), secret)?;
+        match recovered.naming {
+            Some(naming) => vault.put(crate::groups::NAMING_ROLE, &naming)?,
+            None => drop(vault.create(crate::groups::NAMING_ROLE)?),
         }
         let bound = archived.domain()?;
+        let mut keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>> = BTreeMap::new();
+        for ((name, epoch), key) in &recovered.readers {
+            vault.put(&key_role(name, *epoch), key)?;
+            keys.entry(name.clone()).or_default().push(*epoch);
+        }
+        for (name, _) in bound.scopes() {
+            if !keys.contains_key(name) {
+                let key = random::<32>();
+                let epoch = rocky_core::KeyEpoch::new(1, &key);
+                vault.put(&key_role(name, epoch), &key)?;
+                keys.insert(name.to_owned(), vec![epoch]);
+            }
+        }
+        for ((address, epoch), secret) in &recovered.secrets {
+            vault.put(&secret_role(address, *epoch), secret)?;
+        }
+        // Partitions the store named without a key stay known, keyless.
+        let mut groups = archived.groups.clone();
+        for record in groups.values_mut() {
+            record.epochs.clear();
+        }
+        for (key, record) in &recovered.groups {
+            match groups.get_mut(key) {
+                Some(named) if named.name != record.name => {
+                    return Err(
+                        "an escrowed partition differs from the one the backup names".into(),
+                    );
+                }
+                Some(named) => named.epochs = record.epochs.clone(),
+                None => drop(groups.insert(key.clone(), record.clone())),
+            }
+        }
         let grant = Authority::owner(root).issue_trusted(
             identity.public_key()?,
             bound.scope,
@@ -1435,11 +1444,9 @@ impl Settings {
         settings.pending = archived.pending.clone();
         settings.pending_follow = archived.pending_follow.clone();
         settings.learn_revocations(&archived.revocations)?;
-        settings.keys = archived.keys.clone();
-        settings.groups = archived.groups.clone();
+        settings.keys = keys;
+        settings.groups = groups;
         settings.epoch_statements = archived.epoch_statements.clone();
-        // The records stay sealed to the same root.
-        settings.escrow = archived.escrow.clone();
         settings.authority = Some(Issuing::default());
         settings.minting = Some(settings.minting_of(authors));
         let links = CredentialChain(vec![grant]);
@@ -1497,7 +1504,6 @@ impl Settings {
             revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
-            escrow: BTreeMap::new(),
         }
     }
     fn validity(&self) -> Result<(u64, u64, u64), Failure> {
@@ -1777,7 +1783,6 @@ impl Settings {
                 }
                 vault.put(&role, &secret)?;
                 record.hold(epoch)?;
-                self.escrow(&Escrowed::group(&record, epoch, secret))?;
                 if self
                     .epoch_statements
                     .get(&role)
@@ -1853,11 +1858,10 @@ impl Settings {
                     continue;
                 }
                 let held = vault.find(&secret_role(&record.address, *epoch))?;
-                if let Some(secret) = held
-                    && rocky_core::KeyEpoch::new(epoch.generation, &secret) == *epoch
-                {
+                if held.is_some_and(|secret| {
+                    rocky_core::KeyEpoch::new(epoch.generation, &secret) == *epoch
+                }) {
                     record.hold(*epoch)?;
-                    self.escrow(&Escrowed::group(&record, *epoch, secret))?;
                     changed = true;
                 }
             }
@@ -2694,7 +2698,6 @@ impl Settings {
             revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
-            escrow: BTreeMap::new(),
         };
         let domain = settings.domain()?;
         if supplied.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
@@ -2773,11 +2776,6 @@ impl Settings {
         vault.put(&key_role(name, epoch), key)?;
         epochs.push(epoch);
         epochs.sort_unstable();
-        self.escrow(&Escrowed::Reader {
-            collection: name.to_owned(),
-            epoch,
-            key: *key,
-        })?;
         Ok(true)
     }
 }
@@ -2916,7 +2914,6 @@ impl Joining {
             revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
-            escrow: BTreeMap::new(),
         };
         // The schema and lineage are the publisher's.
         settings.verify_schema()?;
@@ -2958,7 +2955,7 @@ impl Joining {
         if settings.profile.issues() {
             // Issuer authority is the capability's; no key travels.
             settings.authority = Some(Issuing::default());
-            settings.hold_naming(&vault, enrollment.naming.as_deref())?;
+            hold_naming(&vault, enrollment.naming.as_deref())?;
             // Tombstones start with every statement already held.
             settings.learn_revocations(&RevocationSet::new())?;
             if enrollment.capability.capability.authors()? != enrollment.authors {
@@ -3979,11 +3976,6 @@ impl Settings {
                 epochs.push(epoch);
                 epochs.sort_unstable();
             }
-            self.escrow(&Escrowed::Reader {
-                collection: name.clone(),
-                epoch,
-                key,
-            })?;
             keys.push((name, epoch, key));
             fault::check(fault::Stage::Key)?;
         }
@@ -4006,7 +3998,6 @@ impl Settings {
             self.epoch_statements
                 .insert(secret_role(&record.address, epoch), ids.clone());
             record.hold(epoch)?;
-            self.escrow(&Escrowed::group(&record, epoch, secret))?;
             self.groups.insert(address, record);
             fault::check(fault::Stage::Key)?;
         }
@@ -4426,7 +4417,6 @@ impl Settings {
             deliveries,
             claims,
             revocations_pushed,
-            escrow,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -4457,7 +4447,6 @@ impl Settings {
             && *deliveries == other.deliveries
             && *claims == other.claims
             && *revocations_pushed == other.revocations_pushed
-            && *escrow == other.escrow
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

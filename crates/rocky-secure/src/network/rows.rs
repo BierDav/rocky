@@ -228,6 +228,7 @@ impl NativeSession {
             receive_voids(replica, &page.voids, &[scope]).await?;
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
+            self.keep_escrow(replica, &frames).await?;
             // The page is received in shared transactions and one flush.
             let span = tracing::debug_span!(
                 "page_apply",
@@ -324,6 +325,7 @@ impl NativeSession {
                 bytes.saturating_add(frame.weight())
             });
             self.carry_chains(&mut page.frames).await?;
+            self.carry_escrow(replica, &page.frames).await?;
             self.send(RowMessage::Push {
                 scope,
                 frames: page.frames,
@@ -458,6 +460,7 @@ impl NativeSession {
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
                 self.carry_chains(&mut page.frames).await?;
+                self.carry_escrow(replica, &page.frames).await?;
                 self.send(RowMessage::RangeFrames {
                     page: Box::new(page),
                 })
@@ -496,6 +499,7 @@ impl NativeSession {
                 // An incomplete frame is not received; the frontier that
                 // answers the push shows the sender what is still missing.
                 let (frames, _) = self.complete_frames(frames)?;
+                self.keep_escrow(replica, &frames).await?;
                 for status in replica.receive_migration_all(frames).await {
                     status?;
                 }

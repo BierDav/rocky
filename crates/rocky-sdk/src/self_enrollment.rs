@@ -205,7 +205,7 @@ impl Settings {
             // Its identity's authority makes this node an issuer too.
             settings.authority = Some(crate::enrollment::Issuing::default());
             settings.learn_revocations(&RevocationSet::new())?;
-            settings.hold_naming(&vault, bundle.naming.as_deref())?;
+            crate::enrollment::hold_naming(&vault, bundle.naming.as_deref())?;
         }
         settings.adopt_groups(&vault, &bundle.groups)?;
         settings.add_peer(&vault, contact)?;

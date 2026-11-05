@@ -1,7 +1,8 @@
-//! Root recovery: every data key an installation holds is escrowed to the
-//! offline root, so the root phrase and a trusted node's backup recover the
-//! domain's data with every trusted node and device lost, while the
-//! escrow records give any other key holder nothing.
+//! Root recovery: every data key epoch is escrowed to the offline root in
+//! records that travel with its frames, so the root phrase and any node's
+//! backup, a keyless custodian's too, recover the data that store holds
+//! with every trusted node and device lost, while the records give anyone
+//! else nothing.
 // The SDK's blocking constructors and native archives.
 #![cfg(not(target_family = "wasm"))]
 use rocky_credentials::{RootEscrow, RootKey};
@@ -102,17 +103,26 @@ fn identity(directory: &Path) -> Result<Value, Failure> {
         directory.join("identity.json"),
     )?)?)
 }
-/// The escrow records of an identity record.
+/// The root escrow records a node's replica holds, by tag; its identity
+/// record keeps none.
 fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
-    identity(directory)?["escrow"]
-        .as_object()
-        .ok_or("escrow")?
-        .iter()
-        .map(|(tag, bytes)| {
-            let bytes = data_encoding::HEXLOWER.decode(bytes.as_str().ok_or("hex")?.as_bytes())?;
-            Ok((tag.clone(), RootEscrow::from_bytes(&bytes)?))
-        })
-        .collect()
+    assert!(identity(directory)?.get("escrow").is_none());
+    let file = rusqlite::Connection::open_with_flags(
+        directory.join("rocky.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = file.prepare("SELECT tag,record FROM secure_escrow")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    rows.map(|row| {
+        let (tag, record) = row?;
+        Ok((
+            data_encoding::HEXLOWER.encode(&tag),
+            RootEscrow::from_bytes(&record)?,
+        ))
+    })
+    .collect()
 }
 /// Every 32-byte secret an installation's file key store holds.
 fn secrets(directory: &Path) -> Result<Vec<[u8; 32]>, Failure> {
@@ -193,6 +203,7 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     issuer.database.backup(&archive).await?;
     issuer.close().await;
     drop(issuer);
+    let kept = escrow(&creator)?;
     // Every device is lost: its keys with it. What remains is the archive,
     // which holds no key, and the phrase.
     std::fs::remove_dir_all(&creator)?;
@@ -224,12 +235,9 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     assert_eq!(everything(&device).await, expected);
     let saved = identity(&recovered)?;
     assert_eq!(generations(&saved, "notes"), [1, 2, 3]);
-    let (kept, now) = (
-        held["escrow"].as_object().ok_or("escrow")?,
-        saved["escrow"].as_object().ok_or("escrow")?,
-    );
+    let now = escrow(&recovered)?;
     assert!(
-        kept.iter().all(|(tag, record)| now.get(tag) == Some(record)),
+        kept.iter().all(|record| now.contains(record)),
         "the records stay sealed to the root"
     );
     assert!(now.len() > kept.len(), "the rotated epochs are escrowed");
@@ -494,6 +502,84 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
             .ok_or("revoked twice")?;
         assert!(refused.to_string().contains("already revoked"), "{refused}");
     }
+    device.close().await;
+    Ok(())
+}
+
+/// Every device is lost but a keyless custodian of the notes and of one
+/// list: its store alone, with the root, recovers every row it holds
+/// ciphertext of, under each key epoch, the escrow records having
+/// travelled to it with the frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    let lost = principal(&issuer).await;
+    let created = issuer
+        .ok(json!({"type":"partition_create","group":"list","values":values(LISTS[0])}))
+        .await;
+    let custody = root.path().join("custody");
+    let custodian = Device::new(Database::join(
+        open(&custody, &hub),
+        &issuer
+            .invite_as(json!({"kind":"custody","scopes":["notes","lists","items"]}))
+            .await,
+    )?)?;
+    for table in ["lists", "items"] {
+        custodian
+            .ok(json!({"type":"partition_register","table":table,"values":values(LISTS[0]),"name":created["name"]}))
+            .await;
+    }
+    common::introduce(&issuer, &custodian).await;
+    write_item(&issuer, LISTS[0], "before").await;
+    write_note(&issuer, "before").await;
+    issuer.sync().await.map_err(|error| error.to_string())?;
+    // A rotation: later rows travel under the new epochs and their records.
+    rotate(&issuer, &root.path().join("reader"), LISTS[0]).await?;
+    write_item(&issuer, LISTS[0], "after").await;
+    write_note(&issuer, "after").await;
+    issuer.sync().await.map_err(|error| error.to_string())?;
+    let expected = everything(&issuer).await;
+    assert_eq!(expected.len(), 4, "{expected:?}");
+
+    // The custodian holds no key, only records of the epochs it stores.
+    let held = identity(&custody)?;
+    assert_eq!(held["keys"], json!({}));
+    let carried = escrow(&custody)?;
+    assert!(!carried.is_empty());
+    let name = created["name"].as_str().ok_or("name")?;
+    for (_, record) in &carried {
+        let bytes = record.to_bytes()?;
+        for named in [LISTS[0].as_bytes(), name.as_bytes()] {
+            assert!(!bytes.windows(named.len()).any(|window| window == named));
+        }
+    }
+    let archive = root.path().join("custody.backup");
+    custodian.database.backup(&archive).await?;
+    custodian.close().await;
+    issuer.close().await;
+    for lost in ["creator", "custody", "reader"] {
+        std::fs::remove_dir_all(root.path().join(lost))?;
+    }
+
+    let recovered = root.path().join("recovered");
+    let opened = Database::recover(
+        open(&recovered, &hub),
+        &archive,
+        &RootKey::from_phrase(&phrase)?,
+    )?;
+    // The custodian's registry knows the lost creator.
+    assert_eq!(names(&opened.revoked), [lost]);
+    let device = Device::new(opened)?;
+    assert_eq!(everything(&device).await, expected);
+    // The recovered trusted node writes on.
+    write_item(&device, LISTS[0], "recovered").await;
+    write_note(&device, "recovered").await;
+    assert_eq!(everything(&device).await.len(), 6);
     device.close().await;
     Ok(())
 }

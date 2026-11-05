@@ -42,6 +42,9 @@ pub(crate) struct Extensions {
 
 /// Source-schema ordinals and frame-bound birth statements, without
 /// existence counts; a partition's tuple only inside the sealed body.
+/// Distinct root escrow records peers may carry for one key epoch:
+/// anyone can seal to the root, so a recovery tries each.
+pub(crate) const MAX_CARRIED_ESCROW: usize = 4;
 pub(crate) const ROW_FORMAT: u8 = 16;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
@@ -199,6 +202,11 @@ impl EncryptedFrame {
     }
     pub fn scope(&self) -> Result<ResourceScope, Error> {
         Ok(self.operation_ref()?.header.extensions.scope)
+    }
+    /// The key epoch the frame is sealed under: the root escrow records
+    /// of that epoch travel with it.
+    pub(crate) fn generation(&self) -> Result<rocky_core::KeyEpoch, Error> {
+        Ok(self.operation_ref()?.header.extensions.generation)
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
         self.operation_ref().cloned()

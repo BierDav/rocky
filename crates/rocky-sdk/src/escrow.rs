@@ -1,16 +1,27 @@
 //! Root escrow of the data keys an installation holds: every collection
-//! key epoch, group secret epoch (with its partition's naming secret) and
-//! the partition naming root is sealed to the domain's offline root as it
-//! is stored, in the identity record that backups carry. The root alone
-//! then recovers a backup's data, with every trusted node and device lost
-//! (`Configuration::recover`). Records are opaque: see
-//! `rocky_credentials::RootEscrow`.
-use crate::{Failure, enrollment::Settings, groups::GroupRecord};
-use data_encoding::HEXLOWER;
-use rocky_core::{Commitment, KeyEpoch, PartitionName, PartitionValue};
-use rocky_credentials::{PublicKey, RootEscrow, RootKey, escrow_tag};
+//! key epoch and group secret epoch (with its partition's naming secret)
+//! is sealed to the domain's offline root and kept in the replica beside
+//! the frames of that epoch, which carry it to every holder of the scope,
+//! keyless custody too. An issuer's partition naming root stays local.
+//! The root alone then recovers the data of any node's backup, with every
+//! trusted node and device lost (`Configuration::recover`). Records are
+//! opaque: see `rocky_credentials::RootEscrow`.
+use crate::{
+    Failure,
+    domain::Domain,
+    enrollment::{Settings, key_role},
+    groups::{GroupPartition, GroupRecord, NAMING_ROLE, record_key, secret_role},
+    secrets::Vault,
+};
+use rocky_core::{Commitment, KeyEpoch, PartitionName, PartitionValue, ResourceScope};
+use rocky_credentials::{RootEscrow, RootKey, escrow_tag};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The key epoch a record travels with, or none for the naming root.
+pub(crate) type Slot = Option<(ResourceScope, KeyEpoch)>;
+/// A store's records and the key epochs of the ciphertext it holds.
+pub(crate) type Archived = (Vec<(Slot, RootEscrow)>, BTreeSet<(ResourceScope, KeyEpoch)>);
 
 /// What one record seals.
 #[derive(Serialize, Deserialize)]
@@ -35,16 +46,6 @@ pub(crate) enum Escrowed {
     Naming { root: [u8; 32] },
 }
 impl Escrowed {
-    pub fn group(record: &GroupRecord, epoch: KeyEpoch, secret: [u8; 32]) -> Self {
-        Self::Group {
-            group: record.group.clone(),
-            values: record.values.clone(),
-            address: record.address,
-            name: record.name,
-            epoch,
-            secret,
-        }
-    }
     fn secret(&self) -> &[u8; 32] {
         match self {
             Self::Reader { key, .. } => key,
@@ -53,114 +54,199 @@ impl Escrowed {
         }
     }
 }
-impl Settings {
-    /// Seals `item` to the root unless a record of its key is held.
-    pub(crate) fn escrow(&mut self, item: &Escrowed) -> Result<(), Failure> {
-        let tag = escrow_tag(self.publisher, item.secret());
-        let id = HEXLOWER.encode(&tag);
-        if !self.escrow.contains_key(&id) {
-            let record = RootEscrow::seal(self.publisher, tag, &serde_json::to_vec(item)?)?;
-            self.escrow.insert(id, HEXLOWER.encode(&record.to_bytes()?));
+
+/// Seals every key `settings` holds that `held`, the replica's records by
+/// slot and tag, lacks: each collection key epoch under its scope, each
+/// group secret epoch under every member table's scope, and the naming
+/// root of an issuer.
+fn seal(
+    settings: &Settings,
+    vault: &Vault,
+    domain: &Domain,
+    held: &BTreeSet<(Slot, Commitment)>,
+) -> Result<Vec<(Slot, RootEscrow)>, Failure> {
+    let mut items = Vec::new();
+    for (name, scope) in domain.scopes() {
+        for epoch in settings.keys.get(name).into_iter().flatten() {
+            let key = vault.get(&key_role(name, *epoch))?;
+            let item = Escrowed::Reader {
+                collection: name.to_owned(),
+                epoch: *epoch,
+                key,
+            };
+            items.push((Some((scope, *epoch)), item));
         }
-        Ok(())
     }
+    for partition in settings.partitions(domain)? {
+        let record = &partition.record;
+        for epoch in &record.epochs {
+            let secret = vault.get(&secret_role(&record.address, *epoch))?;
+            for member in &partition.members {
+                let item = Escrowed::Group {
+                    group: record.group.clone(),
+                    values: record.values.clone(),
+                    address: record.address,
+                    name: record.name,
+                    epoch: *epoch,
+                    secret,
+                };
+                items.push((Some((member.scope, *epoch)), item));
+            }
+        }
+    }
+    if let Some(root) = vault.find(NAMING_ROLE)? {
+        items.push((None, Escrowed::Naming { root }));
+    }
+    let mut sealed = Vec::new();
+    for (slot, item) in items {
+        let tag = escrow_tag(settings.publisher, item.secret());
+        if !held.contains(&(slot, tag)) {
+            let record = RootEscrow::seal(settings.publisher, tag, &serde_json::to_vec(&item)?)?;
+            sealed.push((slot, record));
+        }
+    }
+    Ok(sealed)
 }
 
-/// Keys a root opened from an identity record's escrow. Recovery reads
-/// native archives only.
+/// Seals into `replica` what it lacks of the keys `settings` holds. The
+/// records derive from the vault, so the next call completes one an
+/// interruption cut short.
+pub(crate) async fn keep(
+    replica: &rocky_secure::EncryptedReplica<rocky_core::TypedRows>,
+    settings: &Settings,
+    vault: &Vault,
+    domain: &Domain,
+) -> Result<(), Failure> {
+    let held = replica.escrowed().await?;
+    replica
+        .keep_escrow(seal(settings, vault, domain, &held)?)
+        .await?;
+    Ok(())
+}
+
+/// Keys a root opened from a store's escrow records. Recovery reads native
+/// archives only.
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 #[derive(Default)]
 pub(crate) struct Recovered {
     pub readers: BTreeMap<(String, KeyEpoch), [u8; 32]>,
-    /// Group secrets by group address and epoch, with the naming secret.
-    pub groups: BTreeMap<(Commitment, KeyEpoch), (PartitionName, [u8; 32])>,
+    /// Group partitions by record key, with the epochs recovered.
+    pub groups: BTreeMap<String, GroupRecord>,
+    /// Group secrets by group address and epoch.
+    pub secrets: BTreeMap<(Commitment, KeyEpoch), [u8; 32]>,
     pub naming: Option<[u8; 32]>,
 }
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 impl Recovered {
-    /// Opens every record of `archived` with `root`, and checks they hold
-    /// exactly the keys the record lists: a missing, extra or inconsistent
-    /// record fails the recovery and is named.
-    pub fn open(archived: &Settings, root: &RootKey) -> Result<Self, Failure> {
-        let publisher: PublicKey = root.public_key();
+    /// Opens the `records` of a store of `archived`'s domain with `root`.
+    /// Anyone can seal to the root, so a record that opens to no key of
+    /// its slot is skipped; every key epoch in `held`, those the store
+    /// holds ciphertext of, must be opened, or the recovery fails naming it.
+    pub fn open(
+        archived: &Settings,
+        (records, held): Archived,
+        root: &RootKey,
+    ) -> Result<Self, Failure> {
+        let publisher = root.public_key();
         if publisher != archived.publisher {
             return Err("the root key is not this domain's root".into());
         }
+        let domain = archived.domain()?;
         let mut recovered = Self::default();
-        for (id, bytes) in &archived.escrow {
-            let record = RootEscrow::from_bytes(&HEXLOWER.decode(bytes.as_bytes())?)?;
-            let item: Escrowed = serde_json::from_slice(&record.open(root)?)?;
-            let tag = escrow_tag(publisher, item.secret());
-            if record.tag() != tag || HEXLOWER.encode(&tag) != *id {
-                return Err("an escrow record's tag does not match its key".into());
-            }
-            match item {
-                Escrowed::Reader {
-                    collection,
-                    epoch,
-                    key,
-                } => {
-                    if KeyEpoch::new(epoch.generation, &key) != epoch {
-                        return Err("an escrowed key does not match its epoch".into());
+        let mut covered = BTreeSet::new();
+        for (slot, record) in records {
+            let Some(item) = record
+                .open(root)
+                .ok()
+                .and_then(|payload| serde_json::from_slice::<Escrowed>(&payload).ok())
+                .filter(|item| record.tag() == escrow_tag(publisher, item.secret()))
+            else {
+                continue;
+            };
+            match (slot, item) {
+                (None, Escrowed::Naming { root }) => recovered.naming = Some(root),
+                (
+                    Some((scope, epoch)),
+                    Escrowed::Reader {
+                        collection,
+                        epoch: sealed,
+                        key,
+                    },
+                ) => {
+                    if sealed == epoch
+                        && KeyEpoch::new(epoch.generation, &key) == epoch
+                        && domain
+                            .scopes()
+                            .any(|(name, held)| name == collection && held == scope)
+                    {
+                        recovered.readers.insert((collection, epoch), key);
+                        covered.insert((scope, epoch));
                     }
-                    recovered.readers.insert((collection, epoch), key);
                 }
-                Escrowed::Group {
-                    group,
-                    values,
-                    address,
-                    name,
-                    epoch,
-                    secret,
-                } => {
-                    let held = archived
-                        .groups
-                        .get(&crate::groups::record_key(&address))
-                        .filter(|record| {
-                            record.group == group && record.values == values && record.name == name
-                        });
-                    if held.is_none() || KeyEpoch::new(epoch.generation, &secret) != epoch {
-                        return Err(
-                            "an escrowed group secret does not match the partition it names".into(),
-                        );
-                    }
-                    recovered.groups.insert((address, epoch), (name, secret));
+                (Some((scope, epoch)), item) => {
+                    covered.extend(recovered.group(&domain, scope, epoch, item)?);
                 }
-                Escrowed::Naming { root } => recovered.naming = Some(root),
+                (None, _) => {}
             }
         }
-        let mut listed = 0;
-        for (collection, epochs) in &archived.keys {
-            for epoch in epochs {
-                if !recovered
-                    .readers
-                    .contains_key(&(collection.clone(), *epoch))
-                {
-                    return Err(format!(
-                        "key epoch {} of {collection} has no root escrow record",
-                        epoch.generation
-                    )
-                    .into());
-                }
-                listed += 1;
-            }
-        }
-        for record in archived.groups.values() {
-            for epoch in &record.epochs {
-                if !recovered.groups.contains_key(&(record.address, *epoch)) {
-                    return Err(format!(
-                        "secret epoch {} of a {} partition has no root escrow record",
-                        epoch.generation, record.group
-                    )
-                    .into());
-                }
-                listed += 1;
-            }
-        }
-        if listed != recovered.readers.len() + recovered.groups.len() {
-            return Err("an escrow record holds a key the archived device does not list".into());
+        if let Some((scope, epoch)) = held.iter().find(|slot| !covered.contains(*slot)) {
+            return Err(format!(
+                "the backup holds data of key epoch {} of scope {} that no root escrow record \
+                 opens",
+                epoch.generation,
+                rocky_core::scope_label(scope)
+            )
+            .into());
         }
         Ok(recovered)
+    }
+    /// Takes a group secret sealed for `scope` at `epoch` if it is that
+    /// epoch's and the partition it names has `scope` as a member; returns
+    /// the epoch's slots of every member.
+    fn group(
+        &mut self,
+        domain: &Domain,
+        scope: ResourceScope,
+        epoch: KeyEpoch,
+        item: Escrowed,
+    ) -> Result<Vec<(ResourceScope, KeyEpoch)>, Failure> {
+        let Escrowed::Group {
+            group,
+            values,
+            address,
+            name,
+            epoch: sealed,
+            secret,
+        } = item
+        else {
+            return Ok(Vec::new());
+        };
+        if sealed != epoch || KeyEpoch::new(epoch.generation, &secret) != epoch {
+            return Ok(Vec::new());
+        }
+        let record = GroupRecord {
+            group,
+            values,
+            address,
+            name,
+            epochs: Vec::new(),
+        };
+        let Ok(partition) = GroupPartition::of(domain, &record) else {
+            return Ok(Vec::new());
+        };
+        if !partition.members.iter().any(|member| member.scope == scope) {
+            return Ok(Vec::new());
+        }
+        self.groups
+            .entry(record_key(&address))
+            .or_insert(record)
+            .hold(epoch)?;
+        self.secrets.insert((address, epoch), secret);
+        Ok(partition
+            .members
+            .iter()
+            .map(|member| (member.scope, epoch))
+            .collect())
     }
 }
 
@@ -190,45 +276,58 @@ mod tests {
             60,
         )
     }
-    fn hold(settings: &mut Settings, generation: u64, key: [u8; 32]) -> Result<(), Failure> {
-        let epoch = KeyEpoch::new(generation, &key);
-        settings.keys.entry("notes".into()).or_default().push(epoch);
-        settings.escrow(&Escrowed::Reader {
+    fn record(root: &RootKey, item: &Escrowed) -> RootEscrow {
+        let tag = escrow_tag(root.public_key(), item.secret());
+        RootEscrow::seal(root.public_key(), tag, &serde_json::to_vec(item).unwrap()).unwrap()
+    }
+    fn reader(generation: u64, key: [u8; 32]) -> Escrowed {
+        Escrowed::Reader {
             collection: "notes".into(),
-            epoch,
+            epoch: KeyEpoch::new(generation, &key),
             key,
-        })
+        }
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn recovery_opens_exactly_the_listed_keys_and_names_a_missing_one() -> Result<(), Failure> {
+    fn recovery_opens_the_records_of_held_epochs_skips_forgeries_and_names_a_gap()
+    -> Result<(), Failure> {
         let root = RootKey::generate();
-        let mut listed = settings(&root);
-        hold(&mut listed, 1, [3; 32])?;
-        hold(&mut listed, 2, [4; 32])?;
-        // Escrowing a held key again adds nothing.
-        let before = listed.escrow.clone();
-        listed.escrow(&Escrowed::Reader {
-            collection: "notes".into(),
-            epoch: KeyEpoch::new(2, &[4; 32]),
-            key: [4; 32],
-        })?;
-        assert_eq!(listed.escrow, before);
-        // A record of a key the archive does not list fails.
-        let mut extra = listed.clone();
-        extra.keys.get_mut("notes").unwrap().pop();
-        let error = Recovered::open(&extra, &root).err().unwrap().to_string();
-        assert!(error.contains("does not list"), "{error}");
-        let recovered = Recovered::open(&listed, &root)?;
+        let archived = settings(&root);
+        let scope = archived
+            .domain()?
+            .scopes()
+            .find(|(name, _)| *name == "notes")
+            .map(|(_, scope)| scope)
+            .ok_or("scope")?;
+        let (one, two) = (KeyEpoch::new(1, &[3; 32]), KeyEpoch::new(2, &[4; 32]));
+        let held = BTreeSet::from([(scope, one), (scope, two)]);
+        let records = vec![
+            (Some((scope, one)), record(&root, &reader(1, [3; 32]))),
+            // Sealed to another root, or under the wrong epoch: skipped.
+            (
+                Some((scope, two)),
+                record(&RootKey::generate(), &reader(2, [4; 32])),
+            ),
+            (Some((scope, two)), record(&root, &reader(1, [9; 32]))),
+            (Some((scope, two)), record(&root, &reader(2, [4; 32]))),
+            (None, record(&root, &Escrowed::Naming { root: [5; 32] })),
+        ];
+        let recovered = Recovered::open(&archived, (records.clone(), held.clone()), &root)?;
         assert_eq!(recovered.readers.len(), 2);
-        assert!(recovered.readers.values().any(|key| *key == [4; 32]));
-        // A key without a record fails, naming its collection.
-        let missing = KeyEpoch::new(3, &[5; 32]);
-        listed.keys.get_mut("notes").unwrap().push(missing);
-        let error = Recovered::open(&listed, &root).err().unwrap().to_string();
-        assert!(error.contains("key epoch 3 of notes"), "{error}");
+        assert_eq!(recovered.readers[&("notes".into(), two)], [4; 32]);
+        assert_eq!(recovered.naming, Some([5; 32]));
+        // An epoch the store holds ciphertext of without a record fails.
+        let mut gap = held;
+        gap.insert((scope, KeyEpoch::new(3, &[6; 32])));
+        let error = Recovered::open(&archived, (records.clone(), gap), &root)
+            .err()
+            .ok_or("recovered a gap")?
+            .to_string();
+        assert!(error.contains("key epoch 3"), "{error}");
         // Another root opens nothing.
-        assert!(Recovered::open(&listed, &RootKey::generate()).is_err());
+        assert!(
+            Recovered::open(&archived, (records, BTreeSet::new()), &RootKey::generate()).is_err()
+        );
         Ok(())
     }
 }

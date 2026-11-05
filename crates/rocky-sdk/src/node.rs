@@ -1897,7 +1897,7 @@ impl Node {
                 .install_key_epoch(KeyMaterial::at(scope, generation, key))
                 .await?;
         }
-        Ok(())
+        crate::escrow::keep(&self.replica, settings, &self.vault, &self.domain()).await
     }
     /// Renews this device's credentials: from its issuers on a member,
     /// self-signed on an issuer, which asks the other issuers first when

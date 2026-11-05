@@ -72,11 +72,6 @@ impl Settings {
                 ids.sort_unstable();
                 self.epoch_statements.insert(role, ids);
                 self.keys.insert(name.to_owned(), vec![epoch]);
-                self.escrow(&crate::escrow::Escrowed::Reader {
-                    collection: name.to_owned(),
-                    epoch,
-                    key,
-                })?;
             }
         }
         self.credentials = self.issue_own(vault)?;

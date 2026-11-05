@@ -401,9 +401,14 @@ impl<A: RowApplication> Inner<A> {
         };
         let schema = LogicalSchema::parse(descriptor)
             .map_err(|_| Error::Corrupt("typed table descriptor".into()))?;
-        let typed = self
+        let mut typed = self
             .authorized_projection(Typed::new(schema, decode(domain)?, &decode(readers)?)?)
             .await?;
+        // Tables wider grants allow since are not created yet: a later
+        // `install_tables` projects them through a plan.
+        if let Some(recorded) = self.projection_access().await? {
+            typed = typed.restrict(&recorded);
+        }
         self.workspace.typed = Some(Arc::new(typed));
         transaction!(self, |inner| inner.install_history().await)?;
         self.start_events();

@@ -6,7 +6,40 @@ use super::*;
 pub(super) const SCHEMA: &[&str] = &[
     // Earlier epochs of a scope; `secure_keys` holds the current one.
     "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))",
+    // Root escrow records, opaque here, by the key epoch whose frames they
+    // travel with; empty scope and epoch for a record of the whole domain,
+    // which stays local.
+    "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,tag BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,tag))",
 ];
+use crate::wire::MAX_CARRIED_ESCROW;
+type Slot = Option<(ResourceScope, rocky_core::KeyEpoch)>;
+fn slot_values(slot: &Slot) -> Result<[SqlValue; 2], Error> {
+    Ok(match slot {
+        Some((scope, generation)) => [
+            SqlValue::Blob(encode(scope)?),
+            SqlValue::Blob(encode(generation)?),
+        ],
+        None => [SqlValue::Blob(Vec::new()), SqlValue::Blob(Vec::new())],
+    })
+}
+fn escrow_row(row: &[SqlValue]) -> Result<(Slot, rocky_credentials::RootEscrow), Error> {
+    let corrupt = || Error::Corrupt("escrow record".into());
+    let [
+        SqlValue::Blob(scope),
+        SqlValue::Blob(generation),
+        SqlValue::Blob(record),
+    ] = row
+    else {
+        return Err(corrupt());
+    };
+    let slot = if scope.is_empty() && generation.is_empty() {
+        None
+    } else {
+        Some((decode(scope)?, decode(generation)?))
+    };
+    let record = rocky_credentials::RootEscrow::from_bytes(record).map_err(|_| corrupt())?;
+    Ok((slot, record))
+}
 
 fn key_hash(key: &[u8; 32]) -> Vec<u8> {
     rocky_core::commitment("rocky.scope-key.v1", key).to_vec()
@@ -331,6 +364,148 @@ impl<A: RowApplication> EncryptedReplica<A> {
             retained.push((*scope, tuple.clone(), name, epochs));
         }
         Ok(retained)
+    }
+    /// The root escrow records held, by key epoch and tag.
+    pub async fn escrowed(&self) -> Result<BTreeSet<(Slot, Commitment)>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        rows(
+            &inner.conn,
+            "SELECT scope,generation,record FROM secure_escrow",
+        )
+        .await?
+        .iter()
+        .map(|row| escrow_row(row).map(|(slot, record)| (slot, record.tag())))
+        .collect()
+    }
+    /// Keeps root escrow records this node sealed of the keys it holds,
+    /// each with the frames of its key epoch, or locally for `None`. One
+    /// replaces a carried record of its tag.
+    pub async fn keep_escrow(
+        &self,
+        records: Vec<(Slot, rocky_credentials::RootEscrow)>,
+    ) -> Result<(), Error> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@cache_neutral inner, |inner| {
+            for (slot, record) in &records {
+                let [scope, generation] = slot_values(slot)?;
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_escrow VALUES(?,?,?,?) ON CONFLICT(scope,generation,tag) DO UPDATE SET record=excluded.record",
+                        bindings(vec![
+                            scope,
+                            generation,
+                            SqlValue::Blob(record.tag().to_vec()),
+                            SqlValue::Blob(record.to_bytes().map_err(credential)?),
+                        ]),
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+    /// Keeps records a peer carried with frames of their key epoch, up to
+    /// `MAX_CARRIED_ESCROW` distinct ones per epoch; a held tag stays.
+    pub(crate) async fn keep_carried_escrow(
+        &self,
+        records: Vec<(
+            (ResourceScope, rocky_core::KeyEpoch),
+            rocky_credentials::RootEscrow,
+        )>,
+    ) -> Result<(), Error> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        transaction!(@cache_neutral inner, |inner| {
+            for (slot, record) in &records {
+                let [scope, generation] = slot_values(&Some(*slot))?;
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_escrow SELECT ?1,?2,?3,?4 WHERE (SELECT count(*) FROM secure_escrow WHERE scope=?1 AND generation=?2)<?5 ON CONFLICT(scope,generation,tag) DO NOTHING",
+                        bindings(vec![
+                            scope,
+                            generation,
+                            SqlValue::Blob(record.tag().to_vec()),
+                            SqlValue::Blob(record.to_bytes().map_err(credential)?),
+                            SqlValue::Integer(MAX_CARRIED_ESCROW as i64),
+                        ]),
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+    /// The records of `slots`, which a session carries before their frames.
+    pub(crate) async fn escrow_of(
+        &self,
+        slots: &BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
+    ) -> Result<
+        Vec<(
+            (ResourceScope, rocky_core::KeyEpoch),
+            rocky_credentials::RootEscrow,
+        )>,
+        Error,
+    > {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut found = Vec::new();
+        for slot in slots {
+            let [scope, generation] = slot_values(&Some(*slot))?;
+            let records = collect_rows(
+                inner
+                    .conn
+                    .query(
+                        "SELECT scope,generation,record FROM secure_escrow WHERE scope=? AND generation=? LIMIT ?",
+                        bindings(vec![
+                            scope,
+                            generation,
+                            SqlValue::Integer(MAX_CARRIED_ESCROW as i64),
+                        ]),
+                    )
+                    .await?,
+            )
+            .await?;
+            for row in records {
+                found.push((*slot, escrow_row(&row)?.1));
+            }
+        }
+        Ok(found)
+    }
+    /// Reads a closed file, a backup's copy: its root escrow records and
+    /// the key epochs of the ciphertext it holds, which they must cover.
+    pub async fn archived_escrow(
+        path: &Path,
+    ) -> Result<
+        (
+            Vec<(Slot, rocky_credentials::RootEscrow)>,
+            BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
+        ),
+        Error,
+    > {
+        check_replica_format(path).await?;
+        let conn = ScopedConnection::new(
+            crate::sqlite::Connection::open_read_only(path)?,
+            None,
+            crate::store::SCHEMA,
+        );
+        let records = rows(&conn, "SELECT scope,generation,record FROM secure_escrow")
+            .await?
+            .iter()
+            .map(|row| escrow_row(row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut held = BTreeSet::new();
+        for row in rows(&conn, "SELECT header FROM secure_operations").await? {
+            let [SqlValue::Blob(header)] = row.as_slice() else {
+                return Err(Error::Corrupt("retained operation".into()));
+            };
+            let header: p2panda_core::Header<Extensions> = decode(header)?;
+            held.insert((header.extensions.scope, header.extensions.generation));
+        }
+        Ok((records, held))
     }
     /// The installed key epochs of a scope, ascending; the last is current.
     pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {

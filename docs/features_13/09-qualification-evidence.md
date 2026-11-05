@@ -1225,14 +1225,25 @@ points, and the `board_cap` assertion bounds a board's points.
 
 ## Root recovery escrow
 
-- Model: every data key an installation holds is sealed to the offline
-  root as it is stored: collection key epochs (create, `hold` on
-  enrollment and renewal, rotation, schema generations), group secret
-  epochs with their partition's naming secret (create, envelope install,
-  enrollment and renewal delivery, rotation, `recover_groups`) and an
-  issuer's partition naming root. Records live in the identity record
-  (`identity.json` field `escrow`, tag → record), which backup archives
-  carry; sealing needs only the publisher key.
+- Model: every data key epoch is sealed to the offline root and kept in
+  the replica (`secure_escrow`), keyed by the epoch whose frames it
+  recovers. A collection key epoch is keyed under its scope; a group
+  secret epoch, carried with its partition's group, values, address and
+  naming secret, under every member table's scope. An issuer's partition
+  naming root is kept local, under no epoch. The SDK seals at open and
+  whenever keys change (`escrow::keep` from `attach`, `apply` and
+  `hold_keys`). Records derive from the vault, so an interrupted seal
+  completes at the next open. identity.json keeps no copy (identity
+  `VERSION` 27); the replica is the single source.
+- Travel: before a page, a session carries the records of each key epoch
+  its frames name, once per session (`Escrow` message, modelled on chain
+  carriage). This happens on range pages, pushes, held-change pages and
+  held pushes. A receiver keeps the records of the frames it accepts, at
+  most 4 distinct per epoch (`MAX_CARRIED_ESCROW`); its own seal replaces
+  a carried record of its tag. Every holder of a scope therefore holds
+  them: keyless custody, partial devices and any backup. Records are opaque
+  and reach only a peer that receives those frames anyway. The coordinator
+  never receives frames, so it never holds one.
 - Derivation: the root's Ed25519 key mapped to X25519 (birational map;
   secret scalar = clamped first half of SHA-512 of the root secret, as
   libsodium's `ed25519_*_to_curve25519`). Record `rocky.root-escrow.v1`
@@ -1240,46 +1251,77 @@ points, and the `board_cap` assertion bounds a board's points.
   an ECIES sealed box: fresh X25519 ephemeral, wrapping key =
   commitment(`rocky.root-escrow.key.v1`, shared ‖ context(version, root,
   tag, ephemeral)), ChaCha20-Poly1305 over a length-prefixed payload
-  padded to 256 bytes. The payload (JSON: reader/group/naming) is the only
-  place a collection, partition values, address or name appear. `tag` =
-  commitment(`rocky.root-escrow.tag.v1`, root ‖ secret): only holders of
-  the key compute it, so a holder escrows a key once and nobody else can
-  link a record to a key, epoch or partition.
+  padded to 256 bytes. The payload is the only place a collection or
+  partition is named. `tag` = commitment(`rocky.root-escrow.tag.v1`,
+  root ‖ secret). The replica stores the blinded scope and epoch beside a
+  record, which every holder already sees in the frame headers.
 - Recovery: `Configuration::recover(archive, root)` /
-  `Database::recover(open, archive, root)` (native; archives are native
-  files). It verifies the archive, opens every record with the root and
-  refuses unless they hold exactly the key epochs the archived record lists
-  (a missing or extra record is named), then installs a fresh trusted
-  identity: root-signed trusted grant over the upper half of the free
-  author numbers the archived trusted node held (as its `split` to an
-  issuer would), the keys, groups, epoch statements, revocations and
-  escrow, and rebinds the archived file like a restore. The identity record
-  is written last. Identity format `VERSION` 26.
+  `Database::recover(open, archive, root)` works from any node's backup.
+  It reads the records and the key epochs of the ciphertext in the archived
+  replica (`EncryptedReplica::archived_escrow`) and opens each record with
+  the root.
+  - A record is accepted only when its opened key hashes to its slot's
+    epoch and its collection, or its partition's member scopes, match the
+    slot. Anyone can seal to the root, so forged or poisoned records are
+    skipped.
+  - A held epoch left unopened fails the recovery and is named.
+  - Group records come back from their payloads. A collection with no
+    recovered key gets a fresh one, and a store without the naming root
+    gets a fresh root.
+  - The recovered node opens the file without its keys, installs its
+    tables and then takes the keys, so frames a keyless store kept
+    apply. Opening now projects only the tables a file recorded; wider
+    grants add the rest through a plan.
+- Author numbers: a creator is trusted with 1..2^30−1 (`AuthorRange::DOMAIN`).
+  The root keeps the upper half for recoveries: 16384 slots of 2^16
+  (`AuthorRange::recovery`). A recovery takes a random slot that the
+  archived identity's grants do not use, so no trusted node's range, nor
+  anything split from it, can collide.
+- Lost trusted identities: before the recovered node greets its opener,
+  the root revokes every other live trusted identity in the archived
+  registry, with the identities each first enrolled, and every key
+  rotates. `Opened::revoked` names them. A revocation that fails fails the
+  recovery and says how to finish it with `Session::revoke_trusted`.
 - Tests: rocky-sdk `root_recovery::{the_root_phrase_and_a_backup_recover_every_partition_with_every_device_lost,
-  a_revoked_trusted_node_gains_nothing_from_escrow_records}`;
-  `escrow::tests::recovery_opens_exactly_the_listed_keys_and_names_a_missing_one`;
+  a_revoked_trusted_node_gains_nothing_from_escrow_records,
+  a_recovery_takes_author_numbers_no_trusted_node_handed_out,
+  a_recovery_revokes_every_lost_trusted_identity_it_knows,
+  a_custodians_store_and_the_root_recover_what_it_holds}`;
+  `escrow::tests::recovery_opens_the_records_of_held_epochs_skips_forgeries_and_names_a_gap`;
   rocky-credentials `escrow::tests::only_the_root_opens_a_record_and_it_names_nothing`.
-  The first writes three partitions and notes, rotates notes and one
-  partition by revocation, backs up, deletes every directory and key
-  store, recovers from the phrase alone, reads all six rows, writes under
-  the current keys and enrolls a device that syncs. The second shows no
-  secret a revoked trusted node held opens any record (its own or the
-  creator's after rotation), records carry no list name, address or
-  naming secret, stolen keys cannot recover an archive, and the root opens
-  the rotated records. Mutation: dropping the escrow of a rotated group
-  secret fails recovery with "secret epoch 2 of a list partition has no
-  root escrow record".
-- Open: escrow travels in identity records, not with replicated
-  ciphertext, so the root recovers what the archived node held; ciphertext
-  a custodian or partial device kept without its key needs the holder's
-  archive. Recovery needs a trusted node's archive (it alone records free
-  author numbers); an issuer the archived node enrolled after the backup
-  would get the same upper half. Recovery does not revoke the lost trusted
-  identities or rotate keys: the application calls `revoke_trusted` with
-  the root next. A browser has no recovery. Opening needs the root secret
-  (`RootKey`), not an arbitrary signer.
-- Checks: `./scripts/lint` 0; `./scripts/check --unit --integration`
-  247 unit and 1111 integration passed (test wall 77 s; 373 s with the
-  build, machine load ~100); wasm32 clippy (rocky-credentials,
-  rocky-secure, rocky-sdk) 0; `./scripts/check-wasm-consumer` 0. Browser
-  test runs were not repeated.
+  - Custodian test: a keyless custodian of the notes and of one list
+    receives frames before and after a rotation. Its store holds records
+    that name neither the list nor its partition name. Every other
+    directory is deleted. Its backup and the phrase recover all four rows
+    under both epochs, the creator is revoked, and the recovered node
+    writes on.
+  - Author-number test: an issuer is enrolled after the backup, and the
+    recovered range is disjoint from both the issuer's and the creator's.
+- Mutations: disabling carriage leaves the custodian with no records
+  (test fails). The pre-fix `minting.split()` allocation fails the
+  author-number test (overlap). Dropping the escrow of a rotated group
+  secret fails recovery and names the epoch.
+- Open:
+  - A store that took a scope only from a checkpoint, without frames,
+    carries no records of it until a frame arrives; a key holder seals its
+    own.
+  - A recovered store whose registry lacks a trusted identity, for example
+    one promoted after the backup, cannot revoke it. The app revokes it
+    with `Session::revoke_trusted` once it appears.
+  - Revoking a lost trusted identity also revokes the devices it first
+    enrolled; they enroll again.
+  - Two recoveries from copies that never learned of each other share a
+    slot with probability 1/16384.
+  - Records of an evicted partition stay, opaque, in the evicting store.
+  - A crash between recovery's first open and its key install leaves a
+    file that needs the recovery redone.
+  - A browser has no recovery; opening needs the root secret (`RootKey`).
+- Formats: replica `rocky.encrypted-replica.v53` (`secure_escrow`);
+  identity `VERSION` 27.
+- Checks on 40ae8eb6:
+  - `./scripts/lint`: 0.
+  - `./scripts/check --unit --integration`: 248 unit and 1120 integration
+    tests passed (integration wall 61 s; 4 min 36 s with the build).
+  - wasm32 clippy (rocky-credentials, rocky-secure, rocky-sdk): 0.
+  - `./scripts/check-wasm-consumer`: 0.
+  - Browser test runs were not repeated.

@@ -159,7 +159,7 @@ impl Node {
             }
             crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
         }
-        Ok(())
+        crate::escrow::keep(&self.replica, settings, &self.vault, &self.domain()).await
     }
     /// Records the group partition, without a key unless it holds one.
     async fn know(&self, partition: &GroupPartition) -> Result<(), Failure> {
@@ -267,8 +267,6 @@ impl Node {
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
-        let secret = self.vault.get(&secret_role(&record.address, epoch))?;
-        draft.escrow(&crate::escrow::Escrowed::group(&record, epoch, secret))?;
         let ids = settings
             .revocations
             .statements()
@@ -376,7 +374,6 @@ impl Node {
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
-        draft.escrow(&crate::escrow::Escrowed::group(&record, epoch, secret))?;
         if draft
             .epoch_statements
             .get(&role)

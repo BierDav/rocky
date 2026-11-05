@@ -41,6 +41,33 @@ fn seal_of(inspection: &Value, tip: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_node_only_raises_the_genesis_minimum_and_the_roots_governs()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    main(&a).await;
+    let minimum = async || ok(&a, "inspect", json!({})).await["genesis_minimum"].clone();
+    ok(&a, "genesis_minimum", json!({"minimum_in_sync": 1})).await;
+    ok(&a, "genesis_minimum", json!({"minimum_in_sync": 3})).await;
+    assert_eq!(minimum().await, 3);
+    // A trusted node cannot lower it, and says so.
+    let lowered = tips(&a, "genesis_minimum", json!({"minimum_in_sync": 2})).await;
+    assert!(message(lowered.unwrap_err()).contains("stays 3"));
+    // The root lowers it without revoking anyone, and then governs.
+    ok(
+        &a,
+        "genesis_minimum",
+        json!({"minimum_in_sync": 2, "root": a.root()}),
+    )
+    .await;
+    assert_eq!(minimum().await, 2);
+    let raised = tips(&a, "genesis_minimum", json!({"minimum_in_sync": 5})).await;
+    assert!(message(raised.unwrap_err()).contains("stays 2"));
+    assert_eq!(minimum().await, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_continue_seal_moves_the_bookmark_and_keeps_every_row() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;

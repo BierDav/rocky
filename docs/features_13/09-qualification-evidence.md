@@ -1185,6 +1185,25 @@ points, and the `board_cap` assertion bounds a board's points.
   `tips::a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks`
   (70 leaves keep the live head and the 63 newest stages; 65 live forks
   refuse); refusing every cut over 64 heads fails it.
+  Genesis minimum: a revoked or past-cut genesis line no longer counts
+  (before, revoking a node that raised the minimum left the raise in
+  force), and the root's own line governs once signed, so the root lowers
+  a raise without revoking anyone; while the root signed none, the
+  largest trusted minimum counts, so no single trusted node lowers it.
+  Restricting the minimum to the root was rejected: apps set it from a
+  trusted node and the root stays offline. A trusted node already holds
+  equal power over liveness (moving bookmarks, opening tips with any
+  minimum), so the remedy is the root's line or revocation.
+  `set_root_genesis_minimum` signs the root's line; a trusted
+  `genesis_minimum` that would not take effect is refused, naming the
+  minimum in force. rocky-credentials
+  `tips::the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting`
+  and rocky-sdk
+  `tips::a_trusted_node_only_raises_the_genesis_minimum_and_the_roots_governs`;
+  taking the largest of the root's and trusted lines fails the first.
+  Checks per item on `main` 60004183: `./scripts/lint` 0; `./scripts/check
+  --unit --integration` 0 (final: 248 unit and 1117 integration passed in
+  66 s wall); wasm32 clippy 0; `./scripts/check-wasm-consumer` 0.
 - Limits: A node can still open several stage branches off one place,
   each with its own signed schema seal, as an honest withdraw and restage
   does; they are not equivocations, and a cut keeps only named heads. A cut of a

@@ -1018,13 +1018,27 @@ impl Session {
             .await
     }
     /// A trusted node signs the minimum of trusted acknowledgments that
-    /// makes a seal on the genesis line final.
+    /// makes a seal on the genesis line final. It only raises the largest
+    /// trusted minimum, and none once the root signed one.
     pub async fn set_genesis_minimum(
         &self,
         minimum_in_sync: u32,
     ) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}))
             .await
+    }
+    /// The root signs the genesis line's minimum, which then governs over
+    /// trusted nodes' minimums, raised or lowered, without revoking anyone.
+    pub async fn set_root_genesis_minimum(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+        minimum_in_sync: u32,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.tips_with_root(
+            json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}),
+            Some(root),
+        )
+        .await
     }
     /// Finalizes ready seals of the followed path and compacts at the newest
     /// one that is final or has `keep` seals after it.

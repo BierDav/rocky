@@ -1818,3 +1818,53 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
     }
     assert!(forked.proposed_cut(&trusted.public_key(), &lanes).is_err());
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() {
+    let owner = PrivateKey::new();
+    let (honest, raiser) = (PrivateKey::new(), PrivateKey::new());
+    let mut graph = graph();
+    let line = |graph: &TipGraph, signer: &PrivateKey, minimum| {
+        let chain = trusted_chain(graph, &owner, signer);
+        let statement = rocky_credentials::GenesisLineStatement {
+            format: rocky_credentials::GENESIS_LINE_FORMAT,
+            scope: graph.scope,
+            minimum_in_sync: minimum,
+        };
+        let signed = rocky_credentials::SignedGenesisLine::endorse_linked(
+            statement,
+            signer,
+            &chain,
+            link(graph, signer, &chain),
+        )
+        .unwrap();
+        signed.verify(owner.public_key(), graph).unwrap();
+        signed
+    };
+    let genesis = graph.genesis();
+    graph.genesis_lines.push(line(&graph, &honest, 2));
+    assert_eq!(graph.line_minimum(genesis).unwrap(), Some(2));
+    // A trusted node may raise it: the largest trusted minimum counts.
+    graph.genesis_lines.push(line(&graph, &raiser, 9));
+    assert_eq!(graph.line_minimum(genesis).unwrap(), Some(9));
+    // Revoking the raiser lowers it again.
+    graph
+        .exclude_revoked(&revoking(&owner, &[raiser.public_key()]))
+        .unwrap();
+    assert_eq!(graph.line_minimum(genesis).unwrap(), Some(2));
+    // Without revoking anyone, the root's own minimum governs, lower or
+    // higher, and trusted lines no longer count.
+    graph.exclude_revoked(&RevocationSet::new()).unwrap();
+    graph.genesis_lines.push(
+        rocky_credentials::SignedGenesisLine::sign(
+            rocky_credentials::GenesisLineStatement {
+                format: rocky_credentials::GENESIS_LINE_FORMAT,
+                scope: graph.scope,
+                minimum_in_sync: 3,
+            },
+            &owner,
+        )
+        .unwrap(),
+    );
+    assert_eq!(graph.line_minimum(genesis).unwrap(), Some(3));
+}

@@ -990,9 +990,11 @@ impl TipGraph {
                 revoked.insert(id()?);
             }
         }
-        // Revoked acknowledgments no longer count toward a seal's finality.
+        // Revoked acknowledgments no longer count toward a seal's finality,
+        // nor revoked genesis lines toward its minimum.
+        let statements_revoked = revoked.clone();
         for record in &self.finalities {
-            let minimum = match self.finality_minimum(record) {
+            let minimum = match self.finality_minimum_in(record, &statements_revoked) {
                 Ok(minimum) => minimum,
                 Err(_) => continue,
             };
@@ -1354,17 +1356,19 @@ impl TipGraph {
         Ok(listed)
     }
     /// The minimum of distinct trusted nodes a seal of `tip` needs to be
-    /// final: its line's opening's, or on the genesis line the largest the
-    /// owner signed; none while the owner signed none.
+    /// final: its line's opening's, or on the genesis line
+    /// [`Self::genesis_minimum`]'s.
     pub fn line_minimum(&self, tip: TipId) -> Result<Option<usize>, Error> {
+        self.line_minimum_in(tip, &self.revoked)
+    }
+    fn line_minimum_in(
+        &self,
+        tip: TipId,
+        revoked: &BTreeSet<Commitment>,
+    ) -> Result<Option<usize>, Error> {
         let root = self.line_root_any(tip)?;
         if root == self.genesis() {
-            return Ok(self
-                .genesis_lines
-                .iter()
-                .filter(|line| line.statement.scope == self.scope)
-                .map(|line| line.statement.minimum_in_sync as usize)
-                .max());
+            return self.genesis_minimum(revoked);
         }
         for opening in &self.openings {
             if opening.statement.scope == self.scope && opening.tip()? == root {
@@ -1373,9 +1377,36 @@ impl TipGraph {
         }
         Err(denied("unknown tip"))
     }
+    /// The genesis line's minimum, without `revoked` lines: the largest
+    /// the owner signed, so the root can lower a raise without revoking
+    /// anyone, or while it signed none the largest a trusted identity
+    /// signed, so no single trusted node lowers it; none without either.
+    fn genesis_minimum(&self, revoked: &BTreeSet<Commitment>) -> Result<Option<usize>, Error> {
+        let (mut owner, mut trusted) = (None, None);
+        for line in &self.genesis_lines {
+            if line.statement.scope != self.scope
+                || (!revoked.is_empty() && revoked.contains(&line.id()?))
+            {
+                continue;
+            }
+            let largest = match TipAuthority::of(line.endorsement(), self.scope) {
+                TipAuthority::Owner => &mut owner,
+                _ => &mut trusted,
+            };
+            *largest = (*largest).max(Some(line.statement.minimum_in_sync as usize));
+        }
+        Ok(owner.or(trusted))
+    }
     fn finality_minimum(&self, record: &SealFinality) -> Result<usize, Error> {
+        self.finality_minimum_in(record, &self.revoked)
+    }
+    fn finality_minimum_in(
+        &self,
+        record: &SealFinality,
+        revoked: &BTreeSet<Commitment>,
+    ) -> Result<usize, Error> {
         let seal = self.seal_by_id(record.seal)?;
-        self.line_minimum(seal.statement.tip)?
+        self.line_minimum_in(seal.statement.tip, revoked)?
             .ok_or_else(|| denied("the genesis line has no signed minimum"))
     }
     /// Verifies a finality record against the graph: it names a held seal,

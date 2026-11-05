@@ -244,7 +244,7 @@ impl Node {
                     .as_u64()
                     .and_then(|minimum| u32::try_from(minimum).ok())
                     .ok_or_else(|| refused("minimum_in_sync must be a positive number"))?;
-                self.sign_genesis_minimum(scope, minimum).await?;
+                self.sign_genesis_minimum(scope, minimum, root).await?;
             }
             "create" => {
                 let tip = match request.get("tip") {
@@ -941,26 +941,59 @@ impl Node {
         .await
     }
 
-    /// A trusted node signs the minimum of trusted acknowledgments that
-    /// makes a seal on the genesis line final.
-    async fn sign_genesis_minimum(&self, scope: Scope, minimum: u32) -> Result<(), Failure> {
-        let mut signer = self.tip_signer(scope).await?;
-        if !signer.opens {
-            return Err(refused(
-                "only a trusted node signs the genesis line's minimum",
-            ));
-        }
-        self.hold_chain(&mut signer, scope).await?;
-        let line = signer.endorse::<SignedGenesisLine>(GenesisLineStatement {
+    /// A trusted node, or the root, signs the minimum of trusted
+    /// acknowledgments that makes a seal on the genesis line final. The
+    /// root's governs once signed; a trusted node only raises the largest
+    /// trusted one. A minimum that would not take effect is refused.
+    async fn sign_genesis_minimum(
+        &self,
+        scope: Scope,
+        minimum: u32,
+        root: &super::Root,
+    ) -> Result<(), Failure> {
+        let statement = GenesisLineStatement {
             format: GENESIS_LINE_FORMAT,
             scope,
             minimum_in_sync: minimum,
-        })?;
+        };
+        let takes_effect = |graph: &TipGraph| match graph.line_minimum(graph.genesis())? {
+            Some(current) if current == minimum as usize => Ok(()),
+            Some(current) => Err(refused(format!(
+                "the genesis line's minimum stays {current}: the root's minimum governs, \
+                 and a trusted node only raises it"
+            ))),
+            None => Err(refused("the genesis line's minimum was not set")),
+        };
+        if root.signer().is_some() {
+            let settings = self.settings.lock().await.clone();
+            let root = crate::enrollment::root_signer(
+                root.signer(),
+                settings.publisher,
+                "signing the genesis line's minimum",
+            )?;
+            let line = SignedGenesisLine::sign(statement, root)?;
+            return self
+                .publish_tips(
+                    scope,
+                    None,
+                    vec![TipStatement::GenesisLine(line)],
+                    takes_effect,
+                )
+                .await;
+        }
+        let mut signer = self.tip_signer(scope).await?;
+        if !signer.opens {
+            return Err(refused(
+                "only a trusted node or the root signs the genesis line's minimum",
+            ));
+        }
+        self.hold_chain(&mut signer, scope).await?;
+        let line = signer.endorse::<SignedGenesisLine>(statement)?;
         self.publish_tips(
             scope,
             Some(signer),
             vec![TipStatement::GenesisLine(line)],
-            |_| Ok(()),
+            takes_effect,
         )
         .await
     }

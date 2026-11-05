@@ -112,6 +112,9 @@ impl<A: RowApplication> Inner<A> {
         if transaction!(self, |inner| inner.forget_stale_step().await)? {
             return Ok(true);
         }
+        if self.base_cleanup_step().await? {
+            return Ok(true);
+        }
         if self.scope_key(scope).is_ok() && !self.importing(scope).await? {
             self.graph_for(scope.domain)?;
             self.finalize_at_most(scope.domain, 1).await?;

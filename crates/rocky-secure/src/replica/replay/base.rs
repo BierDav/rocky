@@ -12,10 +12,18 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     // marks the seals a scope's rows were taken at, empty ones included,
     // with the seal's encoded `SealedOutcomes`. They stay while the seal
     // leaves the path and comes back.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_replayed_seal_rows(scope INTEGER NOT NULL,seal BLOB NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,seal,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed_snapshot_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)",
+    "INSERT OR IGNORE INTO secure_replayed_snapshot_clock VALUES(1,0)",
+    "CREATE TABLE IF NOT EXISTS secure_replayed_snapshots(scope INTEGER NOT NULL,seal BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal,version)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed_seal_rows(scope INTEGER NOT NULL,seal BLOB NOT NULL,version INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,seal,version,row)) WITHOUT ROWID",
     // Rows at the scope's checkpoint, and those of an import in progress.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_base(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed_base_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    // A locally compacted base borrows immutable seal rows. Imported bases
+    // own their rows instead. The selector changes with the signed checkpoint.
+    "CREATE TABLE IF NOT EXISTS secure_replayed_base_source(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,version INTEGER NOT NULL) WITHOUT ROWID",
+    "CREATE VIEW IF NOT EXISTS secure_replayed_base AS SELECT r.scope,r.row,r.image FROM secure_replayed_base_rows r WHERE NOT EXISTS(SELECT 1 FROM secure_replayed_base_source s WHERE s.scope=r.scope) UNION ALL SELECT r.scope,r.row,r.image FROM secure_replayed_base_source s JOIN secure_replayed_seal_rows r ON r.scope=s.scope AND r.seal=s.seal AND r.version=s.version",
+    "CREATE TRIGGER IF NOT EXISTS secure_replayed_base_delete INSTEAD OF DELETE ON secure_replayed_base BEGIN DELETE FROM secure_replayed_base_rows WHERE scope=OLD.scope AND row=OLD.row; DELETE FROM secure_replayed_seal_rows WHERE scope=OLD.scope AND row=OLD.row AND (seal,version)=(SELECT seal,version FROM secure_replayed_base_source WHERE scope=OLD.scope); END",
     "CREATE TABLE IF NOT EXISTS secure_replayed_staged(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     // The field ids stored images name; never deleted.
     "CREATE TABLE IF NOT EXISTS secure_replayed_fields(ordinal INTEGER PRIMARY KEY,field BLOB NOT NULL UNIQUE)",
@@ -125,31 +133,43 @@ impl FieldOrdinals {
         Ok(packed)
     }
     /// The full image of a stored one.
-    pub(in crate::replica) fn unpack(&self, mut packed: &[u8]) -> Result<Vec<u8>, Error> {
-        let corrupt = || Error::Corrupt("replayed stored image".into());
+    pub(in crate::replica) fn unpack(&self, packed: &[u8]) -> Result<Vec<u8>, Error> {
         let mut image = Vec::with_capacity(packed.len() * 4);
-        while !packed.is_empty() {
-            let mut ordinal = 0u64;
-            let mut shift = 0;
-            loop {
-                let (&byte, rest) = packed.split_first().ok_or_else(corrupt)?;
-                packed = rest;
-                if shift > 56 {
-                    return Err(corrupt());
-                }
-                ordinal |= u64::from(byte & 0x7f) << shift;
-                shift += 7;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-            }
-            let (value, rest) = split_value(packed).ok_or_else(corrupt)?;
-            image.extend_from_slice(self.fields.get(&ordinal).ok_or_else(corrupt)?);
+        for (ordinal, value) in packed_fields(packed)? {
+            image.extend_from_slice(
+                self.fields
+                    .get(&ordinal)
+                    .ok_or_else(|| Error::Corrupt("replayed stored image".into()))?,
+            );
             image.extend_from_slice(value);
-            packed = rest;
         }
         Ok(image)
     }
+}
+
+fn packed_fields(mut packed: &[u8]) -> Result<Vec<(u64, &[u8])>, Error> {
+    let corrupt = || Error::Corrupt("replayed stored image".into());
+    let mut fields = Vec::new();
+    while !packed.is_empty() {
+        let mut ordinal = 0u64;
+        let mut shift = 0;
+        loop {
+            let (&byte, rest) = packed.split_first().ok_or_else(corrupt)?;
+            packed = rest;
+            if shift > 56 {
+                return Err(corrupt());
+            }
+            ordinal |= u64::from(byte & 0x7f) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let (value, rest) = split_value(packed).ok_or_else(corrupt)?;
+        fields.push((ordinal, value));
+        packed = rest;
+    }
+    Ok(fields)
 }
 
 /// Adds one base row to `sets`.
@@ -169,6 +189,42 @@ pub(in crate::replica) fn base_sets(rows: &[(Commitment, Vec<u8>)]) -> Sets {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// Only the dictionary entries referenced by a bounded chunk of stored images.
+    pub(in crate::replica) async fn chunk_field_ordinals<'a>(
+        &self,
+        images: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<FieldOrdinals, Error> {
+        let mut needed = BTreeSet::new();
+        for image in images {
+            needed.extend(
+                packed_fields(image)?
+                    .into_iter()
+                    .map(|(ordinal, _)| ordinal),
+            );
+        }
+        let mut ordinals = FieldOrdinals::default();
+        for ordinal in needed {
+            let records = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT field FROM secure_replayed_fields WHERE ordinal=?",
+                        [ordinal as i64],
+                    )
+                    .await?,
+            )
+            .await?;
+            let Some([SqlValue::Blob(field)]) = records.first().map(Vec::as_slice) else {
+                return Err(Error::Corrupt("replayed field ordinal".into()));
+            };
+            ordinals.fields.insert(ordinal, checkpoint::row_of(field)?);
+        }
+        #[cfg(any(test, feature = "qualification"))]
+        self.flusher.measurements.work(
+            lock::WorkUnit::TransitionDictionaryField,
+            ordinals.fields.len() as u64,
+        );
+        Ok(ordinals)
+    }
     /// The stored images' field dictionary, with every field of `fields`.
     pub(in crate::replica) async fn field_ordinals(
         &self,
@@ -349,7 +405,13 @@ impl<A: RowApplication> Inner<A> {
             let outcomes = self.sealed_outcomes(id).await?;
             self.conn
                 .execute(
-                    "INSERT OR REPLACE INTO secure_replayed_seals VALUES(?,?,?)",
+                    "UPDATE secure_replayed_snapshot_clock SET version=version+1 WHERE id=1",
+                    (),
+                )
+                .await?;
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO secure_replayed_seals SELECT ?,?,?,version FROM secure_replayed_snapshot_clock WHERE id=1",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(seal.to_vec()),
@@ -357,16 +419,14 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
-            self.conn
-                .execute(
-                    "DELETE FROM secure_replayed_seal_rows WHERE scope=? AND seal=?",
-                    bindings(vec![SqlValue::Integer(id), SqlValue::Blob(seal.to_vec())]),
-                )
-                .await?;
+            self.conn.execute(
+                "INSERT INTO secure_replayed_snapshots SELECT scope,seal,version FROM secure_replayed_seals WHERE scope=? AND seal=?",
+                bindings(vec![SqlValue::Integer(id), SqlValue::Blob(seal.to_vec())]),
+            ).await?;
             for (row, image) in images {
                 self.conn
                     .execute(
-                        "INSERT INTO secure_replayed_seal_rows VALUES(?,?,?,?)",
+                        "INSERT INTO secure_replayed_seal_rows SELECT ?,?,version,?,? FROM secure_replayed_snapshot_clock WHERE id=1",
                         bindings(vec![
                             SqlValue::Integer(id),
                             SqlValue::Blob(seal.to_vec()),
@@ -478,7 +538,18 @@ impl<A: RowApplication> Inner<A> {
         .first()
         .map(Vec::as_slice)
         {
-            Some([SqlValue::Blob(outcomes)]) => Ok(Some(decode(outcomes)?)),
+            Some([SqlValue::Blob(outcomes)]) => {
+                let outcomes: checkpoint::SealedOutcomes = decode(outcomes)?;
+                outcomes
+                    .check()
+                    .map_err(|reason| Error::Corrupt(reason.into()))?;
+                #[cfg(any(test, feature = "qualification"))]
+                self.flusher.measurements.work(
+                    lock::WorkUnit::TransitionOutcomeRecord,
+                    outcomes.listed.len() as u64,
+                );
+                Ok(Some(outcomes))
+            }
             Some(_) => Err(Error::Corrupt("sealed outcomes".into())),
             None => Ok(None),
         }
@@ -493,7 +564,9 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<(Commitment, Vec<u8>)>, Error> {
         let (sql, params) = match seal {
             Some(seal) => (
-                format!("SELECT row,image FROM {table} WHERE scope=? AND seal=? ORDER BY row"),
+                format!(
+                    "SELECT row,image FROM {table} WHERE scope=?1 AND seal=?2 AND version=(SELECT version FROM secure_replayed_seals WHERE scope=?1 AND seal=?2) ORDER BY row"
+                ),
                 vec![SqlValue::Integer(id), SqlValue::Blob(seal.to_vec())],
             ),
             None => (
@@ -523,14 +596,23 @@ impl<A: RowApplication> Inner<A> {
         depth: Option<i64>,
     ) -> Result<(), Error> {
         self.conn
-            .execute("DELETE FROM secure_replayed_base WHERE scope=?", [id])
+            .execute(
+                "DELETE FROM secure_replayed_base_source WHERE scope=?",
+                [id],
+            )
+            .await?;
+        self.conn
+            .execute("DELETE FROM secure_base_transition WHERE scope=?", [id])
+            .await?;
+        self.conn
+            .execute("DELETE FROM secure_replayed_base_rows WHERE scope=?", [id])
             .await?;
         let fields = fields_of(rows.iter().map(|(_, image)| image.as_slice()))?;
         let ordinals = self.field_ordinals(fields).await?;
         for (row, image) in rows {
             self.conn
                 .execute(
-                    "INSERT INTO secure_replayed_base VALUES(?,?,?)",
+                    "INSERT INTO secure_replayed_base_rows VALUES(?,?,?)",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(row.to_vec()),
@@ -546,10 +628,14 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
         through: i64,
     ) -> Result<(), Error> {
-        for table in ["secure_replayed_seals", "secure_replayed_seal_rows"] {
+        for table in [
+            "secure_replayed_seals",
+            "secure_replayed_seal_rows",
+            "secure_replayed_snapshots",
+        ] {
             self.conn
                 .execute(
-                    format!("DELETE FROM {table} WHERE scope=? AND seal NOT IN (SELECT seal FROM secure_finalized WHERE depth>?)"),
+                    format!("DELETE FROM {table} WHERE scope=?1 AND seal NOT IN (SELECT seal FROM secure_finalized WHERE depth>?2) AND seal NOT IN (SELECT seal FROM secure_replayed_base_source WHERE scope=?1) AND seal NOT IN (SELECT seal FROM secure_base_transition WHERE scope=?1)"),
                     [id, through],
                 )
                 .await?;

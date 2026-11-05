@@ -295,7 +295,7 @@ bump in its evidence.
 | 7 | [Intent migrations](07-intent-migrations.md) | 4 | 2 w | Migrations publish as intents; bounded, resumable |
 | 8 | [Intent only](08-intent-only.md) | 5, 6, 7 | 3 w | `Mergeable`, registers and resolver deleted; replayed checkpoints; [complete, 1,829 of 2,500 lines removed; sync rows hold](08-intent-only-evidence.md) |
 | 9 | [Qualification](09-qualification.md) | 1, 2, 8 | 1 w | Devices, convergence fuzz, sync non-regression; [in process and desktop qualified, five defects fixed; device rows not verified](09-qualification-evidence.md) |
-| 10 (deferred) | [Bounded transitions](10-bounded-transitions.md) (planned; design after 8, code on trigger) | 8; 9 and its trigger | 1–1.5 w design, then ~1 w per kind | Transitions, rewinds and seal finalization in bounded steps |
+| 10 | [Bounded transitions](10-bounded-transitions.md) (in progress: immutable compaction row preparation/publication/cleanup; metadata and other kinds unbounded, [evidence](10-bounded-transitions-evidence.md)) | 8; 9 and its trigger | 1–1.5 w design, then ~1 w per kind | Transitions, rewinds and seal finalization in bounded steps |
 
 ```mermaid
 flowchart LR

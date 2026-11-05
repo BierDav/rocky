@@ -970,10 +970,13 @@ async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched(
 
 mod anchors;
 pub(in crate::tests) mod audit;
+mod bounded;
 mod cascades;
 mod deferred;
 mod eligibility;
 mod identities;
+#[cfg(not(target_family = "wasm"))]
+mod measurement;
 mod open_members;
 mod own;
 mod partial_reads;

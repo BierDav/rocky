@@ -18,6 +18,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         };
         keep(self.settle().await);
+        keep(self.recover_base_cleanup().await);
         if let Some((domain, _)) = self.followed_bookmark().await {
             let needs = self.seal_rebootstraps(domain).await?;
             for need in &needs {
@@ -35,6 +36,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
         keep(self.rederive().await);
         keep(self.forget_covered_drops().await);
         first.map_or(Ok(()), Err)
+    }
+    /// Resume durable base retirement after an orderly reopen. The in-memory
+    /// maintenance queue is rebuilt one bounded cleanup transaction at a time.
+    async fn recover_base_cleanup(&self) -> Result<(), Error> {
+        loop {
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+            let more = inner.base_cleanup_step().await?;
+            drop(inner);
+            if !more {
+                return Ok(());
+            }
+            rocky_platform::task::yield_now().await;
+        }
     }
     /// Derives the replayed rows again where a scope's clear left them
     /// waiting and nothing it needs waits any more.

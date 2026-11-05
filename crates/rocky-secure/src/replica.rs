@@ -479,6 +479,11 @@ pub(super) struct Inner<A> {
         tokio::sync::oneshot::Receiver<()>,
     )>,
     #[cfg(test)]
+    base_prepare_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
     /// The armed crash point and the one that fired.
     #[cfg(any(test, feature = "qualification"))]
@@ -759,6 +764,8 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         checkpoint::SERVED_SCHEMA,
         checkpoint::FAILURE_SCHEMA,
         compaction::SCHEMA,
+        compaction::TRANSITION_SCHEMA,
+        compaction::HISTORY_SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
         chains::SCHEMA,
@@ -1083,6 +1090,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             migration_storage_pause: None,
             #[cfg(test)]
             held_token_pause: None,
+            #[cfg(test)]
+            base_prepare_pause: None,
             #[cfg(test)]
             stage_fault: None,
             #[cfg(any(test, feature = "qualification"))]

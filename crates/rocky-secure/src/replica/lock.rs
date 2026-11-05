@@ -231,7 +231,7 @@ pub(crate) struct Guard<G> {
     guard: G,
     _timing: Hold,
     #[cfg(any(test, feature = "qualification"))]
-    work_start: [u64; 17],
+    work_start: [u64; 25],
 }
 struct Hold {
     site: &'static Location<'static>,
@@ -285,6 +285,14 @@ impl<G> Drop for Guard<G> {
             "reclaimed_page",
             "domain_header",
             "scan_fallback",
+            "transition_hash_row",
+            "transition_cleanup_row",
+            "transition_publication",
+            "transition_dictionary_field",
+            "transition_history_record",
+            "transition_identity_record",
+            "transition_ledger_record",
+            "transition_outcome_record",
         ]
         .into_iter()
         .enumerate()
@@ -351,7 +359,7 @@ mod qualification {
     #[derive(Default)]
     struct Recording {
         data: std::sync::Mutex<Option<Measurements>>,
-        work: [std::sync::atomic::AtomicU64; 17],
+        work: [std::sync::atomic::AtomicU64; 25],
     }
     pub(crate) enum WorkUnit {
         #[cfg(feature = "qualification")]
@@ -373,6 +381,14 @@ mod qualification {
         ReclaimedPage = 14,
         DomainHeader = 15,
         ScanFallback = 16,
+        TransitionHashRow = 17,
+        TransitionCleanupRow = 18,
+        TransitionPublication = 19,
+        TransitionDictionaryField = 20,
+        TransitionHistoryRecord = 21,
+        TransitionIdentityRecord = 22,
+        TransitionLedgerRecord = 23,
+        TransitionOutcomeRecord = 24,
     }
 
     #[derive(Default, Debug)]
@@ -414,7 +430,7 @@ mod qualification {
                 measurements.interactive_steps.push(steps);
             }
         }
-        pub(crate) fn work_snapshot(&self) -> [u64; 17] {
+        pub(crate) fn work_snapshot(&self) -> [u64; 25] {
             std::array::from_fn(|index| {
                 self.0.work[index].load(std::sync::atomic::Ordering::Relaxed)
             })

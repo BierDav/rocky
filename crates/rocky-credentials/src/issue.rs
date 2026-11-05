@@ -615,22 +615,51 @@ impl CredentialChain {
         node: PublicKey,
         author: u32,
     ) -> Result<Self, Error> {
+        self.certify_member(holder, node, author, 0, None)
+    }
+    /// Signs a node certificate at an explicit identity membership sequence.
+    /// Sequence zero has no predecessor; later links must name the previous
+    /// certificate ID so concurrent links can be detected as a fork.
+    pub fn certify_member(
+        self,
+        holder: &dyn IdentityProvider,
+        node: PublicKey,
+        author: u32,
+        sequence: u64,
+        previous: Option<rocky_core::Commitment>,
+    ) -> Result<Self, Error> {
         let last = self.holder(holder)?.clone();
         let extended = last.extended()?;
-        self.certify_with(
+        self.certify_with_membership(
             holder,
             (node, author),
             (last.grants.clone(), extended.partitions),
+            sequence,
+            previous,
         )
     }
     /// As `certify`, with `grants` and `partitions` of the identity's: an
     /// issuer identity's certificate names what its node holds.
     pub fn certify_with(
-        mut self,
+        self,
         holder: &dyn IdentityProvider,
         (node, author): (PublicKey, u32),
         (grants, partitions): (Vec<ResourceGrant>, Vec<PartitionGrant>),
     ) -> Result<Self, Error> {
+        self.certify_with_membership(holder, (node, author), (grants, partitions), 0, None)
+    }
+    /// As `certify_with`, carrying explicit membership metadata.
+    pub fn certify_with_membership(
+        mut self,
+        holder: &dyn IdentityProvider,
+        (node, author): (PublicKey, u32),
+        (grants, partitions): (Vec<ResourceGrant>, Vec<PartitionGrant>),
+        sequence: u64,
+        previous: Option<rocky_core::Commitment>,
+    ) -> Result<Self, Error> {
+        if (sequence == 0) != previous.is_none() {
+            return Err(denied("invalid membership sequence"));
+        }
         let last = self.holder(holder)?;
         let authors = AuthorRange::new(author, author)?;
         if !last
@@ -651,6 +680,8 @@ impl CredentialChain {
                 partitions,
                 node: Some(crate::PeerId::of(node)),
                 authors: Some(authors),
+                sequence: Some(sequence),
+                previous,
                 ..Extended::default()
             })?,
             ..last.clone()

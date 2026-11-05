@@ -280,6 +280,12 @@ impl SignedCapability {
         }
         Ok(self.issuer)
     }
+
+    /// The membership sequence and predecessor carried by a node certificate.
+    pub fn membership(&self) -> Result<Option<(u64, Option<Commitment>)>, Error> {
+        let extended = self.capability.extended()?;
+        Ok(extended.sequence.map(|sequence| (sequence, extended.previous)))
+    }
 }
 
 /// Links from the publisher to a node: issuer identities, the identity

@@ -442,6 +442,8 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         trusted: None,
         claims: None,
         origin: None,
+        sequence: Some(0),
+        previous: None,
     })
     .unwrap();
     chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());

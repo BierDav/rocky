@@ -11,7 +11,7 @@ pub const RECOVERY_FIRST: u32 = 1 << 30;
 pub const RECOVERY_SLOT: u32 = 1 << 16;
 /// Recoveries the reserved numbers hold.
 pub const RECOVERY_SLOTS: u32 = (MAX_AUTHOR - RECOVERY_FIRST + 1) / RECOVERY_SLOT;
-const EXTENSION_VERSION: u32 = 9;
+const EXTENSION_VERSION: u32 = 10;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -86,6 +86,8 @@ struct Body {
     trusted: Option<rocky_core::Scope>,
     claims: Option<crate::ClaimRight>,
     origin: Option<Origin>,
+    sequence: Option<u64>,
+    previous: Option<rocky_core::Commitment>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -111,6 +113,10 @@ pub struct Extended {
     /// The trusted identity that first enrolled this identity, kept by every
     /// renewal: the root's revocation of it ends this link too.
     pub origin: Option<Origin>,
+    /// Membership sequence of a node certificate. The first link is zero.
+    pub sequence: Option<u64>,
+    /// The preceding membership certificate, or none for sequence zero.
+    pub previous: Option<rocky_core::Commitment>,
 }
 /// A trusted identity and when its root grant became valid: a recovery
 /// ends every link whose origin's grant predates its own.
@@ -132,6 +138,8 @@ impl Extension {
             trusted: extended.trusted,
             claims: extended.claims,
             origin: extended.origin,
+            sequence: extended.sequence,
+            previous: extended.previous,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -151,6 +159,9 @@ impl Extension {
         if body.authors.is_some_and(|authors| !authors.valid()) {
             return Err(denied("invalid credential extension"));
         }
+        if body.sequence.is_none() != body.previous.is_none() && body.sequence != Some(0) {
+            return Err(denied("invalid membership link"));
+        }
         if body.partitions.len() > crate::MAX_GRANTS {
             return Err(denied("invalid partition credential extension"));
         }
@@ -168,6 +179,8 @@ impl Extension {
             trusted: body.trusted,
             claims: body.claims,
             origin: body.origin,
+            sequence: body.sequence,
+            previous: body.previous,
         })
     }
 }
@@ -182,7 +195,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -193,6 +206,8 @@ mod tests {
                     trusted: None,
                     claims: None,
                     origin: None,
+                    sequence: None,
+                    previous: None,
                 })
                 .unwrap(),
             );

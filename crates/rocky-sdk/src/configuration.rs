@@ -109,7 +109,8 @@ impl Configuration {
     /// its root escrow. The root then revokes every other trusted identity
     /// the archive knows, with the identities each first enrolled, and every
     /// key rotates; `Opened::revoked` names them. In a browser `archive`
-    /// names a file in Rocky's storage (`rocky_platform::fs`). A recovery
+    /// names a file in Rocky's storage (`rocky_platform::fs`); see
+    /// [`Self::recover_archive`] for an archive's bytes. A recovery
     /// interrupted at any step is finished by calling this again with the
     /// same archive and root; opening the directory meanwhile is refused.
     pub async fn recover(
@@ -118,6 +119,37 @@ impl Configuration {
         root: &crate::RootKey,
     ) -> Result<Opened, Failure> {
         Database::launch_recover(self.options(), archive, root).await
+    }
+    /// As [`Self::recover`], from the archive's bytes, such as a browser
+    /// upload of [`Database::export_backup`]. They are staged in the
+    /// directory and removed once the recovery finishes or stops; an
+    /// interrupted one is finished by calling this again with the same
+    /// bytes.
+    pub async fn recover_archive(
+        &self,
+        archive: &[u8],
+        root: &crate::RootKey,
+    ) -> Result<Opened, Failure> {
+        rocky_platform::fs::create_dir_all(&self.directory)?;
+        let staged = self.directory.join("recovery.backup");
+        rocky_platform::fs::write(&staged, archive)?;
+        let recovered = self.recover(&staged, root).await;
+        if let Err(error) = rocky_platform::fs::remove_file(&staged) {
+            if let Ok(opened) = &recovered {
+                opened.database.close().await?;
+            }
+            return Err(format!(
+                "could not remove the staged archive {}: {error}{}",
+                staged.display(),
+                if recovered.is_ok() {
+                    "; the recovery finished: open the directory"
+                } else {
+                    ""
+                }
+            )
+            .into());
+        }
+        recovered
     }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {

@@ -1348,7 +1348,9 @@ points, and the `board_cap` assertion bounds a board's points.
     recovery statement not yet signed).
   - Transparency: a device the statement ends, a trusted node or one it
     first enrolled, learns it on its next session or renewal and reports
-    `RevocationReason::Recovery { recovered }`. An issuer no longer takes
+    `RevocationReason::Recovery { recovered }`. Every other device reports
+    `AlertKind::RecoveryEnded` for each trusted identity it knows that the
+    statement ended. An issuer no longer takes
     from an epoch request the statement that ends it: it records the
     revocation as a session does. Before, it held the statement and its
     own status failed.
@@ -1421,8 +1423,40 @@ points, and the `board_cap` assertion bounds a board's points.
     node the later recovery kept or the root added that still lacks the
     statement, and the alert shows `shared_slot`.
   - Grants signed from a clock more than a day behind the recovery's can
-    fall before it. `Opened::revoked` names only what the finishing
-    attempt revoked by name.
+    fall before it.
+  - `RecoveryEnded` needs the ended identity's grant: a device that holds
+    neither its registry record nor a tip statement it signed (a trusted
+    node that never signed one, seen from a member) does not name it,
+    though the statement ends it there too.
+  - Closed (survivors alerted): a device that learned a recovery
+    statement said nothing about the ordinary trusted identities it ended
+    (only `RecoveriesMet` for a recovered one). Status and health reports
+    now carry `AlertKind::RecoveryEnded { recovered, ended }` for every
+    other trusted identity this device knows whose grant the latest
+    recovery ends, recovered identities and its own aside. It is derived
+    on each report from the issuer registry's trusted grants and the
+    trusted grants the tip graph's chained statements carry
+    (`TipGraph::trusted_grants`), so an identity learned after the
+    statement is reported as well. The alert says the cascade ends what
+    the identity first enrolled. rocky-sdk
+    `root_recovery::survivors_report_the_trusted_identities_a_recovery_ended`:
+    the creator and a second trusted node each sign a tip statement and
+    are backed up. The recovered node, a trusted node the root adds
+    afterwards (learning both after the statement) and a reader member
+    (no registry) each report both. Mutations: without the alert the
+    recovered node's check fails; without the tip-graph source the
+    member's fails.
+  - Closed (`Opened::revoked` complete): it named only what the finishing
+    attempt revoked by name, so a recovery resumed after `Named` returned
+    nothing. `Node::revoke_lost` now names every trusted identity in the
+    registry that the archived identity record had not already ended,
+    whichever attempt revoked it. `Install::Recover` keeps the archived
+    record, which the archive yields on every attempt. The sweep
+    `recovery::tests::a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slot`
+    (native and Chromium) now grants a reader first, so the creator's
+    grant is in its registry, and checks `revoked` names the creator at
+    every stop. Mutation: returning only what the attempt revoked fails
+    at `Named`.
   - Closed (recovery statement, v9): a recovered store whose registry
     lacked a trusted identity could not revoke it, and the app revoked it
     with `Session::revoke_trusted` once it appeared. The recovery
@@ -1527,9 +1561,27 @@ points, and the `board_cap` assertion bounds a board's points.
   - A crash after the keys are installed but before the root revokes the
     lost identities leaves a store that opens with them unrevoked; the
     revoke step owns finishing that (`Session::revoke_trusted`).
-  - A browser holds an archive whole in memory, and an app moves archive
-    bytes in or out of Rocky's storage with `rocky_platform::fs`; the SDK
-    offers no download or upload.
+  - Closed (archive bytes): an app could only move archive bytes in or
+    out of Rocky's storage with `rocky_platform::fs`. `Database::export_backup`
+    now returns the signed archive as bytes: the node writes it to a file
+    of its own in the data directory, reads it and removes it.
+    `Configuration::recover_archive(bytes, root)` stages the bytes in the
+    directory, runs `recover` and removes them, whether it finished or
+    stopped; calling it again with the same bytes resumes. It is the
+    same code natively and on wasm32, and the archive format is the same.
+    Test `recovery::tests::a_backup_exported_as_bytes_recovers_the_domain`
+    (native and Chromium): export, delete, refuse junk bytes, recover from
+    the bytes, write. No `.backup` or `.partial` file is left on either
+    side. Mutations: keeping the export file, or the staged upload, fails
+    it.
+  - A browser still holds an archive whole in memory, twice while it is
+    exported or staged. A restore (invitation) stays native and
+    path-based.
+  - Checks (recovery transparency): `./scripts/lint` 0;
+    `./scripts/check --unit --integration` 250 unit and 1133 integration
+    passed (integration wall 78 s); `./scripts/check --wasm` 0 (68 of 68
+    browser runs). No persisted or wire version changed: the new alert
+    kind only adds a variant to status and health reports.
   - Checks (crash-safe and browser recovery): `./scripts/lint` 0;
     `./scripts/check --unit --integration` 249 unit and 1125 integration
     passed; `./scripts/check --wasm` clippy 0 and 68 of 68 browser runs

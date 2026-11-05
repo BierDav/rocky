@@ -1315,8 +1315,23 @@ impl TipGraph {
             .min_by_key(|item| (Reverse(item.link.sequence), item.id))
             .map_or(ChainLink::first(*lane), |head| head.link.next(head.id)))
     }
-    /// The lanes `identity` signed chained statements or acknowledgments
-    /// through.
+    /// The trusted identities whose chained statements or acknowledgments
+    /// the graph holds, each with the latest `not_before` of the root's
+    /// trusted grant its credentials carry.
+    pub fn trusted_grants(&self) -> Result<BTreeMap<PublicKey, u64>, Error> {
+        let (statements, acknowledgments) = self.chained()?;
+        let mut grants = BTreeMap::new();
+        for item in statements.iter().chain(&acknowledgments) {
+            let Some(grant) = item.credentials.0.first().map(|link| &link.capability) else {
+                continue;
+            };
+            if grant.subject == item.identity && grant.extended()?.trusted == Some(self.scope) {
+                let since = grants.entry(item.identity).or_insert(grant.not_before);
+                *since = (*since).max(grant.not_before);
+            }
+        }
+        Ok(grants)
+    }
     /// Every identity a chained statement or acknowledgment names.
     pub fn chain_identities(&self) -> Result<BTreeSet<PublicKey>, Error> {
         let (statements, acknowledgments) = self.chained()?;
@@ -1326,6 +1341,8 @@ impl TipGraph {
             .map(|item| item.identity)
             .collect())
     }
+    /// The lanes `identity` signed chained statements or acknowledgments
+    /// through.
     pub fn lanes_of(&self, identity: &PublicKey) -> Result<BTreeSet<PublicKey>, Error> {
         let (statements, acknowledgments) = self.chained()?;
         Ok(statements

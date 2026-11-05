@@ -1674,6 +1674,29 @@ impl Node {
         let _ = rocky_platform::fs::remove_dir_all(&staging);
         result
     }
+    /// A backup archive as bytes: written to a file of its own in the data
+    /// directory, read and removed.
+    pub(crate) async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
+        let directory = self
+            .path
+            .parent()
+            .ok_or("the identity has no data directory")?;
+        let target = directory.join(format!(
+            "export-{}.backup",
+            HEXLOWER.encode(&crate::enrollment::random::<8>())
+        ));
+        let exported = async {
+            self.backup(&target).await?;
+            Ok(rocky_platform::fs::read(&target)?)
+        }
+        .await;
+        for leftover in [&target, &target.with_extension("partial")] {
+            if rocky_platform::fs::exists(leftover) {
+                rocky_platform::fs::remove_file(leftover)?;
+            }
+        }
+        exported
+    }
     /// The definition generation, the earlier ones still admitted and a
     /// table rebuild under way.
     async fn generation(&self) -> Result<Value, Failure> {
@@ -1708,40 +1731,49 @@ impl Node {
     }
     /// A recovery's root revokes every other trusted identity this node
     /// knows, lost with its devices, with the identities it first enrolled;
-    /// every key rotates. Returns the revoked identities in order.
+    /// every key rotates. Returns, in order, every identity the recovery
+    /// revokes by name, those an interrupted attempt revoked too: the
+    /// registry's trusted identities the `archived` identity record had
+    /// not ended.
     pub(crate) async fn revoke_lost(
         &self,
         root: Arc<dyn rocky_credentials::IdentityProvider>,
+        archived: &Settings,
     ) -> Result<Vec<PublicKey>, Failure> {
         let root = Root(Some(root));
-        let mut revoked = Vec::new();
-        loop {
-            let registry = self.registry().await?;
+        let registry = self.registry().await?;
+        let own = self.settings.lock().await.identity;
+        let lost: Vec<PublicKey> = registry
+            .trusted
+            .keys()
+            .copied()
+            .filter(|identity| {
+                *identity != own
+                    && !archived.revocations.revokes_origin(identity)
+                    && !archived.tombstoned(identity)
+            })
+            .collect();
+        for identity in &lost {
             // Named ones are revoked with a cut, which keeps their history.
-            let lost = {
+            let revoked = {
                 let settings = self.settings.lock().await;
-                registry.trusted.keys().copied().find(|identity| {
-                    *identity != settings.identity
-                        && !settings.revocations.revokes_origin(identity)
-                        && !settings.tombstoned(identity)
-                        && !revoked.contains(identity)
-                })
+                settings.revocations.revokes_origin(identity) || settings.tombstoned(identity)
             };
-            let Some(identity) = lost else {
-                if let Some(directory) = self.path.parent() {
-                    crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Named)?;
-                }
-                self.revoke_before_recovery(&root).await?;
-                return Ok(revoked);
-            };
-            let target = crate::enrollment::Revoke::Identity(identity);
+            if revoked {
+                continue;
+            }
+            let target = crate::enrollment::Revoke::Identity(*identity);
             self.revoke_with(target, &root, true)
                 .await
                 .map_err(|error| format!("revoking lost trusted identity {identity}: {error}"))?;
             self.activity
                 .record("device_revoked", json!({"identity": identity.to_hex()}));
-            revoked.push(identity);
         }
+        if let Some(directory) = self.path.parent() {
+            crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Named)?;
+        }
+        self.revoke_before_recovery(&root).await?;
+        Ok(lost)
     }
     /// The recovery's own root statements, for the trusted identities its
     /// store never named: each keeps the heads this node holds of the

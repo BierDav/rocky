@@ -382,24 +382,61 @@ impl Node {
             })
             .collect())
     }
-    /// Root recoveries that met: the latest ended the others.
+    /// Root recoveries that met: the latest ended the others. And every
+    /// other trusted identity known here, from the registry or the tip
+    /// graph, whose grant the latest recovery ended.
     pub(super) async fn recovery_alerts(&self) -> Result<Vec<Alert>, Failure> {
-        let revocations = &self.settings.lock().await.revocations;
+        if self.settings.lock().await.revocations.recovery().is_none() {
+            return Ok(Vec::new());
+        }
+        // Read before the settings are held: reading takes their lock.
+        let registry = self.registry().await?;
+        // The trusted identities known here, with their grants' time: the
+        // registry's, and those whose tip statements the graph holds.
+        let mut known: BTreeMap<PublicKey, u64> =
+            match self.replica.tip_graph(self.domain().scope).await {
+                Ok(graph) => graph.trusted_grants().map_err(refused)?,
+                // Before the domain's graph is installed there is nothing to judge.
+                Err(_) => BTreeMap::new(),
+            };
+        for (identity, record) in &registry.trusted {
+            let since = known
+                .entry(*identity)
+                .or_insert(record.grant.capability.not_before);
+            *since = (*since).max(record.grant.capability.not_before);
+        }
+        let settings = self.settings.lock().await;
+        let revocations = &settings.revocations;
         let Some(latest) = revocations.recovery().copied() else {
             return Ok(Vec::new());
         };
-        Ok(revocations
-            .recoveries()
-            .into_iter()
-            .filter(|recovery| *recovery != latest)
-            .map(|ended| Alert {
-                kind: AlertKind::RecoveriesMet {
-                    kept: latest.keep.to_hex(),
-                    ended: ended.keep.to_hex(),
-                    shared_slot: ended.slot == latest.slot,
-                },
-                since: None,
+        let recoveries = revocations.recoveries();
+        let met = recoveries
+            .iter()
+            .filter(|recovery| **recovery != latest)
+            .map(|ended| AlertKind::RecoveriesMet {
+                kept: latest.keep.to_hex(),
+                ended: ended.keep.to_hex(),
+                shared_slot: ended.slot == latest.slot,
+            });
+        // Recovered identities are reported as recoveries that met; this
+        // device's own end as its revocation reason.
+        let ended = known
+            .iter()
+            .filter(|(identity, since)| {
+                **identity != settings.identity
+                    && !recoveries
+                        .iter()
+                        .any(|recovery| recovery.keep == **identity)
+                    && latest.ends(**since, identity)
             })
+            .map(|(identity, _)| AlertKind::RecoveryEnded {
+                recovered: latest.keep.to_hex(),
+                ended: identity.to_hex(),
+            });
+        Ok(met
+            .chain(ended)
+            .map(|kind| Alert { kind, since: None })
             .collect())
     }
     /// Reloads the other trusted identities from the registry, merges the

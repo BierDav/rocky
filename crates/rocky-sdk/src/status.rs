@@ -483,6 +483,15 @@ pub enum AlertKind {
         ended: String,
         shared_slot: bool,
     },
+    /// The root recovery that kept the trusted identity `recovered` ended
+    /// the trusted identity `ended`, whose grant came before it, and with
+    /// it every identity `ended` first enrolled: their devices are refused
+    /// (each reports `RevocationReason::Recovery`) and enroll again through
+    /// `recovered` or a trusted node the root added since. Reported for
+    /// every trusted identity this device knows, from the issuer registry
+    /// or the tip statements it holds, whether it learns of it before the
+    /// statement or after.
+    RecoveryEnded { recovered: String, ended: String },
 }
 /// How long a trusted node may stay unheard before the others flag it.
 pub const TRUSTED_STALE_AFTER: std::time::Duration =

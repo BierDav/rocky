@@ -758,6 +758,10 @@ impl Simulation {
                 crate::AlertKind::RecoveriesMet { shared_slot, .. } => {
                     format!("recoveries met shared slot {shared_slot}")
                 }
+                crate::AlertKind::RecoveryEnded { ended, .. } => format!(
+                    "{} ended by recovery",
+                    self.identities.get(ended).map_or("?", String::as_str)
+                ),
             })
             .collect();
         format!("alerts {described:?}")

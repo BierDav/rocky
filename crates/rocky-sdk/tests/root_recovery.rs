@@ -764,3 +764,96 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
     second.close().await;
     Ok(())
 }
+
+/// Each device says which trusted identities a recovery ended, those it
+/// learns of after the statement too: the recovered node and a trusted
+/// node the root adds afterwards from their registry, a member from the
+/// tip statements the lost identities signed.
+#[tokio::test(flavor = "multi_thread")]
+async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    write_note(&issuer, "before").await;
+    let trusted = Device::new(Database::join(
+        open(&root.path().join("trusted"), &hub),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let second = principal(&trusted).await;
+    let grant = issuer
+        .ok(json!({"type":"tips","action":"trust","identity":second,"root":issuer.root()}))
+        .await;
+    trusted
+        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    // Each signs a chained tip statement, which carries its trusted grant.
+    for action in ["create", "follow"] {
+        issuer
+            .ok(json!({"type":"tips","action":action,"name":"main"}))
+            .await;
+    }
+    for (device, minimum) in [(&issuer, 1), (&trusted, 2)] {
+        device
+            .ok(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":minimum}))
+            .await;
+    }
+    common::introduce(&issuer, &trusted).await;
+    trusted.sync().await.map_err(|error| error.to_string())?;
+    let first = principal(&issuer).await;
+    let archive = root.path().join("creator.backup");
+    issuer.database.backup(&archive).await?;
+    trusted.close().await;
+    issuer.close().await;
+
+    let opened = Database::recover(
+        open(&root.path().join("recovered"), &hub),
+        &archive,
+        &RootKey::from_phrase(&phrase)?,
+    )?;
+    let device = Device::new(opened)?;
+    let kept = principal(&device).await;
+    let expected = [
+        json!({"type":"recovery_ended","recovered":kept,"ended":first}),
+        json!({"type":"recovery_ended","recovered":kept,"ended":second}),
+    ];
+    let sorted = |mut alerts: Vec<Value>| {
+        alerts.sort_by_key(|alert| alert["ended"].as_str().map(str::to_owned));
+        alerts
+    };
+    let expected = sorted(expected.to_vec());
+    assert_eq!(sorted(alerts(&device, "recovery_ended").await), expected);
+
+    let again = Device::new(Database::join(
+        open(&root.path().join("again"), &hub),
+        &device.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let identity = principal(&again).await;
+    let grant = device
+        .ok(json!({"type":"tips","action":"trust","identity":identity,
+            "root":{"phrase":phrase}}))
+        .await;
+    again
+        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    common::introduce(&device, &again).await;
+    again.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(revocation_reason(&again).await, Value::Null);
+    assert_eq!(sorted(alerts(&again, "recovery_ended").await), expected);
+    // A member holds no registry: the tip statements alone name them.
+    let member = Device::new(Database::join(
+        open(&root.path().join("member"), &hub),
+        &device
+            .invite_as(json!({"kind":"reader","scopes":["notes"]}))
+            .await,
+    )?)?;
+    common::introduce(&device, &member).await;
+    member.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(sorted(alerts(&member, "recovery_ended").await), expected);
+    for device in [&member, &again, &device] {
+        device.close().await;
+    }
+    Ok(())
+}

@@ -42,7 +42,9 @@ pub(crate) fn mark(directory: &Path, marker: &Marker) -> Result<(), Failure> {
 /// root, saves a fresh trusted identity holding those keys and puts the
 /// archive's files in place, behind the marker that rebinds them at open.
 /// Nothing is written until every key opened. A recovery of the same
-/// archive left unfinished continues under the identity it saved.
+/// archive left unfinished continues under the identity it saved. Returns
+/// it and the archived identity record, whose revocations say which
+/// trusted identities the recovery revokes.
 pub(crate) async fn recover(
     path: &Path,
     directory: &Path,
@@ -50,7 +52,7 @@ pub(crate) async fn recover(
     archive: &Path,
     root: &crate::RootKey,
     provider: Option<Arc<dyn crate::IdentityProvider>>,
-) -> Result<Settings, Failure> {
+) -> Result<(Settings, Settings), Failure> {
     let staging = directory.join("restore");
     let opened = crate::backup::open(archive, &staging)?;
     if root.public_key() != opened.inventory.publisher {
@@ -125,7 +127,7 @@ pub(crate) async fn recover(
     }
     rocky_platform::fs::remove_dir_all(&staging)?;
     fault::check(directory, fault::Stage::Placed)?;
-    Ok(settings)
+    Ok((settings, opened.identity))
 }
 
 /// Deterministic interruptions of a recovery, for its crash sweep.

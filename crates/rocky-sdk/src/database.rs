@@ -53,9 +53,10 @@ pub struct Opened {
     pub root: Option<crate::RootKey>,
     /// The lost trusted identities a recovery revoked with the root, with
     /// the identities each first enrolled, whose devices enroll again; every
-    /// key rotated. Empty for any other open. A trusted identity the backup
-    /// predates is not known here: revoke it with `Session::revoke_trusted`
-    /// once it appears.
+    /// key rotated. All of them, also those an interrupted attempt revoked.
+    /// Empty for any other open. A trusted identity the backup never knew
+    /// is not named here: the recovery statement ends it, and devices that
+    /// know it report `AlertKind::RecoveryEnded`.
     pub revoked: Vec<rocky_credentials::PublicKey>,
 }
 
@@ -89,6 +90,8 @@ pub(crate) enum Install {
         archive: PathBuf,
         /// Taken once, when the installation is written.
         root: std::sync::Mutex<Option<Box<crate::RootKey>>>,
+        /// The archived identity record, once the archive is opened.
+        archived: std::sync::Mutex<Option<Box<Settings>>>,
     },
 }
 struct Setup {
@@ -118,6 +121,8 @@ enum Command {
         reply: oneshot::Sender<Vec<u8>>,
     },
     End(u64, oneshot::Sender<()>),
+    /// A backup archive, as bytes.
+    Export(oneshot::Sender<Result<Vec<u8>, Failure>>),
     Attach(Network, oneshot::Sender<Result<u64, Failure>>),
     Detach(u64, oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), String>>),
@@ -423,6 +428,7 @@ impl Database {
         Install::Recover {
             archive: archive.to_path_buf(),
             root: std::sync::Mutex::new(Some(Box::new(crate::RootKey::from_secret(root.secret())))),
+            archived: std::sync::Mutex::new(None),
         }
     }
     /// Writes a signed backup archive of this database to `target`; see
@@ -444,6 +450,12 @@ impl Database {
                 .into());
         }
         Ok(reply["value"].to_string())
+    }
+    /// A signed backup archive of this database as bytes, for the app to
+    /// save or a browser to download; `backup` writes the same archive to
+    /// a file. `Configuration::recover_archive` takes the bytes back.
+    pub async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
+        self.shared.request(Command::Export).await?
     }
     // Blocks the caller until the database is open, which a browser cannot.
     #[cfg(not(target_family = "wasm"))]
@@ -1385,7 +1397,11 @@ async fn identity(
             )
             .await
         }
-        Install::Recover { archive, root } => {
+        Install::Recover {
+            archive,
+            root,
+            archived,
+        } => {
             // The root stays for `run_inner` to revoke the lost identities.
             let root = root
                 .lock()
@@ -1393,7 +1409,7 @@ async fn identity(
                 .as_deref()
                 .map(|root| crate::RootKey::from_secret(root.secret()))
                 .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
-            let settings = crate::recovery::recover(
+            let (settings, record) = crate::recovery::recover(
                 path,
                 directory,
                 secrets,
@@ -1403,6 +1419,7 @@ async fn identity(
             )
             .await?;
             drop(root);
+            *archived.lock().map_err(|_| "archive poisoned")? = Some(Box::new(record));
             let Some(network) = network else {
                 return Ok((settings, None));
             };
@@ -1996,7 +2013,12 @@ async fn run_inner(
     // Recovery is for lost trusted nodes: the root revokes them before
     // anyone writes, and is dropped.
     let revoked = match &setup.install {
-        Install::Recover { root, .. } => {
+        Install::Recover { root, archived, .. } => {
+            let archived = archived
+                .lock()
+                .map_err(|_| "archive poisoned")?
+                .take()
+                .ok_or("the recovered archive was not opened")?;
             let root: Arc<crate::RootKey> = root
                 .lock()
                 .map_err(|_| "root poisoned")?
@@ -2010,7 +2032,10 @@ async fn run_inner(
             };
             crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Revoking)
                 .map_err(unfinished)?;
-            let revoked = node.revoke_lost(root).await.map_err(unfinished)?;
+            let revoked = node
+                .revoke_lost(root, &archived)
+                .await
+                .map_err(unfinished)?;
             rocky_platform::fs::remove_file(directory.join(crate::backup::MARKER))?;
             revoked
         }
@@ -2094,6 +2119,11 @@ async fn run_inner(
             Command::Attach(network, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "attach", async move {
                     let _ = reply.send(node.attach(network).await);
+                });
+            }
+            Command::Export(reply) => {
+                crate::reactor::spawn_in(&mut tasks, "export_backup", async move {
+                    let _ = reply.send(node.export_backup().await);
                 });
             }
             Command::Detach(id, reply) => {

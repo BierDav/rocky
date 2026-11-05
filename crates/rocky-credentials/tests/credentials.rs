@@ -136,7 +136,8 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     let credentials = Credentials {
         publisher: domain.publisher.public_key(),
         revocations: domain.policy(),
-        chain,
+        capabilities: chain.delegable(),
+        certificate: chain.certificate().cloned(),
     };
     // Any channel may carry the bytes; they verify on arrival.
     let received = Credentials::from_bytes(&credentials.to_bytes().expect("bytes")).expect("set");
@@ -240,54 +241,11 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
             )
             .is_err()
     );
-    // A leaf cannot add a scope, a right or a field its parent lacks.
-    let root = chain.0[0].clone();
-    let widen = |change: &dyn Fn(&mut ResourceGrant)| {
-        let mut leaf = Capability {
-            subject: node.public_key(),
-            kind: PrincipalKind::Node,
-            delegations: 0,
-            extension: Extension::new(Extended {
-                authors: Some(AuthorRange::new(1, 1).unwrap()),
-                node: Some(rocky_credentials::PeerId::of(node.public_key())),
-                ..Default::default()
-            })
-            .expect("node binding"),
-            ..root.capability.clone()
-        };
-        change(&mut leaf.grants[0]);
-        CredentialChain(vec![
-            root.clone(),
-            SignedCapability::sign(leaf, &user).expect("leaf"),
-        ])
-    };
-    let other = domain.resources[1].scope;
-    assert!(
-        domain
-            .verify(&widen(&|grant| grant.scope = other), &node, &policy, NOW)
-            .is_err()
-    );
-    assert!(
-        domain
-            .verify(
-                &widen(&|grant| {
-                    grant.rights.insert(Right::PublishSchema);
-                }),
-                &node,
-                &policy,
-                NOW
-            )
-            .is_err()
-    );
-    // Narrowing is delegation: fewer rights on selected rows.
-    let narrowed = widen(&|grant| {
-        grant.rights = [Right::Read].into();
-        grant.rows = RowSelection::Only([[1; 32]].into());
-    });
-    let grants = domain
-        .verify(&narrowed, &node, &policy, NOW)
-        .expect("narrowed");
-    assert_eq!(rights(&grants), [Right::Read].into());
+    // A certificate holds no grants of its own: its node holds its
+    // identity's. One naming any is refused.
+    let mut leaf = chain.0[1].capability.clone();
+    leaf.grants = chain.0[0].capability.grants.clone();
+    assert!(SignedCapability::sign(leaf, &user).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -954,9 +912,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     // A node link cannot carry a user extension.
     let mut leaf = chain.0[2].capability.clone();
     leaf.extension = narrowed.0[1].capability.extension.clone();
-    let mut tagged = chain.clone();
-    tagged.0[2] = SignedCapability::sign(leaf, &delegate).expect("signed");
-    assert!(verify(&tagged).is_err());
+    assert!(SignedCapability::sign(leaf, &delegate).is_err());
     // A later extension version is refused with a clear error.
     #[derive(serde::Serialize)]
     struct Later {

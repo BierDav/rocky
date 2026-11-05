@@ -559,7 +559,7 @@ fn issued(
         .capability
         .grants
         .clone();
-    let authority = Authority::issuer(&owner, &issuer);
+    let authority = Authority::issuer(&owner, &issuer)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -574,7 +574,8 @@ fn issued(
     Ok(Credentials {
         publisher: serde_json::from_value(creator["publisher"].clone())?,
         revocations,
-        chain,
+        capabilities: chain,
+        certificate: None,
     })
 }
 

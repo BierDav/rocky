@@ -59,8 +59,12 @@ fn node_of(trusted: &(PrivateKey, CredentialChain), author: u32) -> (PrivateKey,
 /// An issuer identity `parent` enrolls below it.
 fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
-    let link = Authority::issuer(&parent.0, &parent.1)
-        .issue_issuer(key.public_key(), None, (NOW, 30 * DAY, 0))
+    let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
+        .issue_issuer(
+            key.public_key(),
+            Some(rocky_credentials::AuthorRange::ALL),
+            (NOW, 30 * DAY, 0),
+        )
         .unwrap();
     let mut chain = parent.1.clone();
     chain.0.push(link);
@@ -69,7 +73,7 @@ fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChai
 /// A member identity `parent` enrolls, and its node's chain.
 fn member(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, PrivateKey, CredentialChain) {
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
-    let link = Authority::issuer(&parent.0, &parent.1)
+    let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
         .issue_terms(
             user.public_key(),
             vec![rocky_core::ResourceGrant {
@@ -128,7 +132,7 @@ fn a_trusted_grant_never_expires_and_only_the_root_signs_one() {
     );
     // No trusted identity grants trust, and nobody renews a trusted grant.
     assert!(
-        Authority::issuer(&key, &grant)
+        rocky_credentials::testing::authority(&key, &grant)
             .issue_trusted(PrivateKey::new().public_key(), SCOPE, AuthorRange::ALL, NOW)
             .is_err()
     );
@@ -152,7 +156,7 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
         b.1.clone()
             .certify(&b.0, b_node.public_key(), 1001)
             .unwrap();
-    let by_a = Authority::issuer(&a.0, &a.1).revoke(Revocation {
+    let by_a = rocky_credentials::testing::authority(&a.0, &a.1).revoke(Revocation {
         nodes: [rocky_credentials::PeerId::of(b_node.public_key())].into(),
         ..revocation(&a.0, &b.0)
     });
@@ -184,7 +188,7 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
     );
     // A trusted identity still revokes what it did not get from the root.
     let (_, device, chain) = member(&b);
-    let by_a = set(Authority::issuer(&a.0, &a.1)
+    let by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
         .revoke(Revocation {
             nodes: [rocky_credentials::PeerId::of(device.public_key())].into(),
             identities: Default::default(),
@@ -214,7 +218,7 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     };
     assert_eq!(origin(&enrolled), Some(hijacked.0.public_key()));
     // The honest trusted node renews it: the origin stays.
-    let renewed = Authority::issuer(&honest.0, &honest.1)
+    let renewed = rocky_credentials::testing::authority(&honest.0, &honest.1)
         .renew(
             &enrolled.0[1].capability,
             &RevocationSet::new(),
@@ -243,13 +247,13 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     assert!(verify(&own, &own_node).is_ok());
     // No trusted node renews it again; the device enrolls anew.
     assert!(
-        Authority::issuer(&honest.0, &honest.1)
+        rocky_credentials::testing::authority(&honest.0, &honest.1)
             .renew(&renewed.capability, &revoked, (NOW, 30 * DAY, 0))
             .is_err()
     );
     assert!(revoked.revokes_origin(&hijacked.0.public_key()));
     // A trusted identity's statement naming another cascades to nothing.
-    let by_honest = set(Authority::issuer(&honest.0, &honest.1)
+    let by_honest = set(rocky_credentials::testing::authority(&honest.0, &honest.1)
         .revoke(revocation(&honest.0, &hijacked.0))
         .unwrap());
     assert!(
@@ -274,7 +278,7 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     let (_, below_node, below_member) = member(&below);
     let recovered = trusted_at(&root, AuthorRange::recovery(7).unwrap(), NOW + 2 * DAY);
     // A survivor that renewed the device before it learned the recovery.
-    let renewed = Authority::issuer(&recovered.0, &recovered.1)
+    let renewed = rocky_credentials::testing::authority(&recovered.0, &recovered.1)
         .renew(
             &enrolled.0[1].capability,
             &RevocationSet::new(),
@@ -319,7 +323,7 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     // No survivor renews what the ended identity enrolled once it holds
     // the statement.
     assert!(
-        Authority::issuer(&recovered.0, &recovered.1)
+        rocky_credentials::testing::authority(&recovered.0, &recovered.1)
             .renew(&renewed.capability, &set, (at, 30 * DAY, 0))
             .is_err()
     );
@@ -431,7 +435,7 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
         }),
     };
     assert!(
-        Authority::issuer(&first.0, &first.1)
+        rocky_credentials::testing::authority(&first.0, &first.1)
             .revoke(statement.clone())
             .is_err()
     );

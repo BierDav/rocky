@@ -1,5 +1,5 @@
 //! Publisher-bound discovery material; delivered only after session admission.
-use crate::{CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, denied};
+use crate::{CredentialChain, Endorsement, Error, PublicKey, denied};
 use rocky_core::{Commitment, Scope};
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ impl DiscoverySecret {
         scope: Scope,
         statement: Option<Commitment>,
         value: [u8; 32],
-        (signer, chain): (&dyn IdentityProvider, &CredentialChain),
+        (signer, chain): (crate::Signer<'_>, &CredentialChain),
     ) -> Result<Self, Error> {
         Ok(Self {
             scope,

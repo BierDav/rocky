@@ -2,9 +2,10 @@
 //! bytes in, bytes out. Enrollment is optional plumbing over issuance; a
 //! device may equally install credentials supplied another way.
 use crate::{
-    Authority, Capability, CredentialChain, Error, IdentityProvider, MAX_CREDENTIAL_BYTES,
-    MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile, PublicKey, Purpose,
-    RevocationSet, SignedCapability, decode_bounded, denied, encode, signing_bytes,
+    Attestation, Authority, Capability, CredentialChain, Error, IdentityProvider,
+    MAX_CREDENTIAL_BYTES, MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile,
+    PublicKey, Purpose, RevocationSet, SignedCapability, decode_bounded, denied, encode,
+    signing_bytes,
 };
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
@@ -318,9 +319,10 @@ impl RenewRequest {
         }
         let identity = self.chain.provenance(publisher, self.node)?;
         // The identity's link follows the publisher or an issuer link.
-        let granted = match self.chain.0.len().checked_sub(3) {
+        let capabilities = self.chain.capabilities();
+        let granted = match capabilities.0.len().checked_sub(2) {
             None => true,
-            Some(parent) => self.chain.0[parent].capability.extended()?.issues,
+            Some(parent) => capabilities.0[parent].capability.extended()?.issues,
         };
         if !granted {
             return Err(denied("a delegated credential is renewed by its delegator"));
@@ -343,8 +345,8 @@ impl RenewRequest {
 
 /// An issuer's answer: a renewed identity capability with the issuer links
 /// it follows, the revocations the issuer holds and a payload sealed to the
-/// requesting node, such as its reader keys. The issuer's identity signs the
-/// whole answer.
+/// requesting node, such as its reader keys. The issuer's node signs the
+/// whole answer under its certificate; the root signs with its key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Renewal {
     pub capability: SignedCapability,
@@ -354,7 +356,7 @@ pub struct Renewal {
     pub revocations: RevocationSet,
     exchange: [u8; 32],
     sealed: Vec<u8>,
-    signature: Signature,
+    attestation: Attestation,
 }
 impl Renewal {
     fn key(
@@ -374,21 +376,35 @@ impl Renewal {
         ))
     }
     fn body(&self, request: &RenewRequest) -> Result<Vec<u8>, Error> {
+        Self::body_of(
+            request,
+            &self.capability,
+            &self.issuers,
+            &self.revocations,
+            self.exchange,
+            &self.sealed,
+        )
+    }
+    fn body_of(
+        request: &RenewRequest,
+        capability: &SignedCapability,
+        issuers: &CredentialChain,
+        revocations: &RevocationSet,
+        exchange: [u8; 32],
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.renewal.v4",
+            "rocky.credentials.renewal.v5",
             &(
                 request.id()?,
-                self.capability.id()?,
+                capability.id()?,
+                commitment("rocky.credentials.renewal-issuers.v5", &encode(issuers)?),
                 commitment(
-                    "rocky.credentials.renewal-issuers.v4",
-                    &encode(&self.issuers)?,
+                    "rocky.credentials.renewal-revocations.v5",
+                    &encode(revocations)?,
                 ),
-                commitment(
-                    "rocky.credentials.renewal-revocations.v4",
-                    &encode(&self.revocations)?,
-                ),
-                self.exchange,
-                commitment("rocky.credentials.renewal-payload.v4", &self.sealed),
+                exchange,
+                commitment("rocky.credentials.renewal-payload.v5", sealed),
             ),
         )
     }
@@ -422,12 +438,10 @@ impl Renewal {
             .verify_selectors(publisher, request.node, &revocations, time)?;
         let capability = request
             .chain
+            .capabilities()
             .0
-            .iter()
-            .rev()
-            .nth(1)
-            .ok_or_else(|| denied("empty epoch request chain"))?
-            .clone();
+            .pop()
+            .ok_or_else(|| denied("empty epoch request chain"))?;
         Self::seal_capability(authority, request, capability, revocations, payload)
     }
     fn seal_capability(
@@ -444,19 +458,22 @@ impl Renewal {
             b"rocky.credentials.renewal.v4",
             payload,
         )?;
-        let mut renewal = Self {
+        let body = Self::body_of(
+            request,
+            &capability,
+            authority.prefix(),
+            &revocations,
+            exchange,
+            &sealed,
+        )?;
+        Ok(Self {
             capability,
             issuers: authority.prefix().clone(),
             revocations,
             exchange,
             sealed,
-            // Replaced below; a signature has no neutral value.
-            signature: PrivateKey::new().sign(&[]),
-        };
-        renewal.signature = authority
-            .identity
-            .sign(Purpose::Statement, &renewal.body(request)?)?;
-        Ok(renewal)
+            attestation: authority.signer.attest(Purpose::Statement, &body)?,
+        })
     }
     /// The identity that answered: the owner or an issuer of `publisher`.
     pub fn signer(&self, publisher: PublicKey) -> Result<PublicKey, Error> {
@@ -466,8 +483,8 @@ impl Renewal {
             self.issuers.issuer(publisher, None)
         }
     }
-    /// Checks that the owner or an issuer of the pinned `publisher` answered
-    /// exactly `request`, and opens the payload. The renewed chain is
+    /// Checks that the owner's key or an issuer's node of the pinned
+    /// `publisher` answered exactly `request`, and opens the payload. The renewed chain is
     /// `chain`; its receiver verifies it under its revocations.
     pub fn open(
         &self,
@@ -478,7 +495,12 @@ impl Renewal {
         let signer = self
             .signer(publisher)
             .map_err(|_| denied("renewal is not signed by the domain's owner or an issuer"))?;
-        if !signer.verify(&self.body(request)?, &self.signature) {
+        if self.issuers.0.is_empty() != self.attestation.certificate().is_none()
+            || self
+                .attestation
+                .verify(signer, &self.body(request)?)
+                .is_err()
+        {
             return Err(denied(
                 "renewal is not signed by the domain's owner or an issuer",
             ));

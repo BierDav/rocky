@@ -167,7 +167,8 @@ impl CredentialChain {
                 authors: Some(AuthorRange::new(author, author)?),
                 ..Extended::default()
             })?,
-            ..parent
+            not_before: parent.not_before,
+            expires: crate::NEVER,
         };
         self.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(self)

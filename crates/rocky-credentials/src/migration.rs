@@ -1,7 +1,7 @@
 //! Only the migration opening's identity may authorize its finite bulk run.
 use crate::{
-    AuthorBinding, CredentialChain, Endorsement, Error, IdentityProvider, PeerId, PublicKey,
-    RevocationSet, TipGraph, decode_bounded, denied, encode,
+    AuthorBinding, CredentialChain, Endorsement, Error, PeerId, PublicKey, RevocationSet, TipGraph,
+    decode_bounded, denied, encode,
 };
 use rocky_core::{Commitment, MigrationPublicationStatement};
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,9 @@ pub struct SignedMigrationPublication {
     pub writer: AuthorBinding,
 }
 impl SignedMigrationPublication {
-    pub fn endorse(
+    pub fn endorse<'s>(
         statement: MigrationPublicationStatement,
-        signer: &dyn IdentityProvider,
+        signer: impl Into<crate::Signer<'s>>,
         chain: &CredentialChain,
         writer: CredentialChain,
     ) -> Result<Self, Error> {

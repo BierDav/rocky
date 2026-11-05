@@ -1,7 +1,6 @@
 # 2. Identity keys
 
-Status: phase 2a implementation complete (2026-11-06). Membership and
-multi-node linking remain for phase 3.
+Status: planned (2026-11-05). Needs phase 1.
 
 Identity keys work like the root: a phrase or a passkey, in memory for one
 call.

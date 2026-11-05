@@ -1,6 +1,6 @@
 # 1. Node-signed authority
 
-Status: implementation complete; workspace fixture cleanup remains (2026-11-06).
+Status: planned (2026-11-05).
 
 The identity key leaves the hot path. Everything a node signs routinely, it
 signs with its own key under its identity's authority. This is the

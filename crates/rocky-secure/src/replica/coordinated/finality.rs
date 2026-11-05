@@ -95,7 +95,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .acknowledgments
                 .iter()
                 .filter_map(|bytes| TerminalAck::from_bytes(bytes).ok())
-                .filter(|ack| ack.statement == statement && ack.verify(publisher, current).is_ok())
+                .filter(|ack| {
+                    ack.statement == statement
+                        && ack.verify(publisher, current).is_ok()
+                        && graph
+                            .ack_beyond_cut(&revocations, ack)
+                            .is_ok_and(|out| !out)
+                })
                 .collect();
             if acknowledges
                 && !acknowledgments
@@ -191,7 +197,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .acknowledgments
             .iter()
             .filter_map(|bytes| TerminalAck::from_bytes(bytes).ok())
-            .filter(|ack| ack.statement == statement && ack.verify(publisher, current).is_ok())
+            .filter(|ack| {
+                ack.statement == statement
+                    && ack.verify(publisher, current).is_ok()
+                    && graph
+                        .ack_beyond_cut(&revocations, ack)
+                        .is_ok_and(|out| !out)
+            })
             .collect();
         if coordinator.node() == *node.public_key().as_bytes()
             && chain

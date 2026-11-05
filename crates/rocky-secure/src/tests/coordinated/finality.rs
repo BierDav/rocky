@@ -135,3 +135,129 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
     let graph = carol.tip_graph(fixture.lineage.domain).await.unwrap();
     assert!(graph.is_final(committed.id().unwrap()).unwrap());
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_final() {
+    let fixture = Fixture::new(1).await;
+    let alice = &fixture.alice;
+    super::seals::follow_main(&fixture).await;
+    let main = tip_log(&fixture.lineage);
+    let line = TipStatement::GenesisLine(
+        SignedGenesisLine::sign(
+            GenesisLineStatement {
+                format: GENESIS_LINE_FORMAT,
+                scope: fixture.lineage.domain,
+                minimum_in_sync: 2,
+            },
+            fixture.lineage.publisher(),
+        )
+        .unwrap(),
+    );
+    alice.1.publish_tip_statements(&[line]).await.unwrap();
+    let tess_identity = PrivateKey::new();
+    let tess_key = PrivateKey::new();
+    let tess = (
+        tess_key.clone(),
+        fixture
+            .lineage
+            .open_trusted(
+                &fixture.dir.path().join("tess.db"),
+                (&tess_identity, &tess_key),
+                3,
+                None,
+            )
+            .await
+            .unwrap(),
+    );
+    let (tom, tina) = (
+        trusted(&fixture, "tom").await,
+        trusted(&fixture, "tina").await,
+    );
+    for node in [&tess, &tom, &tina] {
+        join_main(&fixture, node).await;
+    }
+    let committed = seal(&fixture.lineage, &alice.1, main.tip).await;
+    let next = committed.successor().unwrap().unwrap();
+    tess.1
+        .publish_tip_statements(&[
+            TipStatement::Seal(committed.clone()),
+            bookmark(&fixture.lineage, "main", Some(main.tip), Some(next)),
+        ])
+        .await
+        .unwrap();
+    // All three acknowledge; tina's record carries the three, tom's two.
+    assert_eq!(
+        tess.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
+        0
+    );
+    share(&tess.1, &tom.1).await;
+    tom.1.finalize_seals(fixture.lineage.domain).await.unwrap();
+    // Tina has not seen tom's record yet, so she acknowledges too.
+    share(&tess.1, &tina.1).await;
+    tina.1.finalize_seals(fixture.lineage.domain).await.unwrap();
+    let graph = tina.1.tip_graph(fixture.lineage.domain).await.unwrap();
+    assert!(
+        graph
+            .finalities
+            .iter()
+            .any(|record| record.acknowledgments.len() == 3)
+    );
+
+    // The root revokes tess, keeping none of its acknowledgments. Carol held the records before; dave learns the cut
+    // first.
+    let carol = open(&fixture.lineage, &fixture.dir, "carol", &PrivateKey::new()).await;
+    share(&tina.1, &carol).await;
+    let identity = tess_identity.public_key();
+    let heads = graph.heads(&identity, &tess_key.public_key()).unwrap();
+    assert!(heads.acknowledgments.is_some());
+    let statement = rocky_credentials::Revocation {
+        app: fixture.lineage.domain.app,
+        issuer: fixture.lineage.publisher().public_key(),
+        time: crate::now().unwrap(),
+        nodes: Default::default(),
+        identities: [identity].into(),
+        capabilities: Default::default(),
+        cut: vec![rocky_credentials::Cut {
+            acknowledgments: None,
+            ..heads
+        }],
+    };
+    let revoked = RevocationSet::try_from(vec![
+        rocky_credentials::SignedRevocation::sign(
+            statement,
+            fixture.lineage.publisher(),
+            &rocky_credentials::CredentialChain::default(),
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let dave = open(&fixture.lineage, &fixture.dir, "dave", &PrivateKey::new()).await;
+    for replica in [&carol, &dave] {
+        replica.learn_revocations(&revoked).await.unwrap();
+    }
+    share(&tina.1, &dave).await;
+    for replica in [&carol, &dave] {
+        let graph = replica.tip_graph(fixture.lineage.domain).await.unwrap();
+        assert!(graph.is_final(committed.id().unwrap()).unwrap());
+        assert_eq!(graph.seal(main.tip).unwrap(), Some(&committed));
+        assert!(!graph.finalities.is_empty());
+        assert!(graph.finalities.iter().all(|record| {
+            record.acknowledgments.len() == 2
+                && record
+                    .acknowledgments
+                    .iter()
+                    .all(|ack| ack.signer != tess_key.public_key())
+        }));
+        assert!(graph.past_cut.is_empty());
+        assert_eq!(
+            replica
+                .past_cut_records(fixture.lineage.domain)
+                .await
+                .unwrap(),
+            [(identity, tess_key.public_key(), 0, 1)]
+        );
+        let held = replica.tip_statements(None, 32).await.unwrap();
+        assert!(!held.iter().any(|statement| matches!(statement,
+            TipStatement::Finality(record) if record.acknowledgments.iter().any(|ack| ack.signer == tess_key.public_key()))));
+    }
+}

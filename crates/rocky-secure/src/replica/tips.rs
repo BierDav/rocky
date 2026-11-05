@@ -4,8 +4,9 @@ pub(super) mod refresh;
 use rocky_core::Scope;
 use rocky_credentials::{
     SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedGenesisLine, SignedSeal,
-    SignedTipOpening, TipGraph,
+    SignedTipOpening, TerminalAck, TipGraph,
 };
+use std::collections::BTreeMap;
 
 /// Largest stored or exchanged tip statement: a finality record.
 pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = SECURE_MESSAGE_BYTES - 1024;
@@ -44,9 +45,9 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_line_nodes(line BLOB PRIMARY KEY,node BLOB NOT NULL UNIQUE) WITHOUT ROWID",
     // The last terminal acknowledgment each local node signed: its chain's head.
     "CREATE TABLE IF NOT EXISTS secure_ack_chain(lane BLOB PRIMARY KEY,ack BLOB NOT NULL) WITHOUT ROWID",
-    // Statements a root revocation's cut left out for good, refused on
-    // arrival or pruned: what the past-cut alert counts, never stored.
-    "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,PRIMARY KEY(scope,digest)) WITHOUT ROWID",
+    // Statements and acknowledgments a root revocation's cut left out for
+    // good, refused on arrival or pruned: what the past-cut alert counts.
+    "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,ack INTEGER NOT NULL CHECK(ack IN(0,1)),PRIMARY KEY(scope,digest)) WITHOUT ROWID",
 ];
 /// Past-cut statements recorded per chain; more count no further.
 const MAX_PAST_CUT_RECORDS: i64 = 256;
@@ -803,8 +804,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(changed)
     }
     /// Deletes the statements a cut leaves out for good that nothing kept
-    /// refers to, recording them for the alert. Inside the caller's
-    /// transaction; returns whether a graph changed.
+    /// refers to, and strips such acknowledgments from finality records,
+    /// dropping a record left below its line's minimum; records both for
+    /// the alert. Inside the caller's transaction; returns whether a graph
+    /// changed.
     pub(in crate::replica) async fn prune_past_cut(
         &mut self,
         revocations: &rocky_credentials::RevocationSet,
@@ -819,13 +822,13 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             };
             let prunable = graph.prunable(revocations, &pinned).map_err(credential)?;
-            if prunable.is_empty() {
-                continue;
-            }
-            let pruned: Vec<TipStatement> = graph_statements(graph)
-                .into_iter()
-                .filter(|statement| statement.id().is_ok_and(|id| prunable.contains(&id)))
-                .collect();
+            let pruned: Vec<TipStatement> = match prunable.is_empty() {
+                true => Vec::new(),
+                false => graph_statements(graph)
+                    .into_iter()
+                    .filter(|statement| statement.id().is_ok_and(|id| prunable.contains(&id)))
+                    .collect(),
+            };
             for statement in &pruned {
                 self.record_past_cut(scope, statement).await?;
                 self.conn
@@ -835,8 +838,37 @@ impl<A: RowApplication> Inner<A> {
                     )
                     .await?;
             }
-            if let Some(graph) = self.graphs.get_mut(&scope) {
+            let Some(graph) = self.graphs.get_mut(&scope) else {
+                continue;
+            };
+            if !prunable.is_empty() {
                 graph.remove_statements(&prunable).map_err(credential)?;
+            }
+            let stripped = graph.strip_finalities(revocations).map_err(credential)?;
+            for record in &stripped {
+                for ack in &record.acknowledgments {
+                    self.record_past_cut_ack(scope, ack).await?;
+                }
+                self.conn
+                    .execute(
+                        "DELETE FROM secure_tip_statements WHERE digest=?",
+                        [record.record.to_vec()],
+                    )
+                    .await?;
+                if let Some(kept) = &record.kept {
+                    let statement = TipStatement::Finality(kept.clone());
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO secure_tip_statements(digest,statement,staged) VALUES(?,?,0)",
+                            [statement.id()?.to_vec(), encode(&statement)?],
+                        )
+                        .await?;
+                }
+            }
+            if prunable.is_empty() && stripped.is_empty() {
+                continue;
+            }
+            if let Some(graph) = self.graphs.get_mut(&scope) {
                 graph.exclude_revoked(revocations).map_err(credential)?;
             }
             changed = true;
@@ -882,10 +914,39 @@ impl<A: RowApplication> Inner<A> {
         let Some((identity, link)) = statement.chain_place() else {
             return Ok(());
         };
+        self.record_past(scope, statement.id()?, identity, link.lane, false)
+            .await
+    }
+    /// Records an acknowledgment a cut leaves out, as [`Self::record_past_cut`].
+    pub(in crate::replica) async fn record_past_cut_ack(
+        &self,
+        scope: Scope,
+        ack: &TerminalAck,
+    ) -> Result<(), Error> {
+        let Some(identity) = ack.identity() else {
+            return Ok(());
+        };
+        self.record_past(
+            scope,
+            ack.id().map_err(credential)?,
+            identity,
+            ack.link.lane,
+            true,
+        )
+        .await
+    }
+    async fn record_past(
+        &self,
+        scope: Scope,
+        id: Commitment,
+        identity: PublicKey,
+        lane: PublicKey,
+        ack: bool,
+    ) -> Result<(), Error> {
         let (scope, identity, lane) = (
             encode(&scope)?,
             identity.as_bytes().to_vec(),
-            link.lane.as_bytes().to_vec(),
+            lane.as_bytes().to_vec(),
         );
         let held = collect_rows(
             self.conn
@@ -906,12 +967,13 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO secure_past_cut VALUES(?,?,?,?)",
+                "INSERT OR IGNORE INTO secure_past_cut VALUES(?,?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(scope),
-                    SqlValue::Blob(statement.id()?.to_vec()),
+                    SqlValue::Blob(id.to_vec()),
                     SqlValue::Blob(identity),
                     SqlValue::Blob(lane),
+                    SqlValue::Integer(i64::from(ack)),
                 ]),
             )
             .await?;
@@ -1476,22 +1538,55 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
     }
     /// Leaves out of a received batch the statements a cut this replica
-    /// holds refuses for good, recording them for the alert.
+    /// holds refuses for good, and strips such acknowledgments from its
+    /// finality records, leaving out a record then below its line's
+    /// minimum; records both for the alert.
     async fn refuse_past_cut(
         &self,
         statements: &[TipStatement],
     ) -> Result<Vec<TipStatement>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let revocations = &inner.config.revocations;
         let mut kept = Vec::with_capacity(statements.len());
+        // The graph with the batch's statements, for a stripped record's minimum.
+        let mut batch: BTreeMap<Scope, TipGraph> = BTreeMap::new();
         for statement in statements {
-            let beyond = match (
-                statement.chain_place(),
-                inner.graphs.get(&statement.scope()),
-            ) {
-                (Some((identity, link)), Some(graph)) => graph
-                    .beyond_cut(&inner.config.revocations, &identity, &link, statement.id()?)
+            let Some(graph) = inner.graphs.get(&statement.scope()) else {
+                kept.push(statement.clone());
+                continue;
+            };
+            if let TipStatement::Finality(record) = statement {
+                let (stripped, acks) = graph
+                    .strip_past_cut(revocations, record)
+                    .map_err(credential)?;
+                if acks.is_empty() {
+                    kept.push(statement.clone());
+                    continue;
+                }
+                for ack in &acks {
+                    inner.record_past_cut_ack(record.scope, ack).await?;
+                }
+                let graph = batch.entry(record.scope).or_insert_with(|| {
+                    let mut graph = graph.clone();
+                    for statement in statements {
+                        if !matches!(statement, TipStatement::Finality(_))
+                            && statement.scope() == record.scope
+                        {
+                            statement.append(&mut graph);
+                        }
+                    }
+                    graph
+                });
+                if graph.meets_minimum(&stripped) {
+                    kept.push(TipStatement::Finality(stripped));
+                }
+                continue;
+            }
+            let beyond = match statement.chain_place() {
+                Some((identity, link)) => graph
+                    .beyond_cut(revocations, &identity, &link, statement.id()?)
                     .map_err(credential)?,
-                _ => false,
+                None => false,
             };
             match beyond {
                 true => inner.record_past_cut(statement.scope(), statement).await?,
@@ -1500,26 +1595,31 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(kept)
     }
-    /// The statements cuts refused or pruned here, per identity and lane.
+    /// The statements and acknowledgments cuts refused or pruned here, per
+    /// identity and lane: `(identity, lane, statements, acknowledgments)`.
     pub async fn past_cut_records(
         &self,
         scope: Scope,
-    ) -> Result<Vec<(PublicKey, PublicKey, u64)>, Error> {
+    ) -> Result<Vec<(PublicKey, PublicKey, u64, u64)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut counts = Vec::new();
         for record in collect_rows(
             inner
                 .conn
                 .query(
-                    "SELECT identity,lane,COUNT(*) FROM secure_past_cut WHERE scope=? GROUP BY identity,lane",
+                    "SELECT identity,lane,SUM(ack=0),SUM(ack) FROM secure_past_cut WHERE scope=? GROUP BY identity,lane",
                     [encode(&scope)?],
                 )
                 .await?,
         )
         .await?
         {
-            let [SqlValue::Blob(identity), SqlValue::Blob(lane), SqlValue::Integer(count)] =
-                record.as_slice()
+            let [
+                SqlValue::Blob(identity),
+                SqlValue::Blob(lane),
+                SqlValue::Integer(statements),
+                SqlValue::Integer(acknowledgments),
+            ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("past cut record".into()));
             };
@@ -1529,7 +1629,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .map_err(|_| Error::Corrupt("past cut key".into()))?;
                 PublicKey::from_bytes(&bytes).map_err(|_| Error::Corrupt("past cut key".into()))
             };
-            counts.push((key(identity)?, key(lane)?, u64::try_from(*count).unwrap_or_default()));
+            counts.push((
+                key(identity)?,
+                key(lane)?,
+                u64::try_from(*statements).unwrap_or_default(),
+                u64::try_from(*acknowledgments).unwrap_or_default(),
+            ));
         }
         Ok(counts)
     }

@@ -1498,7 +1498,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
         assert!(graph.past_cut.is_empty());
         assert_eq!(
             replica.past_cut_records(f.public.domain).await.unwrap(),
-            [(trusted.public_key(), trusted.public_key(), 1)]
+            [(trusted.public_key(), trusted.public_key(), 1, 0)]
         );
         let held = replica.tip_statements(None, 32).await.unwrap();
         assert!(!held.contains(&TipStatement::Bookmark(late.clone())));

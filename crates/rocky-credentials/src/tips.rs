@@ -2,7 +2,7 @@
 use crate::revocation::{Cut, Head};
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
-    SignedCheckpointRecord, decode_bounded, denied, encode,
+    SignedCheckpointRecord, TerminalAck, decode_bounded, denied, encode,
 };
 use rocky_core::{Commitment, Scope, TipId};
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,16 @@ pub struct PastCut {
     pub identity: PublicKey,
     pub link: ChainLink,
     pub acknowledgment: bool,
+}
+
+/// A finality record a cut changed: its old ID, the record that replaced
+/// it, if any still meets its line's minimum, and the acknowledgments
+/// stripped from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrippedFinality {
+    pub record: Commitment,
+    pub kept: Option<SealFinality>,
+    pub acknowledgments: Vec<TerminalAck>,
 }
 
 /// Genesis uses the current schema digest; its domain is the graph's scope.
@@ -505,16 +515,56 @@ fn kept(
     kept
 }
 
+/// Whether `heads` of a cut leave out the chain item `id` at `link` for
+/// good, over the held `links`: at or after a head's place without being
+/// it, or before one and off the path the held items lead back along.
+fn beyond(
+    links: &BTreeMap<Commitment, (PublicKey, ChainLink)>,
+    heads: &BTreeSet<Head>,
+    link: &ChainLink,
+    id: Commitment,
+) -> bool {
+    for head in heads {
+        if head.id == id {
+            return false;
+        }
+        // A head reaches only lower places.
+        if link.sequence >= head.sequence {
+            continue;
+        }
+        // Walk back from the head while the graph holds it.
+        let mut cursor = head.id;
+        let reached = loop {
+            let Some((_, held)) = links.get(&cursor) else {
+                // Not held: undecided until it arrives.
+                break true;
+            };
+            match held.previous {
+                Some(previous) if held.sequence > link.sequence + 1 => cursor = previous,
+                Some(previous) => break previous == id,
+                None => break false,
+            }
+        };
+        if reached {
+            return false;
+        }
+    }
+    true
+}
+
 /// Chained statements' identities and links by ID: built over the graph's lists as they grow, rebuilt when one
 /// changed otherwise. Never compared or serialized.
 #[derive(Default)]
 struct ChainIndex(Mutex<Places>);
 #[derive(Clone, Default)]
 struct Places {
-    /// Per list: how many it indexed, and the last one's ID.
-    built: [(usize, Option<Commitment>); 5],
+    /// Per list, finality records last: how many it indexed, and the last
+    /// one's ID.
+    built: [(usize, Option<Commitment>); 6],
     /// Each chained statement's identity and link, by ID.
     links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
+    /// Each acknowledgment's identity and link, by ID.
+    acks: BTreeMap<Commitment, (PublicKey, ChainLink)>,
 }
 impl Clone for ChainIndex {
     fn clone(&self) -> Self {
@@ -535,6 +585,41 @@ impl std::fmt::Debug for ChainIndex {
 impl ChainIndex {
     fn places(&self) -> MutexGuard<'_, Places> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+/// What a graph list's item adds to the chain index.
+trait Indexed {
+    fn index(&self, places: &mut Places) -> Result<(), Error>;
+}
+macro_rules! indexed_statement {
+    ($($signed:ty),*) => {$(
+        impl Indexed for $signed {
+            fn index(&self, places: &mut Places) -> Result<(), Error> {
+                if let (Some(link), Some(signer)) =
+                    (self.link, Endorsement::signer_of(&self.endorsement().chain))
+                {
+                    places.links.insert(self.id()?, (signer, link));
+                }
+                Ok(())
+            }
+        }
+    )*};
+}
+indexed_statement!(
+    SignedSeal,
+    SignedTipOpening,
+    SignedBookmarkMove,
+    SignedGenesisLine,
+    SignedCheckpointRecord
+);
+impl Indexed for SealFinality {
+    fn index(&self, places: &mut Places) -> Result<(), Error> {
+        for ack in &self.acknowledgments {
+            if let Some(identity) = ack.identity() {
+                places.acks.insert(ack.id()?, (identity, ack.link));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -669,15 +754,13 @@ impl TipGraph {
                     let from = index.built[$n].0;
                     for signed in self.$list.iter().skip(from) {
                         let id = signed.id()?;
-                        if let (Some(link), Some(signer)) = (signed.link, Endorsement::signer_of(&signed.endorsement().chain)) {
-                            index.links.insert(id, (signer, link));
-                        }
+                        signed.index(&mut index)?;
                         index.built[$n] = (from.max(index.built[$n].0) + 1, Some(id));
                     }
                 )*
             };
         }
-        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints);
+        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints, 5 finalities);
         Ok(index)
     }
     /// Every signed statement: a lazy ID, its chain and its link.
@@ -844,33 +927,94 @@ impl TipGraph {
         let Some(heads) = revocations.cut(identity, &link.lane) else {
             return Ok(false);
         };
-        let index = self.indexed()?;
-        for head in &heads.statements {
-            if head.id == id {
-                return Ok(false);
-            }
-            // A head reaches only lower places.
-            if link.sequence >= head.sequence {
-                continue;
-            }
-            // Walk back from the head while the graph holds it.
-            let mut cursor = head.id;
-            let reached = loop {
-                let Some((_, held)) = index.links.get(&cursor) else {
-                    // Not held: undecided until it arrives.
-                    break true;
-                };
-                match held.previous {
-                    Some(previous) if held.sequence > link.sequence + 1 => cursor = previous,
-                    Some(previous) => break previous == id,
-                    None => break false,
-                }
-            };
-            if reached {
-                return Ok(false);
+        Ok(beyond(&self.indexed()?.links, &heads.statements, link, id))
+    }
+    /// Whether a root statement's cut leaves out `ack` for good, as
+    /// [`Self::beyond_cut`] judges statements against its acknowledgment head.
+    pub fn ack_beyond_cut(
+        &self,
+        revocations: &RevocationSet,
+        ack: &TerminalAck,
+    ) -> Result<bool, Error> {
+        let Some(heads) = ack
+            .identity()
+            .and_then(|identity| revocations.cut(&identity, &ack.link.lane))
+        else {
+            return Ok(false);
+        };
+        Ok(beyond(
+            &self.indexed()?.acks,
+            &heads.acknowledgments,
+            &ack.link,
+            ack.id()?,
+        ))
+    }
+    /// `record` without the acknowledgments a cut leaves out for good, and
+    /// those, in its order.
+    pub fn strip_past_cut(
+        &self,
+        revocations: &RevocationSet,
+        record: &SealFinality,
+    ) -> Result<(SealFinality, Vec<TerminalAck>), Error> {
+        let mut kept = record.clone();
+        let mut stripped = Vec::new();
+        kept.acknowledgments.clear();
+        for ack in &record.acknowledgments {
+            match self.ack_beyond_cut(revocations, ack)? {
+                true => stripped.push(ack.clone()),
+                false => kept.acknowledgments.push(ack.clone()),
             }
         }
-        Ok(true)
+        Ok((kept, stripped))
+    }
+    /// Whether `record`, judged without verifying its acknowledgments, has
+    /// as many as its seal's line needs. A record whose seal or minimum
+    /// the graph lacks passes; verification judges it.
+    pub fn meets_minimum(&self, record: &SealFinality) -> bool {
+        !record.acknowledgments.is_empty()
+            && self
+                .finality_minimum(record)
+                .ok()
+                .is_none_or(|minimum| record.acknowledgments.len() >= minimum)
+    }
+    /// Strips every finality record of the acknowledgments a cut leaves
+    /// out for good, dropping a record left below its line's minimum or
+    /// equal to another. Returns, per changed record, its old ID, what
+    /// replaced it and the stripped acknowledgments.
+    pub fn strip_finalities(
+        &mut self,
+        revocations: &RevocationSet,
+    ) -> Result<Vec<StrippedFinality>, Error> {
+        let mut changed = Vec::new();
+        let mut finalities = Vec::with_capacity(self.finalities.len());
+        let mut held = BTreeSet::new();
+        for record in &self.finalities {
+            let (kept, acknowledgments) = self.strip_past_cut(revocations, record)?;
+            if acknowledgments.is_empty() {
+                if held.insert(record.id()?) {
+                    finalities.push(record.clone());
+                }
+                continue;
+            }
+            let kept = Some(kept).filter(|kept| self.meets_minimum(kept));
+            let replaced = match &kept {
+                Some(kept) if held.insert(kept.id()?) => {
+                    finalities.push(kept.clone());
+                    kept.clone().into()
+                }
+                _ => None,
+            };
+            changed.push(StrippedFinality {
+                record: record.id()?,
+                kept: replaced,
+                acknowledgments,
+            });
+        }
+        if !changed.is_empty() {
+            self.finalities = finalities;
+            *self.index.places() = Places::default();
+        }
+        Ok(changed)
     }
     /// The statements a cut leaves out for good (see [`Self::beyond_cut`])
     /// that no other statement this graph keeps refers to, whether as a

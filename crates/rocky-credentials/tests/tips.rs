@@ -1584,3 +1584,111 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     graph.exclude_revoked(&keep(live_only)).unwrap();
     assert_eq!(graph.revoked, ids(&[&staged]));
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
+    let owner = PrivateKey::new();
+    let issuer = PrivateKey::new();
+    let mut graph = graph();
+    let committed = endorsed(
+        &graph,
+        &owner,
+        graph.genesis(),
+        1,
+        &issuer,
+        &issuer_chain(&owner, &issuer),
+    );
+    graph.seals.push(committed.clone());
+    graph.genesis_lines.push(
+        rocky_credentials::SignedGenesisLine::sign(
+            rocky_credentials::GenesisLineStatement {
+                format: rocky_credentials::GENESIS_LINE_FORMAT,
+                scope: graph.scope,
+                minimum_in_sync: 2,
+            },
+            &owner,
+        )
+        .unwrap(),
+    );
+    let revoked = trusted_node(&graph, &owner);
+    let others: Vec<_> = (0..3).map(|_| trusted_node(&graph, &owner)).collect();
+    // The revoked node acknowledges twice; the cut keeps the first.
+    let kept = ack(&graph, &committed, &revoked);
+    let late = rocky_credentials::TerminalAck::sign(
+        kept.statement.clone(),
+        &revoked.0,
+        revoked.1.clone(),
+        kept.link.next(kept.id().unwrap()),
+    )
+    .unwrap();
+    let record = |acks: Vec<rocky_credentials::TerminalAck>| {
+        rocky_credentials::SealFinality::new(graph.scope, committed.id().unwrap(), acks)
+    };
+    let before = record(vec![kept.clone(), ack(&graph, &committed, &others[0])]);
+    let enough = record(vec![
+        late.clone(),
+        ack(&graph, &committed, &others[1]),
+        ack(&graph, &committed, &others[2]),
+    ]);
+    let short = record(vec![late.clone(), ack(&graph, &committed, &others[2])]);
+    graph.finalities = vec![before.clone(), enough.clone(), short.clone()];
+    let identity = revoked.1.0[0].capability.subject;
+    let statement = rocky_credentials::Revocation {
+        app: graph.scope.app,
+        issuer: owner.public_key(),
+        time: 200,
+        nodes: Default::default(),
+        identities: [identity].into(),
+        capabilities: Default::default(),
+        cut: vec![rocky_credentials::Cut {
+            identity,
+            lane: revoked.0.public_key(),
+            statements: Vec::new(),
+            acknowledgments: Some(rocky_credentials::Head {
+                sequence: 0,
+                id: kept.id().unwrap(),
+            }),
+        }],
+    };
+    let revocations =
+        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
+    assert!(!graph.ack_beyond_cut(&revocations, &kept).unwrap());
+    assert!(graph.ack_beyond_cut(&revocations, &late).unwrap());
+
+    // An arriving record loses the late acknowledgment and still counts.
+    let (stripped, acks) = graph.strip_past_cut(&revocations, &enough).unwrap();
+    assert!(acks == [late.clone()]);
+    assert!(
+        stripped.acknowledgments
+            == enough
+                .acknowledgments
+                .iter()
+                .filter(|ack| **ack != late)
+                .cloned()
+                .collect::<Vec<_>>()
+    );
+    assert!(graph.meets_minimum(&stripped));
+    graph
+        .verify_finality(&stripped, owner.public_key(), Some((&revocations, 300)))
+        .unwrap();
+    let (stripped_short, _) = graph.strip_past_cut(&revocations, &short).unwrap();
+    assert!(!graph.meets_minimum(&stripped_short));
+
+    // A holder strips its records: the one below the minimum goes.
+    let changed = graph.strip_finalities(&revocations).unwrap();
+    assert!(
+        changed
+            .iter()
+            .map(|change| (change.record, change.kept.clone()))
+            .collect::<Vec<_>>()
+            == [
+                (enough.id().unwrap(), Some(stripped)),
+                (short.id().unwrap(), None)
+            ]
+    );
+    assert_eq!(graph.finalities.len(), 2);
+    assert!(graph.finalities[0] == before);
+    graph.exclude_revoked(&revocations).unwrap();
+    assert!(graph.is_final(committed.id().unwrap()).unwrap());
+    assert!(graph.strip_finalities(&revocations).unwrap().is_empty());
+}

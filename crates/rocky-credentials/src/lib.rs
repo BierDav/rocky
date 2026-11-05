@@ -79,7 +79,8 @@ pub use tips::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, ChainLink, Equivocation,
     GENESIS_LINE_FORMAT, GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, PastCut, Recovery,
     SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedGenesisLine, SignedSeal,
-    SignedTipOpening, TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
+    SignedTipOpening, StrippedFinality, TIP_OPENING_FORMAT, TipAuthority, TipGraph,
+    TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

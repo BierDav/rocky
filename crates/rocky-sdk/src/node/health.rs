@@ -326,8 +326,12 @@ impl Node {
         };
         let mut past: BTreeMap<(PublicKey, PublicKey), (u64, u64)> = BTreeMap::new();
         // Refused on arrival or pruned: no longer held, still counted.
-        for (identity, lane, count) in self.replica.past_cut_records(graph.scope).await? {
-            past.entry((identity, lane)).or_default().0 += count;
+        for (identity, lane, statements, acknowledgments) in
+            self.replica.past_cut_records(graph.scope).await?
+        {
+            let counts = past.entry((identity, lane)).or_default();
+            counts.0 += statements;
+            counts.1 += acknowledgments;
         }
         for item in &graph.past_cut {
             let counts = past.entry((item.identity, item.link.lane)).or_default();

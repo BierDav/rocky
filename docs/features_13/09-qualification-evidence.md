@@ -1102,8 +1102,14 @@ points, and the `board_cap` assertion bounds a board's points.
   leaves out for good (at or past a head's place without being it, or
   before a held head and off its path) and deletes stored ones, except
   what a kept statement or local state (bases, replays, relays, pulls,
-  staged statements, followed tips) refers to. Both are recorded
-  (`secure_past_cut`, 256 per chain) and counted in the alert.
+  staged statements, followed tips) refers to. Acknowledgments are judged
+  the same way against the cut's acknowledgment head: a finality record
+  carries no signature of its own, so a holder strips past-cut ones from a
+  record on arrival, when pruning and when building one from the
+  coordinator's acknowledgments, and keeps the smaller record (a new ID,
+  same format) while it still meets its line's minimum; otherwise the
+  record goes. All are recorded (`secure_past_cut`, statements and
+  acknowledgments apart, 256 per chain) and counted in the alert.
 - Own chain: a node's next link comes after its held and journaled
   statements; one chained after a statement still waiting for its
   coordinated log entry is journaled behind it (`chain_pending`,
@@ -1139,9 +1145,15 @@ points, and the `board_cap` assertion bounds a board's points.
   statements in the live chain fails the stage test; ignoring journaled
   statements fails the waiting-seal test; without the cut the creator
   revocation deletes `main`.
-- Limits: acknowledgments past a cut are left out of finality but not
-  refused or deleted, since they arrive inside finality records whose other
-  acknowledgments count. A stage branch tag is unauthenticated within the
+- Follow-ups (`lane/cut-followups`): acknowledgments past a cut,
+  rocky-credentials `tips::a_cut_strips_the_acknowledgments_past_its_head_from_finality_records`
+  and rocky-secure
+  `coordinated::finality::a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_final`
+  (a holder that held the records before the cut and one that learned the
+  cut first both keep the seal final on the other two nodes'
+  acknowledgments); judging no acknowledgment past its cut fails it.
+  `secure_past_cut` gains `ack`; file identity `rocky.encrypted-replica.v52`.
+- Limits: A stage branch tag is unauthenticated within the
   identity: a node of a trusted identity can branch its own chain without
   an equivocation alert; a cut still keeps only named heads. A cut of a
   node with many stage branches signed alongside live statements needs a

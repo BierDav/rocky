@@ -459,6 +459,14 @@ pub enum AlertKind {
         sequence: u64,
         acknowledgment: bool,
     },
+    /// The peer `node` carried `records` root escrow records this device
+    /// refused, the latest because `reason`: no key holder of their scope
+    /// vouched for them. A genuine record is never displaced by one.
+    EscrowRefused {
+        node: String,
+        records: u64,
+        reason: String,
+    },
 }
 /// How long a trusted node may stay unheard before the others flag it.
 pub const TRUSTED_STALE_AFTER: std::time::Duration =

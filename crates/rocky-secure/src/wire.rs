@@ -40,11 +40,11 @@ pub(crate) struct Extensions {
     pub births: Vec<serde_bytes::ByteArray<32>>,
 }
 
+/// Key holders whose vouched root escrow records a replica keeps for one
+/// key epoch; a further one is refused.
+pub(crate) const MAX_ESCROW_SIGNERS: usize = 32;
 /// Source-schema ordinals and frame-bound birth statements, without
 /// existence counts; a partition's tuple only inside the sealed body.
-/// Distinct root escrow records peers may carry for one key epoch:
-/// anyone can seal to the root, so a recovery tries each.
-pub(crate) const MAX_CARRIED_ESCROW: usize = 4;
 pub(crate) const ROW_FORMAT: u8 = 16;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";

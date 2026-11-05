@@ -111,16 +111,21 @@ fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
         directory.join("rocky.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let mut statement = file.prepare("SELECT tag,record FROM secure_escrow")?;
+    let mut statement = file.prepare("SELECT scope,record FROM secure_escrow")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     rows.map(|row| {
-        let (tag, record) = row?;
-        Ok((
-            data_encoding::HEXLOWER.encode(&tag),
-            RootEscrow::from_bytes(&record)?,
-        ))
+        // Records of a key epoch are vouched for by their sealer.
+        let (scope, record) = row?;
+        let record = if scope.is_empty() {
+            RootEscrow::from_bytes(&record)?
+        } else {
+            rocky_credentials::VouchedEscrow::from_bytes(&record)?
+                .record()
+                .clone()
+        };
+        Ok((data_encoding::HEXLOWER.encode(&record.tag()), record))
     })
     .collect()
 }

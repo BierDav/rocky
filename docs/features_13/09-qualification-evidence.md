@@ -1238,12 +1238,31 @@ points, and the `board_cap` assertion bounds a board's points.
 - Travel: before a page, a session carries the records of each key epoch
   its frames name, once per session (`Escrow` message, modelled on chain
   carriage). This happens on range pages, pushes, held-change pages and
-  held pushes. A receiver keeps the records of the frames it accepts, at
-  most 4 distinct per epoch (`MAX_CARRIED_ESCROW`); its own seal replaces
-  a carried record of its tag. Every holder of a scope therefore holds
-  them: keyless custody, partial devices and any backup. Records are opaque
-  and reach only a peer that receives those frames anyway. The coordinator
-  never receives frames, so it never holds one.
+  held pushes. Every holder of a scope therefore holds them: keyless
+  custody, partial devices and any backup. Records are opaque and reach
+  only a peer that receives those frames anyway. The coordinator never
+  receives frames, so it never holds one.
+- Authentication: anyone can seal to the root, so a carried record is a
+  `VouchedEscrow`. The node that sealed it signs (scope, epoch, signer,
+  time, its credential chain, record).
+  - A receiver keeps a record only when the signature verifies, the time
+    is at most `MAX_CLOCK_AHEAD` ahead, and the chain, at the signing time
+    and under the current revocations, grants the signer Read on the
+    whole scope. Frame authors are judged the same way.
+  - Records are stored one per vouching key holder (primary key: scope,
+    epoch, signer), and a signer replaces only its own. Unverified
+    records are never stored, and nothing is first-come, so a forged
+    record cannot displace a genuine one. A compromised key holder adds at
+    most its own row, and recovery skips any record that does not open to
+    its epoch's key.
+  - At most `MAX_ESCROW_SIGNERS` (32) holders are kept per epoch; a
+    further one is refused.
+  - Each refusal is counted durably against the peer that carried it
+    (`secure_escrow_refused`). The app sees it as
+    `AlertKind::EscrowRefused { node, records, reason }` in status and
+    health.
+  - A node's own records are signed when sealed (`keep_escrow`), and the
+    SDK's dedupe (`escrowed`) counts only its own.
 - Derivation: the root's Ed25519 key mapped to X25519 (birational map;
   secret scalar = clamped first half of SHA-512 of the root secret, as
   libsodium's `ed25519_*_to_curve25519`). Record `rocky.root-escrow.v1`
@@ -1287,6 +1306,7 @@ points, and the `board_cap` assertion bounds a board's points.
   a_recovery_takes_author_numbers_no_trusted_node_handed_out,
   a_recovery_revokes_every_lost_trusted_identity_it_knows,
   a_custodians_store_and_the_root_recover_what_it_holds}`;
+  rocky-secure `tests::escrow::forged_escrow_records_sent_first_never_displace_the_genuine_one`;
   `escrow::tests::recovery_opens_the_records_of_held_epochs_skips_forgeries_and_names_a_gap`;
   rocky-credentials `escrow::tests::only_the_root_opens_a_record_and_it_names_nothing`.
   - Custodian test: a keyless custodian of the notes and of one list
@@ -1297,7 +1317,14 @@ points, and the `board_cap` assertion bounds a board's points.
     writes on.
   - Author-number test: an issuer is enrolled after the backup, and the
     recovered range is disjoint from both the issuer's and the creator's.
-- Mutations: disabling carriage leaves the custodian with no records
+  - Forging test: a serving peer sends four junk records, sealed to the
+    root and signed by keys without their own chain, ahead of the key
+    holder's genuine record. The receiver keeps only the genuine one,
+    which opens with the root, and counts four refusals against that
+    peer.
+- Mutations: keeping carried records unjudged, first come up to four (the
+  previous rule), fails the forging test: the four forgeries are kept and
+  the genuine record is refused. Disabling carriage leaves the custodian with no records
   (test fails). The pre-fix `minting.split()` allocation fails the
   author-number test (overlap). Dropping the escrow of a rotated group
   secret fails recovery and names the epoch.
@@ -1313,15 +1340,22 @@ points, and the `board_cap` assertion bounds a board's points.
   - Two recoveries from copies that never learned of each other share a
     slot with probability 1/16384.
   - Records of an evicted partition stay, opaque, in the evicting store.
+  - A compromised issuer can enroll devices of its own that can read the
+    scope and fill an epoch's `MAX_ESCROW_SIGNERS` with junk; a later
+    holder's record is then refused, but the refusal is reported. A
+    revoked signer's records are refused when carried again; other
+    holders' records still travel.
   - A crash between recovery's first open and its key install leaves a
     file that needs the recovery redone.
   - A browser has no recovery; opening needs the root secret (`RootKey`).
-- Formats: replica `rocky.encrypted-replica.v53` (`secure_escrow`);
-  identity `VERSION` 27.
-- Checks on 40ae8eb6:
+- Formats: replica `rocky.encrypted-replica.v54` (`secure_escrow` keyed by
+  signer, `secure_escrow_refused`); link `HANDSHAKE_VERSION` 24 (it also
+  covers the `Escrow` message, which v53 added without a bump); identity
+  `VERSION` 27.
+- Checks on 580d3446:
   - `./scripts/lint`: 0.
-  - `./scripts/check --unit --integration`: 248 unit and 1120 integration
-    tests passed (integration wall 61 s; 4 min 36 s with the build).
+  - `./scripts/check --unit --integration`: 248 unit and 1121 integration
+    tests passed (integration wall 61 s; 4 min 46 s with the build).
   - wasm32 clippy (rocky-credentials, rocky-secure, rocky-sdk): 0.
   - `./scripts/check-wasm-consumer`: 0.
   - Browser test runs were not repeated.

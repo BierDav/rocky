@@ -1,13 +1,14 @@
 //! Root escrow records travel with the data they recover: before a page,
 //! the session carries the records of each key epoch its frames were
-//! sealed under, once per session. The peer keeps those of the frames it
-//! receives, so every holder of a scope, keyless custody too, holds them.
+//! sealed under, once per session, as the key holders that sealed them
+//! vouched for them. The peer keeps those of the frames it receives that a
+//! key holder vouched for, so every holder of a scope, keyless custody
+//! too, holds them, and a forged record never displaces a genuine one.
 //! A record is opaque and names nothing; it reaches only a peer that
 //! receives the frames anyway.
 use super::*;
-use crate::wire::MAX_CARRIED_ESCROW;
 use rocky_core::KeyEpoch;
-use rocky_credentials::RootEscrow;
+use rocky_credentials::VouchedEscrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 type Slot = (ResourceScope, KeyEpoch);
@@ -15,14 +16,17 @@ type Slot = (ResourceScope, KeyEpoch);
 #[derive(Serialize, Deserialize)]
 pub(super) enum EscrowMessage {
     /// Records of the key epochs the next page's frames name. It has no answer.
-    Carry { records: Vec<(Slot, RootEscrow)> },
+    Carry { records: Vec<VouchedEscrow> },
 }
 
 /// Lives one session, like the chain table.
 #[derive(Default)]
 pub(super) struct EscrowTable {
     sent: BTreeSet<Slot>,
-    received: BTreeMap<Slot, Vec<RootEscrow>>,
+    received: BTreeMap<Slot, Vec<VouchedEscrow>>,
+    /// Records sent ahead of the genuine ones, as a forging peer would.
+    #[cfg(test)]
+    forged: Vec<VouchedEscrow>,
 }
 
 fn slots(frames: &[EncryptedFrame]) -> Result<BTreeSet<Slot>, Error> {
@@ -47,25 +51,29 @@ impl NativeSession {
         if fresh.is_empty() {
             return Ok(());
         }
-        let records = replica.escrow_of(&fresh).await?;
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut records = replica.escrow_of(&fresh).await?;
+        #[cfg(test)]
+        records.splice(0..0, std::mem::take(&mut self.escrow.forged));
         if !records.is_empty() {
             self.send(EscrowMessage::Carry { records }).await?;
         }
         Ok(())
     }
-    /// Keeps carried records until frames of their epoch arrive; the
-    /// session's byte budget bounds them.
+    /// Holds carried records until frames of their epoch arrive; the
+    /// session's byte budget bounds them, and none is judged first-come.
     pub(super) fn learn_escrow(&mut self, message: EscrowMessage) {
         let EscrowMessage::Carry { records } = message;
-        for (slot, record) in records {
-            let held = self.escrow.received.entry(slot).or_default();
-            if held.len() < MAX_CARRIED_ESCROW && !held.contains(&record) {
-                held.push(record);
-            }
+        for record in records {
+            self.escrow
+                .received
+                .entry(record.slot())
+                .or_default()
+                .push(record);
         }
     }
-    /// Stores the carried records of the key epochs of `frames`, which
-    /// this node receives.
+    /// Judges and stores the carried records of the key epochs of
+    /// `frames`, which this node receives.
     pub(super) async fn keep_escrow<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -73,10 +81,12 @@ impl NativeSession {
     ) -> Result<(), Error> {
         let mut kept = Vec::new();
         for slot in slots(frames)? {
-            for record in self.escrow.received.remove(&slot).unwrap_or_default() {
-                kept.push((slot, record));
-            }
+            kept.extend(self.escrow.received.remove(&slot).unwrap_or_default());
         }
-        replica.keep_carried_escrow(kept).await
+        replica.keep_carried_escrow(self.peer, kept).await
+    }
+    #[cfg(test)]
+    pub(crate) fn forge_escrow(&mut self, records: Vec<VouchedEscrow>) {
+        self.escrow.forged = records;
     }
 }

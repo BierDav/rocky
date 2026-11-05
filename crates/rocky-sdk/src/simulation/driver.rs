@@ -748,6 +748,9 @@ impl Simulation {
                 crate::AlertKind::TipChainEquivocation { node, sequence, .. } => {
                     format!("{} forked at {sequence}", name(node))
                 }
+                crate::AlertKind::EscrowRefused { node, records, .. } => {
+                    format!("{} escrow refused {records}", name(node))
+                }
                 crate::AlertKind::TrustedNodeStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)

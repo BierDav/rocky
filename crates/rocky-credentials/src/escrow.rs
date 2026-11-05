@@ -12,17 +12,21 @@
 //! secret that only its holders can compute, so a holder skips escrowing
 //! a key twice and nobody else can link a record to anything.
 use crate::{
-    Error, PublicKey, RootKey, decode_bounded, denied, encode,
+    CredentialChain, Error, PrivateKey, PublicKey, RootKey, Signature, decode_bounded, denied,
+    encode,
     group::{agree, agreed},
     signing_bytes,
 };
-use rocky_core::{Commitment, commitment};
+use rocky_core::{Commitment, KeyEpoch, ResourceScope, commitment};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u32 = 1;
 const CONTEXT: &str = "rocky.root-escrow.context.v1";
 const WRAPPING: &str = "rocky.root-escrow.key.v1";
 const TAG: &str = "rocky.root-escrow.tag.v1";
+const VOUCH: &str = "rocky.root-escrow.vouch.v1";
+/// A vouched record's bound: the record and its signer's chain.
+const MAX_VOUCHED_BYTES: usize = MAX_RECORD_BYTES + 64 * 1024;
 /// Payloads are padded to a multiple of this, hiding their exact length.
 const PADDING: usize = 256;
 /// The largest payload one record seals.
@@ -138,6 +142,82 @@ impl RootEscrow {
         let record: Self = decode_bounded(bytes, MAX_RECORD_BYTES + 256)?;
         record.validate()?;
         Ok(record)
+    }
+}
+
+/// A record as the node that sealed it vouches for it: signed with the
+/// scope and key epoch whose frames carry it, at `signed_at`, under the
+/// chain that let it read them. Anyone can seal to the root, so a
+/// receiver keeps a record only when a key holder vouches for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VouchedEscrow {
+    body: Vouch,
+    signature: Signature,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Vouch {
+    version: u32,
+    scope: ResourceScope,
+    epoch: KeyEpoch,
+    signer: PublicKey,
+    signed_at: u64,
+    chain: CredentialChain,
+    record: RootEscrow,
+}
+impl VouchedEscrow {
+    pub fn sign(
+        node: &PrivateKey,
+        chain: CredentialChain,
+        (scope, epoch): (ResourceScope, KeyEpoch),
+        record: RootEscrow,
+        signed_at: u64,
+    ) -> Result<Self, Error> {
+        let body = Vouch {
+            version: VERSION,
+            scope,
+            epoch,
+            signer: node.public_key(),
+            signed_at,
+            chain,
+            record,
+        };
+        let signature = node.sign(&signing_bytes(VOUCH, &body)?);
+        Ok(Self { body, signature })
+    }
+    /// Checks the signer's signature; the caller judges its chain.
+    pub fn verify(&self) -> Result<(), Error> {
+        if self.body.version != VERSION
+            || !self
+                .body
+                .signer
+                .verify(&signing_bytes(VOUCH, &self.body)?, &self.signature)
+        {
+            return Err(denied("escrow vouch signature mismatch"));
+        }
+        self.body.record.validate()
+    }
+    pub fn slot(&self) -> (ResourceScope, KeyEpoch) {
+        (self.body.scope, self.body.epoch)
+    }
+    pub fn signer(&self) -> PublicKey {
+        self.body.signer
+    }
+    pub fn signed_at(&self) -> u64 {
+        self.body.signed_at
+    }
+    pub fn chain(&self) -> &CredentialChain {
+        &self.body.chain
+    }
+    pub fn record(&self) -> &RootEscrow {
+        &self.body.record
+    }
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        encode(self)
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        decode_bounded(bytes, MAX_VOUCHED_BYTES)
     }
 }
 

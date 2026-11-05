@@ -365,6 +365,23 @@ impl Node {
             .map(|kind| Alert { kind, since: None })
             .collect())
     }
+    /// The carried root escrow records this replica refused, by peer.
+    pub(super) async fn escrow_alerts(&self) -> Result<Vec<Alert>, Failure> {
+        Ok(self
+            .replica
+            .escrow_refusals()
+            .await?
+            .into_iter()
+            .map(|(peer, records, reason)| Alert {
+                kind: AlertKind::EscrowRefused {
+                    node: peer.to_hex(),
+                    records,
+                    reason,
+                },
+                since: None,
+            })
+            .collect())
+    }
     /// Reloads the other trusted identities from the registry, merges the
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
@@ -532,6 +549,7 @@ impl Node {
         }
         let mut alerts = self.alerts();
         alerts.extend(self.tip_chain_alerts().await?);
+        alerts.extend(self.escrow_alerts().await?);
         alerts.sort();
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {

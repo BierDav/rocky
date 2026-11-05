@@ -2567,7 +2567,6 @@ impl Settings {
     }
 
     /// The publisher key an invitation names, before anything is stored.
-    #[cfg(not(target_family = "wasm"))]
     pub fn invitation_publisher(invitation: &str) -> Result<PublicKey, Failure> {
         Ok(Invite::parse(invitation)?.publisher)
     }

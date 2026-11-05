@@ -1574,9 +1574,41 @@ points, and the `board_cap` assertion bounds a board's points.
     the bytes, write. No `.backup` or `.partial` file is left on either
     side. Mutations: keeping the export file, or the staged upload, fails
     it.
+  - Closed (browser restore): a restore (invitation) was native, blocking
+    and path-based. `Configuration::restore(path, invitation)` and
+    `Configuration::restore_archive(bytes, invitation)` now run the one
+    install path natively and on wasm32 over the configured network;
+    `Database::restore` is its blocking wrapper. The bytes are staged in
+    the directory as `restore.backup` and removed whether the restore
+    finishes or stops, as for `recover_archive`. Resume needed no format
+    change: the restore marker already names the archive, and a restore
+    stopped after enrolling goes on under the identity it saved, without
+    spending another invitation. An open of a directory whose restore
+    stopped before placing its file names the unfinished restore instead
+    of asking for a recovery. Tests (native and Chromium, in-memory hub):
+    `backup::tests::a_member_restored_from_bytes_with_a_fresh_invitation_syncs_and_writes`
+    exports a member that synced one note and holds one unsent, deletes
+    it, refuses junk bytes, restores from the bytes with a fresh
+    invitation, checks a fresh identity, writes and syncs both notes to
+    the owner, refuses a second restore and reopens.
+    `backup::tests::a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_identity`
+    stops at `Enrolled`, `Rebound` and `Attached`, then restores again
+    with the same bytes and spent invitation. Mutations: the old wasm32
+    refusal arm fails both in Chromium; keeping the staged file fails
+    both; re-enrolling on resume fails the sweep ("invitation already
+    used").
+  - Checks (browser restore): `./scripts/lint` 0;
+    `./scripts/check --unit --integration` 252 unit and 1133 integration
+    passed (integration wall 78.65 s); `./scripts/check --wasm` clippy 0,
+    wasm build 873 tests and 68 of 68 browser runs passed (browser wall
+    143 s). No persisted or wire version changed.
   - A browser still holds an archive whole in memory, twice while it is
-    exported or staged. A restore (invitation) stays native and
-    path-based.
+    exported or staged: `rocky_platform::fs` reads a browser file whole,
+    so verifying the staged file copies it while the caller's bytes are
+    borrowed, and export reads the staged database whole while the
+    archive grows. Dropping the copy needs ranged reads in
+    `rocky_platform::fs`, or the bytes moved into the install by value
+    and released after extraction; neither is a small change.
   - Checks (recovery transparency): `./scripts/lint` 0;
     `./scripts/check --unit --integration` 250 unit and 1133 integration
     passed (integration wall 78 s); `./scripts/check --wasm` 0 (68 of 68

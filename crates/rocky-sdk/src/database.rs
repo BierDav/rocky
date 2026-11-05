@@ -61,7 +61,7 @@ pub struct Opened {
 }
 
 // The blocking constructors make the other installs; a browser has create,
-// join, recover and open (`Configuration`).
+// join, restore, recover and open (`Configuration`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) enum Install {
     Create {
@@ -387,19 +387,32 @@ impl Database {
     /// signing identity, which `invitation` enrolls over `open.network`.
     /// The archive's operations, handles, tickets, results and effects keep
     /// their original identities; nothing is sent again as new work. An
-    /// interrupted restore continues when called again. See
-    /// `docs/runtime/backup-and-restore.md`.
+    /// interrupted restore continues when called again.
+    /// `Configuration::restore` does the same without blocking.
     pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
+        let install = Self::restore_install(&open, archive, invitation)?;
+        Self::start(open, install)
+    }
+    pub(crate) async fn launch_restore(
+        open: Open<'_>,
+        archive: &Path,
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        let install = Self::restore_install(&open, archive, invitation)?;
+        Self::launch(open, install, None).await
+    }
+    fn restore_install(
+        open: &Open<'_>,
+        archive: &Path,
+        invitation: &str,
+    ) -> Result<Install, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("restore").into());
         }
-        Self::start(
-            open,
-            Install::Restore {
-                archive: archive.to_path_buf(),
-                invitation: invitation.into(),
-            },
-        )
+        Ok(Install::Restore {
+            archive: archive.to_path_buf(),
+            invitation: invitation.into(),
+        })
     }
     // Blocks the caller until the database is open, which a browser cannot.
     #[cfg(not(target_family = "wasm"))]
@@ -1313,7 +1326,14 @@ async fn identity(
         return Err("no domain in this directory: create or join one".into());
     }
     if exists && !resuming && !rocky_platform::fs::exists(directory.join("rocky.sqlite")) {
-        return Err("existing identity has no runtime database; recovery is required".into());
+        return Err(
+            if rocky_platform::fs::exists(directory.join(crate::backup::MARKER)) {
+                "a restore is unfinished in this directory: restore again with its backup"
+            } else {
+                "existing identity has no runtime database; recovery is required"
+            }
+            .into(),
+        );
     }
     match install {
         Install::Create { ttl, root } => {
@@ -1386,7 +1406,6 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(false, key).await?)))
         }
-        #[cfg(not(target_family = "wasm"))]
         Install::Restore {
             archive,
             invitation,
@@ -1426,10 +1445,6 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(true, key).await?)))
         }
-        // A restore enrolls through an invitation, which a browser takes
-        // only through `Configuration::join`.
-        #[cfg(target_family = "wasm")]
-        Install::Restore { .. } => Err("restoring a backup is unavailable in a browser".into()),
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             settings.provider = setup.identity.clone();
@@ -1610,7 +1625,6 @@ pub(crate) async fn insert_rows(
     }
     Ok(())
 }
-#[cfg(not(target_family = "wasm"))]
 /// Verifies the archive, enrolls a fresh identity with the invitation's
 /// issuer and puts the archive's files in place. The marker, written
 /// before enrolling, names the predecessor whose file is rebound at open.
@@ -1678,15 +1692,25 @@ async fn restore(
             }
         }
     };
-    if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
-        return Err("the enrolled domain differs from the backup's".into());
-    }
-    for (name, staged) in &opened.files {
-        if name != "identity.json" {
-            rocky_platform::fs::rename(staged, directory.join(name))?;
+    let placed = (|| -> Result<(), Failure> {
+        if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
+            return Err("the enrolled domain differs from the backup's".into());
         }
+        crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Enrolled)?;
+        for (name, staged) in &opened.files {
+            if name != "identity.json" {
+                rocky_platform::fs::rename(staged, directory.join(name))?;
+            }
+        }
+        rocky_platform::fs::remove_dir_all(&staging)?;
+        Ok(())
+    })();
+    if let Err(error) = placed {
+        if link.1 {
+            link.0.close().await;
+        }
+        return Err(error);
     }
-    rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, Some(link)))
 }
 

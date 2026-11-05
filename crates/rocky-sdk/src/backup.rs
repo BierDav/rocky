@@ -1,7 +1,7 @@
 //! Signed backup archives of one database: a coherent copy of its file,
 //! and its identity record, which holds no key. An archive is restored only into a fresh
-//! signing identity enrolled with an issuer. See
-//! `docs/runtime/backup-and-restore.md`.
+//! signing identity enrolled with an issuer (`Configuration::restore`), or
+//! recovered by the root (`Configuration::recover`).
 use rocky_credentials::PublicKey;
 use serde::{Deserialize, Serialize};
 
@@ -283,3 +283,6 @@ mod archive {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

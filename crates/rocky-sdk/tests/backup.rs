@@ -1,5 +1,5 @@
-//! Signed backup archives restored into a fresh signing identity. See
-//! `docs/runtime/backup-and-restore.md`.
+//! Signed backup archives restored into a fresh signing identity through
+//! the blocking constructor; `backup::tests` covers `Configuration`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;

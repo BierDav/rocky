@@ -130,12 +130,17 @@ pub(crate) async fn recover(
     Ok((settings, opened.identity))
 }
 
-/// Deterministic interruptions of a recovery, for its crash sweep.
+/// Deterministic interruptions of a recovery or a restore, for their crash
+/// sweeps. A restore stops at `Enrolled` and at the stages from `Rebound`
+/// to `Attached`, which both open.
 pub(crate) mod fault {
     use crate::Failure;
     use std::path::Path;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Stage {
+        /// A restore enrolled and saved its identity; its files are not
+        /// placed.
+        Enrolled,
         /// The marker is saved, the identity not.
         Marked,
         /// The identity is saved, the files not placed.

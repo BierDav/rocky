@@ -51,6 +51,12 @@ pub struct Opened {
     /// once, or keep its secret behind a passkey: Rocky keeps no copy, and
     /// only it adds or revokes trusted nodes and recovers the domain.
     pub root: Option<crate::RootKey>,
+    /// The lost trusted identities a recovery revoked with the root, with
+    /// the identities each first enrolled, whose devices enroll again; every
+    /// key rotated. Empty for any other open. A trusted identity the backup
+    /// predates is not known here: revoke it with `Session::revoke_trusted`
+    /// once it appears.
+    pub revoked: Vec<rocky_credentials::PublicKey>,
 }
 
 // The blocking constructors make the other installs; a browser has create,
@@ -162,8 +168,9 @@ enum Command {
         oneshot::Sender<Result<crate::counters::Reading, Failure>>,
     ),
 }
-/// The scope and the network service a database opened with.
-type Greeting = Result<(String, Option<u64>), Failure>;
+/// The scope and the network service a database opened with, and the
+/// identities its recovery revoked.
+type Greeting = Result<(String, Option<u64>, Vec<rocky_credentials::PublicKey>), Failure>;
 /// Where `run` reports how opening went: to the opener blocked on the
 /// database's thread, or to an opener that awaits it.
 enum Hello {
@@ -395,8 +402,9 @@ impl Database {
     /// trusted nodes with every trusted node and device lost: into an empty
     /// directory, under a fresh trusted identity the root grants, with every
     /// key the archived node held opened from its root escrow. A key the
-    /// escrow lacks fails the recovery and is named. `root` signs and is
-    /// dropped. See `Configuration::recover`.
+    /// escrow lacks fails the recovery and is named. The root revokes the
+    /// lost trusted identities (`Opened::revoked`), then is dropped. See
+    /// `Configuration::recover`.
     pub fn recover(
         open: Open<'_>,
         archive: &Path,
@@ -541,7 +549,7 @@ impl Database {
         worker: Worker,
     ) -> Result<Opened, Failure> {
         match greeting {
-            Ok((scope, network)) => {
+            Ok((scope, network, revoked)) => {
                 let shared = Arc::new(Shared {
                     input,
                     cleanup,
@@ -551,6 +559,7 @@ impl Database {
                 });
                 Ok(Opened {
                     root: None,
+                    revoked,
                     network: network.map(|id| NetworkService::new(&shared, id)),
                     database: Arc::new(Self {
                         shared,
@@ -1374,20 +1383,21 @@ async fn identity(
         }
         #[cfg(not(target_family = "wasm"))]
         Install::Recover { archive, root } => {
-            let root = root
-                .lock()
-                .map_err(|_| "root poisoned")?
-                .take()
-                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
-            let settings = recover(
-                path,
-                directory,
-                secrets,
-                archive,
-                &root,
-                setup.identity.clone(),
-            )?;
-            drop(root);
+            // The root stays for `run_inner` to revoke the lost identities.
+            let settings = {
+                let root = root.lock().map_err(|_| "root poisoned")?;
+                let root = root
+                    .as_deref()
+                    .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
+                recover(
+                    path,
+                    directory,
+                    secrets,
+                    archive,
+                    root,
+                    setup.identity.clone(),
+                )?
+            };
             let Some(network) = network else {
                 return Ok((settings, None));
             };
@@ -1981,8 +1991,30 @@ async fn run_inner(
         Some((transport, owned)) => Some(node.link(transport, owned).await),
         None => None,
     };
+    // Recovery is for lost trusted nodes: the root revokes them before
+    // anyone writes, and is dropped.
+    #[cfg(not(target_family = "wasm"))]
+    let revoked = match &setup.install {
+        Install::Recover { root, .. } => {
+            let root: Arc<crate::RootKey> = root
+                .lock()
+                .map_err(|_| "root poisoned")?
+                .take()
+                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?
+                .into();
+            node.revoke_lost(root).await.map_err(|error| {
+                format!(
+                    "recovered, but {error}; open the installation and revoke it with \
+                     `Session::revoke_trusted`"
+                )
+            })?
+        }
+        _ => Vec::new(),
+    };
+    #[cfg(target_family = "wasm")]
+    let revoked = Vec::new();
     hello
-        .send(Ok((scope, network)))
+        .send(Ok((scope, network, revoked)))
         .map_err(|_| "database opener abandoned")?;
     if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();

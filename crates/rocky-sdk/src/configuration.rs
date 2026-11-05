@@ -106,9 +106,10 @@ impl Configuration {
     /// The root recovers the domain from `archive`, a backup of one of its
     /// trusted nodes, with every trusted node and device lost: a fresh
     /// trusted node holding every key the archived node held, opened from
-    /// its root escrow. Revoke the lost trusted identities with
-    /// `Session::revoke_trusted` next, which rotates every key. Archives are
-    /// native files; a browser has no recovery.
+    /// its root escrow. The root then revokes every other trusted identity
+    /// the archive knows, with the identities each first enrolled, and every
+    /// key rotates; `Opened::revoked` names them. Archives are native files;
+    /// a browser has no recovery.
     #[cfg(not(target_family = "wasm"))]
     pub async fn recover(
         &self,

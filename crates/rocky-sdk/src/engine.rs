@@ -104,6 +104,7 @@ impl Engine {
             database,
             network,
             root,
+            ..
         } = match &options.mode {
             Mode::Create {
                 credential_ttl,

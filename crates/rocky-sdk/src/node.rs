@@ -1713,6 +1713,41 @@ impl Node {
     async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<Value, Failure> {
         self.revoke_with(target, &Root::default(), false).await
     }
+    /// A recovery's root revokes every other trusted identity this node
+    /// knows, lost with its devices, with the identities it first enrolled;
+    /// every key rotates. Returns the revoked identities in order.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn revoke_lost(
+        &self,
+        root: Arc<dyn rocky_credentials::IdentityProvider>,
+    ) -> Result<Vec<PublicKey>, Failure> {
+        let root = Root(Some(root));
+        let mut revoked = Vec::new();
+        loop {
+            let registry = self.registry().await?;
+            let lost = {
+                let settings = self.settings.lock().await;
+                registry
+                    .trusted_identities(&settings.revocations)
+                    .into_iter()
+                    .find(|identity| {
+                        *identity != settings.identity
+                            && !settings.tombstoned(identity)
+                            && !revoked.contains(identity)
+                    })
+            };
+            let Some(identity) = lost else {
+                return Ok(revoked);
+            };
+            let target = crate::enrollment::Revoke::Identity(identity);
+            self.revoke_with(target, &root, true)
+                .await
+                .map_err(|error| format!("revoking lost trusted identity {identity}: {error}"))?;
+            self.activity
+                .record("device_revoked", json!({"identity": identity.to_hex()}));
+            revoked.push(identity);
+        }
+    }
     /// The cut a root revocation of `target` carries: for each node of the
     /// revoked trusted identity, or the revoked node, the latest heads of
     /// its chains this node's tip graph holds, and the stage-branch heads

@@ -144,6 +144,15 @@ async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Fai
         .await;
     Ok(())
 }
+async fn principal(device: &Device) -> String {
+    device.ok(json!({"type":"session"})).await["principal"]
+        .as_str()
+        .unwrap_or_default()
+        .into()
+}
+fn names(identities: &[rocky_credentials::PublicKey]) -> Vec<String> {
+    identities.iter().map(ToString::to_string).collect()
+}
 fn generations(identity: &Value, collection: &str) -> Vec<u64> {
     identity["keys"][collection]
         .as_array()
@@ -162,6 +171,7 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     let opened = Database::create(open(&creator, &hub), None)?;
     let phrase = opened.root.as_ref().ok_or("root")?.phrase();
     let issuer = Device::new(opened)?;
+    let lost = principal(&issuer).await;
     for list in LISTS {
         issuer
             .ok(json!({"type":"partition_create","group":"list","values":values(list)}))
@@ -208,14 +218,21 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
         &RootKey::from_phrase(&phrase)?,
     )?;
     assert!(opened.root.is_none(), "the root is never handed back");
+    // The lost creator is revoked, which rotates every key.
+    assert_eq!(names(&opened.revoked), [lost]);
     let device = Device::new(opened)?;
     assert_eq!(everything(&device).await, expected);
     let saved = identity(&recovered)?;
-    assert_eq!(generations(&saved, "notes"), [1, 2]);
-    assert_eq!(
-        saved["escrow"], held["escrow"],
+    assert_eq!(generations(&saved, "notes"), [1, 2, 3]);
+    let (kept, now) = (
+        held["escrow"].as_object().ok_or("escrow")?,
+        saved["escrow"].as_object().ok_or("escrow")?,
+    );
+    assert!(
+        kept.iter().all(|(tag, record)| now.get(tag) == Some(record)),
         "the records stay sealed to the root"
     );
+    assert!(now.len() > kept.len(), "the rotated epochs are escrowed");
     // The recovered node is a trusted node of its own identity: it writes
     // under the current keys, with author numbers no one else held.
     assert_ne!(saved["identity"], held["identity"]);
@@ -231,7 +248,7 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
         .iter()
         .map(|epoch| epoch["generation"].clone())
         .collect();
-    assert_eq!(epochs, [json!(1), json!(2)]);
+    assert_eq!(epochs, [json!(1), json!(2), json!(3)]);
     // It seals and enrolls devices like any trusted node; a joining
     // device imports the rows before the rotation from the sealed base.
     device.follow_main().await;
@@ -415,6 +432,68 @@ async fn a_recovery_takes_author_numbers_no_trusted_node_handed_out() -> Result<
         column(&device, "SELECT key FROM notes ORDER BY key").await,
         ["before", "recovered"]
     );
+    device.close().await;
+    Ok(())
+}
+
+/// Every trusted identity the backup knows is lost with its devices: the
+/// recovery revokes each with the root, and the app learns which.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let creator = root.path().join("creator");
+    let opened = Database::create(open(&creator, &hub), None)?;
+    let phrase = opened.root.as_ref().ok_or("root")?.phrase();
+    let issuer = Device::new(opened)?;
+    write_note(&issuer, "before").await;
+    let trusted = Device::new(Database::join(
+        open(&root.path().join("trusted"), &hub),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+    )?)?;
+    let second = principal(&trusted).await;
+    let grant = issuer
+        .ok(json!({"type":"tips","action":"trust","identity":second,"root":issuer.root()}))
+        .await;
+    trusted
+        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
+        .await;
+    let mut lost = vec![principal(&issuer).await, second];
+    lost.sort();
+    let archive = root.path().join("creator.backup");
+    issuer.database.backup(&archive).await?;
+    trusted.close().await;
+    issuer.close().await;
+
+    let recovered = root.path().join("recovered");
+    let opened = Database::recover(
+        open(&recovered, &hub),
+        &archive,
+        &RootKey::from_phrase(&phrase)?,
+    )?;
+    let mut revoked = names(&opened.revoked);
+    revoked.sort();
+    assert_eq!(revoked, lost);
+    let device = Device::new(opened)?;
+    // Both revocations are recorded and one more key epoch serves writes.
+    let saved = identity(&recovered)?;
+    assert!(generations(&saved, "notes").len() >= 2);
+    write_note(&device, "recovered").await;
+    assert_eq!(
+        column(&device, "SELECT key FROM notes ORDER BY key").await,
+        ["before", "recovered"]
+    );
+    // Revoking again is refused: nothing is left to revoke.
+    for identity in &lost {
+        let refused = device
+            .database
+            .session()
+            .revoke_trusted(identity, Arc::new(RootKey::from_phrase(&phrase)?))
+            .await
+            .err()
+            .ok_or("revoked twice")?;
+        assert!(refused.to_string().contains("already revoked"), "{refused}");
+    }
     device.close().await;
     Ok(())
 }

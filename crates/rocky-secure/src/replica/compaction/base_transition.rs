@@ -267,19 +267,22 @@ impl<A: RowApplication> Inner<A> {
                         "DELETE FROM secure_replayed_seal_rows WHERE scope=?1 AND seal=?2 AND version=?3 AND row IN(SELECT row FROM secure_replayed_seal_rows WHERE scope=?1 AND seal=?2 AND version=?3 ORDER BY row LIMIT ?4)",
                         bindings(vec![SqlValue::Integer(id), SqlValue::Blob(seal.clone()), SqlValue::Integer(*version), SqlValue::Integer(remaining as i64)]),
                     ).await? as usize;
-                    remaining -= deleted;
-                    if remaining > 0 {
+                    let snapshot = if deleted < remaining {
                         inner.conn.execute(
                             "DELETE FROM secure_replayed_snapshots WHERE scope=? AND seal=? AND version=?", params(),
                         ).await?;
-                        remaining -= 1;
-                    }
+                        1
+                    } else {
+                        0
+                    };
                     inner.fault(checkpoint::Stage::BaseCleanup)?;
                     #[cfg(any(test, feature = "qualification"))]
                     inner.flusher.measurements.work(
                         lock::WorkUnit::TransitionCleanupRow,
-                        (BASE_ROWS - remaining) as u64,
+                        (BASE_ROWS - remaining + deleted + snapshot) as u64,
                     );
+                    #[cfg(not(any(test, feature = "qualification")))]
+                    let _ = snapshot;
                     return Ok(true);
                 }
             }

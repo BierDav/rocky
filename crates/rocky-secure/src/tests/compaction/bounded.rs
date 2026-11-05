@@ -88,6 +88,47 @@ async fn base_preparation_keeps_reads_and_successful_writes_available() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn base_metadata_preparation_is_bounded_per_acquisition() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "bounded-metadata", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    populate(&replica, Replica::BASE_TRANSITION_ROWS * 2 + 3).await;
+    seal(&lineage, &replica).await;
+    replica.finalize_path(lineage.domain).await.unwrap();
+    let measurements = replica.lock_measurements();
+    measurements.start();
+    replica.compact(lineage.domain, 0).await.unwrap();
+    let measured = measurements.stop();
+    assert!(
+        measured
+            .holders
+            .values()
+            .any(|holder| holder.units.contains_key("transition_history_record")),
+        "base history was not prepared in steps"
+    );
+    for holder in measured.holders.values() {
+        for (unit, samples) in &holder.units {
+            if matches!(
+                unit.as_str(),
+                "transition_history_record"
+                    | "transition_identity_record"
+                    | "transition_ledger_record"
+                    | "transition_outcome_record"
+            ) {
+                assert!(
+                    samples
+                        .iter()
+                        .all(|(work, _)| *work <= Replica::BASE_TRANSITION_ROWS as u64),
+                    "{unit} exceeded one bounded acquisition"
+                );
+            }
+        }
+    }
+    replica.audit(lineage.scope("items")).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_base_steps_resume_without_mixed_or_double_applied_state() {
     for point in [
         CrashPoint::BasePrepare,

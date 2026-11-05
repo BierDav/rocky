@@ -765,6 +765,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         checkpoint::FAILURE_SCHEMA,
         compaction::SCHEMA,
         compaction::TRANSITION_SCHEMA,
+        compaction::HISTORY_SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
         chains::SCHEMA,

@@ -923,7 +923,10 @@ impl<A: RowApplication> Inner<A> {
                 .collect(),
         ))
     }
-    async fn replayed_births(&self, hash: Hash) -> Result<Vec<checkpoint::IdentityMark>, Error> {
+    pub(super) async fn replayed_births(
+        &self,
+        hash: Hash,
+    ) -> Result<Vec<checkpoint::IdentityMark>, Error> {
         match collect_rows(
             self.conn
                 .query(

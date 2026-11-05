@@ -81,7 +81,7 @@ ones. Cleanup can resume after any committed chunk without making a partial
 snapshot available as preparation input. No scratch file or durable overflow
 state is needed for this kind.
 
-One replica-format bump, `v51` → `v52`, covers these local tables, views and
+One replica-format bump, `v55` → `v56`, covers these local tables, views and
 snapshot generations. Older formats are rejected; there are no migrations,
 legacy readers or wire-format changes.
 

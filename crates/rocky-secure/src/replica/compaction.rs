@@ -13,6 +13,8 @@ use rocky_credentials::SignedSeal;
 mod anchors;
 mod base_transition;
 pub(super) use base_transition::SCHEMA as TRANSITION_SCHEMA;
+pub(super) use history_transition::SCHEMA as HISTORY_SCHEMA;
+mod history_transition;
 mod incremental;
 mod indexed;
 mod oracle;
@@ -1439,12 +1441,22 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: ResourceScope,
         id: i64,
-        target: &Finalized,
-        seal: &SignedSeal,
+        (target, seal): (&Finalized, &SignedSeal),
         previous: Option<&(i64, SignedCheckpoint)>,
         through: i64,
+        history: Option<&history_transition::PreparedHistory>,
     ) -> Result<bool, Error> {
         let base = previous.filter(|(_, signed)| signed.statement.seal.is_some());
+        if let Some(history) = history {
+            // Lock gaps let writers touch the captured prefix after its scan.
+            if history.through != through {
+                return Err(Error::Conflict);
+            }
+            self.validate_base_history(id, history).await?;
+            self.conn
+                .execute("DELETE FROM secure_base_history WHERE scope=?", [id])
+                .await?;
+        }
         let prepared = self.prepared_base(id, target.seal).await?;
         let taken = if prepared.is_some() {
             None
@@ -1480,10 +1492,13 @@ impl<A: RowApplication> Inner<A> {
                     [id, target.depth],
                 )
                 .await?;
-            self.conn
-                .execute("DELETE FROM secure_base_transition WHERE scope=?", [id])
-                .await?;
-            self.queue_base_cleanup(id, target.depth).await?;
+            if prepared.is_some() {
+                // Keep the newest equal snapshot readable even when the old
+                // signature stays. A later key/policy refresh still needs it.
+                self.publish_prepared_base(id, target).await?;
+            } else {
+                self.queue_base_cleanup(id, target.depth).await?;
+            }
             return Ok(false);
         }
         // Rows the seal left undecided make no base; a later seal's does.
@@ -1529,20 +1544,26 @@ impl<A: RowApplication> Inner<A> {
         };
         let borrowed = prepared.is_some();
         let sets = prepared.unwrap_or_else(|| replay::base_sets(&rows));
-        let (frontier, operations) = self.covered_frontier(id, base, through).await?;
+        let (frontier, operations) = match history {
+            Some(history) => (history.frontier.clone(), history.operations),
+            None => self.covered_frontier(id, base, through).await?,
+        };
         let tip = seal.statement.tip;
         let schema = self
             .generation_of(self.manifest_of_tip(tip)?, false)?
             .schema;
         let (handles, handle_digest) = self.handle_set().await?;
-        let identities = self
-            .covered_identity_marks(
-                id,
-                base.map_or(&[][..], |(_, signed)| &signed.statement.identities),
-                &frontier,
-            )
-            .await?
-            .ok_or_else(|| Error::Corrupt("a covered operation is unavailable".into()))?;
+        let identities = match history {
+            Some(history) => history.identities.clone(),
+            None => self
+                .covered_identity_marks(
+                    id,
+                    base.map_or(&[][..], |(_, signed)| &signed.statement.identities),
+                    &frontier,
+                )
+                .await?
+                .ok_or_else(|| Error::Corrupt("a covered operation is unavailable".into()))?,
+        };
         let frontier: Vec<LogPosition> = frontier.into_values().collect();
         let statement = CheckpointStatement {
             format: CHECKPOINT_FORMAT,
@@ -1573,7 +1594,10 @@ impl<A: RowApplication> Inner<A> {
                 count: handles,
                 digest: handle_digest.digest(),
             },
-            custody: self.custody_summary(id, through).await?,
+            custody: match history {
+                Some(history) => history.custody.clone(),
+                None => self.custody_summary(id, through).await?,
+            },
             outcomes,
         };
         let signed = self.sign_checkpoint(statement)?;
@@ -1620,7 +1644,20 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         }
-        self.reseed_ledger(scope, id).await?;
+        if history.is_some() {
+            // Forward compaction absorbs a prefix already represented by L.
+            // Only newly based own floors can raise it; the live suffix stays.
+            for mark in signed
+                .statement
+                .identities
+                .iter()
+                .filter_map(checkpoint::CoveredMark::own_mark)
+            {
+                self.fold_ledger(scope, &mark).await?;
+            }
+        } else {
+            self.reseed_ledger(scope, id).await?;
+        }
         Ok(true)
     }
     /// The operations a base through applied position `through` covers,
@@ -1695,6 +1732,7 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
         target: &Finalized,
         seal: &SignedSeal,
+        history: Option<&history_transition::PreparedHistory>,
     ) -> Result<bool, Error> {
         let previous = self
             .checkpoint_record(id, true)
@@ -1733,7 +1771,14 @@ impl<A: RowApplication> Inner<A> {
         let through = bound.unwrap_or(cursor);
         if self.replayed_scope(scope) {
             return self
-                .compact_replayed(scope, id, target, seal, previous.as_ref(), through)
+                .compact_replayed(
+                    scope,
+                    id,
+                    (target, seal),
+                    previous.as_ref(),
+                    through,
+                    history,
+                )
                 .await;
         }
         // Empty partitions need current coverage even with unchanged rows:
@@ -2058,6 +2103,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             scopes.push((scope, id));
         }
+        let mut history = BTreeMap::new();
         // Prepare every scope before publishing any. Linked bases cannot be
         // exposed to a competing tip between scope publications.
         for &(scope, id) in &scopes {
@@ -2098,6 +2144,31 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     break;
                 }
             }
+            if inner.replayed_scope(scope) {
+                let Some(mut work) = inner.begin_base_history(scope, id, target).await? else {
+                    continue;
+                };
+                loop {
+                    let more = inner.base_history_step(id, &mut work).await?;
+                    drop(inner);
+                    rocky_platform::task::yield_now().await;
+                    inner = self.inner.lock(Class::Background).await;
+                    if inner.authority != authority
+                        || inner.path_index(domain, target.seal)? != at
+                        || !inner
+                            .finalized(domain)
+                            .await?
+                            .iter()
+                            .any(|known| known.seal == target.seal)
+                    {
+                        return Err(Error::Conflict);
+                    }
+                    if !more {
+                        break;
+                    }
+                }
+                history.insert(id, work.finish());
+            }
         }
         if inner.domain_scopes(domain).await? != held {
             return Err(Error::Conflict);
@@ -2115,7 +2186,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         inner
-            .publish_compaction(domain, &scopes, target, seal)
+            .publish_compaction(domain, &scopes, target, seal, &history)
             .await?;
         #[cfg(any(test, feature = "qualification"))]
         inner.crash_at(|point| point == CrashPoint::BasePublished)?;
@@ -2248,6 +2319,7 @@ impl<A: RowApplication> Inner<A> {
         scopes: &[(ResourceScope, i64)],
         target: &Finalized,
         seal: &SignedSeal,
+        history: &BTreeMap<i64, history_transition::PreparedHistory>,
     ) -> Result<(), Error> {
         if scopes.iter().any(|(scope, _)| self.replayed_scope(*scope)) {
             // Linked bases are one state even across process death. Selecting
@@ -2255,7 +2327,12 @@ impl<A: RowApplication> Inner<A> {
             self.cut_wal().await;
             transaction!(self, |inner| {
                 for &(scope, id) in scopes {
-                    inner.compact_scope(scope, id, target, seal).await?;
+                    if inner.importing(scope).await? {
+                        return Err(Error::Conflict);
+                    }
+                    inner
+                        .compact_scope(scope, id, target, seal, history.get(&id))
+                        .await?;
                     inner.fault(checkpoint::Stage::Compact)?;
                 }
                 inner.mark_compacted(domain, target.depth).await
@@ -2268,7 +2345,12 @@ impl<A: RowApplication> Inner<A> {
             for (index, &(scope, id)) in scopes.iter().enumerate() {
                 self.cut_wal().await;
                 transaction!(self, |inner| {
-                    inner.compact_scope(scope, id, target, seal).await?;
+                    if inner.importing(scope).await? {
+                        return Err(Error::Conflict);
+                    }
+                    inner
+                        .compact_scope(scope, id, target, seal, history.get(&id))
+                        .await?;
                     inner.fault(checkpoint::Stage::Compact)?;
                     if index + 1 == scopes.len() {
                         inner.mark_compacted(domain, target.depth).await?;

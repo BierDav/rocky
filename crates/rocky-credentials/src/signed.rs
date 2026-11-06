@@ -81,7 +81,7 @@ pub enum Signer<'a> {
     Node {
         key: &'a PrivateKey,
         identity: PublicKey,
-        certificate: Certificate,
+        certificate: Box<Certificate>,
     },
 }
 impl<'a, T: IdentityProvider> From<&'a T> for Signer<'a> {
@@ -109,7 +109,7 @@ impl<'a> Signer<'a> {
         Ok(Self::Node {
             key,
             identity: leaf.issuer,
-            certificate,
+            certificate: Box::new(certificate),
         })
     }
     /// The principal it signs for.
@@ -135,7 +135,7 @@ impl<'a> Signer<'a> {
             Self::Node {
                 key, certificate, ..
             } => Attestation {
-                certificate: Some(certificate.clone()),
+                certificate: Some(certificate.as_ref().clone()),
                 signature: key.sign(message),
             },
         })

@@ -59,6 +59,14 @@ impl MembershipSet {
     /// result regardless of arrival order.
     pub fn insert(&mut self, certificate: &SignedCapability) -> Result<MembershipLink, Error> {
         let link = MembershipLink::from_certificate(certificate)?;
+        let known_nodes = self
+            .links(link.identity)
+            .map(|known| known.node)
+            .filter(|node| *node != link.node)
+            .count();
+        if known_nodes >= MAX_MEMBERSHIP_NODES {
+            return Err(denied("identity membership limit reached"));
+        }
         let entry = self
             .links
             .entry((link.identity, link.sequence))
@@ -90,6 +98,26 @@ impl MembershipSet {
 
     pub fn is_forked(&self, identity: PublicKey) -> bool {
         self.forks(identity).next().is_some()
+    }
+
+    /// Whether every known link forms one unambiguous predecessor chain.
+    /// Forked sequences and missing predecessors are invalid until the
+    /// identity links again from the surviving head.
+    pub fn is_valid(&self, identity: PublicKey) -> bool {
+        if self.is_forked(identity) {
+            return false;
+        }
+        let mut previous = self
+            .links(identity)
+            .find(|link| link.sequence == 0)
+            .map(|link| link.certificate);
+        for link in self.links(identity).filter(|link| link.sequence > 0) {
+            if link.previous != previous {
+                return false;
+            }
+            previous = Some(link.certificate);
+        }
+        true
     }
 
     /// Returns the latest non-forked membership head, if one exists.
@@ -147,5 +175,41 @@ mod tests {
         assert!(set.is_forked(identity.public_key()));
         assert_eq!(set.forks(identity.public_key()).next().unwrap().0, 0);
         assert!(set.head(identity.public_key()).is_none());
+    }
+
+    #[test]
+    fn a_link_must_follow_the_membership_head_and_the_bound_is_32_nodes() {
+        let identity = PrivateKey::new();
+        let first = certificate(&identity, &PrivateKey::new(), 0, None);
+        let mut set = MembershipSet::new();
+        let head = set.insert(&first).unwrap();
+        let next = certificate(&identity, &PrivateKey::new(), 1, Some(head.certificate));
+        let next_link = set.insert(&next).unwrap();
+        assert!(set.is_valid(identity.public_key()));
+        let wrong = certificate(&identity, &PrivateKey::new(), 2, Some(first.id().unwrap()));
+        set.insert(&wrong).unwrap();
+        assert!(!set.is_valid(identity.public_key()));
+        let mut bounded = MembershipSet::new();
+        for sequence in 0..MAX_MEMBERSHIP_NODES as u64 {
+            let prior = if sequence == 0 {
+                None
+            } else {
+                bounded
+                    .head(identity.public_key())
+                    .map(|link| link.certificate)
+            };
+            let cert = certificate(&identity, &PrivateKey::new(), sequence, prior);
+            bounded.insert(&cert).unwrap();
+        }
+        let extra = certificate(
+            &identity,
+            &PrivateKey::new(),
+            32,
+            bounded
+                .head(identity.public_key())
+                .map(|link| link.certificate),
+        );
+        assert!(bounded.insert(&extra).is_err());
+        let _ = next_link;
     }
 }

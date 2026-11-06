@@ -50,15 +50,23 @@ pub struct MembershipSet {
 }
 
 impl MembershipSet {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Inserts a certificate. A second certificate at one identity sequence
     /// is retained as a fork so every holder reaches the same equivocation
     /// result regardless of arrival order.
     pub fn insert(&mut self, certificate: &SignedCapability) -> Result<MembershipLink, Error> {
         let link = MembershipLink::from_certificate(certificate)?;
-        let entry = self.links.entry((link.identity, link.sequence)).or_default();
-        if !entry.iter().any(|known| known.certificate == link.certificate) {
+        let entry = self
+            .links
+            .entry((link.identity, link.sequence))
+            .or_default();
+        if !entry
+            .iter()
+            .any(|known| known.certificate == link.certificate)
+        {
             entry.push(link);
             entry.sort_by_key(|known| known.certificate);
         }
@@ -66,13 +74,18 @@ impl MembershipSet {
     }
 
     pub fn links(&self, identity: PublicKey) -> impl Iterator<Item = &MembershipLink> {
-        self.links.iter().filter(move |((key, _), _)| *key == identity).flat_map(|(_, links)| links)
+        self.links
+            .iter()
+            .filter(move |((key, _), _)| *key == identity)
+            .flat_map(|(_, links)| links)
     }
 
     pub fn forks(&self, identity: PublicKey) -> impl Iterator<Item = (u64, &[MembershipLink])> {
-        self.links.iter().filter_map(move |((key, sequence), links)| {
-            (*key == identity && links.len() > 1).then_some((*sequence, links.as_slice()))
-        })
+        self.links
+            .iter()
+            .filter_map(move |((key, sequence), links)| {
+                (*key == identity && links.len() > 1).then_some((*sequence, links.as_slice()))
+            })
     }
 
     pub fn is_forked(&self, identity: PublicKey) -> bool {
@@ -82,7 +95,12 @@ impl MembershipSet {
     /// Returns the latest non-forked membership head, if one exists.
     pub fn head(&self, identity: PublicKey) -> Option<MembershipLink> {
         self.links(identity)
-            .filter(|link| !self.links.get(&(identity, link.sequence)).is_some_and(|links| links.len() > 1))
+            .filter(|link| {
+                !self
+                    .links
+                    .get(&(identity, link.sequence))
+                    .is_some_and(|links| links.len() > 1)
+            })
             .max_by_key(|link| link.sequence)
             .copied()
     }
@@ -91,9 +109,14 @@ impl MembershipSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Capability, Extension, Extended, PrivateKey};
+    use crate::{Capability, Extended, Extension, PrivateKey};
 
-    fn certificate(identity: &PrivateKey, node: &PrivateKey, sequence: u64, previous: Option<Commitment>) -> SignedCapability {
+    fn certificate(
+        identity: &PrivateKey,
+        node: &PrivateKey,
+        sequence: u64,
+        previous: Option<Commitment>,
+    ) -> SignedCapability {
         let capability = Capability {
             subject: node.public_key(),
             kind: rocky_core::PrincipalKind::Node,
@@ -107,7 +130,8 @@ mod tests {
                 sequence: Some(sequence),
                 previous,
                 ..Extended::default()
-            }).unwrap(),
+            })
+            .unwrap(),
         };
         SignedCapability::sign(capability, identity).unwrap()
     }
@@ -125,4 +149,3 @@ mod tests {
         assert!(set.head(identity.public_key()).is_none());
     }
 }
-

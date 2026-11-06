@@ -2,11 +2,12 @@
 //! identity with issuer authority signs.
 use crate::{
     AuthorRange, Capability, CredentialChain, Endorsement, Error, Extended, Extension,
-    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PublicKey,
+    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PeerId, PublicKey,
     Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
 };
 use rocky_core::{
-    Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
+    AppId, Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right,
+    RowSelection,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -638,6 +639,34 @@ impl CredentialChain {
             previous,
         )
     }
+
+    /// Signs an identity-owned unlink for one of its node certificates.
+    pub fn unlink(
+        &self,
+        holder: &dyn IdentityProvider,
+        app: AppId,
+        time: u64,
+        node: PublicKey,
+    ) -> Result<SignedRevocation, Error> {
+        let identity = self.holder(holder)?.subject;
+        if identity != holder.public_key()? {
+            return Err(denied("the unlink signer is not this identity"));
+        }
+        SignedRevocation::sign(
+            Revocation {
+                app,
+                issuer: identity,
+                time,
+                nodes: [PeerId::of(node)].into(),
+                identities: BTreeSet::new(),
+                capabilities: BTreeSet::new(),
+                cut: Vec::new(),
+                recovery: None,
+            },
+            holder,
+            self,
+        )
+    }
     /// As `certify`, with `grants` and `partitions` of the identity's: an
     /// issuer identity's certificate names what its node holds.
     pub fn certify_with(
@@ -659,6 +688,9 @@ impl CredentialChain {
     ) -> Result<Self, Error> {
         if (sequence == 0) != previous.is_none() {
             return Err(denied("invalid membership sequence"));
+        }
+        if sequence >= crate::MAX_MEMBERSHIP_NODES as u64 {
+            return Err(denied("identity membership limit reached"));
         }
         let last = self.holder(holder)?;
         let authors = AuthorRange::new(author, author)?;

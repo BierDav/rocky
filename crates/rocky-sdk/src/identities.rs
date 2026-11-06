@@ -132,12 +132,38 @@ impl Settings {
             .map(|link| link.capability.extended())
             .transpose()?
             .is_some_and(|extended| extended.issues);
+        let existing_author = self.credentials.author_number().ok();
+        let range = links
+            .authors()?
+            .ok_or("the identity holds no author range")?;
+        let sequence = u64::from(author.saturating_sub(range.first));
+        let previous = self
+            .credentials
+            .0
+            .last()
+            .filter(|link| link.capability.kind == rocky_core::PrincipalKind::Node)
+            .map(|link| link.id())
+            .transpose()?;
         let chain = if issues {
             let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
             let partitions = crate::enrollment::whole_partitions(domain, &grants);
-            links.certify_with(identity, (node, author), (grants, partitions))?
+            if existing_author == Some(author) {
+                links.certify_with(identity, (node, author), (grants, partitions))?
+            } else {
+                links.certify_with_membership(
+                    identity,
+                    (node, author),
+                    (grants, partitions),
+                    sequence,
+                    previous,
+                )?
+            }
         } else {
-            links.certify(identity, node, author)?
+            if existing_author == Some(author) {
+                links.certify(identity, node, author)?
+            } else {
+                links.certify_member(identity, node, author, sequence, previous)?
+            }
         };
         chain.verify_selectors(
             self.publisher,

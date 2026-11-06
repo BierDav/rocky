@@ -35,6 +35,9 @@ Verification evidence:
   fails in coordinator and rocky-secure tests that still construct legacy
   self-signed or grant-bearing node certificates. The unit tier reported 236
   passed; integration reported 625 passed before dependent failures.
+- `./scripts/check --wasm`: the wasm build completed and 882 tests started;
+  five rocky-secure fixture tests still fail because their legacy authority
+  chains are not yet ported (`bulk::intents` and `bulk::syntax_authority`).
 
 The remaining gate failures are test-fixture migration work in
 `rocky-coordinator` and `rocky-secure`; production SDK and credentials tests

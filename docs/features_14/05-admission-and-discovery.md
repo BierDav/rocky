@@ -1,10 +1,8 @@
 # 5. Admission and discovery
 
-Status: Phase 5a implemented; workspace gate limitations recorded (2026-11-06), based on
-main `cec2ad1d78393e4ebee6366fefa6dda9f44df8ed` (phases 1, 2a and 4).
-[Phase 5a evidence](05-admission-and-discovery-evidence.md) records checks and
-remaining scope. Phase 3 membership remains a prerequisite for linking and
-the later discovery work.
+Status: Phase 5a integrated; Phase 5b SDK implemented and verified (2026-11-07). [Admission and discovery evidence](05-admission-and-discovery-evidence.md)
+records current results and the unavailable external Paperless consumer.
+Phase 3's final passing gate supersedes the historical Phase 5a failures.
 
 ## Phase 5a
 
@@ -19,11 +17,36 @@ and refuse a revoked node or identity.
 Phase 3 database scoping advances settings to v31, invitations to v7 and
 enrollment answers to v5; pairing requests remain v4. Each accepts only its
 current format. Custody routing preserves
-the original issuer node used by the code. `discovered` currently lists only
-pending requests. Phase 2b adds linkable and single-use identity lifecycles and
-in-memory approval continuations. Certified seen-node discovery, code-confirmed
-membership linking and Paperless integration remain for Phase 5b; the remaining
-sections describe the full phase destination.
+the original issuer node used by the code. `discovered` lists pending admission, pending same-identity links and certified
+Seen nodes. Phase 2b supplies linkable and single-use identity lifecycles and
+in-memory approval continuations.
+
+## Phase 5b
+
+`Configuration::link(contact, identity_provider)` returns `AwaitingLink`, holding
+the request and exchange secret without retaining the identity signer. Its
+six-digit code is bound to the signed request, including both nodes and its
+fresh exchange nonce. The answering node exposes the same code through
+`Session::discovered().links`. The application compares both screens and calls
+`Session::confirm_link(node, code)` there, then
+`Configuration::confirm_link(contact, identity_provider, pending, code)` on the
+joining device. Neither a wrong code nor only one confirmation releases the
+credential/key bundle. Each signing call takes an explicit identity provider.
+The native blocking `Database::enroll_identity` and `Database::confirm_link`
+use the same protocol. Link challenges are in memory, bounded to 32 and expire
+after five minutes; retrying the same challenge preserves confirmation.
+
+Any node can list certified Seen devices, with node, certifying identity,
+last-seen epoch seconds, registry-known/unknown, identity-revoked and
+identity-unlinked flags. Unauthenticated discovery addresses remain hints;
+a Seen entry requires a certificate verified in the local database context.
+A non-issuer has no registry key and flags identities it cannot place.
+
+Paperless is absent from this checkout and its listed sibling projects; its
+external UI/owner-approval consumer work cannot be completed here. Phase 6
+trusted-identity alerts, staleness and cuts and the proposed
+[features_15 publication follow-up](../features_15/07-live-publication.md)
+are separate work.
 
 ## Database-scoping integration
 

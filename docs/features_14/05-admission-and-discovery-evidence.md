@@ -1,4 +1,90 @@
-# Phase 5a admission evidence
+# Admission and discovery evidence
+
+## Phase 5b current record (2026-11-07)
+
+SDK implemented and verified; required workspace gate exits 0.
+The historical Phase 5a results below are preserved. Their prerequisite
+failures were superseded by the final Phase 3 gate in
+[03-membership-evidence.md](03-membership-evidence.md#final-gate-record-2026-11-07).
+
+Certified Seen discovery is available on any node. It intersects observed
+contacts/live sessions/peer history with database-verified certificate evidence,
+and reports the node, certifying identity, last-seen time, registry-known and
+unknown flags, identity revocation and identity-owned unlink. Discovery hints
+alone do not authenticate an identity or grant authority. Non-issuers expose
+their missing registry knowledge explicitly.
+
+Linking now pauses before sending the sealed bundle. The signed request binds
+the database context, both nodes and fresh exchange nonce; its digest derives
+the six-digit code displayed on each device. The answering device confirms via
+`Session::confirm_link`; the joining device supplies the matching code and an
+explicit per-call provider to `Configuration::confirm_link`. Its `AwaitingLink`
+continuation contains request/exchange state, never the signer. Wrong codes or
+missing confirmation refuse the bundle, and credentials are not installed.
+Answering-side challenges expire after five minutes, keep at most 32 entries,
+and preserve confirmation when the exact request retries. Phase 5a's persisted
+pending-admission, invitation expiry, bound and retry behavior remain intact.
+
+Regression coverage adds wrong-code refusal on either device, correct code
+without answering confirmation, no installed credentials before both confirm,
+matching displayed six-digit codes, and successful sequence-one installation.
+Seen coverage exercises a non-issuer's unknown-identity flag, an issuer's known
+identity, unlink and identity revocation. Existing three-node and independent
+two-database flows now confirm both screens through the same public API.
+Foreign link requests use the same reusable identity with distinct roots and
+with a shared root/different scope. Rejection leaves the answering node's saved
+settings and pending requests unchanged and installs no joining credentials;
+subsequent valid links/unlinks and database-local grants still work. A direct
+deterministic challenge test covers 33 arrivals, oldest eviction, exact retry,
+confirmation expiry and no consumed membership sequence during challenge.
+
+Final measured checks:
+
+- Inherited focused run: 11 group-secret and 10 identity tests passed;
+  `/tmp/rocky-phase5b-focused.log`.
+- Extended focused run: all 12 identity tests passed, including code, Seen and
+  foreign-context regressions; `/tmp/rocky-phase5b-identities-final.log`.
+- `./scripts/lint`: exit 0 with the inherited `chaos.yml:86` expression diagnostic;
+  `/tmp/rocky-phase5b-lint-final.log`.
+- Required `RUSTC_WRAPPER= ./scripts/check`: exit 0. Workspace Clippy and the
+  SDK all-target compile without default features pass. Native unit tier:
+  261 passed; integration tier: 1,175 passed, no failures. Wasm Clippy passes.
+  Browser tier: all 71 runs pass, covering 903 selected tests in 68 binaries.
+  The browser/native relay test passes, including browser writes and
+  coordinated claims arriving at the native node. Full output:
+  `/tmp/rocky-phase5b-full-check.log`.
+- `scripts/commitlint --jj`: passed; `/tmp/rocky-phase5b-commitlint.log`.
+
+The initial full gate stopped on a needless borrow in the new dispatch arm;
+that was corrected before the passing final run. The focused identity run
+also reported an unused close result; the final code propagates it and passes
+Clippy. These gates validate the SDK and existing browser/native probe, not
+Paperless, the full e2e/soak tier, a desktop application or general distributed
+qualification. The new interactive linking regressions run natively over the
+memory transport; browser compilation and the existing browser matrix pass.
+Ignored cases are not claimed as passes.
+
+`cargo metadata --no-deps --format-version 1` establishes `rocky-credentials`
+as request/code owner and `rocky-sdk` as lifecycle, discovery and consumer owner.
+Paperless (`paperless-core`, `paperless-node`, `DatabaseSettings.tsx` and
+`native/join_approval.rs`) was searched in the checkout; the listed sibling
+projects contain no Paperless checkout. Its owner-approval/UI integration is
+unavailable external consumer work, not a tested or completed change here.
+Applications still own passkeys, QR, database selection and encrypted personal
+directories with bootstrap/sync/recovery. Phase 6 is next; Phase 7 was not edited.
+
+The six protected files were checked against
+`/tmp/rocky-phase5b-protected-start.sha256`; all six match byte-for-byte.
+Final audit output: `/tmp/rocky-phase5b-protected-final.log`. The unrelated Phase 7
+evidence was separately snapshotted and preserved byte-for-byte: an external
+process moved it from `features_14` to `features_15` during verification; its
+SHA-256 remains `835267397b2f432039a80f519d126c5f0495dfaa3c2ad1729b57388cade3bce5`.
+That process also updates the roadmap and runs its own check; this lane did not
+move those files or stop that process. Work stays in current jj
+change `lzmuuprq`, parent `qouwotvn` (`0d031c15`), without commits, bookmarks,
+pushes, history rewrites, other checkouts or extra cache/build directories.
+
+## Historical Phase 5a record
 
 Status: Phase 5a implemented; required gates run with the limitations below (2026-11-06).
 

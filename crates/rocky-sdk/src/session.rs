@@ -33,6 +33,27 @@ pub struct Discovered {
     /// Join requests waiting on this issuer node, oldest first; empty on
     /// any other node.
     pub pending: Vec<JoinRequest>,
+    pub seen: Vec<SeenDevice>,
+    pub links: Vec<LinkRequest>,
+}
+/// Certified evidence observed in this database; it grants no authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct SeenDevice {
+    pub node: String,
+    pub identity: String,
+    pub last_seen: u64,
+    pub registry_known: bool,
+    pub unknown_identity: bool,
+    pub revoked: bool,
+    pub unlinked: bool,
+}
+/// A same-identity link waiting for this device's confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct LinkRequest {
+    pub node: String,
+    pub code: String,
+    pub received: u64,
+    pub confirmed: bool,
 }
 /// An issuer's admission of a pending join request.
 #[derive(Clone)]
@@ -110,7 +131,17 @@ impl Session {
                 })
             })
             .collect::<Result<_, _>>()?;
-        Ok(Discovered { pending })
+        Ok(Discovered {
+            pending,
+            seen: serde_json::from_value(value["seen"].clone())?,
+            links: serde_json::from_value(value["links"].clone())?,
+        })
+    }
+    /// Confirms the code displayed by the new device before releasing its bundle.
+    pub async fn confirm_link(&self, node: &str, code: &str) -> Result<(), Failure> {
+        self.request(json!({"type":"confirm_link", "node":node, "code":code}))
+            .await
+            .map(drop)
     }
     /// Admits a pending join request once `admit.code` equals the code its
     /// device shows; a mismatch is refused. The device enrolls at its next

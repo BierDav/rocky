@@ -41,7 +41,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`,
 /// join requests wait in `Issuing::requests`.
-pub const VERSION: u32 = 31;
+pub const VERSION: u32 = 32;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
@@ -351,9 +351,12 @@ pub struct Issuing {
     /// Every node and identity a statement this issuer learned revoked.
     /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
-    /// On a trusted node: when it last heard from each other trusted
-    /// identity, saved coarsely so a restart keeps staleness.
+    /// On a trusted node: when it last heard from each linked trusted
+    /// node, saved coarsely so a restart keeps staleness.
     pub heard: BTreeMap<PublicKey, u64>,
+    /// Local, durable observations of trusted membership, including our own.
+    pub trusted_nodes:
+        BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::TrustedObservation>>,
     /// Seconds another trusted identity may stay unheard before it is
     /// stale; `None` is `TRUSTED_STALE_AFTER`.
     pub stale_after: Option<u64>,
@@ -1675,7 +1678,8 @@ impl Settings {
         if !record.profile().is_some_and(Profile::issues) {
             return Err("only an identity enrolled with an issuer invitation is trusted".into());
         }
-        let live = registry.trusted_identities(&self.revocations);
+        let live =
+            registry.trusted_identities(self.database_context()?, &self.revocations, now()?)?;
         if !live.contains(&identity) && live.len() >= crate::registry::MAX_TRUSTED {
             return Err(format!(
                 "a domain has at most {} trusted identities",

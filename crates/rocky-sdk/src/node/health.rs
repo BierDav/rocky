@@ -22,7 +22,7 @@ pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 /// Changes that arrive together become one report.
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Coordination failures that stand, from every call to the service.
 /// Without iroh no service is composed, so none arises.
@@ -186,21 +186,29 @@ pub(super) struct TrustedWatch {
     nodes: BTreeMap<PublicKey, PublicKey>,
     heard: BTreeMap<PublicKey, u64>,
     stale_after: u64,
+    membership_alerts: Vec<Alert>,
 }
 /// A last-heard time is saved once it moved this far, or an eighth of
 /// the threshold, so reports and links do not write the settings each time.
 const HEARD_SAVE: u64 = 3600;
 impl TrustedWatch {
     fn hear(&mut self, node: &PublicKey, at: u64) {
-        if let Some(identity) = self.nodes.get(node) {
-            let heard = self.heard.entry(*identity).or_default();
+        if self.nodes.contains_key(node) {
+            let heard = self.heard.entry(*node).or_default();
             *heard = (*heard).max(at);
         }
     }
     /// Each identity's last sign of life: heard, or else granted.
     fn last(&self) -> impl Iterator<Item = (PublicKey, u64)> + '_ {
         self.granted.iter().map(|(identity, granted)| {
-            let heard = self.heard.get(identity).copied().unwrap_or_default();
+            let heard = self
+                .nodes
+                .iter()
+                .filter(|(_, owner)| *owner == identity)
+                .filter_map(|(node, _)| self.heard.get(node))
+                .copied()
+                .max()
+                .unwrap_or_default();
             (*identity, heard.max(*granted))
         })
     }
@@ -208,7 +216,7 @@ impl TrustedWatch {
         self.last()
             .filter(move |(_, last)| time.saturating_sub(*last) >= self.stale_after)
             .map(|(identity, last)| Alert {
-                kind: AlertKind::TrustedNodeStale {
+                kind: AlertKind::TrustedIdentityStale {
                     identity: identity.to_hex(),
                     last_heard_epoch_seconds: last,
                 },
@@ -265,13 +273,13 @@ fn content(report: &HealthReport) -> HealthReport {
     }
 }
 fn signed_bytes(
-    scope: &rocky_core::Scope,
+    database: rocky_credentials::DatabaseContext,
     node: &PublicKey,
     body: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     Ok(rocky_credentials::signing_bytes(
-        "rocky.sdk.health-report.v1",
-        &(scope, node, serde_bytes::Bytes::new(body)),
+        "rocky.sdk.health-report.v2",
+        &(database, node, serde_bytes::Bytes::new(body)),
     )?)
 }
 fn label(node: &PublicKey) -> String {
@@ -287,7 +295,7 @@ impl Node {
         }
     }
     /// This device's alerts: clocks its peers disagree with, standing
-    /// coordination failures and, on a trusted node, stale trusted nodes
+    /// coordination failures and, on a trusted node, stale trusted identities
     /// and a skipped seal.
     pub(super) fn alerts(&self) -> Vec<Alert> {
         let time = self.status_time().unwrap_or_default();
@@ -297,6 +305,12 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .alerts(time)
             .collect();
+        let membership = self
+            .trusted_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .membership_alerts
+            .clone();
         let mut alerts: Vec<Alert> = self
             .clocks
             .lock()
@@ -305,6 +319,7 @@ impl Node {
             .cloned()
             .chain(self.coordination.alerts())
             .chain(stale)
+            .chain(membership)
             .chain(
                 self.seal_skipped
                     .lock()
@@ -443,29 +458,43 @@ impl Node {
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
-            Some((self.registry().await?, self.membership().await?))
+            Some(self.registry().await?)
         } else {
             None
         };
+        let mut known = self.replica.revocations().await;
         let mut settings = self.settings.lock().await;
         let own = settings.identity;
+        let database = settings.database_context()?;
+        known.merge_in(&settings.revocations, database, now()?)?;
+        if let Some(certificate) = settings.credentials.certificate() {
+            known.link(certificate.clone())?;
+        }
+        known.verify_in(database)?;
         let saved = settings
             .authority
             .as_ref()
             .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
             .unwrap_or_default();
+        let time = self.status_time()?;
+        let trusted = registry
+            .as_ref()
+            .map(|registry| registry.trusted_identities(database, &known, time))
+            .transpose()?
+            .unwrap_or_default();
         let (granted, nodes) = match &registry {
-            Some((registry, membership)) => {
-                let granted: BTreeMap<PublicKey, u64> = registry
-                    .trusted_identities(&settings.revocations)
-                    .into_iter()
+            Some(registry) => {
+                let membership = crate::membership::Membership::replicated(&known, database)?;
+                let granted: BTreeMap<PublicKey, u64> = trusted
+                    .iter()
+                    .copied()
                     .filter(|identity| *identity != own)
                     .filter_map(|identity| {
                         let record = registry.trusted.get(&identity)?;
                         Some((identity, record.granted))
                     })
                     .collect();
-                let nodes = granted
+                let nodes: BTreeMap<PublicKey, PublicKey> = granted
                     .keys()
                     .flat_map(|identity| {
                         membership
@@ -477,37 +506,81 @@ impl Node {
             }
             None => Default::default(),
         };
+        let mut observed = settings
+            .authority
+            .as_ref()
+            .map(|issuing| issuing.trusted_nodes.clone())
+            .unwrap_or_default();
+        if registry.is_some() {
+            crate::membership::observe_trusted(&known, &trusted, time, &mut observed)?;
+        }
         let save = {
             let mut watch = self
                 .trusted_watch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             watch.stale_after = saved.1.unwrap_or(TRUSTED_STALE_AFTER.as_secs());
-            for (identity, at) in &saved.0 {
-                let heard = watch.heard.entry(*identity).or_default();
+            for (node, at) in &saved.0 {
+                let heard = watch.heard.entry(*node).or_default();
                 *heard = (*heard).max(*at);
             }
-            watch
-                .heard
-                .retain(|identity, _| granted.contains_key(identity));
+            watch.heard.retain(|node, _| nodes.contains_key(node));
             watch.granted = granted;
             watch.nodes = nodes;
+            let live: Vec<_> = watch
+                .nodes
+                .keys()
+                .filter(|node| self.linked(**node))
+                .copied()
+                .collect();
+            for node in live {
+                watch.hear(&node, time);
+            }
             let granularity = HEARD_SAVE.min(watch.stale_after / 8);
-            let moved = watch.heard.iter().any(|(identity, at)| {
+            let moved = watch.heard.iter().any(|(node, at)| {
                 saved
                     .0
-                    .get(identity)
+                    .get(node)
                     .is_none_or(|saved| at.saturating_sub(*saved) >= granularity)
             });
             (moved || watch.heard.len() != saved.0.len()).then(|| watch.heard.clone())
         };
-        if let (Some(heard), Some(_)) = (save, &settings.authority) {
+        let observed_changed = settings
+            .authority
+            .as_ref()
+            .is_some_and(|issuing| issuing.trusted_nodes != observed);
+        if settings.authority.is_some() && (save.is_some() || observed_changed) {
             let mut draft = settings.clone();
             if let Some(issuing) = draft.authority.as_mut() {
-                issuing.heard = heard;
+                if let Some(heard) = save {
+                    issuing.heard = heard;
+                }
+                issuing.trusted_nodes = observed;
             }
             draft.save(&self.path)?;
             *settings = draft;
+        }
+        let membership_alerts = if registry.is_some() {
+            settings
+                .authority
+                .as_ref()
+                .into_iter()
+                .flat_map(|issuing| &issuing.trusted_nodes)
+                .flat_map(|(identity, nodes)| {
+                    nodes
+                        .iter()
+                        .flat_map(move |(node, observation)| observation.alerts(*identity, *node))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.trusted_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .membership_alerts = membership_alerts;
+        if observed_changed {
+            self.observations.touch();
         }
         Ok(())
     }
@@ -517,21 +590,10 @@ impl Node {
             .trusted_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let before = watch.heard.clone();
-        watch.hear(node, at);
         let time = self.status_time().unwrap_or_default();
-        // A stale node heard again clears its alert.
-        let cleared = watch.granted.keys().any(|identity| {
-            let last = |heard: &BTreeMap<PublicKey, u64>| {
-                heard
-                    .get(identity)
-                    .copied()
-                    .unwrap_or_default()
-                    .max(watch.granted[identity])
-            };
-            time.saturating_sub(last(&before)) >= watch.stale_after
-                && time.saturating_sub(last(&watch.heard)) < watch.stale_after
-        });
+        let stale = watch.alerts(time).count();
+        watch.hear(node, at);
+        let cleared = watch.alerts(time).count() < stale;
         drop(watch);
         if cleared {
             self.observations.touch();
@@ -565,7 +627,7 @@ impl Node {
         self.observations.touch();
         Ok(json!({"stale_after": seconds}))
     }
-    /// The next time, after `time`, another trusted node turns stale.
+    /// The next time, after `time`, another trusted identity turns stale.
     pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {
         self.trusted_watch
             .lock()
@@ -612,6 +674,7 @@ impl Node {
             .is_ok())
     }
     pub(super) async fn health_report(&self) -> Result<HealthReport, Failure> {
+        self.refresh_trusted_watch().await?;
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         for blocker in self.blockers().await? {
             let kind = serde_json::to_value(&blocker.kind)?["type"]
@@ -647,11 +710,12 @@ impl Node {
             coordination_failure: self.coordination.failure(),
         })
     }
-    fn sign_report(&self, report: &HealthReport) -> Result<SignedReport, Failure> {
+    async fn sign_report(&self, report: &HealthReport) -> Result<SignedReport, Failure> {
         let key = PrivateKey::from_bytes(&self.vault.get("node")?);
         let node = key.public_key();
         let body = serde_json::to_vec(report)?;
-        let signature = key.sign(&signed_bytes(&self.domain().scope, &node, &body)?);
+        let database = self.settings.lock().await.database_context()?;
+        let signature = key.sign(&signed_bytes(database, &node, &body)?);
         Ok(SignedReport {
             node,
             body,
@@ -710,7 +774,7 @@ impl Node {
                 let report = self.health_report().await?;
                 if due || last.as_ref().map(content) != Some(content(&report)) {
                     send(HealthMessage::Report {
-                        report: Box::new(self.sign_report(&report)?),
+                        report: Box::new(self.sign_report(&report).await?),
                         received: None,
                     })
                     .await?;
@@ -832,7 +896,7 @@ impl Node {
     /// that syncs on short links reports what its exchange left.
     pub(super) async fn final_report(&self, writer: &Writer, direction: bool) {
         let result = async {
-            let report = self.sign_report(&self.health_report().await?)?;
+            let report = self.sign_report(&self.health_report().await?).await?;
             self.send_health(
                 writer,
                 direction,
@@ -903,7 +967,8 @@ impl Node {
         if Some(signed.node.to_hex()) == self.node_identity.as_ref().ok().cloned() {
             return Ok(());
         }
-        let bytes = signed_bytes(&self.domain().scope, &signed.node, &signed.body)?;
+        let database = self.settings.lock().await.database_context()?;
+        let bytes = signed_bytes(database, &signed.node, &signed.body)?;
         if !signed.node.verify(&bytes, &signed.signature) {
             return Err("the report's signature does not verify".into());
         }
@@ -994,6 +1059,82 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn health_evidence_is_bound_to_the_pinned_root_and_stable_scope() {
+        let key = PrivateKey::new();
+        let node = key.public_key();
+        let database = rocky_credentials::DatabaseContext {
+            publisher: PrivateKey::new().public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let body = b"health";
+        let signature = key.sign(&signed_bytes(database, &node, body).unwrap());
+        assert!(node.verify(&signed_bytes(database, &node, body).unwrap(), &signature));
+        for foreign in [
+            rocky_credentials::DatabaseContext {
+                publisher: PrivateKey::new().public_key(),
+                ..database
+            },
+            rocky_credentials::DatabaseContext {
+                scope: rocky_core::Scope {
+                    domain: rocky_core::DomainId([9; 16]),
+                    ..database.scope
+                },
+                ..database
+            },
+        ] {
+            assert!(!node.verify(&signed_bytes(foreign, &node, body).unwrap(), &signature));
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn either_linked_sibling_keeps_an_identity_live_but_an_unlinked_one_does_not() {
+        let identity = rocky_credentials::PrivateKey::new().public_key();
+        let nodes = [
+            rocky_credentials::PrivateKey::new().public_key(),
+            rocky_credentials::PrivateKey::new().public_key(),
+        ];
+        let mut watch = TrustedWatch {
+            granted: [(identity, 100)].into(),
+            nodes: nodes.into_iter().map(|node| (node, identity)).collect(),
+            stale_after: 60,
+            ..Default::default()
+        };
+        watch.hear(&nodes[0], 150);
+        assert_eq!(watch.alerts(209).count(), 0);
+        watch.hear(&nodes[1], 200);
+        assert_eq!(watch.alerts(259).count(), 0);
+        assert_eq!(watch.deadline(201), Some(260));
+        watch.nodes.remove(&nodes[1]);
+        assert!(matches!(
+            watch.alerts(210).next().map(|alert| alert.kind),
+            Some(AlertKind::TrustedIdentityStale {
+                last_heard_epoch_seconds: 150,
+                ..
+            })
+        ));
+        watch.hear(&nodes[1], 300);
+        assert_eq!(watch.last().collect::<Vec<_>>(), [(identity, 150)]);
+        // Restarts restore per-node evidence; local unlink filtering still applies.
+        let restored = TrustedWatch {
+            heard: watch.heard.clone(),
+            granted: watch.granted.clone(),
+            nodes: watch.nodes.clone(),
+            stale_after: 60,
+            ..Default::default()
+        };
+        assert_eq!(
+            restored.alerts(210).collect::<Vec<_>>(),
+            watch.alerts(210).collect::<Vec<_>>()
+        );
+        let ordinary_database = TrustedWatch::default();
+        assert_eq!(ordinary_database.alerts(1000).count(), 0);
+    }
 
     /// Unanswered calls and failed pushes become alerts only once they
     /// last `STANDING_FAILURE`, keep their start as `since`, and clear with

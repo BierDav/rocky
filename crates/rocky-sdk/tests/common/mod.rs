@@ -288,3 +288,42 @@ pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
     .downcast::<rocky_sdk::RolloutConfirmationRequired>()?;
     Database::open_confirmed(open, &report.report.digest)
 }
+
+/// Simulates a user comparing both displayed codes before linking.
+pub async fn link(open: Open<'_>, contact: &str, responder: &Session) -> Result<Opened, Failure> {
+    let config =
+        rocky_sdk::Configuration::new(open.directory, &rocky_sdk::Schema::parse(open.schema)?)?;
+    let config = if let Some(store) = open.secrets {
+        config.secrets(store)
+    } else {
+        config
+    };
+    let config = if let Some(network) = open.network {
+        config.network(network)
+    } else {
+        config
+    };
+    let identity = open.identity.ok_or("linking needs an identity")?;
+    let error = match config.link(contact, identity.clone()).await {
+        Ok(_) => return Err("unconfirmed link succeeded".into()),
+        Err(error) => error,
+    };
+    let pending = Arc::new(
+        *error
+            .downcast::<rocky_sdk::AwaitingLink>()
+            .map_err(|error| error.to_string())?,
+    );
+    let shown = responder
+        .discovered()
+        .await?
+        .links
+        .into_iter()
+        .find(|request| request.node == pending.node)
+        .ok_or("missing link request")?;
+    assert_eq!(shown.code, pending.code);
+    assert!(!shown.confirmed);
+    responder.confirm_link(&pending.node, &shown.code).await?;
+    config
+        .confirm_link(contact, identity, pending.clone(), &shown.code)
+        .await
+}

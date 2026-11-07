@@ -4,7 +4,12 @@ Status: implementation in progress (2026-11-07). Phases 1, 2, 4 and 5a are
 integrated. Phase 3 database-scoped membership is implemented and verified:
 the full workspace gate passes native tests, supported feature checks,
 browser tests and browser/native sync. See its evidence for measured results
-and limits. Phases 5b and 6 still follow separately.
+and limits. Phase 5b SDK linking/discovery is implemented and verified; see its
+[evidence](05-admission-and-discovery-evidence.md) for the passing native/browser
+gate and unavailable external Paperless integration. Phase 6 is implemented and
+verified; see its [evidence](06-trusted-many-nodes-evidence.md) for the passing
+native/browser gate and its limits. Paperless integration remains outstanding
+external consumer work, so features_14 consumer completion is not claimed.
 Phase briefs record their own status; evidence goes beside each brief as
 `NN-<name>-evidence.md`. Source code and tests define current behavior.
 
@@ -76,13 +81,12 @@ widens its own permissions.
 | 4 | [Identity registry](04-identity-registry.md) | registry and calls keyed by identity; no node records |
 | 5 | [Admission and discovery](05-admission-and-discovery.md) | join requests as discovered devices, verified admission, approve-first invitations |
 | 6 | [Trusted identities with many nodes](06-trusted-many-nodes.md) | trust and staleness per identity, alerts when a trusted identity links a node, lane cuts over every node |
-| 7 | [Bounded live publication](07-live-publication.md) (proposed) | shared credentials, publication completion and scoped repair for live refresh; [investigation evidence](07-live-publication-evidence.md) |
 
 1 → 2 → 3 is the critical path. 4 can start after 1. 5 needs 3 and 4. 6
 needs 3.
 
-Phase 7 is an independent performance follow-up against phases 3 and 5a;
-its runtime changes are proposed, not integrated.
+The proposed [bounded live publication follow-up](../features_15/README.md)
+is tracked separately in features_15 against phases 3 and 5a.
 
 ## Goals
 

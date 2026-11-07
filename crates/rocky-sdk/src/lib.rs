@@ -235,7 +235,7 @@ pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
-pub use session::{Admit, Discovered, Invitation, JoinRequest};
+pub use session::{Admit, Discovered, Invitation, JoinRequest, LinkRequest, SeenDevice};
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use tips::*;
@@ -244,3 +244,5 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// version they attach to.
 #[cfg(feature = "iroh")]
 pub use rocky_iroh as iroh;
+
+pub use self_enrollment::AwaitingLink;

@@ -356,3 +356,113 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
     // Retries of kept claims need no budget.
     assert_eq!(fixture.claim(1, "invoices", claim(1, T), T), Ok(1));
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn trusted_siblings_claim_until_their_identity_unlinks_them() {
+    use rocky_credentials::{
+        AuthorRange, Authority, CredentialChain, Revocation, SignedRevocation,
+    };
+    let mut f = Fixture::new(1, Limits::default());
+    let identity = f.nodes[0].clone();
+    let grant = CredentialChain(vec![
+        Authority::owner(&f.owner)
+            .issue_trusted(identity.public_key(), f.scope, AuthorRange::ALL, T)
+            .unwrap(),
+    ]);
+    let nodes = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let mut previous = None;
+    let chains: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let chain = grant
+                .clone()
+                .certify_member(
+                    &identity,
+                    node.public_key(),
+                    index as u32 + 1,
+                    index as u64,
+                    previous,
+                )
+                .unwrap();
+            previous = Some(chain.certificate().unwrap().id().unwrap());
+            chain
+        })
+        .collect();
+    let request = |index: usize, n: u8| {
+        Request::certified(
+            f.state.genesis.id().unwrap(),
+            [n; 32],
+            Operation::Claim {
+                scope: f.scope,
+                counter: name("siblings"),
+                claim: claim(n, T),
+            },
+            (&nodes[index], chains[index].certificate().cloned()),
+            T,
+        )
+        .unwrap()
+    };
+    let requests: Vec<_> = (0..3)
+        .map(|index| request(index, index as u8 + 1))
+        .collect();
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(
+            f.state.apply_at(T, request),
+            Ok(Outcome::Claimed(index as u64 + 1))
+        );
+    }
+    let unlink = SignedRevocation::sign(
+        Revocation {
+            app: f.scope.app,
+            issuer: identity.public_key(),
+            time: T,
+            nodes: [rocky_credentials::PeerId::of(nodes[1].public_key())].into(),
+            identities: Default::default(),
+            capabilities: Default::default(),
+            cut: Default::default(),
+            recovery: None,
+        },
+        &identity,
+        &chains[1],
+    )
+    .unwrap();
+    let mut authority = RevocationSet::try_from(vec![unlink]).unwrap();
+    for chain in &chains {
+        authority
+            .link(chain.certificate().unwrap().clone())
+            .unwrap();
+    }
+    let push = Request::sign_at(
+        f.state.genesis.id().unwrap(),
+        [10; 32],
+        Operation::Revoke {
+            scope: f.scope,
+            revocations: authority,
+        },
+        &f.owner,
+        T,
+    )
+    .unwrap();
+    f.state.apply_at(T, &push).unwrap();
+    for index in 0..3 {
+        let request = Request::certified(
+            f.state.genesis.id().unwrap(),
+            [20 + index as u8; 32],
+            Operation::Claim {
+                scope: f.scope,
+                counter: name("after unlink"),
+                claim: claim(20 + index as u8, T),
+            },
+            (&nodes[index], chains[index].certificate().cloned()),
+            T,
+        )
+        .unwrap();
+        let result = f.state.apply_at(T, &request);
+        if index == 1 {
+            assert_eq!(result, Err(CoordinationError::Denied));
+        } else {
+            assert!(matches!(result, Ok(Outcome::Claimed(_))));
+        }
+    }
+}

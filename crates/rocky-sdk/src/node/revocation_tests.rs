@@ -598,3 +598,93 @@ async fn foreign_membership_and_unlinks_are_refused_before_runtime_mutation() ->
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release()
+-> Result<(), Failure> {
+    use crate::self_enrollment::LinkRequest;
+    use rocky_credentials::{IdentityKey, IdentityRequest};
+    let directory = tempfile::tempdir()?;
+    let key = Arc::new(IdentityKey::generate());
+    let node = issuer_as(
+        directory.path(),
+        Arc::new(Keys::default()),
+        Some(key.clone()),
+    )
+    .await?;
+    let settings = node.settings.lock().await.clone();
+    let audience = Settings::node_key(&node.vault)?.public_key();
+    let time = now()?;
+    let mut requests = Vec::new();
+    for index in 0..33 {
+        let (request, _) = IdentityRequest::sign(
+            &*key,
+            &PrivateKey::new(),
+            audience,
+            time,
+            settings.database_context()?,
+        )?;
+        let wire = serde_json::to_vec(&LinkRequest {
+            request: request.to_bytes()?,
+            code: None,
+        })?;
+        assert_eq!(
+            node.answer_link(&settings, &wire)?,
+            b"confirmation required"
+        );
+        // Give the first arrival an unambiguous oldest timestamp without sleeping.
+        if index == 0 {
+            node.link_requests
+                .lock()
+                .map_err(|_| "poisoned requests")?
+                .get_mut(&request.node)
+                .ok_or("missing request")?
+                .received = time - 1;
+        }
+        requests.push(request);
+    }
+    {
+        let held = node.link_requests.lock().map_err(|_| "poisoned requests")?;
+        assert_eq!(held.len(), 32);
+        assert!(!held.contains_key(&requests[0].node));
+    }
+    let request = &requests[32];
+    let code = request.confirmation_code()?;
+    node.confirm_link(&json!({"node": request.node.to_hex(), "code":code}))
+        .await?;
+    // Retrying the same challenge preserves the answering device's confirmation.
+    let wire = serde_json::to_vec(&LinkRequest {
+        request: request.to_bytes()?,
+        code: None,
+    })?;
+    node.answer_link(&settings, &wire)?;
+    let confirmed = serde_json::to_vec(&LinkRequest {
+        request: request.to_bytes()?,
+        code: Some(code.clone()),
+    })?;
+    assert!(
+        rocky_credentials::IdentityAnswer::from_bytes(&node.answer_link(&settings, &confirmed)?)
+            .is_ok()
+    );
+    node.link_requests
+        .lock()
+        .map_err(|_| "poisoned requests")?
+        .get_mut(&request.node)
+        .ok_or("missing request")?
+        .received = time - 300;
+    assert!(
+        node.confirm_link(&json!({"node":request.node.to_hex(), "code":code}))
+            .await
+            .is_err()
+    );
+    assert!(node.answer_link(&settings, &confirmed).is_err());
+    assert_eq!(
+        node.replica
+            .revocations()
+            .await
+            .membership()?
+            .next_sequence(settings.identity)?,
+        1
+    );
+    Ok(())
+}

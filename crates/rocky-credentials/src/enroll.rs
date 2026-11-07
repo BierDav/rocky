@@ -638,6 +638,16 @@ impl IdentityRequest {
             &[shared.as_slice(), &self.exchange, exchange, &self.id()?].concat(),
         ))
     }
+    /// Six digits bound to both nodes and this signed request's one-time nonce.
+    pub fn confirmation_code(&self) -> Result<String, Error> {
+        let digest = self.id()?;
+        let number = u32::from_be_bytes(
+            digest[..4]
+                .try_into()
+                .map_err(|_| denied("invalid request digest"))?,
+        );
+        Ok(format!("{:06}", number % 1_000_000))
+    }
     /// Seals `payload` to the requesting node alone.
     pub fn answer(&self, payload: &[u8]) -> Result<IdentityAnswer, Error> {
         let (secret, exchange) = Exchange::new();

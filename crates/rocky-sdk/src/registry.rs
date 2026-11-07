@@ -184,16 +184,37 @@ impl Registry {
             .filter(|identity| !self.trusted.contains_key(identity))
             .collect()
     }
-    /// The live trusted identities: granted by the root, not revoked by it.
+    /// Root-verified, database-local trusted identities whose grants still stand.
     pub fn trusted_identities(
         &self,
+        database: rocky_credentials::DatabaseContext,
         revocations: &rocky_credentials::RevocationSet,
-    ) -> Vec<PublicKey> {
-        self.trusted
-            .iter()
-            .filter(|(_, record)| !revocations.ends_trusted(&record.grant.capability))
-            .map(|(identity, _)| *identity)
-            .collect()
+        time: u64,
+    ) -> Result<Vec<PublicKey>, Failure> {
+        revocations.verify_in(database)?;
+        let mut trusted = Vec::new();
+        for (identity, record) in &self.trusted {
+            let chain = rocky_credentials::CredentialChain(vec![record.grant.clone()]);
+            if chain.database_context(database.publisher)? != database {
+                return Err("trusted grant belongs to another database".into());
+            }
+            let subject = chain.trusted_identity(
+                database.publisher,
+                database.scope,
+                &rocky_credentials::RevocationSet::new(),
+                record.grant.capability.not_before,
+            )?;
+            if subject != *identity {
+                return Err("trusted grant names another identity".into());
+            }
+            if record.grant.capability.not_before <= time
+                && time < record.grant.capability.expires
+                && !revocations.ends_trusted(&record.grant.capability)
+            {
+                trusted.push(*identity);
+            }
+        }
+        Ok(trusted)
     }
 
     fn apply(&mut self, identity: &str, entry: &str, value: &str) -> Result<(), Failure> {
@@ -513,4 +534,74 @@ pub async fn write(
         let _ = sql.run("ROLLBACK", Vec::new()).await;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocky_credentials::{AuthorRange, Authority, DatabaseContext, PrivateKey, RevocationSet};
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn foreign_or_misnamed_root_grants_cannot_make_registry_identities_trusted() {
+        let root = PrivateKey::new();
+        let identity = PrivateKey::new().public_key();
+        let database = DatabaseContext {
+            publisher: root.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let record = TrustedRecord {
+            grant: Authority::owner(&root)
+                .issue_trusted(
+                    identity,
+                    database.scope,
+                    AuthorRange::ALL,
+                    100 + rocky_credentials::LIFETIME_SKEW,
+                )
+                .unwrap(),
+            granted: 100,
+        };
+        let registry = Registry {
+            trusted: [(identity, record.clone())].into(),
+            ..Default::default()
+        };
+        let empty = RevocationSet::new();
+        assert!(
+            registry
+                .trusted_identities(database, &empty, 99)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            registry.trusted_identities(database, &empty, 100).unwrap(),
+            [identity]
+        );
+        for foreign in [
+            DatabaseContext {
+                publisher: PrivateKey::new().public_key(),
+                ..database
+            },
+            DatabaseContext {
+                scope: rocky_core::Scope {
+                    domain: rocky_core::DomainId([9; 16]),
+                    ..database.scope
+                },
+                ..database
+            },
+        ] {
+            assert!(registry.trusted_identities(foreign, &empty, 100).is_err());
+        }
+        let misnamed = Registry {
+            trusted: [(PrivateKey::new().public_key(), record)].into(),
+            ..Default::default()
+        };
+        assert!(misnamed.trusted_identities(database, &empty, 100).is_err());
+        assert_eq!(
+            registry.trusted_identities(database, &empty, 100).unwrap(),
+            [identity]
+        );
+    }
 }

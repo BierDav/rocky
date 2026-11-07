@@ -434,12 +434,24 @@ pub enum AlertKind {
     /// device holds for `STANDING_FAILURE` or longer: claim rights they end
     /// still pass there. Clears when a push is acknowledged.
     RevocationsUnpushed,
+    /// A certified link first observed at `linked` (epoch seconds) while trusted here.
+    TrustedNodeLinked {
+        identity: String,
+        node: String,
+        linked: u64,
+    },
+    /// An identity-owned unlink observed for a trusted identity here.
+    TrustedNodeUnlinked {
+        identity: String,
+        node: String,
+        unlinked: u64,
+    },
     /// On a trusted node: no node of the trusted identity `identity` was
     /// heard from, directly or through another trusted node, for the
     /// configured threshold (`TRUSTED_STALE_AFTER` by default) since
     /// `last_heard_epoch_seconds`. Ask the user whether the root should
     /// revoke it; clears once it is heard again or revoked.
-    TrustedNodeStale {
+    TrustedIdentityStale {
         identity: String,
         last_heard_epoch_seconds: u64,
     },

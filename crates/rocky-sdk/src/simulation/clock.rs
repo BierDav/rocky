@@ -104,12 +104,12 @@ async fn a_link_tells_both_devices_when_one_clock_runs_ahead() -> Result<(), Fai
     assert_eq!(
         outcomes,
         [
-            r#"alerts ["ahead of b 60 min"]"#,
+            r#"alerts ["ahead of b 60 min", "a linked"]"#,
             r#"alerts ["a ahead 60 min"]"#,
             "1 ahead, 0 keys",
+            r#"alerts ["a linked"]"#,
             "alerts []",
-            "alerts []",
-            "alerts []",
+            r#"alerts ["a linked"]"#,
             "alerts []",
         ],
         "{}",

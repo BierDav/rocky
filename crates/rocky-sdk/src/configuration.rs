@@ -229,6 +229,31 @@ impl Configuration {
         opened.identity = pending.phrase.clone();
         Ok(opened)
     }
+    /// Starts linking and returns `AwaitingLink` with the code to compare on both devices.
+    pub async fn link(
+        &self,
+        contact: &str,
+        identity: Arc<dyn IdentityProvider>,
+    ) -> Result<Opened, Failure> {
+        let mut options = self.options();
+        options.identity = Some(identity);
+        Database::launch_link(options, contact, None).await
+    }
+    /// Completes the same request, using the identity only for this call.
+    pub async fn confirm_link(
+        &self,
+        contact: &str,
+        identity: Arc<dyn IdentityProvider>,
+        pending: Arc<crate::AwaitingLink>,
+        code: &str,
+    ) -> Result<Opened, Failure> {
+        if pending.code != code {
+            return Err("link code does not match".into());
+        }
+        let mut options = self.options();
+        options.identity = Some(identity);
+        Database::launch_link(options, contact, Some(pending)).await
+    }
     /// Creates a linkable identity for this join and returns its phrase once.
     pub async fn join_linkable(&self, invitation: &str) -> Result<Opened, Failure> {
         let identity = crate::IdentityKey::generate();

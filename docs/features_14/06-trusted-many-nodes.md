@@ -1,6 +1,9 @@
 # 6. Trusted identities with many nodes
 
-Status: planned (2026-11-05). Needs phase 3.
+Status: implemented and verified (2026-11-07). Consumes Phases 3 and 5b.
+The required native/browser gate passes; see
+[evidence](06-trusted-many-nodes-evidence.md) for measured results and limits.
+External Paperless integration remains outstanding in features_14.
 
 Phase 3 now also requires database-bound membership. Consume that evidence
 without widening trust across databases: the same identity may be trusted in

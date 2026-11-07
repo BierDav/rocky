@@ -28,9 +28,9 @@ not sender commit; the report does not measure commit-to-render time.
 
 ## Confirmed in current source
 
-The current checkout has integrated membership changes beyond alpha.4 and
-is actively being edited. The following mechanisms still exist in the
-inspected source; the external timings have not been reproduced on it.
+The phase 3 checkout has integrated membership changes beyond alpha.4.
+The following mechanisms still exist in the inspected source; the external
+timings have not been reproduced on it.
 
 - `EncryptedFrame::weight` excludes the credential chain, while `Chain`'s
   serializer emits the full credentials. `Handle::push_committed` reads
@@ -66,5 +66,26 @@ modules and existing live-link tests were read before adding this proposal.
 Primary research sources are linked in the phase brief; no paper's reported
 speedup is used as an estimate for Rocky.
 
-Check results are recorded after the investigation checks finish. The
+Checks completed during the investigation:
+
+- `./scripts/check` passed workspace formatting/clippy, 261 unit tests,
+  1,172 integration tests and the isolated replica-lock regression. Its wasm
+  checks passed 903 tests in 71 browser runs, plus browser/native relay sync
+  with a browser write and coordinator claims.
+- The existing SDK single-message committed-push and bounded-burst recovery
+  regressions also passed individually. These establish the existing small
+  fixture's behavior, not the proposed real-schema improvement.
+- `./scripts/commitlint --jj` passed; the proposal's relative links resolve.
+- `./scripts/lint` returned zero, but actionlint reported the existing
+  unsupported arithmetic expression in `.github/workflows/chaos.yml:86`:
+  `100000 + github.run_number * 1000`. Workflow lint remains unresolved
+  despite the wrapper's successful exit; that workflow was not changed here.
+
+After workspace restoration, phase 3 commit `0d031c15` had the same tree as
+the investigation snapshot `73a7daf856d6`, verified with `jj diff` before
+this evidence-only update. The full suite was not repeated for this
+documentation change.
+
+Baseline checks do not implement or validate the proposed publication
+protocol, remeasure Paperless, or qualify a desktop application. The
 proposal's acceptance cases remain unimplemented and unverified.

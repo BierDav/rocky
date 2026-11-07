@@ -1,7 +1,7 @@
 //! Self-enrollment: a new node of an identity that already holds grants
 //! certifies itself with its identity provider. A node of the same identity
 //! hands it what the identity holds; no issuer and no invitation is
-//! involved. See `docs/runtime/sdk-enrollment.md#another-node-of-an-identity`.
+//! involved. Both devices confirm the request code before the bundle is sent.
 use crate::{
     Failure,
     enrollment::{IDENTITY, Intent, Settings, exchange, now},
@@ -57,6 +57,42 @@ impl Bundle {
         self.revocations.verify_in(database)?;
         Ok(())
     }
+}
+
+/// A linking request awaiting confirmation on both devices. Contains no identity signer.
+pub struct AwaitingLink {
+    pub code: String,
+    pub node: String,
+    pub(crate) request: IdentityRequest,
+    pub(crate) secret: rocky_credentials::Exchange,
+}
+impl std::fmt::Debug for AwaitingLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwaitingLink")
+            .field("code", &self.code)
+            .field("node", &self.node)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for AwaitingLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "confirm linking code {} on both devices", self.code)
+    }
+}
+impl std::error::Error for AwaitingLink {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LinkRequest {
+    pub request: Vec<u8>,
+    pub code: Option<String>,
+}
+
+pub(crate) struct PendingLink {
+    pub request: Vec<u8>,
+    pub code: String,
+    pub received: u64,
+    pub confirmed: bool,
 }
 
 impl Settings {
@@ -157,6 +193,7 @@ impl Settings {
         provider: Arc<dyn IdentityProvider>,
         contact: &str,
         transport: &dyn Transport,
+        confirmed: Option<Arc<AwaitingLink>>,
     ) -> Result<Self, Failure> {
         let record = crate::enrollment::ContactRecord::parse(contact)?;
         let addresses = record
@@ -173,17 +210,55 @@ impl Settings {
             .into());
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let (request, secret) =
-            IdentityRequest::sign(&*provider, &node, record.node, now()?, record.database)?;
+        let pending = match confirmed.as_ref() {
+            Some(pending) => {
+                pending.request.verify(
+                    record.node,
+                    provider.public_key()?,
+                    (now()?, SKEW),
+                    record.database,
+                )?;
+                if pending.request.node != node.public_key() {
+                    return Err("link continuation belongs to another installation".into());
+                }
+                None
+            }
+            None => {
+                let (request, secret) =
+                    IdentityRequest::sign(&*provider, &node, record.node, now()?, record.database)?;
+                Some(AwaitingLink {
+                    code: request.confirmation_code()?,
+                    node: node.public_key().to_hex(),
+                    request,
+                    secret,
+                })
+            }
+        };
+        let linking = confirmed
+            .as_deref()
+            .or(pending.as_ref())
+            .ok_or("missing link request")?;
+        let request = &linking.request;
+        let wire = LinkRequest {
+            request: request.to_bytes()?,
+            code: confirmed.as_ref().map(|pending| pending.code.clone()),
+        };
         let reply = exchange(
             transport,
             &addresses,
             Protocol::Renew,
-            &[IDENTITY, &request.to_bytes()?].concat(),
+            &[IDENTITY, &serde_json::to_vec(&wire)?].concat(),
         )
         .await?;
+        if confirmed.is_none() {
+            if reply != b"confirmation required" {
+                return Err("unexpected link challenge".into());
+            }
+            return Err(Box::new(pending.ok_or("missing link continuation")?));
+        }
+        let secret = &linking.secret;
         let bundle: Bundle =
-            serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(&request, &secret)?)?;
+            serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(request, secret)?)?;
         if bundle.format != 6 {
             return Err("unsupported identity enrollment format".into());
         }

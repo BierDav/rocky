@@ -3,8 +3,8 @@
 Rocky provides local-first SQLite storage, encrypted peer replication,
 credentials, seal coordination and optional iroh networking.
 
-Implementation follows [features_13](docs/features_13/README.md), including its
-remaining prerequisites. See [AGENTS.md](AGENTS.md) for contribution
+Implementation follows [features_14](docs/features_14/README.md), building on
+[features_13](docs/features_13/README.md). See [AGENTS.md](AGENTS.md) for contribution
 rules. Use Cargo manifests, module declarations and tests to navigate the
 implementation.
 
@@ -39,13 +39,17 @@ The owner's identity is derived from that root. Identity signers are also
 never stored: a new device joins as a single-use identity, or
 `Configuration::join_linkable` returns its identity phrase once. Supply the
 identity for later linking; opening and renewal use the node key alone.
-The root is needed only to add or revoke a trusted node; those calls fail with
-`publisher_required` without it. Trusted nodes have their own keys and
-invite, renew, revoke ordinary devices and seal; their grants never
-expire, and the others raise `TrustedNodeStale` for one they have not
-heard from. Revoking a trusted node keeps the seals and bookmark moves it
-signed up to the latest ones the revoking node holds; the rest raise
-`TipStatementsPastCut`.
+The root grants and revokes trust per identity; those calls fail with
+`publisher_required` without it. Every linked node of a trusted identity
+can invite, renew, revoke ordinary identities and seal. Linking another node
+needs the identity signer and matching codes on both devices, with no root
+ceremony. Trusted observers retain `TrustedNodeLinked` and `TrustedNodeUnlinked`
+alerts, including for their own identity. Trust never expires; an identity
+raises `TrustedIdentityStale` on its trusted peers when none of its linked
+nodes has been heard from within the configured threshold. Root revocation
+keeps each linked node's seals and bookmark moves through the latest heads
+the revoking node holds; unlink cuts that node's lane independently. Later
+statements raise `TipStatementsPastCut`.
 Every data key epoch is also sealed to the root's public key in records
 that sync with its frames, so with every device lost the root and any
 node's backup, a keyless custodian's too, restore the data that store

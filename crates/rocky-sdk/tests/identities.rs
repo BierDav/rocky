@@ -84,7 +84,7 @@ async fn household() -> Result<Household, Failure> {
     // No issuer answers from here on.
     owner.close().await;
     let second = Device::new(
-        Database::enroll_identity(
+        common::link(
             open(
                 &path.join("m2"),
                 &hub,
@@ -92,11 +92,13 @@ async fn household() -> Result<Household, Failure> {
                 Some(person(&path.join("person"))?),
             ),
             &first.contact().await,
+            &first.database.session(),
         )
+        .await
         .map_err(|error| format!("second enrollment: {error}"))?,
     )?;
     let third = Device::new(
-        Database::enroll_identity(
+        common::link(
             open(
                 &path.join("m3"),
                 &hub,
@@ -104,7 +106,9 @@ async fn household() -> Result<Household, Failure> {
                 Some(person(&path.join("person"))?),
             ),
             &second.contact().await,
+            &second.database.session(),
         )
+        .await
         .map_err(|error| format!("third enrollment: {error}"))?,
     )?;
     let owner = Device::open(&path.join("a"), Some(Network::Owned(hub.connector("a"))))
@@ -359,7 +363,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
     let reopened = config.open().await?;
     assert!(reopened.identity.is_none());
     let second_path = root.path().join("second");
-    let second = Database::enroll_identity(
+    let second = common::link(
         open(
             &second_path,
             &hub,
@@ -367,10 +371,12 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
             Some(Arc::new(IdentityKey::from_phrase(&phrase)?)),
         ),
         &contact,
-    )?;
+        &reopened.database.session(),
+    )
+    .await?;
     let third_path = root.path().join("third");
     let second_contact = second.database.session().contact().await?;
-    let third = Database::enroll_identity(
+    let third = common::link(
         open(
             &third_path,
             &hub,
@@ -378,7 +384,9 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
             Some(Arc::new(IdentityKey::from_secret(key.secret()))),
         ),
         &second_contact,
-    )?;
+        &second.database.session(),
+    )
+    .await?;
     for (index, name) in ["first", "second", "third"].into_iter().enumerate() {
         let saved = identity(root.path(), name)?;
         assert_eq!(saved["identity"], json!(key.public_key()));
@@ -607,15 +615,19 @@ async fn the_last_node_publishes_its_unlink_and_the_identity_links_again() -> Re
         identity(root, "a")?["keys"]["items"],
         "the issuer received the last node's unlink"
     );
-    let replacement = Device::new(Database::enroll_identity(
-        open(
-            &root.join("m4"),
-            &household.hub,
-            "m4",
-            Some(person(&root.join("person"))?),
-        ),
-        &contact,
-    )?)?;
+    let replacement = Device::new(
+        common::link(
+            open(
+                &root.join("m4"),
+                &household.hub,
+                "m4",
+                Some(person(&root.join("person"))?),
+            ),
+            &contact,
+            &nodes[0].database.session(),
+        )
+        .await?,
+    )?;
     common::introduce(owner, &replacement).await;
     replacement
         .sync()
@@ -635,7 +647,7 @@ async fn the_last_node_publishes_its_unlink_and_the_identity_links_again() -> Re
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(), Failure> {
-    for shared_root in [false, true] {
+    for (shared_root, revoked_b) in [(false, false), (true, false), (false, true), (true, true)] {
         let directory = tempfile::tempdir()?;
         let path = directory.path();
         let hub = Arc::new(Hub::default());
@@ -649,7 +661,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         let mut owners = Vec::new();
         let mut members = Vec::new();
         let mut siblings = Vec::new();
-        for (index, root) in [root_a, root_b].into_iter().enumerate() {
+        for (index, root) in [root_a.clone(), root_b].into_iter().enumerate() {
             let owner_name = format!("owner{index}");
             let owner = Device::new(Database::create_with_root(
                 open(&path.join(&owner_name), &hub, &owner_name, None),
@@ -657,7 +669,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 root,
             )?)?;
             let profile = if index == 0 {
-                json!({"kind":"writer","scopes":["items"]})
+                json!({"kind":"issuer"})
             } else {
                 json!({"kind":"reader","scopes":["items"]})
             };
@@ -667,18 +679,34 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 &owner.invite_as(profile).await,
             )?)?;
             common::introduce(&owner, &member).await;
+            if index == 0 {
+                let grant = owner
+                    .database
+                    .session()
+                    .trust(&personal.public_key()?.to_hex(), root_a.clone())
+                    .await?;
+                member
+                    .database
+                    .session()
+                    .install_trust(&grant.grant)
+                    .await?;
+            }
             owner.add(1, &format!("database {index}")).await;
             member.sync().await.map_err(|error| error.to_string())?;
             let sibling_name = format!("sibling{index}");
-            let sibling = Device::new(Database::enroll_identity(
-                open(
-                    &path.join(&sibling_name),
-                    &hub,
-                    &sibling_name,
-                    Some(personal.clone()),
-                ),
-                &member.contact().await,
-            )?)?;
+            let sibling = Device::new(
+                common::link(
+                    open(
+                        &path.join(&sibling_name),
+                        &hub,
+                        &sibling_name,
+                        Some(personal.clone()),
+                    ),
+                    &member.contact().await,
+                    &member.database.session(),
+                )
+                .await?,
+            )?;
             common::introduce(&owner, &sibling).await;
             sibling.sync().await.map_err(|error| error.to_string())?;
             let saved = identity(path, &name)?;
@@ -718,6 +746,32 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             )?)
         };
         let foreign_contact = decode(&owners[1].contact().await, "rocky://peer/")?;
+        // Discovery/link requests signed by this same reusable identity must still
+        // match the answering node's database before it records a pending request.
+        let mut foreign_link = decode(&members[0].contact().await, "rocky://peer/")?;
+        let other_member = decode(&members[1].contact().await, "rocky://peer/")?;
+        foreign_link["database"] = other_member["database"].clone();
+        foreign_link["publisher"] = other_member["publisher"].clone();
+        let foreign_link = format!(
+            "rocky://peer/{}",
+            data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(&foreign_link)?)
+        );
+        let rejected_link = path.join("foreign_link");
+        let config = rocky_sdk::Configuration::new(
+            &rejected_link,
+            &rocky_sdk::Schema::parse(common::SCHEMA)?,
+        )?
+        .network(Network::Owned(hub.connector("foreign_link")));
+        let before = identity(path, "member0")?;
+        let pending_before = members[0].database.session().discovered().await?.links;
+        assert!(config.link(&foreign_link, personal.clone()).await.is_err());
+        assert!(!rejected_link.join("identity.json").exists());
+        assert_eq!(
+            members[0].database.session().discovered().await?.links,
+            pending_before
+        );
+        assert_eq!(identity(path, "member0")?, before);
+
         let mut foreign_invitation = decode(&invitation, "rocky://join/")?;
         foreign_invitation["database"] = foreign_contact["database"].clone();
         foreign_invitation["publisher"] = foreign_contact["publisher"].clone();
@@ -755,9 +809,29 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 .remove("nodes");
             Ok(record)
         };
+        if revoked_b {
+            owners[1]
+                .ok(json!({"type":"revoke","identity":person_key}))
+                .await;
+            for device in [&members[1], &siblings[1]] {
+                assert!(device.sync().await.is_err());
+            }
+            assert!(members[0].sync().await.is_ok());
+            assert!(siblings[0].sync().await.is_ok());
+        }
+        let before_alerts_b = trusted_alerts(&owners[1]).await?;
+        assert!(!trusted_alerts(&owners[0]).await?.iter().any(|alert|
+            matches!(&alert.kind, rocky_sdk::AlertKind::TrustedIdentityStale { identity, .. }
+                if identity == &person_key)));
+        let linked_a = siblings[0].node().await;
+        assert!(trusted_alerts(&owners[0]).await?.iter().any(|alert|
+            matches!(&alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
+                if identity == &person_key && node == &linked_a)));
         let before_registry_b = record(owners[1].ok(json!({"type":"identities"})).await)?;
         assert_eq!(before_registry_b["profile"]["kind"], "reader");
         let before_b = identity(path, "owner1")?["keys"].clone();
+        let before_authority_b = identity(path, "owner1")?["revocations"].clone();
+        let before_heard_b = identity(path, "owner1")?["authority"]["heard"].clone();
         let before_a = identity(path, "owner0")?["keys"].clone();
         members[0]
             .database
@@ -771,12 +845,24 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         members[0].add(2, "surviving writer").await;
         assert!(siblings[0].sync().await.is_err());
         owners[0]
-            .ok(json!({"type":"revoke","identity":personal.public_key()?.to_string()}))
-            .await;
+            .database
+            .session()
+            .revoke_trusted(&person_key, root_a.clone())
+            .await?;
+        assert_eq!(trusted_alerts(&owners[1]).await?, before_alerts_b);
+        assert_eq!(identity(path, "owner1")?["revocations"], before_authority_b);
+        assert_eq!(
+            identity(path, "owner1")?["authority"]["heard"],
+            before_heard_b
+        );
         owners[1].add(3, "still independent").await;
         for device in [&members[1], &siblings[1]] {
-            device.sync().await.map_err(|error| error.to_string())?;
-            assert_eq!(device.titles().await, ["database 1", "still independent"]);
+            if revoked_b {
+                assert!(device.sync().await.is_err());
+            } else {
+                device.sync().await.map_err(|error| error.to_string())?;
+                assert_eq!(device.titles().await, ["database 1", "still independent"]);
+            }
         }
         assert_eq!(identity(path, "owner1")?["keys"], before_b);
         assert_eq!(
@@ -787,5 +873,356 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             device.close().await;
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linking_requires_both_codes_before_credentials_are_released() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let key: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
+    let owner = Device::new(Database::create(
+        open(
+            &directory.path().join("owner"),
+            &hub,
+            "owner",
+            Some(key.clone()),
+        ),
+        None,
+    )?)?;
+    let path = directory.path().join("new");
+    let schema = rocky_sdk::Schema::parse(common::SCHEMA)?;
+    let config = rocky_sdk::Configuration::new(&path, &schema)?
+        .network(Network::Owned(hub.connector("new")));
+    let contact = owner.contact().await;
+    let pending = match config.link(&contact, key.clone()).await {
+        Ok(_) => return Err("unconfirmed link installed credentials".into()),
+        Err(error) => Arc::new(
+            *error
+                .downcast::<rocky_sdk::AwaitingLink>()
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+    assert_eq!(pending.code.len(), 6);
+    assert!(pending.code.bytes().all(|digit| digit.is_ascii_digit()));
+    let session = owner.database.session();
+    let shown = session
+        .discovered()
+        .await?
+        .links
+        .into_iter()
+        .find(|held| held.node == pending.node)
+        .ok_or("missing request")?;
+    assert_eq!(shown.code, pending.code);
+    assert!(!shown.confirmed);
+    let wrong = if pending.code == "000000" {
+        "000001"
+    } else {
+        "000000"
+    };
+    assert!(
+        config
+            .confirm_link(&contact, key.clone(), pending.clone(), wrong)
+            .await
+            .is_err()
+    );
+    assert!(session.confirm_link(&pending.node, wrong).await.is_err());
+    // Even the correct joining-side code cannot release a bundle until the answering side confirms.
+    assert!(
+        config
+            .confirm_link(&contact, key.clone(), pending.clone(), &pending.code)
+            .await
+            .is_err()
+    );
+    assert!(!path.join("identity.json").exists());
+    assert!(!session.discovered().await?.links[0].confirmed);
+    session.confirm_link(&pending.node, &pending.code).await?;
+    assert!(
+        config
+            .confirm_link(&contact, key.clone(), pending.clone(), wrong)
+            .await
+            .is_err()
+    );
+    assert!(!path.join("identity.json").exists());
+    let linked = config
+        .confirm_link(&contact, key, pending.clone(), &pending.code)
+        .await?;
+    let saved: rocky_credentials::CredentialChain =
+        serde_json::from_value(identity(directory.path(), "new")?["credentials"].clone())?;
+    assert_eq!(
+        saved
+            .certificate()
+            .ok_or("certificate")?
+            .membership()?
+            .ok_or("membership")?
+            .0,
+        1
+    );
+    linked.database.close().await?;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(), Failure> {
+    let household = household().await?;
+    let owner = &household.owner;
+    let member = &household.nodes[0];
+    let sibling = &household.nodes[1];
+    let sibling_node = sibling.node().await;
+    common::introduce(member, sibling).await;
+    member.sync().await.map_err(|error| error.to_string())?;
+    let discovered = member.database.session().discovered().await?;
+    assert!(discovered.pending.is_empty());
+    let seen = discovered
+        .seen
+        .iter()
+        .find(|seen| seen.node == sibling_node)
+        .ok_or("certified sibling not seen")?;
+    assert_eq!(
+        seen.identity,
+        identity(household._root.path(), "m2")?["identity"]
+            .as_str()
+            .ok_or("identity")?
+    );
+    assert!(seen.last_seen > 0);
+    assert!(!seen.registry_known);
+    assert!(seen.unknown_identity);
+    assert!(!seen.revoked && !seen.unlinked);
+    common::introduce(owner, sibling).await;
+    owner.sync().await.map_err(|error| error.to_string())?;
+    let issuer_seen = owner.database.session().discovered().await?.seen;
+    let seen = issuer_seen
+        .iter()
+        .find(|seen| seen.node == sibling_node)
+        .ok_or("issuer has no seen sibling")?;
+    assert!(seen.registry_known && !seen.unknown_identity);
+    member
+        .database
+        .session()
+        .unlink(
+            &sibling_node,
+            person(&household._root.path().join("person"))?,
+        )
+        .await?;
+    assert!(
+        member
+            .database
+            .session()
+            .discovered()
+            .await?
+            .seen
+            .iter()
+            .any(|seen| seen.node == sibling_node && seen.unlinked)
+    );
+    owner
+        .ok(json!({"type":"revoke", "identity": seen.identity}))
+        .await;
+    assert!(
+        owner
+            .database
+            .session()
+            .discovered()
+            .await?
+            .seen
+            .iter()
+            .any(|seen| seen.node == sibling_node && seen.revoked)
+    );
+    owner.close().await;
+    for node in household.nodes {
+        node.close().await;
+    }
+    Ok(())
+}
+
+async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::Alert>, Failure> {
+    Ok(device
+        .database
+        .session()
+        .status()
+        .await?
+        .alerts
+        .into_iter()
+        .filter(|alert| {
+            matches!(
+                alert.kind,
+                rocky_sdk::AlertKind::TrustedNodeLinked { .. }
+                    | rocky_sdk::AlertKind::TrustedNodeUnlinked { .. }
+                    | rocky_sdk::AlertKind::TrustedIdentityStale { .. }
+            )
+        })
+        .collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path();
+    let hub = Arc::new(Hub::default());
+    let root = Arc::new(rocky_sdk::RootKey::generate());
+    let personal: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
+    let owner = Device::new(Database::create_with_root(
+        open(&path.join("owner"), &hub, "owner", None),
+        None,
+        root.clone(),
+    )?)?;
+    owner
+        .database
+        .session()
+        .create_bookmark("main", None)
+        .await?;
+    owner.database.session().follow("main").await?;
+    let first = Device::new(Database::join(
+        open(&path.join("first"), &hub, "first", Some(personal.clone())),
+        &owner.invite_as(json!({"kind":"issuer"})).await,
+    )?)?;
+    common::introduce(&owner, &first).await;
+    let person = personal.public_key()?.to_hex();
+    let grant = owner
+        .database
+        .session()
+        .trust(&person, root.clone())
+        .await?;
+    first.database.session().install_trust(&grant.grant).await?;
+    first.sync().await.map_err(|error| error.to_string())?;
+    first.database.session().follow("main").await?;
+    let second = Device::new(
+        common::link(
+            open(&path.join("second"), &hub, "second", Some(personal.clone())),
+            &first.contact().await,
+            &first.database.session(),
+        )
+        .await?,
+    )?;
+    common::introduce(&owner, &second).await;
+    let all = [&owner, &first, &second];
+    for _ in 0..3 {
+        for device in all {
+            device.sync().await.map_err(|error| error.to_string())?;
+        }
+    }
+    second.database.session().follow("main").await?;
+    let mut seals = Vec::new();
+    for (index, signer) in [&first, &second, &first, &second].into_iter().enumerate() {
+        signer
+            .add(100 + index as u8, &format!("sealed {index}"))
+            .await;
+        let sealed = signer.ok(json!({"type":"tips","action":"seal"})).await;
+        seals.push(sealed["tip"].clone());
+        for _ in 0..2 {
+            for device in all {
+                device.sync().await.map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    let third = Device::new(
+        common::link(
+            open(&path.join("third"), &hub, "third", Some(personal.clone())),
+            &second.contact().await,
+            &second.database.session(),
+        )
+        .await?,
+    )?;
+    common::introduce(&owner, &third).await;
+    common::introduce(&first, &third).await;
+    for _ in 0..3 {
+        for device in [&owner, &first, &second, &third] {
+            device.sync().await.map_err(|error| error.to_string())?;
+        }
+    }
+    let third_node = third.node().await;
+    for device in [&owner, &first, &second, &third] {
+        let alerts = trusted_alerts(device).await?;
+        assert_eq!(
+            alerts
+                .iter()
+                .filter(|alert| matches!(&alert.kind,
+            rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
+            if identity == &person && node == &third_node))
+                .count(),
+            1,
+            "{alerts:?}"
+        );
+    }
+    first
+        .database
+        .session()
+        .unlink(&third_node, personal.clone())
+        .await?;
+    for _ in 0..2 {
+        for device in all {
+            device.sync().await.map_err(|error| error.to_string())?;
+        }
+    }
+    assert!(third.sync().await.is_err());
+    for device in all {
+        let alerts = trusted_alerts(device).await?;
+        assert_eq!(
+            alerts
+                .iter()
+                .filter(|alert| matches!(&alert.kind,
+            rocky_sdk::AlertKind::TrustedNodeUnlinked { identity, node, .. }
+            if identity == &person && node == &third_node))
+                .count(),
+            1,
+            "{alerts:?}"
+        );
+    }
+    let before = trusted_alerts(&owner).await?;
+    let saved_before = identity(path, "owner")?["authority"]["trusted_nodes"].clone();
+    assert_eq!(trusted_alerts(&owner).await?, before);
+    assert_eq!(
+        identity(path, "owner")?["authority"]["trusted_nodes"],
+        saved_before
+    );
+    owner
+        .database
+        .session()
+        .revoke_trusted(&person, root)
+        .await?;
+    let saved = identity(path, "owner")?;
+    let revocations: rocky_credentials::RevocationSet =
+        serde_json::from_value(saved["revocations"].clone())?;
+    let cut = revocations
+        .statements()
+        .find(|signed| {
+            signed.root()
+                && signed
+                    .statement
+                    .identities
+                    .contains(&personal.public_key().unwrap())
+        })
+        .ok_or("root cut")?;
+    let lanes: std::collections::BTreeSet<_> = cut
+        .statement
+        .cut
+        .iter()
+        .map(|cut| cut.lane.to_hex())
+        .collect();
+    assert!(lanes.contains(&first.node().await) && lanes.contains(&second.node().await));
+    assert!(!lanes.contains(&third_node));
+    let inspection = owner.ok(json!({"type":"tips","action":"inspect"})).await;
+    for seal in seals {
+        assert!(
+            inspection["seals"]
+                .as_array()
+                .ok_or("seals")?
+                .iter()
+                .any(|held| held["tip"] == seal && held["revoked"] == false),
+            "{inspection}"
+        );
+    }
+    assert!(first.sync().await.is_err());
+    assert!(second.sync().await.is_err());
+    first.close().await;
+    second.close().await;
+    third.close().await;
+    owner.close().await;
+    let reopened = Device::open(
+        &path.join("owner"),
+        Some(Network::Owned(hub.connector("owner"))),
+    )?;
+    assert_eq!(trusted_alerts(&reopened).await?, before);
+    reopened.close().await;
     Ok(())
 }

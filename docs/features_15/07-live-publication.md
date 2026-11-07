@@ -1,8 +1,9 @@
 # 7. Bounded live publication
 
 Status: proposed (2026-11-07); investigation complete, runtime changes not
-implemented. Independent of phase 6; integrate against the database-bound
-membership and admission behavior of phases 3 and 5a. Source findings and
+implemented. Independent of features_14 phase 6; integrate against the database-bound
+membership and admission behavior of [features_14 phase 3](../features_14/03-membership.md)
+and [phase 5a](../features_14/05-admission-and-discovery.md). Source findings and
 external measurements are in [the investigation evidence](07-live-publication-evidence.md).
 
 ## Problem and decision

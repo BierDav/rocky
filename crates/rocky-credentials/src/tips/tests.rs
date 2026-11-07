@@ -112,3 +112,184 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
     assert!(admitted <= 8, "{admitted} IDs computed");
     assert!(!past.contains(&late[0].id().unwrap()));
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    let root = PrivateKey::new();
+    let identity = PrivateKey::new();
+    let nodes = [PrivateKey::new(), PrivateKey::new()];
+    let grant = CredentialChain(vec![
+        Authority::owner(&root)
+            .issue_trusted(
+                identity.public_key(),
+                scope,
+                AuthorRange::new(10, 41).unwrap(),
+                100,
+            )
+            .unwrap(),
+    ]);
+    let first = grant
+        .clone()
+        .certify(&identity, nodes[0].public_key(), 10)
+        .unwrap();
+    let second = grant
+        .certify_member(
+            &identity,
+            nodes[1].public_key(),
+            11,
+            1,
+            Some(first.certificate().unwrap().id().unwrap()),
+        )
+        .unwrap();
+    let chains = [first, second];
+    let mut graph = TipGraph::new(scope, [4; 32]);
+    let append = |graph: &mut TipGraph, lane: usize, n: usize| {
+        let signed = SignedBookmarkMove::endorse_linked(
+            BookmarkMoveStatement {
+                format: BOOKMARK_MOVE_FORMAT,
+                scope,
+                name: format!("lane{lane}-{n}"),
+                from: None,
+                to: Some(graph.genesis()),
+            },
+            crate::Signer::node(&nodes[lane], &chains[lane]).unwrap(),
+            &chains[lane].capabilities(),
+            Some(
+                graph
+                    .next_link(&identity.public_key(), &nodes[lane].public_key())
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        graph.moves.push(signed.clone());
+        signed.id().unwrap()
+    };
+    let kept: BTreeSet<_> = (0..6).map(|n| append(&mut graph, n % 2, n)).collect();
+    let unlink_statement = Revocation {
+        app: scope.app,
+        issuer: identity.public_key(),
+        time: 200,
+        nodes: [crate::PeerId::of(nodes[0].public_key())].into(),
+        identities: Default::default(),
+        capabilities: Default::default(),
+        cut: vec![
+            graph
+                .heads(&identity.public_key(), &nodes[0].public_key())
+                .unwrap(),
+        ],
+        recovery: None,
+    };
+    let unlink =
+        crate::SignedRevocation::sign(unlink_statement.clone(), &identity, &chains[0]).unwrap();
+    unlink.verify(root.public_key(), scope.app).unwrap();
+    // An identity never cuts a sibling it did not unlink, or a different identity's lane.
+    for foreign_identity in [false, true] {
+        let mut forged = unlink_statement.clone();
+        if foreign_identity {
+            forged.cut[0].identity = root.public_key();
+        } else {
+            forged.cut[0].lane = nodes[1].public_key();
+        }
+        assert!(crate::SignedRevocation::sign(forged, &identity, &chains[0]).is_err());
+    }
+    let mut revocations = RevocationSet::try_from(vec![unlink]).unwrap();
+    let after_unlink = append(&mut graph, 0, 7);
+    let repeated_unlink = crate::SignedRevocation::sign(
+        Revocation {
+            time: 201,
+            cut: vec![
+                graph
+                    .heads(&identity.public_key(), &nodes[0].public_key())
+                    .unwrap(),
+            ],
+            ..unlink_statement
+        },
+        &identity,
+        &chains[0],
+    )
+    .unwrap();
+    let repeated = RevocationSet::try_from(vec![repeated_unlink]).unwrap();
+    let before_retry = revocations.clone();
+    revocations
+        .merge(&repeated, root.public_key(), scope.app, 201)
+        .unwrap();
+    let mut reverse_retry = repeated;
+    reverse_retry
+        .merge(&before_retry, root.public_key(), scope.app, 201)
+        .unwrap();
+    assert_eq!(
+        reverse_retry.cut(&identity.public_key(), &nodes[0].public_key()),
+        revocations.cut(&identity.public_key(), &nodes[0].public_key())
+    );
+    let survivor = append(&mut graph, 1, 8);
+    let root_cut = graph
+        .proposed_cut(&identity.public_key(), &[nodes[1].public_key()].into())
+        .unwrap()
+        .0;
+    let root_revoke = Authority::owner(&root)
+        .revoke(Revocation {
+            app: scope.app,
+            issuer: root.public_key(),
+            time: 300,
+            nodes: Default::default(),
+            identities: [identity.public_key()].into(),
+            capabilities: Default::default(),
+            cut: root_cut,
+            recovery: None,
+        })
+        .unwrap();
+    revocations
+        .merge(
+            &RevocationSet::try_from(vec![root_revoke]).unwrap(),
+            root.public_key(),
+            scope.app,
+            300,
+        )
+        .unwrap();
+    let after_root = append(&mut graph, 1, 9);
+    let later_unlink = crate::SignedRevocation::sign(
+        Revocation {
+            app: scope.app,
+            issuer: identity.public_key(),
+            time: 400,
+            nodes: [crate::PeerId::of(nodes[1].public_key())].into(),
+            identities: Default::default(),
+            capabilities: Default::default(),
+            cut: vec![
+                graph
+                    .heads(&identity.public_key(), &nodes[1].public_key())
+                    .unwrap(),
+            ],
+            recovery: None,
+        },
+        &identity,
+        &chains[1],
+    )
+    .unwrap();
+    let later_unlink = RevocationSet::try_from(vec![later_unlink]).unwrap();
+    let before = revocations.clone();
+    revocations
+        .merge(&later_unlink, root.public_key(), scope.app, 400)
+        .unwrap();
+    let mut reverse = later_unlink;
+    reverse
+        .merge(&before, root.public_key(), scope.app, 400)
+        .unwrap();
+    assert_eq!(
+        reverse.cut(&identity.public_key(), &nodes[1].public_key()),
+        revocations.cut(&identity.public_key(), &nodes[1].public_key())
+    );
+    assert_eq!(
+        graph.prunable(&revocations, &BTreeSet::new()).unwrap(),
+        [after_unlink, after_root].into()
+    );
+    graph.exclude_revoked(&revocations).unwrap();
+    assert!(kept.iter().all(|id| !graph.revoked.contains(id)));
+    assert!(!graph.revoked.contains(&survivor));
+    assert_eq!(revocations.pruned(u64::MAX).cut_lanes().count(), 2);
+}

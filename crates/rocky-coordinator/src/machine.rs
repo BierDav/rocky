@@ -621,7 +621,7 @@ impl Metadata {
         time: u64,
     ) -> Result<(), CoordinationError> {
         let control = self.current_control(scope, time)?;
-        if !Self::trusts(control, request, time)
+        if !self.trusts(control, request, time)
             && !self.holds_claim(control, counter, request, time)
         {
             return Err(CoordinationError::Denied);
@@ -810,7 +810,7 @@ impl Metadata {
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
-            && !Self::trusts(&certificate.control, request, request.time)
+            && !self.trusts(&certificate.control, request, request.time)
             && !counter.is_some_and(|counter| {
                 self.holds_claim(&certificate.control, counter, request, request.time)
             })
@@ -1116,7 +1116,7 @@ impl Metadata {
         Ok(&certificate.control)
     }
     /// Whether the request's node certificate is a trusted identity's.
-    fn trusts(control: &DomainControl, request: &Request, time: u64) -> bool {
+    fn trusts(&self, control: &DomainControl, request: &Request, time: u64) -> bool {
         if let Some(publisher) = control.publisher.as_deref().copied() {
             let expected = rocky_credentials::DatabaseContext {
                 publisher,
@@ -1132,9 +1132,13 @@ impl Metadata {
                 return false;
             }
         }
-        request
-            .identity(time)
-            .is_some_and(|identity| control.trusted.contains(&identity))
+        request.identity(time).is_some_and(|identity| {
+            control.trusted.contains(&identity)
+                && self.state.find(control.scope).is_ok_and(|domain| {
+                    !domain.revocations.revokes_origin(&identity)
+                        && !domain.revocations.ends_node_of(identity, request.key, true)
+                })
+        })
     }
     /// A trusted node of `scope` under its current control.
     fn authorized(
@@ -1144,7 +1148,7 @@ impl Metadata {
         time: u64,
     ) -> Result<&DomainControl, CoordinationError> {
         let control = self.current_control(scope, time)?;
-        if !Self::trusts(control, request, time) {
+        if !self.trusts(control, request, time) {
             return Err(CoordinationError::Denied);
         }
         Ok(control)

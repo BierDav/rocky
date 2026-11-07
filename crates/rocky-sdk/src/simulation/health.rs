@@ -49,7 +49,7 @@ async fn a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted() -> Resu
     let skewed = r#"alerts ["coordinator skew 60 min ahead false"]"#;
     assert_eq!(
         run(2, steps, &[" woken ", " alerts "]).await?,
-        [skewed, skewed, "alerts []", "alerts []"]
+        [skewed, skewed, r#"alerts ["a linked"]"#, "alerts []"]
     );
     Ok(())
 }
@@ -154,18 +154,18 @@ async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
         run(3, steps, &[" mesh ", " trust "]).await?,
         [
             "trusted",
-            r#"mesh ["a: alerts []", "b: alerts [], via a"]"#,
+            r#"mesh ["a: alerts [\"c linked\", \"a linked\"]", "b: alerts [], via a"]"#,
             "mesh none"
         ]
     );
     Ok(())
 }
 
-/// A trusted node flags another it has not heard from for its configured
+/// A trusted node flags an identity it has not heard from for its configured
 /// threshold, through `status_after` alone; the flag survives a restart
 /// and clears once the other is heard again.
 #[tokio::test(start_paused = true)]
-async fn a_trusted_node_flags_another_it_has_not_heard_from() -> Result<(), Failure> {
+async fn a_trusted_node_flags_an_identity_it_has_not_heard_from() -> Result<(), Failure> {
     let steps = vec![
         Trust(2),
         Sync(2),
@@ -185,10 +185,10 @@ async fn a_trusted_node_flags_another_it_has_not_heard_from() -> Result<(), Fail
         run(3, steps, &[" woken ", " alerts ", " stale after "]).await?,
         [
             "set",
-            "alerts []",
-            r#"alerts ["c stale"]"#,
-            r#"alerts ["c stale"]"#,
-            "alerts []"
+            r#"alerts ["c linked", "a linked"]"#,
+            r#"alerts ["c linked", "a linked", "c stale"]"#,
+            r#"alerts ["c linked", "a linked", "c stale"]"#,
+            r#"alerts ["c linked", "a linked"]"#
         ]
     );
     Ok(())

@@ -863,6 +863,7 @@ fn a_trusted_identity_cannot_present_another_databases_node_certificate() {
         )
         .unwrap();
         request.authenticate([0; 32]).unwrap();
-        assert_eq!(Metadata::trusts(&control, &request, T), namespace == scope);
+        let state = Fixture::new(1, Limits::default()).state;
+        assert_eq!(state.trusts(&control, &request, T), namespace == scope);
     }
 }

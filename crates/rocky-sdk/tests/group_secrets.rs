@@ -970,7 +970,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         .to_owned();
     let second_store = Arc::new(Store::default());
     let second = Peer::new(
-        Database::enroll_identity(
+        common::link(
             open_with_identity(
                 &root.path().join("second"),
                 &second_store,
@@ -978,7 +978,9 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
                 &person,
             ),
             &contact,
+            &first.database.session(),
         )
+        .await
         .unwrap()
         .database,
         second_store,

@@ -42,7 +42,7 @@ pub struct Revocation {
     pub nodes: BTreeSet<crate::PeerId>,
     pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
-    /// Only in a root statement, ordered by identity and node without
+    /// In a root statement or identity-owned unlink, ordered by identity and node without
     /// repeats: for each node (lane) of a trusted identity the statement
     /// revokes, the heads of its chains that stay valid. A chain without
     /// an entry keeps nothing once its signer is revoked.
@@ -125,12 +125,12 @@ impl Revocation {
         self.recovery
             .is_none_or(|recovery| root && recovery.slot < crate::RECOVERY_SLOTS)
     }
-    /// A cut only in a root statement, ordered without repeats, naming
+    /// A cut in a root statement or identity-owned unlink, ordered without repeats, naming
     /// chains of identities or nodes the statement revokes; a recovery's
     /// may name any identity but the one it keeps, since it ends grants
     /// its signer never saw.
-    fn valid_cut(&self, root: bool) -> bool {
-        (root || self.cut.is_empty())
+    fn valid_cut(&self, authorized: bool) -> bool {
+        (authorized || self.cut.is_empty())
             && self.cut.len() <= MAX_CUT_LANES
             && self
                 .cut
@@ -211,7 +211,7 @@ impl SignedRevocation {
                 && !statement.nodes.is_empty()
                 && (signer.signing_node().is_some() || !Self::unlink_shape(&statement, chain)))
             || statement.empty()
-            || !statement.valid_cut(chain.0.is_empty())
+            || !statement.valid_cut(chain.0.is_empty() || Self::unlink_shape(&statement, chain))
             || !statement.valid_recovery(chain.0.is_empty())
         {
             return Err(denied("invalid revocation"));
@@ -242,7 +242,9 @@ impl SignedRevocation {
                 && statement.nodes == [crate::PeerId::of(certificate.capability.subject)].into()
                 && statement.identities.is_empty()
                 && statement.capabilities.is_empty()
-                && statement.cut.is_empty()
+                && statement.cut.iter().all(|cut| {
+                    cut.identity == statement.issuer && cut.lane == certificate.capability.subject
+                })
                 && statement.recovery.is_none()
         })
     }
@@ -299,7 +301,7 @@ impl SignedRevocation {
         if (!self.chain.0.is_empty() && !unlink && !statement.nodes.is_empty())
             || statement.app != app
             || statement.empty()
-            || !statement.valid_cut(self.chain.0.is_empty())
+            || !statement.valid_cut(self.chain.0.is_empty() || unlink)
             || !statement.valid_recovery(self.chain.0.is_empty())
             || statement
                 .recovery
@@ -621,12 +623,56 @@ impl RevocationSet {
                 .extend(signed.statement.nodes.iter().copied());
             root.capabilities
                 .extend(signed.statement.capabilities.iter().copied());
-            for cut in &signed.statement.cut {
-                let heads = self.cuts.entry((cut.identity, cut.lane)).or_default();
-                heads.statements.extend(cut.statements.iter().copied());
-                heads.acknowledgments.extend(cut.acknowledgments);
-            }
             self.recovery = self.recovery.max(signed.statement.recovery);
+        }
+        let implicit = signed
+            .chain
+            .certificate()
+            .filter(|_| signed.identity_unlink() && signed.statement.cut.is_empty())
+            .map(|certificate| Cut {
+                identity: signed.statement.issuer,
+                lane: certificate.capability.subject,
+                statements: Vec::new(),
+                acknowledgments: None,
+            });
+        let cuts = implicit
+            .as_ref()
+            .map_or(signed.statement.cut.as_slice(), std::slice::from_ref);
+        for cut in cuts {
+            let key = (cut.identity, cut.lane);
+            let root_cut = self.statements.values().any(|known| {
+                known.root()
+                    && known
+                        .statement
+                        .cut
+                        .iter()
+                        .any(|cut| (cut.identity, cut.lane) == key)
+            });
+            if !signed.root() {
+                let earlier = self
+                    .statements
+                    .iter()
+                    .filter(|(_, known)| {
+                        known.identity_unlink()
+                            && known.statement.issuer == cut.identity
+                            && known.statement.nodes.contains(&crate::PeerId::of(cut.lane))
+                    })
+                    .map(|(id, known)| (known.statement.time, *id))
+                    .min();
+                if root_cut || earlier.is_some_and(|earlier| earlier <= (signed.statement.time, id))
+                {
+                    continue;
+                }
+                // The first unlink fixes this lane; retries cannot widen its heads.
+                self.cuts.remove(&key);
+            }
+            // Root authority supersedes an unlink's heads, in either arrival order.
+            if signed.root() && !root_cut {
+                self.cuts.remove(&key);
+            }
+            let heads = self.cuts.entry(key).or_default();
+            heads.statements.extend(cut.statements.iter().copied());
+            heads.acknowledgments.extend(cut.acknowledgments);
         }
         self.statements.insert(id, signed);
         Ok(true)

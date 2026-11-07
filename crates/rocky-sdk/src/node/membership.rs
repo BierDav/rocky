@@ -4,6 +4,7 @@ use super::*;
 impl Node {
     pub(super) async fn unlink(&self, node: PublicKey) -> Result<Value, Failure> {
         let registry = self.registry().await?;
+        let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
         let identity = settings.identity()?;
         let mut known = self.replica.revocations().await;
@@ -30,7 +31,7 @@ impl Node {
             nodes: [rocky_credentials::PeerId::of(node)].into(),
             identities: Default::default(),
             capabilities: Default::default(),
-            cut: Default::default(),
+            cut: vec![graph.heads(&settings.identity, &node)?],
             recovery: None,
         };
         // The identity signs outside the replica transaction. The target certificate proves ownership.

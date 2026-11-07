@@ -80,6 +80,7 @@ pub(crate) enum Install {
     /// of that identity.
     Identity {
         contact: String,
+        confirmed: Option<Arc<crate::AwaitingLink>>,
     },
     Installed,
     /// A backup archive, under a fresh identity the invitation enrolls.
@@ -339,6 +340,7 @@ impl Database {
             open,
             Install::Identity {
                 contact: contact.into(),
+                confirmed: None,
             },
         )
     }
@@ -539,6 +541,40 @@ impl Database {
     ) -> Result<Opened, Failure> {
         let install = Self::join_install(&open, invitation, name)?;
         Self::launch(open, install, None).await
+    }
+    pub(crate) async fn launch_link(
+        open: Open<'_>,
+        contact: &str,
+        confirmed: Option<Arc<crate::AwaitingLink>>,
+    ) -> Result<Opened, Failure> {
+        Self::launch(
+            open,
+            Install::Identity {
+                contact: contact.into(),
+                confirmed,
+            },
+            None,
+        )
+        .await
+    }
+    /// Completes linking after both devices confirm the displayed code.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn confirm_link(
+        open: Open<'_>,
+        contact: &str,
+        pending: Arc<crate::AwaitingLink>,
+        code: &str,
+    ) -> Result<Opened, Failure> {
+        if pending.code != code {
+            return Err("link code does not match".into());
+        }
+        Self::start(
+            open,
+            Install::Identity {
+                contact: contact.into(),
+                confirmed: Some(pending),
+            },
+        )
     }
     pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::launch(open, Install::Installed, None).await
@@ -1416,7 +1452,7 @@ async fn identity(
                 }
             }
         }
-        Install::Identity { contact } => {
+        Install::Identity { contact, confirmed } => {
             let network =
                 network.ok_or(ServiceError::NetworkRequired("enroll an identity's node"))?;
             let provider = setup
@@ -1426,7 +1462,16 @@ async fn identity(
             let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
             let key = Settings::transport_key(&prepared.1)?;
             let (transport, owned) = network.start(false, key).await?;
-            match Settings::enroll_identity(path, prepared, provider, contact, &*transport).await {
+            match Settings::enroll_identity(
+                path,
+                prepared,
+                provider,
+                contact,
+                &*transport,
+                confirmed.clone(),
+            )
+            .await
+            {
                 Ok(settings) => Ok((settings, Some((transport, owned)))),
                 Err(error) => {
                     if owned {

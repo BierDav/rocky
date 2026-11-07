@@ -141,3 +141,84 @@ impl Membership {
             .flat_map(|(identity, nodes)| nodes.values().map(|node| (*identity, node)))
     }
 }
+
+/// A database-local observation retained across sync retries and restarts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedObservation {
+    /// First observed here, in epoch seconds.
+    pub linked: u64,
+    pub unlinked: Option<u64>,
+}
+impl TrustedObservation {
+    pub(crate) fn alerts(
+        &self,
+        identity: PublicKey,
+        node: PublicKey,
+    ) -> impl Iterator<Item = crate::Alert> {
+        let identity = identity.to_hex();
+        let node = node.to_hex();
+        std::iter::once(crate::Alert {
+            kind: crate::AlertKind::TrustedNodeLinked {
+                identity: identity.clone(),
+                node: node.clone(),
+                linked: self.linked,
+            },
+            since: Some(self.linked),
+        })
+        .chain(self.unlinked.map(|unlinked| crate::Alert {
+            kind: crate::AlertKind::TrustedNodeUnlinked {
+                identity,
+                node,
+                unlinked,
+            },
+            since: Some(unlinked),
+        }))
+    }
+}
+
+/// Only verified certificates create observations; discovery hints never do.
+pub(crate) fn observe_trusted(
+    known: &rocky_credentials::RevocationSet,
+    trusted: &[PublicKey],
+    time: u64,
+    observed: &mut BTreeMap<PublicKey, BTreeMap<PublicKey, TrustedObservation>>,
+) -> Result<(), crate::Failure> {
+    let membership = known.membership()?;
+    for certificate in known.certificates() {
+        let identity = certificate.issuer;
+        let node = certificate.capability.subject;
+        if !trusted.contains(&identity) || !membership.accepts(certificate.id()?) {
+            continue;
+        }
+        let observation =
+            observed
+                .entry(identity)
+                .or_default()
+                .entry(node)
+                .or_insert(TrustedObservation {
+                    linked: time,
+                    unlinked: None,
+                });
+        if let Some(unlinked) = known
+            .statements()
+            .filter(|signed| {
+                !signed.root()
+                    && signed.statement.issuer == identity
+                    && signed
+                        .statement
+                        .nodes
+                        .contains(&rocky_credentials::PeerId::of(node))
+            })
+            .map(|signed| signed.statement.time)
+            .min()
+        {
+            observation.unlinked = Some(
+                observation
+                    .unlinked
+                    .map_or(unlinked, |prior| prior.min(unlinked)),
+            );
+        }
+    }
+    Ok(())
+}

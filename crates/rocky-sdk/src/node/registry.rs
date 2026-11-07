@@ -120,17 +120,61 @@ impl Node {
         self.note(&notes).await;
         Ok(())
     }
-    /// The devices this node knows of without having enrolled them: the
-    /// join requests waiting on it.
+    /// Pending approvals and certified nodes observed in this database.
     pub(super) async fn discovered(&self) -> Result<Value, Failure> {
         self.expire_requests().await?;
-        let (pending, expires) = self.settings.lock().await.pending_requests();
+        let settings = self.settings.lock().await.clone();
+        let (pending, expires) = settings.pending_requests();
         let pending: Vec<Value> = pending
             .iter()
             .map(|request| request.view(expires))
             .collect();
-        Ok(json!({"pending": pending}))
+        let registry = self.registry().await?;
+        let mut known = self.replica.revocations().await;
+        known.verify_in(settings.database_context()?)?;
+        known.merge(
+            &settings.revocations,
+            settings.publisher,
+            self.domain().manifest().app,
+            now()?,
+        )?;
+        let time = now()?;
+        let met = self
+            .met
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut seen = BTreeMap::new();
+        for certificate in known.certificates() {
+            let node = certificate.capability.subject;
+            let identity = certificate.issuer;
+            let last = self
+                .last_seen(node, time)
+                .into_iter()
+                .chain(met.get(&node).copied())
+                .chain(settings.contact_meta.get(&node).map(|meta| meta.learned))
+                .max();
+            if let Some(last) = last {
+                let registry_known = registry
+                    .records
+                    .get(&identity)
+                    .is_some_and(|record| record.admitted.is_some());
+                seen.insert(node, json!({
+                    "node": node.to_hex(), "identity": identity.to_hex(), "last_seen": last,
+                    "registry_known": registry_known, "unknown_identity": !registry_known,
+                    "revoked": known.revokes(&identity),
+                    "unlinked": known.identity_unlinks(identity, rocky_credentials::PeerId::of(node)),
+                }));
+            }
+        }
+        let links: Vec<Value> = self.link_requests.lock().unwrap_or_else(PoisonError::into_inner).iter()
+            .filter(|(_, held)| time.saturating_sub(held.received) < 300)
+            .map(|(node, held)| json!({"node": node.to_hex(), "code": held.code, "received": held.received, "confirmed": held.confirmed})).collect();
+        Ok(
+            json!({"pending": pending, "seen": seen.into_values().collect::<Vec<_>>(), "links": links}),
+        )
     }
+
     /// Admits a pending join request whose device shows `code`.
     pub(super) async fn admit(&self, request: &Value) -> Result<Value, Failure> {
         let node = node_of(request)?;
@@ -289,7 +333,11 @@ impl Node {
         let registry = self.registry().await?;
         let membership = self.membership().await?;
         let time = now()?;
-        let trusted = registry.trusted_identities(&settings.revocations);
+        let trusted = registry.trusted_identities(
+            settings.database_context()?,
+            &settings.revocations,
+            time,
+        )?;
         let identities: Vec<Value> = registry
             .records
             .iter()

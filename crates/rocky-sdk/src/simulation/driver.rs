@@ -755,7 +755,13 @@ impl Simulation {
                 crate::AlertKind::EscrowRefused { node, records, .. } => {
                     format!("{} escrow refused {records}", name(node))
                 }
-                crate::AlertKind::TrustedNodeStale { identity, .. } => format!(
+                crate::AlertKind::TrustedNodeLinked { node, .. } => {
+                    format!("{} linked", name(node))
+                }
+                crate::AlertKind::TrustedNodeUnlinked { node, .. } => {
+                    format!("{} unlinked", name(node))
+                }
+                crate::AlertKind::TrustedIdentityStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)
                 ),

@@ -7,6 +7,7 @@ mod delivery;
 mod discovery;
 mod health;
 mod held;
+mod linking;
 mod live_links;
 mod membership;
 mod mesh;
@@ -292,6 +293,7 @@ pub(crate) struct Node {
     /// Peers whose sessions this device served, with the last time; at
     /// most `MET` are kept.
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
+    link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
     /// Peers whose clock the last handshake found more than
     /// `MAX_CLOCK_AHEAD` apart from this one's, as alerts; at most `MET`.
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
@@ -392,6 +394,7 @@ impl Node {
             last_syncs: Default::default(),
             coordination: Arc::new(health::Coordination::new(observations.clone())),
             mesh: Default::default(),
+            link_requests: Default::default(),
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
@@ -1088,6 +1091,7 @@ impl Node {
             "identities" => self.identities().await,
             "identity_label" => self.label(request).await,
             "discovered" => self.discovered().await,
+            "confirm_link" => self.confirm_link(request).await,
             "admit" => self.admit(request).await,
             "refuse" => self.refuse(request).await,
             "grant" | "delegate" => self.grant(request).await,
@@ -1821,7 +1825,12 @@ impl Node {
             if identity == settings.identity || settings.revocations.revokes_origin(&identity) {
                 continue;
             }
-            let lanes = graph.lanes_of(&identity).map_err(refused)?;
+            let lanes = graph
+                .lanes_of(&identity)
+                .map_err(refused)?
+                .into_iter()
+                .filter(|lane| !settings.revocations.ends_node_of(identity, *lane, true))
+                .collect();
             let (kept, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
             if !dropped.is_empty() {
                 self.activity.record(
@@ -1857,14 +1866,23 @@ impl Node {
     ) -> Result<RevocationCut, Failure> {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match target {
-            crate::enrollment::Revoke::Identity(identity) => {
-                let mut lanes = graph.lanes_of(&identity)?;
-                lanes.extend(membership.nodes(&identity).map(|linked| linked.node));
-                (identity, lanes)
-            }
+            crate::enrollment::Revoke::Identity(identity) => (
+                identity,
+                membership
+                    .nodes(&identity)
+                    .map(|linked| linked.node)
+                    .collect(),
+            ),
             crate::enrollment::Revoke::Claims(_) => return Ok(Default::default()),
         };
-        graph.proposed_cut(&identity, &lanes).map_err(refused)
+        let (mut cut, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
+        for lane in lanes {
+            if !cut.iter().any(|cut| cut.lane == lane) {
+                cut.push(graph.heads(&identity, &lane)?);
+            }
+        }
+        cut.sort_by_key(|cut| (cut.identity, cut.lane));
+        Ok((cut, dropped))
     }
     async fn revoke_with(
         &self,
@@ -3595,7 +3613,7 @@ impl Node {
                     settings.learn_revocations(&self.replica.revocations().await)?;
                     // Any node answers another node of its own identity.
                     if let Some(asked) = request.strip_prefix(crate::enrollment::IDENTITY) {
-                        return settings.answer_identity(&self.vault, asked);
+                        return self.answer_link(&settings, asked);
                     }
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));

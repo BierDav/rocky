@@ -1872,13 +1872,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         identity: &dyn rocky_credentials::IdentityProvider,
     ) -> Result<LineNode, Error> {
-        let mut chain = self
-            .inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .config
-            .credentials
-            .clone();
+        let (mut chain, mut known) = {
+            let inner = self.inner.lock(crate::replica::Class::Background).await;
+            (
+                inner.config.credentials.clone(),
+                inner.config.revocations.clone(),
+            )
+        };
+        if let Some(certificate) = chain.certificate() {
+            known.link(certificate.clone()).map_err(credential)?;
+        }
+        let owner = identity.public_key().map_err(credential)?;
+        if chain.principal() != Some(owner) {
+            return Err(denied("line node belongs to another identity"));
+        }
         if chain
             .0
             .last()
@@ -1894,11 +1901,36 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .authors()
             .map_err(credential)?
             .ok_or_else(|| denied("identity author range missing"))?;
-        let author = identity.reserve_author(range).map_err(credential)?;
+        let membership = known.membership().map_err(credential)?;
+        if !membership.can_link(owner, |node| known.identity_unlinks(owner, node)) {
+            return Err(denied("identity membership limit reached"));
+        }
+        let sequence = membership.next_sequence(owner).map_err(credential)?;
+        let capacity = (range.last - range.first).div_ceil(2).clamp(1, 256);
+        let author = u32::try_from(sequence)
+            .ok()
+            .filter(|sequence| *sequence < capacity)
+            .and_then(|sequence| range.first.checked_add(sequence))
+            .ok_or_else(|| denied("identity node author range exhausted"))?;
         let key = PrivateKey::new();
         let credentials = chain
-            .complete(identity, key.public_key(), author)
+            .certify_member(
+                identity,
+                key.public_key(),
+                author,
+                sequence,
+                membership.head(owner).map(|head| head.certificate),
+            )
             .map_err(credential)?;
+        known
+            .link(
+                credentials
+                    .certificate()
+                    .ok_or_else(|| denied("missing line certificate"))?
+                    .clone(),
+            )
+            .map_err(credential)?;
+        self.learn_revocations(&known).await?;
         Ok(LineNode { key, credentials })
     }
     /// Restores a saved line's signer without selecting it for writes. Checkpoints

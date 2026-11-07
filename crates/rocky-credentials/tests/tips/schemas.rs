@@ -24,8 +24,12 @@ fn migration(
 ) -> (SignedSeal, SignedTipOpening, SignedBookmarkMove) {
     let mut statement = seal(graph, graph.genesis(), sequence, owner).statement;
     statement.action = SealAction::Close;
-    let closing =
-        SignedSeal::endorse(statement, signers[0], &issuer_chain(owner, signers[0])).unwrap();
+    let closing = SignedSeal::endorse(
+        statement,
+        rocky_credentials::testing::lane_for(signers[0], &issuer_chain(owner, signers[0])),
+        &issuer_chain(owner, signers[0]),
+    )
+    .unwrap();
     let opened = SignedTipOpening::endorse(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
@@ -34,7 +38,7 @@ fn migration(
             schema,
             minimum_in_sync: 2,
         },
-        signers[1],
+        rocky_credentials::testing::lane_for(signers[1], &issuer_chain(owner, signers[1])),
         &issuer_chain(owner, signers[1]),
     )
     .unwrap();
@@ -47,7 +51,7 @@ fn migration(
             owner,
         )
         .statement,
-        signers[2],
+        rocky_credentials::testing::lane_for(signers[2], &issuer_chain(owner, signers[2])),
         &issuer_chain(owner, signers[2]),
     )
     .unwrap();
@@ -261,7 +265,7 @@ fn a_redirected_continuation_noop_never_blocks_a_migration_move() {
             seal: records.0.id().unwrap(),
             ..records.1.statement
         },
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
         &issuer_chain(&owner, &issuer),
     )
     .unwrap();
@@ -274,7 +278,7 @@ fn a_redirected_continuation_noop_never_blocks_a_migration_move() {
             &owner,
         )
         .statement,
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
         &issuer_chain(&owner, &issuer),
     )
     .unwrap();
@@ -350,10 +354,14 @@ fn issuer_migration_openings_refuse_other_edges_and_unsupported_minima() {
         },
     ] {
         assert!(
-            SignedTipOpening::endorse(statement, &issuer, &issuer_chain(&owner, &issuer))
-                .unwrap()
-                .verify(owner.public_key(), &graph)
-                .is_err()
+            SignedTipOpening::endorse(
+                statement,
+                rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
+                &issuer_chain(&owner, &issuer)
+            )
+            .unwrap()
+            .verify(owner.public_key(), &graph)
+            .is_err()
         );
     }
     records.1.verify(owner.public_key(), &graph).unwrap();
@@ -392,7 +400,7 @@ fn schemas_follow_the_requested_tip_and_validate_all_its_ancestry() {
     let losing = PrivateKey::new();
     let rival = SignedSeal::endorse(
         first.statement.clone(),
-        &losing,
+        rocky_credentials::testing::lane_for(&losing, &issuer_chain(&owner, &losing)),
         &issuer_chain(&owner, &losing),
     )
     .unwrap();
@@ -431,7 +439,7 @@ fn migration_descriptors_require_the_exact_opener_and_certified_initial_writer()
             schema: [9; 32],
             minimum_in_sync: 2,
         },
-        &identity,
+        rocky_credentials::testing::lane_for(&identity, &chain),
         &chain,
     )
     .unwrap();
@@ -453,8 +461,15 @@ fn migration_descriptors_require_the_exact_opener_and_certified_initial_writer()
         root: [0; 32],
     };
     statement.root = statement.empty().hash;
-    let sign =
-        |s| SignedMigrationPublication::endorse(s, &identity, &chain, writer.clone()).unwrap();
+    let sign = |s| {
+        SignedMigrationPublication::endorse(
+            s,
+            rocky_credentials::testing::lane_for(&identity, &chain),
+            &chain,
+            writer.clone(),
+        )
+        .unwrap()
+    };
     let signed = sign(statement.clone());
     signed
         .verify_active(owner.public_key(), &g, &RevocationSet::new(), 200)
@@ -495,7 +510,7 @@ fn migration_descriptors_require_the_exact_opener_and_certified_initial_writer()
     let other_chain = issuer_chain(&owner, &other);
     let wrong = SignedMigrationPublication::endorse(
         statement.clone(),
-        &other,
+        rocky_credentials::testing::lane_for(&other, &other_chain),
         &other_chain,
         writer.clone(),
     )

@@ -33,7 +33,7 @@ const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
-        identity: None,
+        identity: common::prepared_identity(directory),
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -48,7 +48,14 @@ fn create(root: &Path, network: Network) -> Result<Device, Failure> {
     Device::new(Database::create(open(root, Some(network)), None)?)
 }
 fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, Failure> {
-    Device::new(Database::join(open(directory, Some(network)), invitation)?)
+    let mut options = open(directory, Some(network));
+    // Fault tests retain an application signer across lost answers and process restarts.
+    let mut seed = directory.to_string_lossy().as_bytes().to_vec();
+    seed.extend_from_slice(invitation.as_bytes());
+    options.identity = Some(Arc::new(rocky_sdk::IdentityKey::from_secret(
+        rocky_core::commitment("fixture.join-identity", &seed),
+    )));
+    Device::new(Database::join(options, invitation)?)
 }
 fn identity(directory: &Path) -> Result<Value, Failure> {
     Ok(serde_json::from_slice(&std::fs::read(
@@ -58,16 +65,20 @@ fn identity(directory: &Path) -> Result<Value, Failure> {
 fn issuer() -> Value {
     json!({"kind": "issuer"})
 }
-/// Every other device an issuer's registry lists, by node key.
-async fn devices(issuer: &Device) -> BTreeMap<String, Value> {
-    issuer.ok(json!({"type": "devices"})).await["devices"]
+/// Every other identity an issuer's registry lists, by identity key,
+/// without the nodes this issuer knows of it.
+async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
+    issuer.ok(json!({"type": "identities"})).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|device| {
+        .filter(|record| record["own"] != true)
+        .map(|record| {
+            let mut record = record.clone();
+            record.as_object_mut().map(|fields| fields.remove("nodes"));
             (
-                device["node"].as_str().unwrap_or_default().to_owned(),
-                device.clone(),
+                record["identity"].as_str().unwrap_or_default().to_owned(),
+                record,
             )
         })
         .collect()
@@ -181,20 +192,19 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
-    let m_node = m.node().await;
-    let user = devices(&a).await[&m_node]["user"].clone();
+    let (m_node, m_identity) = (m.node().await, m.identity().await);
     let address = a
         .ok(json!({"type": "partition_address", "table": "parts", "values": [{"type": "text", "value": "L"}]}))
         .await;
     let part = &address["tuple"][0];
     let grant = json!({"domain": serde_json::from_str::<Value>(&a.database.scope())?, "table": address["scope"]["table"],
         "selector": [[part[0], {"Only": [part[1]]}]], "rows": "All", "rights": ["Read"], "fields": []});
-    a.ok(json!({"type": "partition_grant", "device": {"user": user, "node": m_node}, "partitions": [grant], "delegations": 2}))
+    a.ok(json!({"type": "partition_grant", "device": {"identity": m_identity, "node": m_node}, "partitions": [grant], "delegations": 2}))
         .await;
-    a.ok(json!({"type": "device_label", "node": m_node, "label": [7, 8, 9]}))
+    a.ok(json!({"type": "identity_label", "identity": m_identity, "label": [7, 8, 9]}))
         .await;
 
-    let at_a = devices(&a).await[&m_node].clone();
+    let at_a = identities(&a).await[&m_identity].clone();
     assert_eq!(
         at_a["profile"],
         json!({"kind": "writer", "scopes": ["items"]})
@@ -215,14 +225,14 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
             >= enrolled_expiry
     );
     online(&b, true).await;
-    assert!(!devices(&b).await.contains_key(&m_node));
+    assert!(!identities(&b).await.contains_key(&m_identity));
 
     synced(&b).await?;
-    let listed = devices(&b).await;
-    assert_eq!(listed[&m_node], at_a);
+    let listed = identities(&b).await;
+    assert_eq!(listed[&m_identity], at_a);
     // The enrolling issuer's own record arrived too.
-    assert_eq!(listed[&a.node().await]["profile"], issuer());
-    assert!(!listed.contains_key(&b.node().await));
+    assert_eq!(listed[&a.identity().await]["profile"], issuer());
+    assert!(!listed.contains_key(&b.identity().await));
     for device in [&a, &b, &m] {
         device.close().await;
     }
@@ -248,12 +258,12 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
-    let (a_node, m_node) = (a.node().await, m.node().await);
+    let (a_node, m_identity) = (a.node().await, m.identity().await);
     a.close().await;
     drop(a);
     std::fs::remove_dir_all(root.join("a"))?;
     online(&b, true).await;
-    assert!(!devices(&b).await.contains_key(&m_node));
+    assert!(!identities(&b).await.contains_key(&m_identity));
 
     m.ok(json!({"type": "renew"})).await;
     let after = m.ok(json!({"type": "session"})).await;
@@ -262,7 +272,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         after["expires"],
         b.ok(json!({"type": "session"})).await["expires"]
     );
-    let record = devices(&b).await[&m_node].clone();
+    let record = identities(&b).await[&m_identity].clone();
     assert_eq!(record["kind"], "renewed");
     assert_eq!(
         record["profile"],
@@ -324,12 +334,12 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     b.ok(json!({"type": "peer_remove", "node": a_node})).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let keys = Database::device(&root.join("d"), None)?;
+    let keys = common::node_keys(&root.join("d"), None)?;
     a.ok(json!({"type": "grant", "device": keys, "profile": {"kind": "writer", "scopes": ["items"]}}))
         .await;
     synced(&a).await?;
     synced(&b).await?;
-    assert!(devices(&b).await.contains_key(&keys.node.to_hex()));
+    assert!(identities(&b).await.contains_key(&keys.identity.to_hex()));
 
     for name in ["c", "r", "w"] {
         let directory = root.join(name);
@@ -351,7 +361,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
         assert_eq!(tables, 0, "{name}");
     }
     for device in [&c, &r, &w] {
-        assert!(device.call(json!({"type": "devices"})).await.is_err());
+        assert!(device.call(json!({"type": "identities"})).await.is_err());
         let query = json!({"sql": "SELECT * FROM issuer_registry", "values": [], "max_rows": 8});
         assert!(
             device
@@ -367,7 +377,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
             .await
             .is_err()
     );
-    assert!(registry_rows(&root.join("b"), "device")? >= 6);
+    assert!(registry_rows(&root.join("b"), "identity")? >= 6);
     for device in [&a, &b, &c, &r, &w] {
         device.close().await;
     }
@@ -415,10 +425,10 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         "{ranges:?}"
     );
     synced(&a).await?;
-    let (x_node, y_node) = (x.node().await, y.node().await);
+    let (x_identity, y_identity) = (x.identity().await, y.identity().await);
     for issuer in [&a, &b] {
-        let listed = devices(issuer).await;
-        assert!(listed.contains_key(&x_node) && listed.contains_key(&y_node));
+        let listed = identities(issuer).await;
+        assert!(listed.contains_key(&x_identity) && listed.contains_key(&y_identity));
     }
 
     // Two issuers renew one device before either hears of the other.
@@ -435,7 +445,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
     m.ok(json!({"type": "sync_start", "enabled": false})).await;
-    let m_node = m.node().await;
+    let m_identity = m.identity().await;
     m.ok(json!({"type": "renew"})).await;
     a.ok(json!({"type": "networking_control", "enabled": false}))
         .await;
@@ -443,27 +453,27 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     m.ok(json!({"type": "renew"})).await;
     a.ok(json!({"type": "networking_control", "enabled": true}))
         .await;
-    assert_eq!(devices(&b).await[&m_node]["kind"], "renewed");
+    assert_eq!(identities(&b).await[&m_identity]["kind"], "renewed");
     synced(&a).await?;
-    let (at_a, at_b) = (devices(&a).await, devices(&b).await);
-    assert_eq!(at_a[&m_node], at_b[&m_node]);
+    let (at_a, at_b) = (identities(&a).await, identities(&b).await);
+    assert_eq!(at_a[&m_identity], at_b[&m_identity]);
     // The record keeps the later renewal; a chain through the second
     // issuer expires no later than that issuer's own.
     let expires =
         |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
     assert!(
         expires(&m.ok(json!({"type": "session"})).await["expires"])?
-            <= expires(&at_a[&m_node]["expires"])?
+            <= expires(&at_a[&m_identity]["expires"])?
     );
-    // One visible device entry per node in either file.
+    // One visible identity entry per identity in either file.
     for name in ["a", "b"] {
         let file = rusqlite::Connection::open_with_flags(
             root.join(name).join("rocky.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let entries: i64 = file.query_row(
-            "SELECT COUNT(*) FROM issuer_registry WHERE node = ? AND entry = 'device'",
-            [&m_node],
+            "SELECT COUNT(*) FROM issuer_registry WHERE identity = ? AND entry = 'identity'",
+            [&m_identity],
             |row| row.get(0),
         )?;
         assert_eq!(entries, 1, "{name}");
@@ -634,43 +644,79 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let issuing = Arc::new(Faults::default());
     let a = create(&root.join("a"), faulty(&hub, "a", &issuing))?;
     let mut members = Vec::new();
-    for (name, issuer_side) in [("m", true), ("n", false)] {
+    for (name, issuer_side, approval) in [
+        ("m", true, false),
+        ("n", false, false),
+        ("p", true, true),
+        ("q", false, true),
+    ] {
         let directory = root.join(name);
         let requesting = Arc::new(Faults::default());
-        let invitation = a.invite().await;
+        let invitation = if approval {
+            let session = a.database.session();
+            let invitation = session.invitation().await?;
+            assert!(invitation.profile.is_none());
+            let error = join(&directory, faulty(&hub, name, &requesting), &invitation.uri)
+                .err()
+                .ok_or("joined without admission")?;
+            let awaiting = error
+                .downcast_ref::<rocky_sdk::AwaitingAdmission>()
+                .ok_or("not awaiting admission")?;
+            let pending = session.discovered().await?.pending;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].code, awaiting.code);
+            assert_eq!(pending[0].invitation, invitation.id);
+            session
+                .admit(rocky_sdk::Admit {
+                    node: pending[0].node.clone(),
+                    code: awaiting.code.clone(),
+                    profile: rocky_sdk::GrantProfile::Writer {
+                        scopes: ["items".into()].into_iter().collect(),
+                    },
+                    label: Some(name.as_bytes().to_vec()),
+                })
+                .await?;
+            session.close().await;
+            invitation.uri
+        } else {
+            a.invite().await
+        };
         if issuer_side {
             *issuing.answer.lock().unwrap() = Some(Protocol::Pair);
         } else {
             *requesting.receipt.lock().unwrap() = Some(Protocol::Pair);
         }
         assert!(join(&directory, faulty(&hub, name, &requesting), &invitation).is_err());
-        let recorded = devices(&a).await;
+        let recorded = identities(&a).await;
         let fresh: Vec<&String> = recorded
             .keys()
-            .filter(|node| {
+            .filter(|identity| {
                 !members
                     .iter()
-                    .any(|(_, known, _): &(Device, String, Arc<Faults>)| known == *node)
+                    .any(|(_, known, _): &(Device, String, Arc<Faults>)| known == *identity)
             })
             .collect();
         assert_eq!(fresh.len(), 1, "{name}: {recorded:?}");
-        let node = fresh[0].clone();
+        let identity = fresh[0].clone();
+        if approval {
+            assert_eq!(recorded[&identity]["label"], json!(name.as_bytes()));
+        }
         assert!(!directory.join("identity.json").exists(), "{name}");
         let member = join(&directory, faulty(&hub, name, &requesting), &invitation)?;
-        assert_eq!(member.node().await, node, "{name}");
-        assert_eq!(devices(&a).await.len(), recorded.len(), "{name}");
-        members.push((member, node, requesting));
+        assert_eq!(member.identity().await, identity, "{name}");
+        assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
+        members.push((member, identity, requesting));
     }
     // A granted bundle lost after its record committed is issued again.
     // Short-lived chains make each renewal's capability a new one.
     let profile = json!({"kind": "writer", "scopes": ["items"]});
     let mut granted = Vec::new();
     for name in ["g", "h"] {
-        let keys = Database::device(&root.join(name), None)?;
+        let keys = common::node_keys(&root.join(name), None)?;
         let grant = json!({"type": "grant", "device": keys, "profile": profile, "ttl": 60});
         a.ok(grant.clone()).await;
-        let recorded = devices(&a).await;
-        assert!(recorded.contains_key(&keys.node.to_hex()));
+        let recorded = identities(&a).await;
+        assert!(recorded.contains_key(&keys.identity.to_hex()));
         let supplied = a.ok(grant).await["supplied"].clone();
         let requesting = Arc::new(Faults::default());
         let device = Device::new(Database::install(
@@ -678,16 +724,16 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             serde_json::from_value(supplied)?,
         )?)?;
         assert_eq!(device.node().await, keys.node.to_hex());
-        let listed = devices(&a).await;
+        let listed = identities(&a).await;
         assert_eq!(listed.len(), recorded.len());
         assert_eq!(
-            listed[&keys.node.to_hex()]["capability"],
+            listed[&keys.identity.to_hex()]["capability"],
             json!(chain_capability(&root.join(name))?)
         );
-        granted.push((device, keys.node.to_hex(), requesting));
+        granted.push((device, keys.identity.to_hex(), requesting));
     }
     // Renewal stopped before its answer is written, then after.
-    for (index, (device, node, requesting)) in granted.iter().enumerate() {
+    for (index, (device, identity, requesting)) in granted.iter().enumerate() {
         let directory = root.join(["g", "h"][index]);
         let held = chain_capability(&directory)?;
         if index == 0 {
@@ -696,7 +742,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             *requesting.receipt.lock().unwrap() = Some(Protocol::Renew);
         }
         assert!(device.call(json!({"type": "renew"})).await.is_err());
-        let record = devices(&a).await[node].clone();
+        let record = identities(&a).await[identity].clone();
         assert_ne!(
             record["capability"],
             json!(held),
@@ -705,7 +751,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
         device.ok(json!({"type": "renew"})).await;
         assert_eq!(
-            devices(&a).await[node]["capability"],
+            identities(&a).await[identity]["capability"],
             json!(chain_capability(&directory)?)
         );
     }
@@ -720,7 +766,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
 }
 
 fn random_device() -> Value {
-    json!({"user": PrivateKey::new().public_key(), "node": PrivateKey::new().public_key()})
+    json!({"identity": PrivateKey::new().public_key(), "node": PrivateKey::new().public_key()})
 }
 
 /// A full registry refuses the 257th device and syncs to a new issuer; the
@@ -748,7 +794,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     }
     let filled = filled.elapsed();
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
-    assert_eq!(devices(&a).await.len(), 255);
+    assert_eq!(identities(&a).await.len(), 255);
 
     // The 257th fails with the named error and writes nothing.
     let before = (
@@ -762,7 +808,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         .ok_or("granted a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let refused = a
-        .call(json!({"type": "pairing", "profile": reader}))
+        .call(json!({"type": "invitation", "profile": reader}))
         .await
         .err()
         .ok_or("invited a 257th device")?;
@@ -772,12 +818,12 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         registry_rows(&root.join("a"), "%")?,
     );
     assert_eq!(before, after);
-    assert_eq!(devices(&a).await.len(), 255);
+    assert_eq!(identities(&a).await.len(), 255);
 
     let start = Instant::now();
     synced(&b).await?;
     let sync = start.elapsed();
-    assert_eq!(devices(&b).await.len(), 255);
+    assert_eq!(identities(&b).await.len(), 255);
     b.close().await;
     drop(b);
     let start = Instant::now();
@@ -786,7 +832,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         Some(memory(&hub, "b")),
     ))?)?;
     let reopen = start.elapsed();
-    assert_eq!(devices(&b).await.len(), 255);
+    assert_eq!(identities(&b).await.len(), 255);
     eprintln!(
         "registry of 256 devices: 253 grants {filled:?}, sync to a new issuer {sync:?}, reopen {reopen:?}"
     );
@@ -810,7 +856,7 @@ async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failu
     let spent = a.invite().await;
     *requesting.receipt.lock().unwrap() = Some(Protocol::Pair);
     assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
-    let ghosts = devices(&a).await;
+    let ghosts = identities(&a).await;
     let Err(unfinished) = Database::open(open(&directory, None)) else {
         panic!("an unfinished join opened");
     };
@@ -821,9 +867,9 @@ async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failu
     let newer = a.invite().await;
     assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
     let member = join(&directory, faulty(&hub, "m", &requesting), &newer)?;
-    let node = member.node().await;
-    assert!(!ghosts.contains_key(&node));
-    assert!(devices(&a).await.contains_key(&node));
+    let identity = member.identity().await;
+    assert!(!ghosts.contains_key(&identity));
+    assert!(identities(&a).await.contains_key(&identity));
     a.add(1, "after").await;
     synced(&member).await?;
     assert_eq!(member.titles().await, ["after"]);
@@ -840,33 +886,89 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let owner = create(&path, memory(&hub, "issuer"))?;
     let label = b"application-defined label";
     let invitation = owner
-        .ok(json!({"type":"pairing", "profile":issuer(), "label":label}))
+        .ok(json!({"type": "invitation", "profile":issuer(), "label":label}))
         .await;
     let member = join(
         &root.path().join("member"),
         memory(&hub, "member"),
         invitation["uri"].as_str().ok_or("uri")?,
     )?;
-    let node = member.ok(json!({"type":"session"})).await["node"]
-        .as_str()
-        .ok_or("node")?
-        .to_owned();
-    let record = devices(&owner).await.remove(&node).ok_or("record")?;
+    let identity = member.identity().await;
+    let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
     // The next invitation cannot erase the association of the earlier enrollment.
     owner
-        .ok(json!({"type":"pairing", "profile":issuer()}))
+        .ok(json!({"type": "invitation", "profile":issuer()}))
         .await;
     member.database.close().await?;
     owner.database.close().await?;
     let reopened = Device::new(Database::open(open(&path, None))?)?;
-    let record = devices(&reopened)
+    let record = identities(&reopened)
         .await
-        .remove(&node)
+        .remove(&identity)
         .ok_or("reopened record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
     reopened.database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer = create(&root.path().join("issuer"), memory(&hub, "issuer"))?;
+    let session = issuer.database.session();
+    let invitation = session.invitation().await?;
+    let directory = root.path().join("joining");
+    let faults = Arc::new(Faults::default());
+    let error = join(
+        &directory,
+        faulty(&hub, "joining", &faults),
+        &invitation.uri,
+    )
+    .err()
+    .ok_or("joined without admission")?;
+    let awaiting = error
+        .downcast_ref::<rocky_sdk::AwaitingAdmission>()
+        .ok_or("not awaiting admission")?;
+    let pending = session.discovered().await?.pending;
+    session
+        .admit(rocky_sdk::Admit {
+            node: pending[0].node.clone(),
+            code: awaiting.code.clone(),
+            profile: rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".into()].into_iter().collect(),
+            },
+            label: None,
+        })
+        .await?;
+    *faults.receipt.lock().unwrap() = Some(Protocol::Pair);
+    assert!(
+        join(
+            &directory,
+            faulty(&hub, "joining", &faults),
+            &invitation.uri
+        )
+        .is_err()
+    );
+    let records = identities(&issuer).await;
+    assert_eq!(records.len(), 1);
+    let identity = records.keys().next().ok_or("missing admitted identity")?;
+    issuer
+        .ok(json!({"type": "revoke", "identity": identity}))
+        .await;
+    let error = join(
+        &directory,
+        faulty(&hub, "joining", &faults),
+        &invitation.uri,
+    )
+    .err()
+    .ok_or("revoked identity joined")?;
+    assert!(error.to_string().contains("revoked"), "{error}");
+    session.close().await;
+    issuer.close().await;
     Ok(())
 }

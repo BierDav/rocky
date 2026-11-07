@@ -443,11 +443,23 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
     for replica in [&a, &b] {
         let issuer = PrivateKey::new();
         let chain = CredentialChain(vec![
-            Authority::owner(&f.publisher)
-                .issue_issuer(issuer.public_key(), None, validity())
-                .unwrap(),
+            Authority::owner_in(
+                &f.publisher,
+                rocky_credentials::DatabaseContext {
+                    publisher: f.publisher.public_key(),
+                    scope: f.public.domain,
+                },
+            )
+            .unwrap()
+            .issue_issuer(issuer.public_key(), None, validity())
+            .unwrap(),
         ]);
-        let signed = SignedSeal::endorse(statement.clone(), &issuer, &chain).unwrap();
+        let signed = SignedSeal::endorse(
+            statement.clone(),
+            rocky_credentials::testing::lane_for(&issuer, &chain),
+            &chain,
+        )
+        .unwrap();
         let records = vec![
             TipStatement::Seal(signed.clone()),
             bookmark(&f, "main", Some(statement.tip), signed.successor().unwrap()),
@@ -621,19 +633,35 @@ async fn identity_replica(
     identity: &PrivateKey,
     node: &PrivateKey,
 ) -> (Replica, CredentialChain) {
-    let root = Authority::owner(&f.publisher)
-        .issue(
-            identity.public_key(),
-            f.full(),
-            rocky_credentials::AuthorRange::ALL,
-            validity(),
-        )
-        .unwrap();
+    identity_replica_at(f, path, identity, node, 1).await
+}
+async fn identity_replica_at(
+    f: &Fixture,
+    path: &Path,
+    identity: &PrivateKey,
+    node: &PrivateKey,
+    first: u32,
+) -> (Replica, CredentialChain) {
+    let root = Authority::owner_in(
+        &f.publisher,
+        rocky_credentials::DatabaseContext {
+            publisher: f.publisher.public_key(),
+            scope: f.public.domain,
+        },
+    )
+    .unwrap()
+    .issue(
+        identity.public_key(),
+        f.full(),
+        rocky_credentials::AuthorRange::new(first, first + 32).unwrap(),
+        validity(),
+    )
+    .unwrap();
     let identity_chain = CredentialChain(vec![root]);
     let mut config = f.config(node, f.full(), &[f.public]);
     config.credentials = identity_chain
         .clone()
-        .complete(identity, node.public_key(), 1)
+        .complete(identity, node.public_key(), first)
         .unwrap();
     (
         EncryptedReplica::open(path, f.app(), config).await.unwrap(),
@@ -670,7 +698,19 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
     let line = LineNode {
         credentials: identity_chain
             .clone()
-            .complete(&identity, branch_node.public_key(), 2)
+            .certify_member(
+                &identity,
+                branch_node.public_key(),
+                2,
+                1,
+                replica
+                    .revocations()
+                    .await
+                    .membership()
+                    .unwrap()
+                    .head(identity.public_key())
+                    .map(|head| head.certificate),
+            )
             .unwrap(),
         key: branch_node.clone(),
     };
@@ -774,7 +814,19 @@ async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node()
     replica
         .register_line_node(LineNode {
             credentials: identity_chain
-                .complete(&identity, branch_node.public_key(), 2)
+                .certify_member(
+                    &identity,
+                    branch_node.public_key(),
+                    2,
+                    1,
+                    replica
+                        .revocations()
+                        .await
+                        .membership()
+                        .unwrap()
+                        .head(identity.public_key())
+                        .map(|head| head.certificate),
+                )
                 .unwrap(),
             key: branch_node.clone(),
         })
@@ -868,7 +920,19 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
     let branch_node = PrivateKey::new();
     let line = LineNode {
         credentials: identity_chain
-            .complete(&identity, branch_node.public_key(), 2)
+            .certify_member(
+                &identity,
+                branch_node.public_key(),
+                2,
+                1,
+                replica
+                    .revocations()
+                    .await
+                    .membership()
+                    .unwrap()
+                    .head(identity.public_key())
+                    .map(|head| head.certificate),
+            )
             .unwrap(),
         key: branch_node.clone(),
     };
@@ -1172,9 +1236,9 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     let (b_identity, c_identity) = (PrivateKey::new(), PrivateKey::new());
     let (b_key, c_key) = (PrivateKey::new(), PrivateKey::new());
     let (b, b_chain) =
-        identity_replica(&f, &dir.path().join("dev-b.db"), &b_identity, &b_key).await;
+        identity_replica_at(&f, &dir.path().join("dev-b.db"), &b_identity, &b_key, 100).await;
     let (c, c_chain) =
-        identity_replica(&f, &dir.path().join("dev-c.db"), &c_identity, &c_key).await;
+        identity_replica_at(&f, &dir.path().join("dev-c.db"), &c_identity, &c_key, 200).await;
     main(&f, &main_replica).await;
     let base = insert(&f, &main_replica, 1, "Base").await;
     for replica in [&b, &c] {
@@ -1196,8 +1260,8 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     main_replica.receive_tip_statements(&opened).await.unwrap();
     let main_tip = main_replica.followed_tip().await;
     for (replica, identity, chain, number) in [
-        (&b, &b_identity, &b_chain, 2),
-        (&c, &c_identity, &c_chain, 3),
+        (&b, &b_identity, &b_chain, 101),
+        (&c, &c_identity, &c_chain, 201),
     ] {
         replica.receive_tip_statements(&continued).await.unwrap();
         replica.receive_tip_statements(&opened).await.unwrap();
@@ -1210,7 +1274,19 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
             .register_line_node(LineNode {
                 credentials: chain
                     .clone()
-                    .complete(identity, node.public_key(), number)
+                    .certify_member(
+                        identity,
+                        node.public_key(),
+                        number,
+                        1,
+                        replica
+                            .revocations()
+                            .await
+                            .membership()
+                            .unwrap()
+                            .head(identity.public_key())
+                            .map(|head| head.certificate),
+                    )
                     .unwrap(),
                 key: node,
             })
@@ -1248,7 +1324,7 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
         .is_err()
     );
     let c_credentials = c_chain
-        .complete(&c_identity, c_key.public_key(), 1)
+        .complete(&c_identity, c_key.public_key(), 200)
         .unwrap();
     b.admit_peer(c_key.public_key(), &c_credentials, dev)
         .await
@@ -1315,9 +1391,16 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
         .map(|_| {
             let key = PrivateKey::new();
             let chain = CredentialChain(vec![
-                Authority::owner(&f.publisher)
-                    .issue_issuer(key.public_key(), None, validity())
-                    .unwrap(),
+                Authority::owner_in(
+                    &f.publisher,
+                    rocky_credentials::DatabaseContext {
+                        publisher: f.publisher.public_key(),
+                        scope: f.public.domain,
+                    },
+                )
+                .unwrap()
+                .issue_issuer(key.public_key(), None, validity())
+                .unwrap(),
             ]);
             (key, chain)
         })
@@ -1326,14 +1409,26 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
         let TipStatement::Bookmark(unsigned) = bookmark(&f, "main", from, to) else {
             unreachable!()
         };
-        TipStatement::Bookmark(SignedBookmarkMove::endorse(unsigned.statement, key, chain).unwrap())
+        TipStatement::Bookmark(
+            SignedBookmarkMove::endorse(
+                unsigned.statement,
+                rocky_credentials::testing::lane_for(key, chain),
+                chain,
+            )
+            .unwrap(),
+        )
     };
 
     // Two issuers seal main's tip at once; among equals the lower digest wins.
     let statement = seal(&f, &a).await.statement;
     let mut variants = Vec::new();
     for (replica, (key, chain)) in [&a, &b].into_iter().zip(&issuers) {
-        let signed = SignedSeal::endorse(statement.clone(), key, chain).unwrap();
+        let signed = SignedSeal::endorse(
+            statement.clone(),
+            rocky_credentials::testing::lane_for(key, chain),
+            chain,
+        )
+        .unwrap();
         let records = vec![
             TipStatement::Seal(signed.clone()),
             endorse_move(chain, key, Some(tip), signed.successor().unwrap()),
@@ -1375,7 +1470,12 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
     // forward; the owner on a closes it and moves main back to a tip on
     // the earlier seal.
     let (key, chain) = &issuers[1 - winner];
-    let forward = SignedSeal::endorse(seal(&f, &b).await.statement, key, chain).unwrap();
+    let forward = SignedSeal::endorse(
+        seal(&f, &b).await.statement,
+        rocky_credentials::testing::lane_for(key, chain),
+        chain,
+    )
+    .unwrap();
     let forward_tip = forward.successor().unwrap().unwrap();
     let forward_records = vec![
         TipStatement::Seal(forward.clone()),
@@ -1436,21 +1536,37 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
     let genesis = a.followed_tip().await;
     let trusted = PrivateKey::new();
     let chain = CredentialChain(vec![
-        Authority::owner(&f.publisher)
-            .issue_trusted(
-                trusted.public_key(),
-                f.public.domain,
-                rocky_credentials::AuthorRange::ALL,
-                now().unwrap(),
-            )
-            .unwrap(),
+        Authority::owner_in(
+            &f.publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            },
+        )
+        .unwrap()
+        .issue_trusted(
+            trusted.public_key(),
+            f.public.domain,
+            rocky_credentials::AuthorRange::ALL,
+            now().unwrap(),
+        )
+        .unwrap(),
     ]);
+    let node_chain = chain
+        .clone()
+        .certify(&trusted, trusted.public_key(), 1)
+        .unwrap();
     let linked = |name: &str, link| {
         let TipStatement::Bookmark(unsigned) = bookmark(&f, name, None, Some(genesis)) else {
             unreachable!()
         };
-        SignedBookmarkMove::endorse_linked(unsigned.statement, &trusted, &chain, Some(link))
-            .unwrap()
+        SignedBookmarkMove::endorse_linked(
+            unsigned.statement,
+            rocky_credentials::Signer::node(&trusted, &node_chain).unwrap(),
+            &chain,
+            Some(link),
+        )
+        .unwrap()
     };
     let first = rocky_credentials::ChainLink::first(trusted.public_key());
     let kept = linked("kept", first);
@@ -1483,7 +1599,16 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
         recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![
-        SignedRevocation::sign(statement, &f.publisher, &CredentialChain::default()).unwrap(),
+        SignedRevocation::sign_in(
+            statement,
+            &f.publisher,
+            &CredentialChain::default(),
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            },
+        )
+        .unwrap(),
     ])
     .unwrap();
     for replica in [&a, &b] {

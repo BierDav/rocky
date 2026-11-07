@@ -9,6 +9,7 @@ pub const MAX_MEMBERSHIP_NODES: usize = crate::MAX_CUT_LANES;
 /// The membership metadata carried by one node certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MembershipLink {
+    pub database: crate::DatabaseContext,
     pub identity: PublicKey,
     pub node: PeerId,
     pub sequence: u64,
@@ -34,6 +35,9 @@ impl MembershipLink {
             return Err(denied("invalid membership certificate"));
         }
         Ok(Self {
+            database: extended
+                .database
+                .ok_or_else(|| denied("membership certificate has no database"))?,
             identity: certificate.issuer,
             node,
             sequence,
@@ -46,6 +50,7 @@ impl MembershipLink {
 /// A deterministic view of all membership links known to a node.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MembershipSet {
+    database: Option<crate::DatabaseContext>,
     links: BTreeMap<(PublicKey, u64), Vec<MembershipLink>>,
 }
 
@@ -59,14 +64,13 @@ impl MembershipSet {
     /// result regardless of arrival order.
     pub fn insert(&mut self, certificate: &SignedCapability) -> Result<MembershipLink, Error> {
         let link = MembershipLink::from_certificate(certificate)?;
-        let known_nodes = self
-            .links(link.identity)
-            .map(|known| known.node)
-            .filter(|node| *node != link.node)
-            .count();
-        if known_nodes >= MAX_MEMBERSHIP_NODES {
-            return Err(denied("identity membership limit reached"));
+        if self
+            .database
+            .is_some_and(|database| database != link.database)
+        {
+            return Err(denied("membership evidence belongs to another database"));
         }
+        self.database = Some(link.database);
         let entry = self
             .links
             .entry((link.identity, link.sequence))
@@ -100,37 +104,90 @@ impl MembershipSet {
         self.forks(identity).next().is_some()
     }
 
-    /// Whether every known link forms one unambiguous predecessor chain.
-    /// Forked sequences and missing predecessors are invalid until the
-    /// identity links again from the surviving head.
-    pub fn is_valid(&self, identity: PublicKey) -> bool {
-        if self.is_forked(identity) {
-            return false;
-        }
-        let mut previous = self
-            .links(identity)
-            .find(|link| link.sequence == 0)
-            .map(|link| link.certificate);
-        for link in self.links(identity).filter(|link| link.sequence > 0) {
-            if link.previous != previous {
-                return false;
-            }
-            previous = Some(link.certificate);
-        }
-        true
+    /// A certificate is usable only on the unambiguous predecessor chain.
+    /// A recovery link skips void fork sequences and names the last valid head.
+    pub fn accepts(&self, certificate: Commitment) -> bool {
+        self.valid_links()
+            .any(|link| link.certificate == certificate)
     }
 
-    /// Returns the latest non-forked membership head, if one exists.
+    fn valid_links(&self) -> impl Iterator<Item = &MembershipLink> {
+        let mut heads = BTreeMap::new();
+        self.links.iter().filter_map(move |((identity, _), links)| {
+            if links.len() != 1 {
+                return None;
+            }
+            let link = &links[0];
+            let previous = heads.get(identity).copied();
+            if link.previous != previous {
+                return None;
+            }
+            heads.insert(*identity, link.certificate);
+            Some(link)
+        })
+    }
+
+    pub fn is_valid(&self, identity: PublicKey) -> bool {
+        !self.is_forked(identity)
+            && self
+                .links(identity)
+                .all(|link| self.accepts(link.certificate))
+    }
+
+    /// The last usable link, including when later links forked.
     pub fn head(&self, identity: PublicKey) -> Option<MembershipLink> {
-        self.links(identity)
-            .filter(|link| {
-                !self
-                    .links
-                    .get(&(identity, link.sequence))
-                    .is_some_and(|links| links.len() > 1)
-            })
-            .max_by_key(|link| link.sequence)
+        self.valid_links()
+            .filter(|link| link.identity == identity)
+            .last()
             .copied()
+    }
+
+    /// Historical sequences are never reused, including void forks and unlinks.
+    pub fn next_sequence(&self, identity: PublicKey) -> Result<u64, Error> {
+        self.links(identity)
+            .map(|link| link.sequence)
+            .max()
+            .map_or(Ok(0), |sequence| {
+                sequence
+                    .checked_add(1)
+                    .ok_or_else(|| denied("membership sequence exhausted"))
+            })
+    }
+
+    /// Missing history is not evidence of equivocation. Only forks and links
+    /// through a known fork are void; linking still requires a complete head.
+    pub(crate) fn void_certificates(&self) -> std::collections::BTreeSet<Commitment> {
+        let mut void: std::collections::BTreeSet<_> = self
+            .links
+            .values()
+            .filter(|links| links.len() > 1)
+            .flatten()
+            .map(|link| link.certificate)
+            .collect();
+        loop {
+            let mut changed = false;
+            for link in self.links.values().flatten() {
+                if link
+                    .previous
+                    .is_some_and(|previous| void.contains(&previous))
+                {
+                    changed |= void.insert(link.certificate);
+                }
+            }
+            if !changed {
+                return void;
+            }
+        }
+    }
+    /// The bound counts usable, still linked nodes, not historical certificates.
+    pub fn can_link(&self, identity: PublicKey, unlinked: impl Fn(PeerId) -> bool) -> bool {
+        let void = self.void_certificates();
+        self.links(identity)
+            .filter(|link| !void.contains(&link.certificate) && !unlinked(link.node))
+            .map(|link| link.node)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            < MAX_MEMBERSHIP_NODES
     }
 }
 
@@ -150,18 +207,44 @@ mod tests {
             kind: rocky_core::PrincipalKind::Node,
             grants: Vec::new(),
             not_before: 1,
-            expires: 2,
+            expires: crate::NEVER,
             delegations: 0,
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node.public_key())),
                 authors: Some(crate::AuthorRange::new(1, 1).unwrap()),
                 sequence: Some(sequence),
                 previous,
+                database: Some(crate::DatabaseContext {
+                    publisher: identity.public_key(),
+                    scope: rocky_core::Scope {
+                        mesh: rocky_core::MeshId([1; 16]),
+                        app: rocky_core::AppId([2; 16]),
+                        domain: rocky_core::DomainId([3; 16]),
+                    },
+                }),
                 ..Extended::default()
             })
             .unwrap(),
         };
         SignedCapability::sign(capability, identity).unwrap()
+    }
+
+    #[test]
+    fn changing_unsigned_envelope_fields_cannot_forge_a_membership_fork() {
+        let identity = PrivateKey::new();
+        let first = certificate(&identity, &PrivateKey::new(), 0, None);
+        let other = certificate(&identity, &PrivateKey::new(), 0, None);
+        let mut forged = first.clone();
+        forged.author_binding = other.author_binding;
+        // The capability's signature survives; the full certificate proof does not.
+        assert_eq!(forged.capability, first.capability);
+        assert_eq!(forged.attestation(), first.attestation());
+        let mut set = crate::RevocationSet::new();
+        set.link(first).unwrap();
+        let before = set.clone();
+        assert!(set.link(forged).is_err());
+        assert_eq!(set, before);
+        assert!(!set.membership().unwrap().is_forked(identity.public_key()));
     }
 
     #[test]
@@ -209,7 +292,11 @@ mod tests {
                 .head(identity.public_key())
                 .map(|link| link.certificate),
         );
-        assert!(bounded.insert(&extra).is_err());
+        assert!(!bounded.can_link(identity.public_key(), |_| false));
+        let first_node = bounded.links(identity.public_key()).next().unwrap().node;
+        assert!(bounded.can_link(identity.public_key(), |node| node == first_node));
+        bounded.insert(&extra).unwrap();
+        assert_eq!(bounded.next_sequence(identity.public_key()).unwrap(), 33);
         let _ = next_link;
     }
 }

@@ -217,7 +217,9 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
             let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, writer()))).await?;
             let c_key = PrivateKey::from_bytes(&c.vault.get("node")?).public_key();
-            a.revoke(crate::enrollment::Revoke::Node(c_key)).await?;
+            let c_identity = c.settings.lock().await.identity;
+            a.revoke(crate::enrollment::Revoke::Identity(c_identity))
+                .await?;
             assert!(c.vault.load_bytes("discovery")?.is_none());
             let link = c.network.read().await;
             let stream = link

@@ -1,6 +1,45 @@
 # 5. Admission and discovery
 
-Status: planned (2026-11-05). Needs phases 3 and 4.
+Status: Phase 5a implemented; workspace gate limitations recorded (2026-11-06), based on
+main `cec2ad1d78393e4ebee6366fefa6dda9f44df8ed` (phases 1, 2a and 4).
+[Phase 5a evidence](05-admission-and-discovery-evidence.md) records checks and
+remaining scope. Phase 3 membership remains a prerequisite for linking and
+the later discovery work.
+
+## Phase 5a
+
+Approval invitations, pending requests, code-confirmed `admit` and `refuse`
+are implemented. Requests survive issuer restarts, retain their keys and nonce
+on retry, expire with the invitation, and evict the oldest above 32 pending.
+Pre-approved `invitation_with(profile)` still enrolls immediately. Admission
+writes identity-keyed registry rows and labels under node-signed issuer
+authority before returning the enrollment. Retries reuse their author range
+and refuse a revoked node or identity.
+
+Phase 3 database scoping advances settings to v31, invitations to v7 and
+enrollment answers to v5; pairing requests remain v4. Each accepts only its
+current format. Custody routing preserves
+the original issuer node used by the code. `discovered` currently lists only
+pending requests. Phase 2b adds linkable and single-use identity lifecycles and
+in-memory approval continuations. Certified seen-node discovery, code-confirmed
+membership linking and Paperless integration remain for Phase 5b; the remaining
+sections describe the full phase destination.
+
+## Database-scoping integration
+
+Keep the implemented phase 5a approval flow. An application can supply an
+existing linkable `IdentityProvider` when joining another database; the issuer
+still approves that database's grants. Such admission does not implicitly link
+or grant access in any other database. The single-use default stays unchanged.
+
+Phase 3 applies signed database context to admission/enrollment and link
+acknowledgments; later 5b linking must consume the same contract. Scoped
+regressions and measured checks are recorded in the Phase 3 evidence. Foreign
+bundles and acknowledgments are refused before credentials or membership are
+installed. An existing identity's directory
+entry is a connection hint, never authorization. Passkey creation/sign-in,
+QR/deep-link presentation and the personal database directory are application
+work; they are not additional phase 5 SDK services.
 
 ## Discovered devices
 

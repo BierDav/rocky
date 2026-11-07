@@ -187,7 +187,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.add_peer(&c.contact().await)
         .await
         .map_err(|e| e.to_string())?;
-    a.ok(json!({"type": "revoke", "node": c.node().await}))
+    a.ok(json!({"type": "revoke", "identity": c.identity().await}))
         .await;
     // Revoking forgets the device's contact and refuses it again.
     assert_eq!(a.peer(&c.node().await).await, Value::Null);
@@ -302,8 +302,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer")))?;
     let invite = decode(&a.invite().await, "rocky://join/")?;
-    assert_eq!(invite["v"], 5);
-    for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
+    assert_eq!(invite["v"], 7);
+    for version in [0, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
         let mut other = invite.clone();
         other["v"] = json!(version);
         let directory = root.path().join(format!("join-{version}"));
@@ -355,6 +355,10 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         13,
         15,
         16,
+        28,
+        29,
+        30,
+        32,
         u32::MAX,
     ] {
         let mut identity: Value = serde_json::from_slice(&original)?;
@@ -421,7 +425,7 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
 }
 
 #[tokio::test]
-async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_in_metadata()
+async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_outside_signed_authority()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
@@ -453,6 +457,49 @@ async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_in_meta
                 continue;
             }
             let bytes = std::fs::read(&path)?;
+            let bytes = if path.file_name().is_some_and(|name| name == "identity.json") {
+                // Node-signed capabilities carry their issuer's certificate.
+                let mut settings: Value = serde_json::from_slice(&bytes)?;
+                let chain: rocky_sdk::credentials::CredentialChain =
+                    serde_json::from_value(settings["credentials"].clone())?;
+                let database = chain
+                    .database_context(serde_json::from_value(settings["publisher"].clone())?)?;
+                let authority: rocky_sdk::credentials::RevocationSet =
+                    serde_json::from_value(settings["revocations"].clone())?;
+                authority.verify_in(database)?;
+                // Permanent signed membership is authority, not a stored route key.
+                settings["revocations"]
+                    .as_object_mut()
+                    .ok_or("authority set")?
+                    .remove("certificates");
+                settings
+                    .as_object_mut()
+                    .ok_or("settings object")?
+                    .remove("credentials");
+                serde_json::to_vec(&settings)?
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "discovery")
+            {
+                // Discovery secrets also carry the signing node's certificate.
+                let mut discovery: Value = serde_json::from_slice(&bytes)?;
+                if let Some(root) = discovery["root"].as_object_mut() {
+                    root.remove("endorsement");
+                }
+                for value in discovery["values"]
+                    .as_object_mut()
+                    .ok_or("discovery values")?
+                    .values_mut()
+                {
+                    value
+                        .as_object_mut()
+                        .ok_or("discovery value")?
+                        .remove("endorsement");
+                }
+                serde_json::to_vec(&discovery)?
+            } else {
+                bytes
+            };
             for needle in [foreign.as_bytes().as_slice(), foreign.to_hex().as_bytes()] {
                 assert!(
                     !bytes.windows(needle.len()).any(|part| part == needle),

@@ -142,7 +142,7 @@ fn secrets(directory: &Path) -> Result<Vec<[u8; 32]>, Failure> {
 /// Revokes a device that was granted `notes` and list `list`, never
 /// installed: the revocation rotates both keys.
 async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Failure> {
-    let device = Database::device(directory, None)?;
+    let device = common::node_keys(directory, None)?;
     issuer
         .ok(json!({"type":"grant","device":device,"profile":{"kind":"reader","scopes":["notes"]}}))
         .await;
@@ -155,7 +155,7 @@ async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Fai
         .ok(json!({"type":"partition_grant","device":device,"partitions":grant}))
         .await;
     issuer
-        .ok(json!({"type":"revoke","identity":device.user.to_string()}))
+        .ok(json!({"type":"revoke","identity":device.identity.to_string()}))
         .await;
     Ok(())
 }

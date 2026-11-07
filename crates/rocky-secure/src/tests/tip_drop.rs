@@ -103,7 +103,19 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
     replica
         .register_line_node(LineNode {
             credentials: chain
-                .complete(&identity, branch_node.public_key(), 2)
+                .certify_member(
+                    &identity,
+                    branch_node.public_key(),
+                    2,
+                    1,
+                    replica
+                        .revocations()
+                        .await
+                        .membership()
+                        .unwrap()
+                        .head(identity.public_key())
+                        .map(|head| head.certificate),
+                )
                 .unwrap(),
             key: branch_node.clone(),
         })

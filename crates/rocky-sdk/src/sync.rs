@@ -421,6 +421,7 @@ pub(crate) async fn session(
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
     let mut session = upstream.link.open().await?;
+    session.refresh_revocations(replica).await?;
     if let Some(handler) = upstream.contacts {
         crate::mesh::exchange(&mut session, handler).await?;
     }

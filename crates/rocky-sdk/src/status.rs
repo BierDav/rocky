@@ -412,6 +412,8 @@ pub struct Alert {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertKind {
+    /// Conflicting identity-signed links are void; the holder must link again.
+    MembershipFork { identity: String, sequence: u64 },
     /// This device's clock is `seconds` ahead of `node`'s, more than
     /// `MAX_CLOCK_AHEAD`: this device's changes wait on that device until
     /// its clock catches up.

@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub(super) struct Peer {
     pub opened: Opened,
+    identity: Arc<dyn rocky_sdk::IdentityProvider>,
     pub session: Session,
     pub scope: Value,
 }
@@ -18,11 +19,17 @@ impl Peer {
         let directory = directory.to_owned();
         let schema = schema.to_owned();
         let bundle = bundle.cloned();
+        let identity: Arc<dyn rocky_sdk::IdentityProvider> =
+            Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+                "fixture.service.identity",
+                directory.to_string_lossy().as_bytes(),
+            )));
+        let startup_identity = identity.clone();
         let opened = tokio::task::spawn_blocking(move || {
             let open = Open {
                 directory: &directory,
                 schema: &schema,
-                identity: None,
+                identity: Some(startup_identity),
                 secrets: None,
                 network: Some(Network::Owned(Arc::new(starter()))),
                 coordination: bundle.map(|bundle| Coordination::Service(Box::new(bundle))),
@@ -35,6 +42,7 @@ impl Peer {
         })
         .await??;
         Ok(Self {
+            identity,
             session: opened.database.session(),
             scope: serde_json::from_str(&opened.database.scope())?,
             opened,
@@ -48,7 +56,20 @@ impl Peer {
             .map_or(Value::Null, |root| json!({"phrase": root.phrase()}))
     }
     pub async fn call(&self, request: Value) -> Result<Value, Failure> {
-        call(&self.session, &self.scope, request).await
+        let reply: Value = serde_json::from_str(
+            &self
+                .session
+                .call_with_identity(
+                    json!({"version":1,"scope":self.scope,"request":request}).to_string(),
+                    self.identity.clone(),
+                )
+                .await?,
+        )?;
+        if reply["status"] == "ok" {
+            Ok(reply["value"].clone())
+        } else {
+            Err(format!("{} failed: {}", request["type"], reply["error"]).into())
+        }
     }
     pub async fn tips(&self, action: &str, body: Value) -> Result<Value, Failure> {
         let mut request = json!({"type":"tips", "action":action});
@@ -67,7 +88,7 @@ impl Peer {
             json!({"kind":kind,"scopes":["counts"]})
         };
         Ok(self
-            .call(json!({"type":"pairing", "profile":profile}))
+            .call(json!({"type": "invitation", "profile":profile}))
             .await?["uri"]
             .as_str()
             .ok_or("invitation")?

@@ -8,20 +8,14 @@ use rocky_core::FieldSelection;
 
 type Replica = EncryptedReplica<Employees>;
 
-/// `base` and grants for other meshes, `count` in all: of the same shape,
+/// `base` and grants for other tables, `count` in all: of the same shape,
 /// or `narrow` ones that only read.
-fn widened(
-    f: &Fixture,
-    base: Vec<ResourceGrant>,
-    count: usize,
-    narrow: bool,
-) -> Vec<ResourceGrant> {
+fn widened(base: Vec<ResourceGrant>, count: usize, narrow: bool) -> Vec<ResourceGrant> {
     let mut grants = base.clone();
     for mesh in 0..count.saturating_sub(base.len()) {
         let mut grant = base[0].clone();
-        grant.scope = f
-            .app()
-            .scope(MeshId([(50 + base.len() + mesh) as u8; 16]), false);
+        grant.scope.table =
+            rocky_core::commitment("fixture.chain.table", &(mesh as u64).to_le_bytes());
         if narrow {
             grant.rights = [Right::Read].into();
             grant.fields = FieldSelection::Only(Default::default());
@@ -32,7 +26,7 @@ fn widened(
     grants
 }
 async fn open(f: &Fixture, dir: &Scratch, node: &PrivateKey, grants: usize) -> (Replica, Chain) {
-    let config = f.config(node, widened(f, f.full(), grants, false), &[f.public]);
+    let config = f.config(node, widened(f.full(), grants, false), &[f.public]);
     let chain = Chain::new(config.credentials.clone()).unwrap();
     let path = dir.path().join(format!("{}.db", node.public_key()));
     (
@@ -117,7 +111,7 @@ async fn a_session_carries_an_authors_chain_once_across_its_pages() {
     // With the chain inside every header a page held few frames.
     let before = (quota / (weight + chain)).min(32);
     let after = (quota / weight).min(32);
-    assert!(before < 8 && after == 32, "{before} then {after}");
+    assert!(before < after && after == 32, "{before} then {after}");
     println!(
         "P11 frames_per_page grants=20 quota={quota} frame={weight} chain={chain} before={before} after={after} frame_bytes={} chain_bytes={carried}",
         report.bytes

@@ -29,6 +29,14 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("a session requires a node credential"));
         }
+        chain
+            .verify_database(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         let (grants, selectors) = chain
             .verify_selectors(self.config.publisher, node, &RevocationSet::new(), time)
             .map_err(credential)?;

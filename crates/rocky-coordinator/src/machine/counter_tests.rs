@@ -23,14 +23,7 @@ impl Fixture {
         operation: Operation,
         time: u64,
     ) -> Result<Outcome, CoordinationError> {
-        let request = crate::machine::self_certified(
-            self.state.genesis.id().unwrap(),
-            crate::transport::nonce(),
-            operation,
-            key,
-            time,
-        )
-        .unwrap();
+        let request = self.certified(operation, key, time);
         self.state.apply_at(time, &request)
     }
     fn claim_as(
@@ -62,9 +55,7 @@ impl Fixture {
     }
     /// Reads through the linearizable read path, as a voter answers it.
     fn reading(&self, counter: &str, claim: Option<Claim>, time: u64) -> Reading {
-        let request = crate::machine::self_certified(
-            self.state.genesis.id().unwrap(),
-            crate::transport::nonce(),
+        let request = self.certified(
             Operation::Counter {
                 scope: self.scope,
                 counter: name(counter),
@@ -72,8 +63,7 @@ impl Fixture {
             },
             &self.nodes[0],
             time,
-        )
-        .unwrap();
+        );
         assert!(request.read_only());
         match self.state.read(&request).unwrap() {
             Outcome::Counter(reading) => reading,

@@ -142,7 +142,7 @@ async fn enrolled_schema(
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;
         let registry = issuer.registry().await?;
-        let (invite, _) = issuer
+        let (invite, _, _) = issuer
             .settings
             .lock()
             .await
@@ -150,11 +150,11 @@ async fn enrolled_schema(
                 &issuer.path,
                 &issuer.vault,
                 &*link.as_ref().ok_or("link")?.transport,
-                (profile, None),
+                (Some(profile), None),
                 &registry,
             )
             .await?;
-        let joining = Settings::prepare_join(&path, &invite, &store, None)?;
+        let joining = Settings::prepare_join(&path, (&invite, ""), &store, None)?;
         let transport = hub
             .connector(name)
             .start(false, Settings::transport_key(&joining.vault)?)

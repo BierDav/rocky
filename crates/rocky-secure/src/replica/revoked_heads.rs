@@ -20,7 +20,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Unknown non-backlink heads the scope's pending frames wait on.
     pub(crate) async fn missing_heads(&self, scope: ResourceScope) -> Result<Vec<Hash>, Error> {
         let inner = self.inner.lock(Class::Background).await;
-        if inner.config.revocations.is_empty() {
+        if !inner.config.revocations.has_revocations() {
             return Ok(Vec::new());
         }
         let pending = collect_rows(
@@ -133,12 +133,10 @@ impl<A: RowApplication> Inner<A> {
     /// Whether the revocation set ends `chain`: the one rule for a head
     /// held here and for a head known only by its evidence.
     pub(super) fn revoked_chain(&self, chain: &Chain) -> Result<bool, Error> {
-        Ok(self
-            .config
+        self.config
             .revocations
-            .revoking(chain.credentials())
-            .map_err(credential)?
-            .is_some())
+            .ends_chain(chain.credentials())
+            .map_err(credential)
     }
     /// The head's signed header and chain, from its stored frame or kept
     /// evidence.

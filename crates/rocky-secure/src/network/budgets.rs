@@ -27,7 +27,7 @@ fn eight_links(grants: usize) -> CredentialChain {
                 SignedCapability::sign(
                     Capability {
                         subject: key.public_key(),
-                        kind: PrincipalKind::Node,
+                        kind: PrincipalKind::User,
                         grants: (0..grants)
                             .map(|index| ResourceGrant {
                                 scope: scope(index as u8),
@@ -40,7 +40,11 @@ fn eight_links(grants: usize) -> CredentialChain {
                         not_before: u64::MAX - 1,
                         expires: u64::MAX,
                         delegations: index as u8,
-                        extension: Extension::new(Extended::default()).unwrap(),
+                        extension: Extension::new(Extended {
+                            authors: Some(rocky_credentials::AuthorRange::ALL),
+                            ..Extended::default()
+                        })
+                        .unwrap(),
                     },
                     &key,
                 )

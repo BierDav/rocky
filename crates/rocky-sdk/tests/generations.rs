@@ -25,9 +25,14 @@ const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":
 /// The second schema with a nullable `rank`.
 const THIRD: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
+fn reopen(options: Open<'_>) -> Result<Device, Failure> {
+    let signer = common::external_identity(options.directory);
+    Device::new(Database::open(options)?).map(|device| device.with_identity(signer))
+}
+
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
-        identity: None,
+        identity: Some(common::external_identity(directory)),
         directory,
         schema,
         secrets: None,
@@ -85,7 +90,7 @@ async fn an_old_member_follows_main_to_a_published_schema_and_reports_behind() -
     a.close().await;
     // The issuer's application declares the second schema: it publishes
     // a `continue` seal naming it and moves `main`.
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     let published = tip(&a).await;
     assert_ne!(published, before);
@@ -130,7 +135,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     b.add(2, "bread").await;
     a.close().await;
 
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     let status = generation(&a).await;
     assert_eq!(status["current"], json!({"schema": 2}));
     assert_eq!(status["application"], "current");
@@ -146,7 +151,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     // A member whose application declares the newer schema waits for its
     // bookmark to reach it; it never publishes.
     b.close().await;
-    let ahead = Device::new(Database::open(open(&b_dir, SECOND, None))?)?;
+    let ahead = reopen(open(&b_dir, SECOND, None))?;
     let status = generation(&ahead).await;
     assert_eq!(status["current"]["schema"], 1);
     assert_eq!(status["application"], "ahead");
@@ -156,7 +161,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
 
     // Following `main` switches it. Bread, written before the seal, is a
     // late frame across a `continue` and applies on every device.
-    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
+    let b = reopen(open(&b_dir, SECOND, network("b")))?;
     b.sync().await.expect("sync");
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2);
@@ -171,7 +176,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
         json!([[text("fresh")]])
     );
     b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
+    let b = reopen(open(&b_dir, SECOND, network("b")))?;
     assert_eq!(generation(&b).await["application"], "current");
     // Its profile names `items`; `tags` is granted like `items`.
     assert_eq!(
@@ -186,7 +191,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     let refused = Database::open(open(&a_dir, &retyped, network("a")));
     let error = refused.err().expect("refused").to_string();
     assert!(error.contains("changed type"), "{error}");
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     a.close().await;
     Ok(())
@@ -209,8 +214,8 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
     b.close().await;
     a.close().await;
 
-    let a = Device::new(Database::open(open(&a_dir, GRANTED, network("a")))?)?;
-    let b = Device::new(Database::open(open(&b_dir, GRANTED, network("b")))?)?;
+    let a = reopen(open(&a_dir, GRANTED, network("a")))?;
+    let b = reopen(open(&b_dir, GRANTED, network("b")))?;
     // Adopting renews nothing; the next sync asks the issuer once for the
     // grant and key of the table that follows `items`.
     let before = chain(&b_dir)?;
@@ -242,7 +247,7 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
         .expect("refused")
         .to_string();
     assert!(error.contains("changed whom it is granted like"), "{error}");
-    let a = Device::new(Database::open(open(&a_dir, GRANTED, network("a")))?)?;
+    let a = reopen(open(&a_dir, GRANTED, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     a.close().await;
     Ok(())
@@ -279,7 +284,7 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
 
     // The issuer closes `main`, opens the migration's tip and migrates
     // there: the migration is the new tip's first signed write.
-    let a = Device::new(Database::open(open(&dirs("a"), REQUIRED, network("a")))?)?;
+    let a = reopen(open(&dirs("a"), REQUIRED, network("a")))?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "current");
@@ -312,7 +317,7 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     c.close().await;
 
     // A member updated to the new application writes the new tip directly.
-    let b = Device::new(Database::open(open(&dirs("b"), REQUIRED, network("b")))?)?;
+    let b = reopen(open(&dirs("b"), REQUIRED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["application"], "current");
     b.ok(json!({
@@ -370,7 +375,7 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
 
     // Requiring a field that was nullable rewrites its stored NULLs as the
     // default in the switch, without a migration.
-    let a = Device::new(Database::open(open(&dirs("a"), BARE, network("a")))?)?;
+    let a = reopen(open(&dirs("a"), BARE, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY title").await,
@@ -385,8 +390,8 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     );
     b.close().await;
     c.close().await;
-    let b = Device::new(Database::open(open(&dirs("b"), BARE, network("b")))?)?;
-    let c = Device::new(Database::open(open(&dirs("c"), BARE, network("c")))?)?;
+    let b = reopen(open(&dirs("b"), BARE, network("b")))?;
+    let c = reopen(open(&dirs("c"), BARE, network("c")))?;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
     for device in [&a, &b, &c] {
@@ -410,7 +415,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     a.close().await;
-    let a = Device::new(Database::open(open(root.path(), UNIQUE_REQUIRED, None))?)?;
+    let a = reopen(open(root.path(), UNIQUE_REQUIRED, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
@@ -458,7 +463,7 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     // The application's own version is local: the manifest stays.
     let bumped = SCHEMA.replace(r#""version":1"#, r#""version":7"#);
     let bumped: &'static str = Box::leak(bumped.into_boxed_str());
-    let a = Device::new(Database::open(open(root.path(), bumped, None))?)?;
+    let a = reopen(open(root.path(), bumped, None))?;
     let status = generation(&a).await;
     assert_eq!(status["current"], json!({"schema": 1}));
     assert_eq!(a.titles().await, ["apples"]);
@@ -487,7 +492,7 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
             .to_string();
         assert!(error.contains(refusal), "{error}");
     }
-    let a = Device::new(Database::open(open(root.path(), SCHEMA, None))?)?;
+    let a = reopen(open(root.path(), SCHEMA, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 1);
     assert_eq!(a.titles().await, ["apples"]);
     a.close().await;
@@ -514,10 +519,8 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     a.close().await;
     // The issuer publishes two schemas while the member's application
     // stays at version 1 and writes offline.
-    Device::new(Database::open(open(&a_dir, SECOND, None))?)?
-        .close()
-        .await;
-    let a = Device::new(Database::open(open(&a_dir, THIRD, network("a")))?)?;
+    reopen(open(&a_dir, SECOND, None))?.close().await;
+    let a = reopen(open(&a_dir, THIRD, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 3);
     a.set(2, &apples, "rank", json!(7)).await;
     b.add(3, "bread").await;
@@ -538,7 +541,7 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
         json!([[{"type": "integer", "value": "7"}]])
     );
     b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
+    let b = reopen(open(&b_dir, SCHEMA, network("b")))?;
     assert_eq!(generation(&b).await["current"]["schema"], 3);
     assert_eq!(b.titles().await, ["apples", "bread"]);
     b.close().await;
@@ -590,14 +593,14 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     b.sync().await.expect("sync");
     b.close().await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, NOTED, network("a")))?)?;
+    let a = reopen(open(&a_dir, NOTED, network("a")))?;
     let target = (tip(&a).await, generation(&a).await["manifest"].clone());
     // The member's files before it meets the published schema.
     let saved = root.path().join("saved");
     std::fs::create_dir(&saved)?;
     copy_replica(&b_dir, &saved)?;
     let identity = std::fs::read(b_dir.join("identity.json"))?;
-    let b = Device::new(Database::open(open(&b_dir, NOTED, network("b")))?)?;
+    let b = reopen(open(&b_dir, NOTED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.close().await;
@@ -611,7 +614,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
         b_dir.join("identity.json"),
         with_pending(&identity, &target.0, &target.1)?,
     )?;
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, None))?)?;
+    let b = reopen(open(&b_dir, SCHEMA, None))?;
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "behind");
@@ -629,7 +632,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
         b_dir.join("identity.json"),
         with_pending(&identity, &target.0, &target.1)?,
     )?;
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
+    let b = reopen(open(&b_dir, SCHEMA, network("b")))?;
     assert_eq!(generation(&b).await["current"]["schema"], 1);
     b.sync().await.expect("sync");
     let status = generation(&b).await;
@@ -662,10 +665,10 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     b.sync().await.expect("sync");
     b.close().await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, NOTED, network("a")))?)?;
+    let a = reopen(open(&a_dir, NOTED, network("a")))?;
     let target = (tip(&a).await, generation(&a).await["manifest"].clone());
     let identity = std::fs::read(b_dir.join("identity.json"))?;
-    let b = Device::new(Database::open(open(&b_dir, NOTED, network("b")))?)?;
+    let b = reopen(open(&b_dir, NOTED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(tip(&b).await, target.0);
     // The owner seals the target with the same schema; the member's
@@ -683,7 +686,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
         b_dir.join("identity.json"),
         with_pending(&identity, &target.0, &target.1)?,
     )?;
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, None))?)?;
+    let b = reopen(open(&b_dir, SCHEMA, None))?;
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["pending"], Value::Null);
@@ -707,7 +710,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     a.follow_main_migrating().await;
     let apples = a.add(1, "apples").await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     a.set(2, &apples, "note", json!("fresh")).await;
     // A device whose application declares version 1 joins: its database
     // starts at generation 2.
@@ -728,7 +731,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     b.sync().await.expect("sync");
     assert_eq!(a.titles().await, ["apples", "bread"]);
     b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
+    let b = reopen(open(&b_dir, SCHEMA, network("b")))?;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.close().await;
     a.close().await;
@@ -779,7 +782,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     a.close().await;
     // The issuer publishes the second schema and meets only `b` before it
     // leaves.
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     a.set(2, &apples, "note", json!("fresh")).await;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -812,7 +815,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     b.ok(json!({"type":"tips", "action":"follow", "name":"dev"}))
         .await;
     b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, THIRD, network("b")))?)?;
+    let b = reopen(open(&b_dir, THIRD, network("b")))?;
     // A trusted node is an issuer: it publishes its schema on `dev` as a
     // migration, which waits there for its finality.
     let reopened = generation(&b).await;
@@ -842,7 +845,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     assert_eq!(generation(&b).await["pending"], Value::Null);
 
     c.close().await;
-    let c = Device::new(Database::open(open(&c_dir, SECOND, network("c")))?)?;
+    let c = reopen(open(&c_dir, SECOND, network("c")))?;
     assert_eq!(generation(&c).await["application"], "current");
     let bread = c.add(3, "bread").await;
     c.sync().await.expect("sync");
@@ -870,7 +873,7 @@ async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it(
     let invitation = a.invite().await;
     a.add(1, "apples").await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     // The invitation names tables, not a generation: it enrolls into the
     // one the issuer runs now.
@@ -914,8 +917,8 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     a.close().await;
     b.close().await;
     // Each issuer seals `main` with the second schema on its own.
-    let a = Device::new(Database::open(open(&a_dir, SECOND, None))?)?;
-    let b = Device::new(Database::open(open(&b_dir, SECOND, None))?)?;
+    let a = reopen(open(&a_dir, SECOND, None))?;
+    let b = reopen(open(&b_dir, SECOND, None))?;
     let (left, right) = (generation(&a).await, generation(&b).await);
     assert_eq!(left["manifest"], right["manifest"]);
     assert_ne!(tip(&a).await, tip(&b).await);
@@ -929,8 +932,8 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     };
     assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     assert_eq!(tags(&a_dir)?.as_array().map(Vec::len), Some(1));
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
-    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
+    let b = reopen(open(&b_dir, SECOND, network("b")))?;
     a.add(2, "bread").await;
     tag(&a, 5, "fruit").await;
     tag(&b, 5, "dairy").await;
@@ -1000,7 +1003,7 @@ async fn a_device_on_main_never_fetches_or_installs_a_dev_branch_schema() -> Res
     a.ok(json!({"type": "tips", "action": "follow", "name": "dev"}))
         .await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     let dev_manifest = generation(&a).await["manifest"].clone();
     tag(&a, 2, "on dev").await;
@@ -1055,12 +1058,12 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     a.close().await;
     // Networking off, the issuer closes `main`, opens the migration's tip
     // and migrates; nothing has left it.
-    let a = Device::new(Database::open(open(&a_dir, REQUIRED, None))?)?;
+    let a = reopen(open(&a_dir, REQUIRED, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     // Meanwhile the member writes `main`, past the closing seal's frontier.
     b.add(3, "bread").await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, REQUIRED, network("a")))?)?;
+    let a = reopen(open(&a_dir, REQUIRED, network("a")))?;
     introduce(&a, &b).await;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
@@ -1107,7 +1110,7 @@ async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Res
     a.ok(json!({"type": "tips", "action": "compact", "keep": 1}))
         .await;
     a.close().await;
-    let a = Device::new(Database::open(open(&directory, REQUIRED, None))?)?;
+    let a = reopen(open(&directory, REQUIRED, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
@@ -1150,14 +1153,14 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     b.sync().await.expect("sync");
     a.close().await;
     b.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SECOND, None))?)?;
-    let b = Device::new(Database::open(open(&b_dir, RIVAL, None))?)?;
+    let a = reopen(open(&a_dir, SECOND, None))?;
+    let b = reopen(open(&b_dir, RIVAL, None))?;
     let winner = generation(&a).await["manifest"].clone();
     assert_ne!(winner, generation(&b).await["manifest"]);
     a.close().await;
     b.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
-    let b = Device::new(Database::open(open(&b_dir, RIVAL, network("b")))?)?;
+    let a = reopen(open(&a_dir, SECOND, network("a")))?;
+    let b = reopen(open(&b_dir, RIVAL, network("b")))?;
     introduce(&a, &b).await;
     for _ in 0..4 {
         b.sync().await.expect("sync");
@@ -1205,7 +1208,7 @@ async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(
     a.ok(json!({"type": "tips", "action": "follow", "name": "dev"}))
         .await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, REQUIRED, network("a")))?)?;
+    let a = reopen(open(&a_dir, REQUIRED, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     introduce(&a, &b).await;
     a.ok(json!({"type": "tips", "action": "follow", "name": "main"}))
@@ -1263,7 +1266,7 @@ async fn reopening_main_restores_the_branch_signer_of_its_shared_checkpoint() ->
         .await;
     let main = tip(&a).await;
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, SCHEMA, network("a")))?)?;
+    let a = reopen(open(&a_dir, SCHEMA, network("a")))?;
     assert_eq!(tip(&a).await, main);
     let b = Device::join(
         &root.path().join("b"),

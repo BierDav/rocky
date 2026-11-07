@@ -147,7 +147,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     offline.close().await;
     for device in [&a, &b] {
         device
-            .ok(json!({"type":"revoke","node":PrivateKey::new().public_key().to_hex()}))
+            .ok(json!({"type":"revoke","identity":PrivateKey::new().public_key().to_hex()}))
             .await;
     }
     let before_a = winner(root, "a", "items");
@@ -224,9 +224,9 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
             .ok(json!({"type":"peer_remove","node":original.node().await}))
             .await;
     }
-    a.ok(json!({"type":"revoke","node":carol.node().await}))
+    a.ok(json!({"type": "revoke", "identity": carol.identity().await}))
         .await;
-    b.ok(json!({"type":"revoke","node":dave.node().await}))
+    b.ok(json!({"type": "revoke", "identity": dave.identity().await}))
         .await;
     write(&a, "a").await;
     write(&b, "b").await;

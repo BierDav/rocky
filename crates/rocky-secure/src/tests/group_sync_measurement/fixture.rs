@@ -152,16 +152,6 @@ impl Fixture {
                 )
             })
             .collect();
-        let root = Authority::owner(&self.publisher)
-            .issue_partition_terms(
-                user.public_key(),
-                raw.clone(),
-                grants.clone(),
-                (1, Some(AuthorRange::new(1, 1000).unwrap())),
-                (time, 3600, 5),
-            )
-            .unwrap();
-        let prefix = CredentialChain(vec![root]);
         let recorded = if rocky_platform::fs::exists(path) {
             let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
             let mut rows = conn
@@ -183,13 +173,20 @@ impl Fixture {
         } else {
             None
         };
+        let number = recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number));
+        let root = Authority::owner(&self.publisher)
+            .issue_partition_terms(
+                user.public_key(),
+                raw.clone(),
+                grants.clone(),
+                (1, Some(AuthorRange::new(number, number).unwrap())),
+                (time, 3600, 5),
+            )
+            .unwrap();
+        let prefix = CredentialChain(vec![root]);
         let credentials = prefix
             .clone()
-            .complete(
-                &user,
-                node.public_key(),
-                recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number)),
-            )
+            .complete(&user, node.public_key(), number)
             .unwrap();
         let replica = EncryptedReplica::open(
             path,

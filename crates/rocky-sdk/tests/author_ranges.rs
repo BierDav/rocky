@@ -12,13 +12,19 @@ async fn supplied_numbered_node_writes_offline_reopens_and_keeps_its_granted_ran
 -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let issuer = Device::create(&directory.path().join("issuer"), None)?;
+    let issuer_settings: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        directory.path().join("issuer/identity.json"),
+    )?)?;
+    let first_free = issuer_settings["minting"]["next"]
+        .as_u64()
+        .ok_or("minting")?;
     let path = directory.path().join("writer");
-    let keys = Database::device(&path, None)?;
+    let keys = common::node_keys(&path, None)?;
     let profile = json!({"kind":"writer","scopes":["items"]});
     let grant = json!({"type":"grant","device":keys,"profile":profile,"authors":2});
     let supplied = issuer.ok(grant.clone()).await["supplied"].clone();
     let open = || Open {
-        identity: None,
+        identity: common::prepared_identity(&path),
         directory: &path,
         schema: common::SCHEMA,
         secrets: None,
@@ -31,7 +37,7 @@ async fn supplied_numbered_node_writes_offline_reopens_and_keeps_its_granted_ran
     )?)?;
     let before = writer.ok(json!({"type":"session"})).await;
     let author = before["author"].as_u64().ok_or("author missing")?;
-    assert_eq!(author, 2);
+    assert_eq!(author, first_free);
     writer.add(1, "first").await;
     writer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
     let note = writer.ok(json!({"type":"next_id","table":"items"})).await;

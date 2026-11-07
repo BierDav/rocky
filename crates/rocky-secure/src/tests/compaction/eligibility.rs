@@ -23,9 +23,16 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     // chain is valid at the statement's time.
     let signer = PrivateKey::from_bytes(&[251; 32]);
     let signer_chain = CredentialChain(vec![
-        Authority::owner(lineage.publisher())
-            .issue_issuer(signer.public_key(), None, (0, 86400, 0))
-            .unwrap(),
+        Authority::owner_in(
+            lineage.publisher(),
+            rocky_credentials::DatabaseContext {
+                publisher: (lineage.publisher()).public_key(),
+                scope: lineage.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(signer.public_key(), None, (0, 86400, 0))
+        .unwrap(),
     ]);
     let expired = rocky_credentials::Revocation {
         app: lineage.domain.app,
@@ -39,7 +46,12 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     };
     assert!(!expired.live(now().unwrap()));
     let expired = RevocationSet::try_from(vec![
-        rocky_credentials::SignedRevocation::sign(expired, &signer, &signer_chain).unwrap(),
+        rocky_credentials::SignedRevocation::sign(
+            expired,
+            rocky_credentials::testing::lane_for(&signer, &signer_chain),
+            &signer_chain,
+        )
+        .unwrap(),
     ])
     .unwrap();
     replica
@@ -71,12 +83,23 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     assert_eq!(replica.revocations().await, supplied);
     let tip = replica.followed_tip().await;
     let chain = CredentialChain(vec![
-        Authority::owner(lineage.publisher())
-            .issue_issuer(issuer.public_key(), None, crate::tests::validity())
-            .unwrap(),
+        Authority::owner_in(
+            lineage.publisher(),
+            rocky_credentials::DatabaseContext {
+                publisher: (lineage.publisher()).public_key(),
+                scope: lineage.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .unwrap(),
     ]);
-    let sealed =
-        SignedSeal::endorse(sign_seal(&lineage, tip, vec![]).statement, &issuer, &chain).unwrap();
+    let sealed = SignedSeal::endorse(
+        sign_seal(&lineage, tip, vec![]).statement,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
+        &chain,
+    )
+    .unwrap();
     let error = replica
         .receive_tip_statements(&[TipStatement::Seal(sealed.clone())])
         .await

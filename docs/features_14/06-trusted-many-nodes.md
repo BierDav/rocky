@@ -2,6 +2,12 @@
 
 Status: planned (2026-11-05). Needs phase 3.
 
+Phase 3 now also requires database-bound membership. Consume that evidence
+without widening trust across databases: the same identity may be trusted in
+one database and ordinary or revoked in another. Node bounds, staleness, link
+alerts and root cuts are evaluated within the current database. Keep existing
+trust/coordinator integration and extend its checks for this isolation.
+
 ## Changes
 
 - **Trusted nodes by membership.** A node is trusted when its identity
@@ -29,3 +35,6 @@ Status: planned (2026-11-05). Needs phase 3.
   cut and refuses later ones.
 - Linking a third node raises `TrustedNodeLinked` on every trusted node
   that syncs it.
+- Reuse one identity in two databases with different trust grants. A link,
+  unlink or root revocation in one changes neither the other's trusted lanes
+  nor its staleness and alerts. Foreign membership evidence is refused.

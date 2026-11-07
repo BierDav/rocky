@@ -452,6 +452,15 @@ impl SignedCheckpoint {
         time: u64,
     ) -> Result<(), Error> {
         self.verify_signature()?;
+        self.credentials
+            .verify_database(
+                inner
+                    .config
+                    .credentials
+                    .database_context(inner.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         inner.admits(inner.manifest_of_tip(self.statement.tip)?)?;
         // Only the registry binds a tuple to its keyed scope.
         if inner.authenticated_partition(self.statement.scope)? != self.statement.partition.as_ref()

@@ -90,18 +90,21 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
             issuer
                 .dispatch(
                     &*issuer.client(1)?,
-                    &json!({"type":"pairing", "profile":{"kind":"reader", "scopes":["items"]}}),
+                    &json!({"type": "invitation", "profile":{"kind":"reader", "scopes":["items"]}}),
                 )
                 .await?;
             let token = issuer.vault.get("invitation")?;
             let request = rocky_credentials::PairRequest::new(
                 &token,
                 "00".repeat(32),
-                PrivateKey::new().public_key(),
-                PrivateKey::new().public_key(),
-                commitment(
-                    "rocky.sdk.application.v1",
-                    Schema::parse(SCHEMA)?.application.as_bytes(),
+                (
+                    PrivateKey::new().public_key(),
+                    PrivateKey::new().public_key(),
+                ),
+                String::new(),
+                crate::enrollment::context(
+                    &Schema::parse(SCHEMA)?,
+                    issuer.settings.lock().await.database_context()?,
                 ),
             )
             .with_routes(&token, vec![("memory".into(), "member".into())])

@@ -111,6 +111,9 @@ async fn rebind(
                 [predecessor.as_bytes().to_vec()],
             )
             .await?;
+            // The new node cannot restore its predecessor's private line signer.
+            // An unbound genesis line selects the fresh node's own certificate.
+            conn.execute("DELETE FROM secure_line_nodes WHERE node=?", [predecessor.as_bytes().to_vec()]).await?;
             conn.execute(
                 "UPDATE secure_metadata SET identity=?,revision=revision+1 WHERE id=1",
                 [identity(tip, node)?],

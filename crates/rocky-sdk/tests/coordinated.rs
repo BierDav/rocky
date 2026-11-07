@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a> {
     Open {
-        identity: None,
+        identity: Some(common::external_identity(directory)),
         directory,
         schema: common::SCHEMA,
         secrets: None,
@@ -108,7 +108,8 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, c_dir) = (root.path().join("a"), root.path().join("c"));
-    let a = Device::new(Database::create(open(&a_dir, network("a")), None)?)?;
+    let a = Device::new(Database::create(open(&a_dir, network("a")), None)?)?
+        .with_identity(common::external_identity(&a_dir));
     a.follow_main_migrating().await;
     let log = MemoryLog::new();
     log.configure(domain(&a), 1)?;
@@ -127,7 +128,8 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     let c = Device::new(Database::join(
         open(&c_dir, network("c")),
         &a.invite_as(json!({"kind":"issuer"})).await,
-    )?)?;
+    )?)?
+    .with_identity(common::external_identity(&c_dir));
     introduce(&a, &c).await;
     let principal = c.ok(json!({"type":"session"})).await["principal"].clone();
     let grant = a
@@ -157,7 +159,8 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
             log.client(a_node),
         ))),
         ..open(&a_dir, None)
-    })?)?;
+    })?)?
+    .with_identity(common::external_identity(&a_dir));
     let status = a.ok(json!({"type": "generation"})).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     // Nothing of the stage left the device: the source log is open.
@@ -177,7 +180,8 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
             log.client(a_node),
         ))),
         ..open(&a_dir, network("a"))
-    })?)?;
+    })?)?
+    .with_identity(common::external_identity(&a_dir));
     introduce(&a, &c).await;
     for _ in 0..4 {
         let _ = a.sync().await;

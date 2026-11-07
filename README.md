@@ -35,7 +35,11 @@ cargo run -p rocky-sdk --example notes -- ./local/notes
 A database's authority is an offline root key: `Configuration::create`
 returns it once as a 24-word phrase (`Opened::root`), or
 `create_with_root` takes a passkey-backed signer. Rocky never stores it.
-It is needed only to add or revoke a trusted node; those calls fail with
+The owner's identity is derived from that root. Identity signers are also
+never stored: a new device joins as a single-use identity, or
+`Configuration::join_linkable` returns its identity phrase once. Supply the
+identity for later linking; opening and renewal use the node key alone.
+The root is needed only to add or revoke a trusted node; those calls fail with
 `publisher_required` without it. Trusted nodes have their own keys and
 invite, renew, revoke ordinary devices and seal; their grants never
 expire, and the others raise `TrustedNodeStale` for one they have not

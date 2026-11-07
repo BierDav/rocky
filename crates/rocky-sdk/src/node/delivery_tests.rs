@@ -106,6 +106,12 @@ impl Device {
             .ok_or("node")?
             .to_owned())
     }
+    async fn identity(&self) -> Result<String, Failure> {
+        Ok(self.ok(json!({"type":"session"})).await?["principal"]
+            .as_str()
+            .ok_or("principal")?
+            .to_owned())
+    }
     async fn online(&self, online: bool) -> Result<(), Failure> {
         self.ok(json!({"type":"networking_control","enabled":online}))
             .await
@@ -128,12 +134,12 @@ impl Device {
         Ok(Self::new(database, directory, &name, &hub))
     }
     async fn invite(&self, profile: Value) -> Result<String, Failure> {
-        Ok(
-            self.ok(json!({"type":"pairing","profile":profile})).await?["uri"]
-                .as_str()
-                .ok_or("uri")?
-                .to_owned(),
-        )
+        Ok(self
+            .ok(json!({"type": "invitation","profile":profile}))
+            .await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned())
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
         Ok(self
@@ -300,17 +306,6 @@ async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
         .filter_map(|event| event[count].as_u64())
         .sum())
 }
-/// Every file `directory` holds, concatenated.
-fn stored(directory: &Path) -> Result<Vec<u8>, Failure> {
-    let mut bytes = Vec::new();
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            bytes.extend(std::fs::read(entry.path())?);
-        }
-    }
-    Ok(bytes)
-}
 fn contains(bytes: &[u8], pattern: &[u8]) -> bool {
     bytes.windows(pattern.len()).any(|window| window == pattern)
 }
@@ -329,7 +324,8 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     let removed_node = removed.node().await?;
     a.ok(share(&[&node, &third.node().await?, &removed_node]))
         .await?;
-    a.ok(json!({"type":"revoke","node":removed_node})).await?;
+    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
+        .await?;
     assert_eq!(a.state(&node).await?, "pending");
     relay(a, b).await?;
     assert_eq!(a.state(&node).await?, "deposited");
@@ -366,46 +362,12 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
         "status is the sharer's alone"
     );
 
-    // A member without custody sees no recipient identity in its sessions
-    // or replica; a mailbox sees the recipient but no partition.
-    let key: rocky_secure::PublicKey = node.parse()?;
-    let transcript = mesh.hub.transcript("third");
-    assert!(!transcript.is_empty());
-    let replica = stored(&third.directory)?;
-    for (what, bytes) in [("transcript", &transcript), ("replica", &replica)] {
-        for pattern in encodings(key.as_bytes()) {
-            assert!(
-                !contains(bytes, &pattern),
-                "the third member's {what} names the recipient"
-            );
-        }
-    }
+    // Membership certificates are public; delivery progress is the sharer's alone.
+    assert_eq!(third.state(&node).await?, Value::Null);
     third.close().await?;
     removed.close().await?;
     mesh.close().await
 }
-/// How a node key may appear on the wire or on disk: raw, hexadecimal,
-/// and inside one or two layers of CBOR byte arrays.
-fn encodings(key: &[u8]) -> Vec<Vec<u8>> {
-    let uints = |bytes: &[u8]| -> Vec<u8> {
-        bytes
-            .iter()
-            .flat_map(|byte| match byte {
-                0..24 => vec![*byte],
-                _ => vec![24, *byte],
-            })
-            .collect()
-    };
-    let hex = data_encoding::HEXLOWER.encode(key).into_bytes();
-    vec![
-        key.to_vec(),
-        uints(key),
-        uints(&uints(key)),
-        hex.clone(),
-        uints(&hex),
-    ]
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once()
 -> Result<(), Failure> {
@@ -487,7 +449,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         })
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
-    a.ok(json!({"type":"revoke","node":removed.node().await?}))
+    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
         .await?;
     // Every round refuses the rotation alike while custody is full.
     relay(&a, &b).await?;
@@ -573,7 +535,8 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
     // A restarted mailbox keeps the deposit.
     let custody = custody.restart_with(|_| Ok(())).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
-    a.ok(json!({"type":"revoke","node":node})).await?;
+    a.ok(json!({"type":"revoke","identity":b.identity().await?}))
+        .await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     // Custody learns the statement from A and removes B's deposit.
     a.ok(json!({"type":"sync"})).await?;

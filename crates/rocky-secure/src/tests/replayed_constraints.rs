@@ -233,7 +233,10 @@ impl Constrained {
                     user.public_key(),
                     vec![],
                     self.partition_grants(tenant),
-                    (1, Some(rocky_credentials::AuthorRange::ALL)),
+                    (
+                        1,
+                        Some(rocky_credentials::AuthorRange::new(number, number).unwrap()),
+                    ),
                     (now().unwrap(), 3600, 5),
                 )
                 .unwrap();
@@ -244,17 +247,31 @@ impl Constrained {
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: self.grants(),
+            grants: if kind == PrincipalKind::Node {
+                Vec::new()
+            } else {
+                self.grants()
+            },
             not_before: lifetime().0,
-            expires: lifetime().1,
+            expires: if kind == PrincipalKind::Node {
+                rocky_credentials::NEVER
+            } else {
+                lifetime().1
+            },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {
                     rocky_credentials::AuthorRange::new(number, number).unwrap()
                 } else {
-                    rocky_credentials::AuthorRange::ALL
+                    rocky_credentials::AuthorRange::new(number, rocky_credentials::MAX_AUTHOR)
+                        .unwrap()
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                database: Some(rocky_credentials::DatabaseContext {
+                    publisher: self.publisher.public_key(),
+                    scope: self.domain,
+                }),
+                sequence: (kind == PrincipalKind::Node).then_some(0),
                 ..Default::default()
             })
             .unwrap(),

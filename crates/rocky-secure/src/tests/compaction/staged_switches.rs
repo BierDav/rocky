@@ -580,9 +580,16 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
     // An issuer, later revoked, seals the source and moves `main`.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
-        Authority::owner(lineage.publisher())
-            .issue_issuer(issuer.public_key(), None, crate::tests::validity())
-            .unwrap(),
+        Authority::owner_in(
+            lineage.publisher(),
+            rocky_credentials::DatabaseContext {
+                publisher: (lineage.publisher()).public_key(),
+                scope: lineage.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .unwrap(),
     ]);
     let seal = SignedSeal::endorse(
         SealStatement {
@@ -595,7 +602,7 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
             },
             recovery: None,
         },
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
     )
     .unwrap();
@@ -603,7 +610,12 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
     let TipStatement::Bookmark(unsigned) = bookmark(&lineage, Some(source), target) else {
         unreachable!()
     };
-    let moved = SignedBookmarkMove::endorse(unsigned.statement, &issuer, &chain).unwrap();
+    let moved = SignedBookmarkMove::endorse(
+        unsigned.statement,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
+        &chain,
+    )
+    .unwrap();
     a.receive_tip_statements(&[TipStatement::Seal(seal), TipStatement::Bookmark(moved)])
         .await
         .unwrap();

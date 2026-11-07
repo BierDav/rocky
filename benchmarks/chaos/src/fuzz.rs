@@ -67,7 +67,7 @@ async fn join(world: &mut World, name: &str, kind: Kind) -> Result<(), Failure> 
     let mut slot = Slot::new(name, &world.members[0].slot.root);
     // Inviting can be refused transiently (issuer registry still importing).
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":profile}))
+        .call(json!({"type": "invitation","profile":profile}))
         .await
         .map_err(|e| format!("pairing refused: {e}"))?["uri"]
         .as_str()

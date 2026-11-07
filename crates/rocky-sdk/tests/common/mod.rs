@@ -12,6 +12,26 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
+/// An application-owned test signer for multi-call external enrollment.
+pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
+    Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+        "fixture.external-identity",
+        directory.to_string_lossy().as_bytes(),
+    )))
+}
+pub fn prepared_identity(directory: &Path) -> Option<Arc<dyn rocky_sdk::IdentityProvider>> {
+    directory
+        .join("identity.install.json")
+        .exists()
+        .then(|| external_identity(directory))
+}
+pub fn node_keys(
+    directory: &Path,
+    secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
+) -> Result<rocky_sdk::NodeKeys, Failure> {
+    Database::node_keys_of(directory, secrets, Some(external_identity(directory)))
+}
+
 pub struct Device {
     pub database: Arc<Database>,
     pub network: Option<NetworkService>,
@@ -19,10 +39,11 @@ pub struct Device {
     scope: Value,
     /// The creating device's root, which root-only calls name.
     root: Option<String>,
+    signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
 }
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
-        identity: None,
+        identity: prepared_identity(directory),
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -37,18 +58,33 @@ impl Device {
             session: opened.database.session(),
             scope: serde_json::from_str(&opened.database.scope())?,
             root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
+            signer: opened
+                .root
+                .as_ref()
+                .map(|root| Arc::new(root.identity()) as Arc<dyn rocky_sdk::IdentityProvider>),
             database: opened.database,
             network: opened.network,
         })
     }
     pub fn create(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
-        Self::new(Database::create(open(directory, network), None)?)
+        let signer = external_identity(directory);
+        let mut options = open(directory, network);
+        options.identity = Some(signer.clone());
+        Self::new(Database::create(options, None)?).map(|device| device.with_identity(signer))
     }
     pub fn join(directory: &Path, invitation: &str, network: Network) -> Result<Self, Failure> {
-        Self::new(Database::join(open(directory, Some(network)), invitation)?)
+        let signer = external_identity(directory);
+        let mut options = open(directory, Some(network));
+        options.identity = Some(signer.clone());
+        Self::new(Database::join(options, invitation)?).map(|device| device.with_identity(signer))
     }
     pub fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
         Self::new(Database::open(open(directory, network))?)
+            .map(|device| device.with_identity(external_identity(directory)))
+    }
+    pub fn with_identity(mut self, signer: Arc<dyn rocky_sdk::IdentityProvider>) -> Self {
+        self.signer = Some(signer);
+        self
     }
     /// The root this device created the domain with, as a call names it.
     pub fn root(&self) -> Value {
@@ -65,12 +101,13 @@ impl Device {
         identity::call(&self.scope, request, |request| self.raw_call(request)).await
     }
     async fn raw_call(&self, request: Value) -> Result<Value, Value> {
-        let call = json!({"version": 1, "scope": self.scope, "request": request});
-        let reply = self
-            .session
-            .call(call.to_string())
-            .await
-            .map_err(|error| json!(error.to_string()))?;
+        let identity = self.signer.clone();
+        let call = json!({"version": 1, "scope": self.scope, "request": request}).to_string();
+        let reply = match identity {
+            Some(identity) => self.session.call_with_identity(call, identity).await,
+            None => self.session.call(call).await,
+        }
+        .map_err(|error| json!(error.to_string()))?;
         let reply: Value =
             serde_json::from_str(&reply).map_err(|error| json!(error.to_string()))?;
         if reply["status"] == "ok" {
@@ -145,7 +182,7 @@ impl Device {
             .await
     }
     pub async fn invite_as(&self, profile: Value) -> String {
-        self.ok(json!({"type": "pairing", "profile": profile}))
+        self.ok(json!({"type": "invitation", "profile": profile}))
             .await["uri"]
             .as_str()
             .unwrap_or_default()
@@ -156,6 +193,10 @@ impl Device {
     }
     pub async fn node(&self) -> String {
         self.text("session", "node").await
+    }
+    /// The identity this device's node belongs to.
+    pub async fn identity(&self) -> String {
+        self.text("session", "principal").await
     }
     async fn text(&self, request: &str, field: &str) -> String {
         self.ok(json!({"type": request})).await[field]

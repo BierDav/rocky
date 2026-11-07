@@ -1,9 +1,8 @@
 //! Revocation statements and the grow-only set a device holds of them.
 use crate::{
-    CredentialChain, Error, IdentityProvider, PublicKey, Purpose, SignedCapability, decode_bounded,
-    denied, encode, signing_bytes,
+    Attestation, CredentialChain, Error, PublicKey, Purpose, SignedCapability, Signer,
+    decode_bounded, denied, encode, signing_bytes,
 };
-use p2panda_core::Signature;
 use rocky_core::{AppId, Commitment};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,9 +19,9 @@ pub const MAX_LIVE_REVOCATIONS: usize = 1024;
 pub const MAX_REVOCATION_BYTES: usize = 8 * 1024;
 /// What the signature and the framing add to an encoded statement and
 /// its signer's chain, at most.
-pub const SIGNATURE_OVERHEAD: usize = 192;
+pub const SIGNATURE_OVERHEAD: usize = 1024;
 /// Largest encoded set, a bound on what any merge accepts.
-pub const MAX_REVOCATION_SET_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_REVOCATION_SET_BYTES: usize = 4 * 1024 * 1024;
 /// The named refusal of a revocation beyond the live bound.
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
 
@@ -154,31 +153,80 @@ impl Revocation {
     }
 }
 
-/// A statement signed by the owner, or by an issuer identity whose chain
-/// it carries.
+/// A statement signed by the owner's key, or by a node of an issuer
+/// identity whose chain it carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedRevocation {
     pub statement: Revocation,
     /// The issuer links from the publisher to the signer; empty for the owner.
     pub chain: CredentialChain,
-    signature: Signature,
+    attestation: Attestation,
+    database: Option<crate::DatabaseContext>,
 }
-const SIGNED: &str = "rocky.revocation.v5";
+const SIGNED: &str = "rocky.revocation.v7";
 impl SignedRevocation {
-    pub fn sign(
+    pub fn sign<'s>(
         statement: Revocation,
-        signer: &dyn IdentityProvider,
+        signer: impl Into<Signer<'s>>,
         chain: &CredentialChain,
     ) -> Result<Self, Error> {
-        if statement.issuer != signer.public_key()?
+        let database = if chain.0.is_empty() {
+            None
+        } else {
+            Some(chain.database_context(chain.0[0].issuer)?)
+        };
+        Self::sign_scoped(statement, signer.into(), chain, database)
+    }
+    /// Signs within a pinned database, including root-owned statements.
+    pub fn sign_in<'s>(
+        statement: Revocation,
+        signer: impl Into<Signer<'s>>,
+        chain: &CredentialChain,
+        database: crate::DatabaseContext,
+    ) -> Result<Self, Error> {
+        if !chain.0.is_empty() && chain.database_context(database.publisher)? != database {
+            return Err(denied("revocation belongs to another database"));
+        }
+        Self::sign_scoped(statement, signer.into(), chain, Some(database))
+    }
+    pub fn database(&self) -> Option<crate::DatabaseContext> {
+        self.database
+    }
+    fn sign_scoped(
+        statement: Revocation,
+        signer: Signer<'_>,
+        chain: &CredentialChain,
+        database: Option<crate::DatabaseContext>,
+    ) -> Result<Self, Error> {
+        if database.is_some_and(|context| {
+            context.scope.app != statement.app
+                || (chain.0.is_empty() && context.publisher != statement.issuer)
+        }) {
+            return Err(denied("revocation belongs to another application"));
+        }
+        if statement.issuer != signer.principal()?
+            || (chain.0.is_empty() == signer.signing_node().is_some()
+                && !(signer.signing_node().is_none() && Self::unlink_shape(&statement, chain)))
+            || (!chain.0.is_empty()
+                && !statement.nodes.is_empty()
+                && (signer.signing_node().is_some() || !Self::unlink_shape(&statement, chain)))
             || statement.empty()
             || !statement.valid_cut(chain.0.is_empty())
             || !statement.valid_recovery(chain.0.is_empty())
         {
             return Err(denied("invalid revocation"));
         }
+        if let (Some(database), Signer::Node { certificate, .. }) = (database, &signer)
+            && certificate.capability.extended()?.database != Some(database)
+        {
+            return Err(denied("revocation signer belongs to another database"));
+        }
         let signed = Self {
-            signature: signer.sign(Purpose::Revocation, &signing_bytes(SIGNED, &statement)?)?,
+            attestation: signer.attest(
+                Purpose::Revocation,
+                &signing_bytes(SIGNED, &(database, &statement))?,
+            )?,
+            database,
             chain: chain.clone(),
             statement,
         };
@@ -187,15 +235,55 @@ impl SignedRevocation {
         }
         Ok(signed)
     }
-    /// Checks the signature, that the owner or an issuer whose chain was
-    /// valid at the statement's time signed, and the application. The owner
-    /// identity is never revoked. Whether the issuer is revoked later does
-    /// not matter. Returns the statement's ID.
+    fn unlink_shape(statement: &Revocation, chain: &CredentialChain) -> bool {
+        chain.certificate().is_some_and(|certificate| {
+            certificate.issuer == statement.issuer
+                && certificate.capability.not_before <= statement.time
+                && statement.nodes == [crate::PeerId::of(certificate.capability.subject)].into()
+                && statement.identities.is_empty()
+                && statement.capabilities.is_empty()
+                && statement.cut.is_empty()
+                && statement.recovery.is_none()
+        })
+    }
+    fn identity_unlink(&self) -> bool {
+        self.attestation.certificate().is_none() && Self::unlink_shape(&self.statement, &self.chain)
+    }
+    /// Checks the signature, that the owner's key or a node of an issuer
+    /// whose chain and certificate were valid at the statement's time
+    /// signed, and the application. The owner identity is never revoked.
+    /// Whether the issuer or its node is revoked later does not matter.
+    /// Returns the statement's ID.
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<Commitment, Error> {
         let statement = &self.statement;
+        if let Some(database) = self.database {
+            if database.publisher != publisher || database.scope.app != app {
+                return Err(denied("revocation belongs to another database"));
+            }
+            if !self.chain.0.is_empty() && self.chain.database_context(publisher)? != database {
+                return Err(denied("revocation belongs to another database"));
+            }
+        }
+        if let (Some(database), Some(certificate)) = (self.database, self.attestation.certificate())
+            && certificate.capability.extended()?.database != Some(database)
+        {
+            return Err(denied("revocation signer belongs to another database"));
+        }
         let time = statement.time;
+        let unlink = self.identity_unlink();
         let signer = if self.chain.0.is_empty() {
             Ok(publisher)
+        } else if unlink {
+            let certificate = self
+                .chain
+                .certificate()
+                .ok_or_else(|| denied("missing unlink certificate"))?;
+            self.chain.verify_node_alias(
+                publisher,
+                crate::PeerId::of(certificate.capability.subject),
+                certificate.capability.subject,
+            )?;
+            Ok(certificate.issuer)
         } else if self
             .chain
             .0
@@ -208,7 +296,8 @@ impl SignedRevocation {
                 "the issuer chain was not valid at the statement's time",
             ))
         };
-        if statement.app != app
+        if (!self.chain.0.is_empty() && !unlink && !statement.nodes.is_empty())
+            || statement.app != app
             || statement.empty()
             || !statement.valid_cut(self.chain.0.is_empty())
             || !statement.valid_recovery(self.chain.0.is_empty())
@@ -218,9 +307,18 @@ impl SignedRevocation {
             || statement.identities.contains(&publisher)
             || encode(self)?.len() > MAX_REVOCATION_BYTES
             || signer.ok() != Some(statement.issuer)
-            || !statement
-                .issuer
-                .verify(&signing_bytes(SIGNED, statement)?, &self.signature)
+            || (!unlink && self.chain.0.is_empty() != self.attestation.certificate().is_none())
+            || self
+                .attestation
+                .certificate()
+                .is_some_and(|certificate| certificate.capability.not_before > time)
+            || self
+                .attestation
+                .verify(
+                    statement.issuer,
+                    &signing_bytes(SIGNED, &(self.database, statement))?,
+                )
+                .is_err()
         {
             return Err(denied("invalid revocation signature"));
         }
@@ -236,11 +334,11 @@ impl SignedRevocation {
     /// Whether it is still in the distributed set at `time`. A root
     /// statement always is: it may end a trusted grant, which never expires.
     pub fn live(&self, time: u64) -> bool {
-        self.root() || self.statement.live(time)
+        self.root() || self.identity_unlink() || self.statement.live(time)
     }
     /// The first day it is no longer live; `u64::MAX` for a root statement.
     pub fn expiry_day(&self) -> u64 {
-        if self.root() {
+        if self.root() || self.identity_unlink() {
             u64::MAX
         } else {
             self.statement.expiry_day()
@@ -252,7 +350,7 @@ impl SignedRevocation {
     /// identity first enrolled; a recovery's, every trusted grant before
     /// its own and what those first enrolled.
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
-        if protected && !self.root() {
+        if protected && !self.root() && !self.identity_unlink() {
             return Ok(false);
         }
         let subject = &link.capability.subject;
@@ -267,9 +365,10 @@ impl SignedRevocation {
                 }))
             || (extended.trusted.is_some()
                 && recovery.is_some_and(|r| r.ends(link.capability.not_before, subject)))
-            || extended
-                .node
-                .is_some_and(|node| self.statement.nodes.contains(&node))
+            || extended.node.is_some_and(|node| {
+                self.statement.nodes.contains(&node)
+                    && (!self.identity_unlink() || link.issuer == self.statement.issuer)
+            })
             || capabilities.contains(&link.id()?)
             || extended
                 .claims
@@ -287,8 +386,10 @@ impl SignedRevocation {
 /// removed but statements past their expiry, which every holder drops by
 /// the same day-rounded cutoff. A digest identifies the live set.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "Vec<SignedRevocation>", try_from = "Vec<SignedRevocation>")]
+#[serde(into = "ReplicatedAuthority", try_from = "ReplicatedAuthority")]
 pub struct RevocationSet {
+    database: Option<Box<crate::DatabaseContext>>,
+    certificates: BTreeMap<Commitment, SignedCapability>,
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
@@ -312,6 +413,48 @@ struct Ended {
     references: BTreeSet<crate::PeerId>,
     capabilities: BTreeSet<Commitment>,
 }
+/// The current replicated authority encoding. Older statement-only sets are refused.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplicatedAuthority {
+    format: u32,
+    database: Option<crate::DatabaseContext>,
+    statements: Vec<SignedRevocation>,
+    certificates: Vec<SignedCapability>,
+}
+impl From<RevocationSet> for ReplicatedAuthority {
+    fn from(set: RevocationSet) -> Self {
+        Self {
+            format: 3,
+            database: set.database.map(|database| *database),
+            statements: set.statements.into_values().collect(),
+            certificates: set.certificates.into_values().collect(),
+        }
+    }
+}
+impl TryFrom<ReplicatedAuthority> for RevocationSet {
+    type Error = Error;
+    fn try_from(value: ReplicatedAuthority) -> Result<Self, Error> {
+        if value.format != 3 {
+            return Err(denied("unsupported replicated authority format"));
+        }
+        let mut set = Self {
+            database: value.database.map(Box::new),
+            ..Self::default()
+        };
+        for statement in value.statements {
+            set.insert(statement)?;
+        }
+        let mut named = BTreeSet::new();
+        for certificate in value.certificates {
+            if !named.insert(certificate.id()?) {
+                return Err(denied("duplicate membership certificate"));
+            }
+            set.link(certificate)?;
+        }
+        Ok(set)
+    }
+}
 impl From<RevocationSet> for Vec<SignedRevocation> {
     fn from(set: RevocationSet) -> Self {
         set.statements.into_values().collect()
@@ -333,14 +476,142 @@ impl RevocationSet {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn new_in(database: crate::DatabaseContext) -> Self {
+        Self {
+            database: Some(Box::new(database)),
+            ..Self::default()
+        }
+    }
+    /// Atomic database ingress, including into an empty set.
+    pub fn merge_in(
+        &mut self,
+        other: &Self,
+        database: crate::DatabaseContext,
+        time: u64,
+    ) -> Result<Vec<SignedRevocation>, Error> {
+        self.verify_in(database)?;
+        other.verify_in(database)?;
+        let mut next = self.clone();
+        next.bind(Some(database))?;
+        let added = next.merge(other, database.publisher, database.scope.app, time)?;
+        *self = next;
+        Ok(added)
+    }
+    /// Checks every item before the caller changes its local database.
+    pub fn verify_in(&self, database: crate::DatabaseContext) -> Result<(), Error> {
+        if self
+            .database
+            .as_deref()
+            .is_some_and(|held| *held != database)
+        {
+            return Err(denied("authority set belongs to another database"));
+        }
+        self.verify(database.publisher, database.scope.app)?;
+        if self.certificates.values().any(|certificate| {
+            certificate
+                .capability
+                .extended()
+                .ok()
+                .and_then(|extended| extended.database)
+                != Some(database)
+        }) || self
+            .statements
+            .values()
+            .any(|statement| statement.database != Some(database))
+        {
+            return Err(denied("authority evidence belongs to another database"));
+        }
+        Ok(())
+    }
+    fn bind(&mut self, database: Option<crate::DatabaseContext>) -> Result<(), Error> {
+        if let Some(database) = database {
+            if self
+                .database
+                .as_deref()
+                .is_some_and(|held| *held != database)
+            {
+                return Err(denied("authority evidence belongs to another database"));
+            }
+            self.database = Some(Box::new(database));
+        }
+        Ok(())
+    }
+    /// Records identity-signed membership evidence; it grants no permissions.
+    pub fn link(&mut self, certificate: SignedCapability) -> Result<bool, Error> {
+        certificate.certifies(
+            certificate.capability.subject,
+            certificate.capability.not_before,
+        )?;
+        crate::MembershipLink::from_certificate(&certificate)?;
+        let id = certificate.id()?;
+        if self.certificates.contains_key(&id) {
+            return Ok(false);
+        }
+        let mut next = self.clone();
+        let database = certificate
+            .capability
+            .extended()?
+            .database
+            .ok_or_else(|| denied("membership certificate has no database"))?;
+        next.bind(Some(database))?;
+        next.certificates.insert(id, certificate);
+        next.check_size()?;
+        *self = next;
+        Ok(true)
+    }
+    pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
+        self.certificates.values()
+    }
+    pub fn membership(&self) -> Result<crate::MembershipSet, Error> {
+        let mut membership = crate::MembershipSet::new();
+        for certificate in self.certificates.values() {
+            membership.insert(certificate)?;
+        }
+        Ok(membership)
+    }
+    fn fork_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
+        self.membership().is_ok_and(|membership| {
+            let void = membership.void_certificates();
+            let mut counts = BTreeMap::<PublicKey, BTreeSet<crate::PeerId>>::new();
+            let mut valid = BTreeSet::new();
+            let mut links: Vec<_> = self
+                .certificates
+                .values()
+                .filter_map(|certificate| crate::MembershipLink::from_certificate(certificate).ok())
+                .collect();
+            links.sort_by_key(|link| (link.identity, link.sequence, link.certificate));
+            for link in &links {
+                if void.contains(&link.certificate)
+                    || self.identity_unlinks(link.identity, link.node)
+                {
+                    continue;
+                }
+                let nodes = counts.entry(link.identity).or_default();
+                if nodes.contains(&link.node) || nodes.len() < crate::MAX_MEMBERSHIP_NODES {
+                    nodes.insert(link.node);
+                    valid.insert(link.certificate);
+                }
+            }
+            links.iter().any(|link| {
+                link.identity == identity && link.node == node && !valid.contains(&link.certificate)
+            })
+        })
+    }
     fn insert(&mut self, signed: SignedRevocation) -> Result<bool, Error> {
+        self.bind(signed.database)?;
         let id = signed.id()?;
         if self.statements.contains_key(&id) {
             return Ok(false);
         }
         self.subjects.extend(signed.statement.subjects().copied());
-        self.references
-            .extend(signed.statement.nodes.iter().copied());
+        if signed.identity_unlink() {
+            if let Some(certificate) = signed.chain.certificate() {
+                self.link(certificate.clone())?;
+            }
+        } else {
+            self.references
+                .extend(signed.statement.nodes.iter().copied());
+        }
         self.capabilities
             .extend(signed.statement.capabilities.iter().copied());
         if signed.root() {
@@ -360,10 +631,20 @@ impl RevocationSet {
         self.statements.insert(id, signed);
         Ok(true)
     }
-    /// Verifies every statement against the publisher and application.
+    /// Verifies every statement and certificate against its signing authority.
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<(), Error> {
         for signed in self.statements.values() {
             signed.verify(publisher, app)?;
+        }
+        for certificate in self.certificates.values() {
+            certificate.certifies(
+                certificate.capability.subject,
+                certificate.capability.not_before,
+            )?;
+            let database = crate::MembershipLink::from_certificate(certificate)?.database;
+            if database.publisher != publisher || database.scope.app != app {
+                return Err(denied("membership certificate belongs to another database"));
+            }
         }
         self.check_size()
     }
@@ -384,7 +665,9 @@ impl RevocationSet {
         app: AppId,
         time: u64,
     ) -> Result<Vec<SignedRevocation>, Error> {
+        other.verify(publisher, app)?;
         let mut next = self.clone();
+        next.bind(other.database.as_deref().copied())?;
         let mut added = Vec::new();
         for (id, signed) in &other.statements {
             if self.statements.contains_key(id) {
@@ -395,6 +678,9 @@ impl RevocationSet {
                 added.push(signed.clone());
             }
         }
+        for certificate in other.certificates.values() {
+            next.link(certificate.clone())?;
+        }
         next = next.pruned(time);
         next.check_size()?;
         *self = next;
@@ -402,7 +688,11 @@ impl RevocationSet {
     }
     /// This set without the statements expired at `time`.
     pub fn pruned(&self, time: u64) -> Self {
-        let mut set = Self::default();
+        let mut set = Self {
+            database: self.database.clone(),
+            certificates: self.certificates.clone(),
+            ..Self::default()
+        };
         for signed in self.statements.values() {
             if signed.live(time) {
                 // Every held statement was inserted once already.
@@ -422,7 +712,17 @@ impl RevocationSet {
         self.statements.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.statements.is_empty()
+        self.statements.is_empty() && self.certificates.is_empty()
+    }
+    /// Whether evidence can end a chain; valid links alone do not.
+    pub fn has_revocations(&self) -> bool {
+        !self.statements.is_empty()
+            || self.certificates.values().any(|certificate| {
+                self.fork_ends(
+                    certificate.issuer,
+                    crate::PeerId::of(certificate.capability.subject),
+                )
+            })
     }
     /// The statements still live at `time`.
     pub fn live(&self, time: u64) -> usize {
@@ -442,7 +742,29 @@ impl RevocationSet {
             .collect();
         Ok(rocky_core::commitment(
             "rocky.revocation-set.v1",
-            &encode(&live)?,
+            &encode(&(
+                live,
+                self.certificates
+                    .values()
+                    .filter(|certificate| {
+                        self.fork_ends(
+                            certificate.issuer,
+                            crate::PeerId::of(certificate.capability.subject),
+                        )
+                    })
+                    .map(SignedCapability::id)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))?,
+        ))
+    }
+    /// The full replicated evidence, including still-valid membership links.
+    pub fn exchange_digest(&self, time: u64) -> Result<Commitment, Error> {
+        Ok(rocky_core::commitment(
+            "rocky.authority-exchange.v2",
+            &encode(&(
+                self.digest(time)?,
+                self.certificates.keys().collect::<Vec<_>>(),
+            ))?,
         ))
     }
     /// The heads root statements keep of what `identity` signed through
@@ -456,7 +778,19 @@ impl RevocationSet {
     }
     /// Whether some statement revokes `key` as a credential subject.
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
-        self.references.contains(node)
+        if self.references.contains(node) {
+            return true;
+        }
+        let mut known = self
+            .certificates
+            .values()
+            .filter(|certificate| crate::PeerId::of(certificate.capability.subject) == *node)
+            .peekable();
+        known.peek().is_some()
+            && known.all(|certificate| {
+                self.subjects.contains(&certificate.issuer)
+                    || self.ends_node_of(certificate.issuer, certificate.capability.subject, false)
+            })
     }
     pub fn revokes(&self, key: &PublicKey) -> bool {
         self.subjects.contains(key) || self.revokes_reference(&crate::PeerId::of(*key))
@@ -515,7 +849,11 @@ impl RevocationSet {
             (&self.subjects, &self.references, &self.capabilities)
         };
         Ok(subjects.contains(&link.capability.subject)
-            || extended.node.is_some_and(|node| references.contains(&node))
+            || extended.node.is_some_and(|node| {
+                references.contains(&node)
+                    || self.identity_unlinks(link.issuer, node)
+                    || self.fork_ends(link.issuer, node)
+            })
             || capabilities.contains(&link.id()?)
             || extended
                 .claims
@@ -525,6 +863,49 @@ impl RevocationSet {
             || extended
                 .origin
                 .is_some_and(|origin| self.ends_origin(&origin)))
+    }
+    /// Whether some statement ends the node certificate of `node`: names
+    /// the node or its key. A `protected` one only a root statement ends.
+    pub fn ends_node(&self, node: PublicKey, protected: bool) -> bool {
+        let mut known = self
+            .certificates
+            .values()
+            .filter(|certificate| certificate.capability.subject == node)
+            .peekable();
+        let explicit = if protected {
+            &self.root.references
+        } else {
+            &self.references
+        };
+        let subjects = if protected {
+            &self.root.subjects
+        } else {
+            &self.subjects
+        };
+        subjects.contains(&node)
+            || explicit.contains(&crate::PeerId::of(node))
+            || (known.peek().is_some()
+                && known.all(|certificate| self.ends_node_of(certificate.issuer, node, protected)))
+    }
+    /// Whether the node is ended under one exact identity's authority.
+    pub fn ends_node_of(&self, identity: PublicKey, node: PublicKey, protected: bool) -> bool {
+        let (subjects, references) = if protected {
+            (&self.root.subjects, &self.root.references)
+        } else {
+            (&self.subjects, &self.references)
+        };
+        subjects.contains(&node)
+            || references.contains(&crate::PeerId::of(node))
+            || self.identity_unlinks(identity, crate::PeerId::of(node))
+            || self.fork_ends(identity, crate::PeerId::of(node))
+    }
+    /// An identity ends only its own membership, independently of its grants.
+    pub fn identity_unlinks(&self, identity: PublicKey, node: crate::PeerId) -> bool {
+        self.statements.values().any(|signed| {
+            signed.identity_unlink()
+                && signed.statement.issuer == identity
+                && signed.statement.nodes.contains(&node)
+        })
     }
     /// The first statement that revokes the holder of `chain`: its node
     /// certificate or the identity that signed it. A statement ending an

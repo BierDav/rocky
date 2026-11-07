@@ -18,7 +18,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str) -> Open<'a> {
     Open {
         directory,
         schema,
-        identity: None,
+        identity: Some(common::external_identity(directory)),
         secrets: None,
         network: None,
         coordination: None,
@@ -32,13 +32,15 @@ async fn additive_publication_requires_following_and_old_app_opens_behind() -> R
     a.add(1, "apples").await;
     a.close().await;
     let declared = schema(2, false);
-    let a = Device::new(Database::open(open(root.path(), &declared))?)?;
+    let a = Device::new(Database::open(open(root.path(), &declared))?)?
+        .with_identity(common::external_identity(root.path()));
     let status = a.ok(json!({"type":"generation"})).await;
     assert_eq!(status["application"], "ahead");
     assert_eq!(status["reason"], "follow_required");
     let before = main(&a).await["tip"].clone();
     a.close().await;
-    let a = Device::new(Database::open(open(root.path(), &declared))?)?;
+    let a = Device::new(Database::open(open(root.path(), &declared))?)?
+        .with_identity(common::external_identity(root.path()));
     let status = a.ok(json!({"type":"generation"})).await;
     assert_eq!(status["application"], "current", "{status}");
     assert_eq!(status["current"]["schema"], 2);
@@ -62,7 +64,8 @@ async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Res
     a.close().await;
     let declared = schema(2, true);
     for _ in 0..2 {
-        let a = Device::new(Database::open(open(root.path(), &declared))?)?;
+        let a = Device::new(Database::open(open(root.path(), &declared))?)?
+            .with_identity(common::external_identity(root.path()));
         let status = a.ok(json!({"type":"generation"})).await;
         assert_eq!(status["application"], "current", "{status}");
         let rows = a.ok(json!({"type":"read","query":{"sql":"SELECT note FROM items","values":[],"max_rows":10}})).await;
@@ -94,7 +97,8 @@ async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> R
         "UPDATE items SET note=(SELECT max(p.title) FROM parent.items p)"
     ]);
     let declared = declared.to_string();
-    let a = Device::new(Database::open(open(root.path(), &declared))?)?;
+    let a = Device::new(Database::open(open(root.path(), &declared))?)?
+        .with_identity(common::external_identity(root.path()));
     let rows = a.ok(json!({"type":"read","query":{"sql":"SELECT title,note FROM items","values":[],"max_rows":10}})).await;
     assert_eq!(
         rows["rows"],

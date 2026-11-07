@@ -31,7 +31,8 @@ fn chain(
             )
             .unwrap(),
     ]);
-    let mut link = ChainLink::first(signer.public_key());
+    let node = crate::testing::signer(signer, &credentials);
+    let mut link = ChainLink::first(node.signing_node().unwrap());
     let mut moves = Vec::new();
     for n in 0..count {
         let signed = SignedBookmarkMove::endorse_linked(
@@ -42,7 +43,7 @@ fn chain(
                 from: None,
                 to: Some(graph.genesis()),
             },
-            signer,
+            node.clone(),
             &credentials,
             Some(link),
         )
@@ -74,7 +75,7 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
         capabilities: Default::default(),
         cut: vec![Cut {
             identity: revoked.public_key(),
-            lane: revoked.public_key(),
+            lane: cut[0].endorsement().node().unwrap(),
             statements: vec![Head {
                 sequence: 0,
                 id: cut[0].id().unwrap(),

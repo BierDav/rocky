@@ -729,7 +729,7 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_the_cache() {
+async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocations_miss() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let author = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
@@ -742,17 +742,31 @@ async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_t
         .author([72; 32], insert(&f, 2), vec![])
         .await
         .unwrap();
+    let third = author
+        .author([73; 32], insert(&f, 3), vec![])
+        .await
+        .unwrap();
     let before = member.crypto_stats().await;
     assert_eq!(
         member.receive(first.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
     let after = member.crypto_stats().await;
-    assert_eq!(after, (before.0 + 1, before.1 + 1));
+    // Membership learning changes authority. Once it settles, a new frame
+    // of this author reuses the verified chain under the unchanged set.
+    assert_eq!(after.0, before.0 + 1);
+    assert!(after.1 > before.1);
+    assert_eq!(
+        member.receive(second).await.unwrap(),
+        ReceiveStatus::Applied
+    );
+    let cached = member.crypto_stats().await;
+    assert_eq!(cached, (after.0 + 1, after.1));
     assert_eq!(
         member.receive(first.clone()).await.unwrap(),
         ReceiveStatus::Duplicate
     );
+    assert_eq!(member.crypto_stats().await, cached);
     let revoked = revoking(
         &f.publisher,
         f.app().manifest().app,
@@ -760,7 +774,7 @@ async fn incoming_frames_open_and_verify_their_chain_once_and_revocations_miss_t
         &[first.chain().unwrap().credentials().0[0].id().unwrap()],
     );
     member.learn_revocations(&revoked).await.unwrap();
-    assert!(member.receive(second).await.is_err());
+    assert!(member.receive(third).await.is_err());
 }
 
 // Pauses work that natively runs on a blocking thread; a Worker runs it in place.

@@ -24,19 +24,20 @@ async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
         .unwrap();
     follow_main(&lineage, &alice).await;
     let template = lineage.credentials(3, &alice_key);
-    let user = PrivateKey::from_bytes(&rocky_core::commitment(
-        "lineage.user",
-        alice_key.public_key().as_bytes(),
-    ));
     for index in 0..64 {
         let mut root = template.0[0].capability.clone();
-        let mut node = template.0[1].capability.clone();
+        // Same-database table grants force a page boundary independently of
+        // small encoding-size variations in random signatures and keys.
+        for table in 0u8..4 {
+            let mut grant = root.grants[0].clone();
+            grant.scope.table = rocky_core::commitment("placement.fixture.table", &[table]);
+            root.grants.push(grant);
+        }
         root.expires -= index;
-        node.expires -= index;
         alice
             .renew_credentials(CredentialChain(vec![
                 SignedCapability::sign(root, lineage.publisher()).unwrap(),
-                SignedCapability::sign(node, &user).unwrap(),
+                template.certificate().unwrap().clone(),
             ]))
             .await
             .unwrap();

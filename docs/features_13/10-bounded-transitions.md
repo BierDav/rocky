@@ -66,6 +66,10 @@ No waiting/read-only state is introduced for compaction preparation.
   one seal and a child at an incompatible earlier seal. A later losing seal still
   triggers the existing rebootstrap rule. The generic row-frame contract retains
   its existing per-scope publication.
+- Checkpoint-only acquisition carries the `secure_escrow` rows for the covered
+  key epoch in the first encrypted page. The receiver evaluates each record
+  through `keep_carried_escrow` in the same staging transaction, preserving
+  issuer-slot, revocation and supersession rules on rollback-safe import.
 - `secure_base_cleanup` durably owns retirement. A retiring current snapshot
   loses its readable header before its first row is deleted. The independent
   snapshot registry retains cleanup ownership until its last row is gone.

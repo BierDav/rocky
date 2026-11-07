@@ -755,6 +755,17 @@ impl<A: RowApplication> Inner<A> {
                 "followed path schemas missing: {missing:?}"
             )));
         }
+        config
+            .security
+            .credentials
+            .verify_database(
+                inner
+                    .config
+                    .credentials
+                    .database_context(inner.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         check_config(&config.security, &manifest)?;
         let source = inner.workspace.tip;
         let mut security = config.security;

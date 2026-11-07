@@ -23,7 +23,7 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
-        identity: None,
+        identity: common::prepared_identity(directory),
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -188,9 +188,10 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         json!({"kind": "writer", "scopes": ["unknown"]}),
         json!({"kind": "writer", "scopes": ["items"], "rights": ["execute"]}),
         json!({"kind": "admin"}),
-        Value::Null,
     ] {
-        let refused = a.call(json!({"type": "pairing", "profile": profile})).await;
+        let refused = a
+            .call(json!({"type": "invitation", "profile": profile}))
+            .await;
         assert!(refused.is_err(), "{profile}");
     }
     item(&a, 1, "Milk").await?;
@@ -209,7 +210,7 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         assert!(item(&r, 10, "Forged").await.is_err());
         assert!(note(&r, 11, "Forged").await.is_err());
         assert!(
-            r.call(json!({"type": "pairing", "profile": reader}))
+            r.call(json!({"type": "invitation", "profile": reader}))
                 .await
                 .is_err()
         );
@@ -218,7 +219,7 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         assert_eq!(notes(&w).await?, ["Hello"]);
         assert!(item(&w, 12, "Forged").await.is_err());
         assert!(items(&w).await.unwrap_or_default().is_empty());
-        assert!(w.call(json!({"type": "devices"})).await.is_err());
+        assert!(w.call(json!({"type": "identities"})).await.is_err());
         Ok(())
     };
     check(false).await?;
@@ -234,13 +235,14 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
     synced(&w).await?;
     assert_eq!(notes(&a).await?, ["From writer", "Hello"]);
     assert_eq!(items(&a).await?, ["Milk"]);
-    // The issuer lists each device with the profile it enrolled as.
-    let devices = a.ok(json!({"type": "devices"})).await;
-    let mut profiles: Vec<Value> = devices["devices"]
+    // The issuer lists each identity with the profile it enrolled as.
+    let identities = a.ok(json!({"type": "identities"})).await;
+    let mut profiles: Vec<Value> = identities["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|device| device["profile"].clone())
+        .filter(|record| record["own"] != true)
+        .map(|record| record["profile"].clone())
         .collect();
     profiles.sort_by_key(Value::to_string);
     assert_eq!(profiles, [reader, writer]);
@@ -279,10 +281,8 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     assert_ne!(owner["identity"], owner["publisher"]);
     assert_ne!(paired["identity"], paired["publisher"]);
     assert_eq!(secret(root, "a", "publisher")?, None);
-    assert_ne!(
-        secret(root, "i", "identity")?,
-        secret(root, "a", "identity")?
-    );
+    assert_eq!(secret(root, "i", "identity")?, None);
+    assert_eq!(secret(root, "a", "identity")?, None);
     for name in ["publisher", "user"] {
         assert_eq!(secret(root, "i", name)?, None);
     }
@@ -299,8 +299,8 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     synced(&m).await?;
     m.ok(json!({"type": "renew"})).await;
     assert_eq!(i.titles().await, ["Eggs", "Milk"]);
-    let devices = i.ok(json!({"type": "devices"})).await.to_string();
-    assert!(devices.contains(m.node().await.as_str()));
+    let identities = i.ok(json!({"type": "identities"})).await.to_string();
+    assert!(identities.contains(m.identity().await.as_str()));
     for device in [&i, &m] {
         device.close().await;
     }
@@ -342,7 +342,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         assert_eq!(items(device).await?, ["Before"]);
     }
     let revoked = a
-        .ok(json!({"type": "revoke", "node": c.node().await}))
+        .ok(json!({"type": "revoke", "identity": c.identity().await}))
         .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     // Only the collections the revoked reader could read get a new epoch.
@@ -425,13 +425,13 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let c = join(root, &hub, "c", &a.invite().await)?;
     item(&a, 1, "Before").await?;
     synced(&b).await?;
-    let c_node = c.node().await;
-    let devices = a.ok(json!({"type": "devices"})).await;
-    let record = devices["devices"]
+    let (c_node, c_identity) = (c.node().await, c.identity().await);
+    let identities = a.ok(json!({"type": "identities"})).await;
+    let record = identities["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|device| device["node"] == c_node)
+        .find(|record| record["identity"] == c_identity)
         .cloned()
         .ok_or("c's record")?;
     for device in [&a, &b, &c] {
@@ -452,11 +452,8 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
-        nodes: [rocky_credentials::PeerId::of(serde_json::from_value(
-            json!(c_node),
-        )?)]
-        .into(),
-        identities: [serde_json::from_value(record["user"].clone())?].into(),
+        nodes: Default::default(),
+        identities: [serde_json::from_value(json!(c_identity))?].into(),
         capabilities: [rocky_core::Commitment::try_from(
             data_encoding::HEXLOWER
                 .decode(
@@ -473,6 +470,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     };
     let statement_id = statement.id()?;
     saved["authority"]["rotation"] = json!({
+        "identities": [c_identity],
         "nodes": [c_node],
         "statement": statement,
         "keys": {"items": 2},
@@ -501,17 +499,25 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             saved["keys"],
             json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
         );
-        let listed = a.ok(json!({"type": "devices"})).await;
+        let listed = a.ok(json!({"type": "identities"})).await;
         assert!(
-            listed["devices"]
+            listed["identities"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .any(|device| device["node"] == c_node && device["revoked"] == true),
+                .any(|record| record["identity"] == c_identity && record["revoked"] == true),
             "{listed}"
         );
         // The statement signed at completion is the one the intent named.
-        assert_eq!(saved["revocations"][0]["statement"], json!(statement));
+        let authority: rocky_sdk::credentials::RevocationSet =
+            serde_json::from_value(saved["revocations"].clone())?;
+        assert_eq!(
+            authority
+                .get(&statement_id)
+                .ok_or("completed statement")?
+                .statement,
+            statement
+        );
         assert_eq!(secret(root, "a", "reader.items.2")?, Some(made));
         if round == 0 {
             item(&a, 2, "After").await?;
@@ -534,7 +540,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
 }
 
 /// Credentials an issuer outside the SDK made for `user`, from the
-/// creator's identity and publisher key.
+/// creator's node under its certified issuer authority.
 fn issued(
     root: &Path,
     user: rocky_sdk::credentials::PublicKey,
@@ -542,9 +548,9 @@ fn issued(
 ) -> Result<Credentials, Failure> {
     // The creating device's trusted identity issues, below its grant.
     let creator = identity(root, "a")?;
-    let owner = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
+    let node = PrivateKey::from_bytes(&secret(root, "a", "node")?.ok_or("node")?);
     let held: CredentialChain = serde_json::from_value(creator["credentials"].clone())?;
-    let issuer = CredentialChain(vec![held.0.first().ok_or("trusted grant")?.clone()]);
+    let issuer = held.capabilities();
     let revocations: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(creator["revocations"].clone())?;
     // The grants of an enrolled device's profile, without its keys.
@@ -559,7 +565,7 @@ fn issued(
         .capability
         .grants
         .clone();
-    let authority = Authority::issuer(&owner, &issuer);
+    let authority = Authority::issuer(&node, &held)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -574,7 +580,8 @@ fn issued(
     Ok(Credentials {
         publisher: serde_json::from_value(creator["publisher"].clone())?,
         revocations,
-        chain,
+        capabilities: chain,
+        certificate: None,
     })
 }
 
@@ -591,8 +598,8 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     note(&a, 2, "Private").await?;
 
     let directory = root.join("s");
-    let keys = Database::device(&directory, None)?;
-    assert_eq!(Database::device(&directory, None)?, keys);
+    let keys = common::node_keys(&directory, None)?;
+    assert_eq!(common::node_keys(&directory, None)?, keys);
     let creator = identity(root, "a")?;
     let ids = || -> Result<_, Failure> {
         Ok((
@@ -630,17 +637,17 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     for refused in [
         supplied(stranger, items_only.clone())?,
         supplied(
-            keys.user,
+            keys.identity,
             vec![items_only[0].clone(), ("notes".into(), 1, notes_key)],
         )?,
-        supplied(keys.user, Vec::new())?,
+        supplied(keys.identity, Vec::new())?,
     ] {
         assert!(Database::install(open(&directory, &hub, "s"), refused).is_err());
         assert!(!directory.join("identity.json").exists());
     }
     let s = Device::new(Database::install(
         open(&directory, &hub, "s"),
-        supplied(keys.user, items_only)?,
+        supplied(keys.identity, items_only)?,
     )?)?;
     assert_eq!(s.database.scope(), a.database.scope());
     let status = session(&s).await;
@@ -668,7 +675,7 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
         json!({"kind": "writer", "scopes": ["items"]})
     );
     // Installed once: the directory now holds a domain.
-    assert!(Database::device(&directory, None).is_err());
+    assert!(common::node_keys(&directory, None).is_err());
     for device in [&a, &s] {
         device.close().await;
     }

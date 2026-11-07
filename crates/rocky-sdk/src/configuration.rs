@@ -12,6 +12,7 @@ pub struct Configuration {
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
     coordination: Option<Coordination>,
+    name: String,
 }
 impl Configuration {
     /// The bookmark `create` makes and follows on the genesis tip.
@@ -27,6 +28,7 @@ impl Configuration {
             identity: None,
             network: None,
             coordination: None,
+            name: String::new(),
         })
     }
     #[must_use]
@@ -43,6 +45,13 @@ impl Configuration {
     #[must_use]
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
+        self
+    }
+    /// What this device calls itself in a join request, for the issuer
+    /// that admits it; at most 256 bytes.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
     #[must_use]
@@ -130,33 +139,119 @@ impl Configuration {
         archive: &[u8],
         root: &crate::RootKey,
     ) -> Result<Opened, Failure> {
+        self.staged(archive, "recovery", |staged| async move {
+            self.recover(&staged, root).await
+        })
+        .await
+    }
+    /// Restores `archive`, a backup of a member or device, into an empty
+    /// directory under a fresh identity that `invitation` enrolls over the
+    /// configured network. The archive's operations keep their identities;
+    /// nothing is sent again as new work. In a browser `archive` names a
+    /// file in Rocky's storage; see [`Self::restore_archive`] for bytes. An
+    /// interrupted restore continues when called again with the same
+    /// archive, under the identity it enrolled.
+    pub async fn restore(
+        &self,
+        archive: &std::path::Path,
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        Database::launch_restore(self.options(), archive, invitation).await
+    }
+    /// As [`Self::restore`], from the archive's bytes, staged and removed
+    /// as for [`Self::recover_archive`].
+    pub async fn restore_archive(
+        &self,
+        archive: &[u8],
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        self.staged(archive, "restore", |staged| async move {
+            self.restore(&staged, invitation).await
+        })
+        .await
+    }
+    /// Runs `install` on `archive` staged in the directory as
+    /// `{install}.backup`, which is removed whether it finishes or stops.
+    async fn staged<F, Installing>(
+        &self,
+        archive: &[u8],
+        install: &str,
+        run: F,
+    ) -> Result<Opened, Failure>
+    where
+        F: FnOnce(PathBuf) -> Installing,
+        Installing: std::future::Future<Output = Result<Opened, Failure>>,
+    {
         rocky_platform::fs::create_dir_all(&self.directory)?;
-        let staged = self.directory.join("recovery.backup");
+        let staged = self.directory.join(format!("{install}.backup"));
         rocky_platform::fs::write(&staged, archive)?;
-        let recovered = self.recover(&staged, root).await;
+        let installed = run(staged.clone()).await;
         if let Err(error) = rocky_platform::fs::remove_file(&staged) {
-            if let Ok(opened) = &recovered {
+            if let Ok(opened) = &installed {
                 opened.database.close().await?;
             }
             return Err(format!(
                 "could not remove the staged archive {}: {error}{}",
                 staged.display(),
-                if recovered.is_ok() {
-                    "; the recovery finished: open the directory"
+                if installed.is_ok() {
+                    format!("; the {install} finished: open the directory")
                 } else {
-                    ""
+                    String::new()
                 }
             )
             .into());
         }
-        recovered
+        installed
     }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {
         Database::launch_open(self.options()).await
     }
+    /// Resumes an approval join, retaining its single-use key only in this continuation.
+    /// After a process restart a supplied identity provider is required to resume.
+    pub async fn resume_join(
+        &self,
+        invitation: &str,
+        pending: &crate::AwaitingAdmission,
+    ) -> Result<Opened, Failure> {
+        pending.check_resume(&self.directory, invitation)?;
+        let mut options = self.options();
+        options.identity = Some(pending.identity.clone());
+        let mut opened = match Database::launch_join(options, invitation, &self.name).await {
+            Ok(opened) => opened,
+            Err(mut error) => {
+                if let Some(awaiting) = error.downcast_mut::<crate::AwaitingAdmission>() {
+                    awaiting.phrase = pending.phrase.clone();
+                }
+                return Err(error);
+            }
+        };
+        opened.identity = pending.phrase.clone();
+        Ok(opened)
+    }
+    /// Creates a linkable identity for this join and returns its phrase once.
+    pub async fn join_linkable(&self, invitation: &str) -> Result<Opened, Failure> {
+        let identity = crate::IdentityKey::generate();
+        let phrase = identity.phrase();
+        let mut options = self.options();
+        options.identity = Some(Arc::new(identity));
+        let mut opened = match Database::launch_join(options, invitation, &self.name).await {
+            Ok(opened) => opened,
+            Err(mut error) => {
+                if let Some(pending) = error.downcast_mut::<crate::AwaitingAdmission>() {
+                    pending.phrase = Some(phrase);
+                }
+                return Err(error);
+            }
+        };
+        opened.identity = Some(phrase);
+        Ok(opened)
+    }
     /// Enrolls using the configured network. Enrollment runs off the caller's async executor.
+    /// Through an approval invitation this fails with
+    /// [`crate::AwaitingAdmission`] until an issuer admits the device:
+    /// resume with [`Self::resume_join`], keeping the continuation in memory.
     pub async fn join(&self, invitation: &str) -> Result<Opened, Failure> {
-        Database::launch_join(self.options(), invitation).await
+        Database::launch_join(self.options(), invitation, &self.name).await
     }
 }

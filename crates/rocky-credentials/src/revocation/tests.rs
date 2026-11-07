@@ -13,21 +13,36 @@ fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
 /// An issuer whose chain is valid for 300 days around `time`.
 fn issuer_at(publisher: &PrivateKey, time: u64) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
-    let link = Authority::owner(publisher)
-        .issue_issuer(key.public_key(), None, (time - 5 * DAY, 300 * DAY, DAY))
-        .unwrap();
+    let link = Authority::owner_in(
+        publisher,
+        crate::DatabaseContext {
+            publisher: publisher.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: APP,
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        },
+    )
+    .unwrap()
+    .issue_issuer(
+        key.public_key(),
+        Some(crate::AuthorRange::ALL),
+        (time - 5 * DAY, 300 * DAY, DAY),
+    )
+    .unwrap();
     (key, CredentialChain(vec![link]))
 }
 fn signed(statement: Revocation, (key, chain): &(PrivateKey, CredentialChain)) -> SignedRevocation {
-    SignedRevocation::sign(statement, key, chain).unwrap()
+    SignedRevocation::sign(statement, crate::testing::signer(key, chain), chain).unwrap()
 }
 fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
     Revocation {
         app: APP,
         issuer: issuer.public_key(),
         time,
-        nodes: [crate::PeerId::of(node)].into(),
-        identities: [PrivateKey::new().public_key()].into(),
+        nodes: BTreeSet::new(),
+        identities: [node, PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
         cut: Default::default(),
         recovery: None,
@@ -108,7 +123,7 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
         let issuing = issuer_at(&publisher, time);
         SignedRevocation::sign(
             statement(&issuing.0, time, PrivateKey::new().public_key()),
-            &issuing.0,
+            crate::testing::signer(&issuing.0, &issuing.1),
             &issuing.1,
         )
         .unwrap()
@@ -164,13 +179,8 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         .statement
         .nodes
         .insert(crate::PeerId::of(PrivateKey::new().public_key()));
-    let other_app = signed(
-        Revocation {
-            app: AppId([8; 16]),
-            ..statement(issuer, NOW, PrivateKey::new().public_key())
-        },
-        &issuing,
-    );
+    let mut other_app = good.clone();
+    other_app.statement.app = AppId([8; 16]);
     // Another domain's issuer, a member identity that holds no issuer
     // authority and an issuer chain not valid at the statement's time.
     let other_publisher = signed(
@@ -225,17 +235,21 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         owner_revoked,
     ] {
         // The good statement beside it is not learned either.
-        let incoming = RevocationSet::try_from(vec![fresh.clone(), bad]).unwrap();
-        assert!(
-            set.merge(&incoming, publisher.public_key(), APP, NOW)
-                .is_err()
-        );
+        if let Ok(incoming) = RevocationSet::try_from(vec![fresh.clone(), bad]) {
+            assert!(
+                set.merge(&incoming, publisher.public_key(), APP, NOW)
+                    .is_err()
+            );
+        }
         assert_eq!(set, before);
     }
     // Over the size limit: refused when signed and when decoded.
     let mut huge = statement(issuer, NOW, node);
     huge.identities = (0..300).map(|_| PrivateKey::new().public_key()).collect();
-    assert!(SignedRevocation::sign(huge, issuer, &issuing.1).is_err());
+    assert!(
+        SignedRevocation::sign(huge, crate::testing::signer(issuer, &issuing.1), &issuing.1)
+            .is_err()
+    );
     // An identity signs only statements naming it, which name something.
     assert!(SignedRevocation::sign(statement(issuer, NOW, node), &publisher, &issuing.1).is_err());
     let empty = Revocation {
@@ -244,7 +258,14 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         capabilities: BTreeSet::new(),
         ..statement(issuer, NOW, node)
     };
-    assert!(SignedRevocation::sign(empty, issuer, &issuing.1).is_err());
+    assert!(
+        SignedRevocation::sign(
+            empty,
+            crate::testing::signer(issuer, &issuing.1),
+            &issuing.1
+        )
+        .is_err()
+    );
     // The encoding is canonical: a set in another order is refused.
     let pair = RevocationSet::try_from(vec![good.clone(), fresh.clone()]).unwrap();
     let mut reversed: Vec<SignedRevocation> = pair.clone().into();
@@ -283,8 +304,12 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
     // Below `a`, two issuers end each other's chains.
     let below = |parent: &(PrivateKey, CredentialChain)| {
         let key = PrivateKey::new();
-        let link = Authority::issuer(&parent.0, &parent.1)
-            .issue_issuer(key.public_key(), None, (NOW - 5 * DAY, 300 * DAY, DAY))
+        let link = crate::testing::authority(&parent.0, &parent.1)
+            .issue_issuer(
+                key.public_key(),
+                Some(crate::AuthorRange::ALL),
+                (NOW - 5 * DAY, 300 * DAY, DAY),
+            )
             .unwrap();
         let mut chain = parent.1.clone();
         chain.0.push(link);

@@ -224,10 +224,14 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
         recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![
-        rocky_credentials::SignedRevocation::sign(
+        rocky_credentials::SignedRevocation::sign_in(
             statement,
             fixture.lineage.publisher(),
             &rocky_credentials::CredentialChain::default(),
+            rocky_credentials::DatabaseContext {
+                publisher: fixture.lineage.publisher().public_key(),
+                scope: fixture.lineage.domain,
+            },
         )
         .unwrap(),
     ])

@@ -1,8 +1,10 @@
 //! The issuer's side of the registry: answers that commit their rows
-//! before they leave, the device list and labels. See
-//! `docs/decisions/0048-replicated-issuer-registry.md`.
+//! before they leave, the identity list and labels.
 use super::*;
-use crate::registry::{self, Changes, Registry};
+use crate::{
+    membership::Membership,
+    registry::{self, Changes, Registry},
+};
 
 impl Node {
     /// Every record this device holds; empty on a non-issuer, which holds
@@ -13,15 +15,37 @@ impl Node {
         }
         Box::pin(registry::read(&self.replica, self.domain().registry())).await
     }
+    /// Which nodes each identity linked, as this node knows them.
+    pub(crate) async fn membership(&self) -> Result<Membership, Failure> {
+        let mut known = self.replica.revocations().await;
+        let settings = self.settings.lock().await;
+        known.merge(
+            &settings.revocations,
+            settings.publisher,
+            self.domain().manifest().app,
+            now()?,
+        )?;
+        if let Some(certificate) = settings.credentials.certificate() {
+            known.link(certificate.clone())?;
+        }
+        Membership::replicated(&known, settings.database_context()?)
+    }
+    /// Remembers that `node` of `identity` was admitted or renewed here.
+    async fn see(&self, identity: PublicKey, node: PublicKey) -> Result<(), Failure> {
+        let time = now()?;
+        self.configure(|settings| {
+            if let Some(issuing) = settings.authority.as_mut() {
+                crate::membership::see(&mut issuing.seen, identity, node, time);
+            }
+            Ok(())
+        })
+        .await
+    }
 
     /// Commits `changes` with this issuer's own record in one transaction.
     pub(super) async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
         let registry = self.registry().await?;
-        let own = self
-            .settings
-            .lock()
-            .await
-            .own_record(&self.vault, &registry)?;
+        let own = self.settings.lock().await.own_record(&registry)?;
         changes.extend(own);
         Box::pin(registry::write(
             &self.replica,
@@ -44,9 +68,10 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer enrolls devices"));
         }
+        self.expire_requests().await?;
         let registry = self.registry().await?;
         let bootstrap = self.enrollment_bootstrap().await?;
-        let (reply, changes) = {
+        let (reply, changes, notes) = {
             let mut settings = self.settings.lock().await;
             let mut draft = settings.clone();
             draft.bootstrap = Some(bootstrap);
@@ -58,25 +83,85 @@ impl Node {
             answer?
         };
         self.commit(changes).await?;
-        if let Ok(paired) = rocky_credentials::PairRequest::from_bytes(request) {
-            let profile = self
-                .settings
-                .lock()
-                .await
-                .authority
-                .as_ref()
-                .and_then(|authority| {
-                    authority
-                        .invitation
-                        .as_ref()
-                        .map(|invitation| invitation.profile.clone())
-                });
-            self.activity.record(
-                "device_enrolled",
-                json!({"node": paired.node.to_hex(), "profile": profile}),
-            );
+        for note in &notes {
+            if let crate::join_requests::Note::Enrolled { node, profile } = note {
+                let paired = rocky_credentials::PairRequest::from_bytes(request)?;
+                let known = registry.admitted(&paired.user);
+                self.see(paired.user, *node).await?;
+                if !known {
+                    self.activity.record(
+                        "identity_admitted",
+                        json!({"identity": paired.user.to_hex(), "profile": profile}),
+                    );
+                }
+                self.activity.record(
+                    "node_linked",
+                    json!({"identity": paired.user.to_hex(), "node": node.to_hex()}),
+                );
+            }
         }
+        self.note(&notes).await;
         Ok(reply)
+    }
+    /// Surfaces join request changes as activity events.
+    pub(super) async fn note(&self, notes: &[crate::join_requests::Note]) {
+        let expires = self.settings.lock().await.pending_requests().1;
+        for note in notes {
+            if let Some((kind, detail)) = note.event(expires) {
+                self.activity.record(kind, detail);
+            }
+        }
+    }
+    /// Ends the requests of an expired invitation and reports them.
+    async fn expire_requests(&self) -> Result<(), Failure> {
+        let notes = self
+            .configure(|settings| Ok(settings.expire_requests(now()?)))
+            .await?;
+        self.note(&notes).await;
+        Ok(())
+    }
+    /// The devices this node knows of without having enrolled them: the
+    /// join requests waiting on it.
+    pub(super) async fn discovered(&self) -> Result<Value, Failure> {
+        self.expire_requests().await?;
+        let (pending, expires) = self.settings.lock().await.pending_requests();
+        let pending: Vec<Value> = pending
+            .iter()
+            .map(|request| request.view(expires))
+            .collect();
+        Ok(json!({"pending": pending}))
+    }
+    /// Admits a pending join request whose device shows `code`.
+    pub(super) async fn admit(&self, request: &Value) -> Result<Value, Failure> {
+        let node = node_of(request)?;
+        let code = request["code"]
+            .as_str()
+            .ok_or_else(|| refused("code must be the 6 digits the device shows"))?;
+        let profile: Profile = serde_json::from_value(request["profile"].clone())
+            .map_err(|_| refused("admitting needs a grant profile: reader, writer or issuer"))?;
+        let label: Option<Vec<u8>> = serde_json::from_value(request["label"].clone())
+            .map_err(|_| refused("label must be bytes"))?;
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer admits devices"));
+        }
+        self.expire_requests().await?;
+        let registry = self.registry().await?;
+        let notes = self
+            .configure(|settings| settings.admit(&node, code, (profile, label), &registry))
+            .await?;
+        self.note(&notes).await;
+        Ok(json!({}))
+    }
+    /// Refuses a pending join request.
+    pub(super) async fn refuse(&self, request: &Value) -> Result<Value, Failure> {
+        let node = node_of(request)?;
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer refuses devices"));
+        }
+        self.expire_requests().await?;
+        let notes = self.configure(|settings| settings.refuse(&node)).await?;
+        self.note(&notes).await;
+        Ok(json!({}))
     }
     /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
@@ -85,6 +170,10 @@ impl Node {
         let claims = settings.renew_claims(&self.vault, request, &registry, now()?)?;
         let (reply, changes) = settings.renew(&self.vault, request, &registry, claims)?;
         self.commit(changes).await?;
+        let renewed = rocky_credentials::RenewRequest::from_bytes(request)?;
+        if let Some(identity) = renewed.chain.principal() {
+            self.see(identity, renewed.node).await?;
+        }
         Ok(reply)
     }
 
@@ -92,7 +181,7 @@ impl Node {
     /// delegated: identity saved, record committed, then returned.
     pub(super) async fn answer_grant(
         &self,
-        device: crate::DeviceKeys,
+        device: crate::NodeKeys,
         issued: (Profile, Terms),
         delegate: bool,
         contact: Option<String>,
@@ -112,6 +201,7 @@ impl Node {
         };
         if issuer {
             self.commit(changes).await?;
+            self.see(device.identity, device.node).await?;
         }
         Ok(supplied)
     }
@@ -119,7 +209,7 @@ impl Node {
     /// chain leaves it.
     pub(super) async fn record_holder(
         &self,
-        device: &crate::DeviceKeys,
+        device: &crate::NodeKeys,
         grants: &[rocky_credentials::PartitionGrant],
         delegations: u8,
         chain: &CredentialChain,
@@ -129,7 +219,7 @@ impl Node {
             .settings
             .lock()
             .await
-            .holder_changes(&self.vault, device, grants, delegations, &registry)
+            .holder_changes(device, grants, delegations, &registry)
             .map_err(|error| {
                 if error.is::<registry::RegistryFull>() {
                     error
@@ -139,7 +229,7 @@ impl Node {
             })?;
         let leaf = chain.0.last().ok_or("missing partition credential")?;
         changes.capability(
-            &device.node,
+            &device.identity,
             registry::Capability {
                 authors: leaf
                     .capability
@@ -148,14 +238,15 @@ impl Node {
                 id: leaf.id()?,
                 expires: chain.expires(),
             },
-            registry.get(&device.node),
+            registry.get(&device.identity),
         )?;
-        self.commit(changes).await
+        self.commit(changes).await?;
+        self.see(device.identity, device.node).await
     }
-    /// Writes the tombstone of a revoked device.
-    pub(super) async fn record_revocation(&self, node: PublicKey) -> Result<(), Failure> {
+    /// Writes the tombstone of a revoked identity.
+    pub(super) async fn record_revocation(&self, identity: PublicKey) -> Result<(), Failure> {
         let mut changes = Changes::default();
-        changes.revoked(&node)?;
+        changes.revoked(&identity)?;
         self.commit(changes).await
     }
 
@@ -171,45 +262,63 @@ impl Node {
                 authority
                     .rotation
                     .as_ref()
-                    .map(|rotation| rotation.nodes.clone())
+                    .map(|rotation| rotation.identities.clone())
             });
-        let Some(nodes) = pending else {
+        let Some(identities) = pending else {
             return Ok(());
         };
-        for node in nodes {
-            self.record_revocation(node).await?;
+        for identity in identities {
+            self.record_revocation(identity).await?;
         }
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
         let registry = self.registry().await?;
+        let membership = self.membership().await?;
         self.configure(|settings| {
-            settings.complete_revocation(&self.vault, &self.domain(), &registry)
+            settings.complete_revocation(&self.vault, &self.domain(), (&registry, &membership))
         })
         .await
     }
 
-    /// Every other device's record, on an issuer.
-    pub(super) async fn devices(&self) -> Result<Value, Failure> {
+    /// Every identity's record with its linked nodes and its trust and
+    /// claim state, on an issuer.
+    pub(super) async fn identities(&self) -> Result<Value, Failure> {
         let settings = self.settings.lock().await.clone();
         if !settings.issuer() {
-            return Err(refused("only an issuer lists devices"));
+            return Err(refused("only an issuer lists identities"));
         }
-        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let registry = self.registry().await?;
-        let devices: Vec<Value> = registry
+        let membership = self.membership().await?;
+        let time = now()?;
+        let trusted = registry.trusted_identities(&settings.revocations);
+        let identities: Vec<Value> = registry
             .records
             .iter()
-            .filter(|(node, record)| **node != own && record.device.is_some())
-            .map(|(node, record)| {
-                let device = record.device.as_ref();
+            .filter(|(_, record)| record.admitted.is_some())
+            .map(|(identity, record)| {
+                let admitted = record.admitted.as_ref();
                 let capability = record.capability();
+                let nodes: Vec<Value> = membership
+                    .nodes(identity)
+                    .map(|linked| {
+                        json!({
+                            "node": linked.node.to_hex(),
+                            "author": linked.author,
+                            "linked": linked.linked.to_string(),
+                            "last_seen": self.last_seen(linked.node, time).map(|at| at.to_string()),
+                            "revoked": settings.tombstoned(&linked.node),
+                        })
+                    })
+                    .collect();
                 json!({
-                    "node": node.to_hex(),
-                    "user": device.map(|device| device.user.to_hex()),
-                    "kind": device.map(|device| device.kind),
-                    "issuer": device.map(|device| device.issuer.to_hex()),
-                    "enrolled": device.map(|device| device.enrolled.to_string()),
-                    "invitation": device.and_then(|device| device.invitation.as_ref()),
-                    "revoked": record.revoked || settings.revoked_device(node, &registry),
+                    "identity": identity.to_hex(),
+                    "kind": admitted.map(|admitted| admitted.kind),
+                    "issuer": admitted.map(|admitted| admitted.issuer.to_hex()),
+                    "origin": admitted.and_then(|admitted| admitted.origin).map(|origin| origin.to_hex()),
+                    "enrolled": admitted.map(|admitted| admitted.enrolled.to_string()),
+                    "invitation": admitted.and_then(|admitted| admitted.invitation.as_ref()),
+                    "single_use": admitted.is_some_and(|admitted| admitted.single_use),
+                    "own": *identity == settings.identity,
+                    "revoked": settings.revoked_identity(identity, &registry),
                     "profile": record.profile(),
                     "capability": capability.map(|capability| data_encoding::HEXLOWER.encode(&capability.id)),
                     "expires": capability.map(|capability| capability.expires.to_string()),
@@ -217,40 +326,56 @@ impl Node {
                     "partitions": record.grants.iter().map(|grant| json!({
                         "grant": grant.grant, "delegations": grant.delegations,
                     })).collect::<Vec<_>>(),
-
+                    "trusted": registry.trusted.get(identity).map(|trust| json!({
+                        "capability": trust.grant.id().ok().map(|id| data_encoding::HEXLOWER.encode(&id)),
+                        "granted": trust.granted.to_string(),
+                        "live": trusted.contains(identity),
+                    })),
+                    "claims": registry.claims.get(identity).map(|claim| json!({
+                        "right": claim.right,
+                        "delegations": claim.delegations,
+                        "issuer": claim.issuer.to_hex(),
+                        "granted": claim.granted.to_string(),
+                    })),
+                    "nodes": nodes,
                 })
             })
             .collect();
-        Ok(json!({"devices": devices}))
+        Ok(json!({"identities": identities}))
     }
-    /// Sets the opaque application label of a recorded device.
+    /// Sets the opaque application label of a recorded identity.
     pub(super) async fn label(&self, request: &Value) -> Result<Value, Failure> {
-        let node: PublicKey = request["node"]
+        let identity: PublicKey = request["identity"]
             .as_str()
-            .ok_or_else(|| refused("node must be a public key"))?
+            .ok_or_else(|| refused("identity must be a public key"))?
             .parse()
             .map_err(refused)?;
         let label: Vec<u8> = serde_json::from_value(request["label"].clone())
             .map_err(|_| refused("label must be bytes"))?;
         if label.len() > registry::MAX_LABEL {
             return Err(refused(format!(
-                "a device label holds at most {} bytes",
+                "an identity label holds at most {} bytes",
                 registry::MAX_LABEL
             )));
         }
         if !self.settings.lock().await.issuer() {
-            return Err(refused("only an issuer labels devices"));
+            return Err(refused("only an issuer labels identities"));
         }
         let registry = self.registry().await?;
-        if registry
-            .get(&node)
-            .is_none_or(|record| record.device.is_none())
-        {
-            return Err(refused("the registry holds no such device"));
+        if !registry.admitted(&identity) {
+            return Err(refused("the registry holds no such identity"));
         }
         let mut changes = Changes::default();
-        changes.label(&node, &label)?;
+        changes.label(&identity, &label)?;
         self.commit(changes).await?;
         Ok(json!({}))
     }
+}
+
+fn node_of(request: &Value) -> Result<PublicKey, Failure> {
+    request["node"]
+        .as_str()
+        .ok_or_else(|| refused("node must be a public key"))?
+        .parse()
+        .map_err(refused)
 }

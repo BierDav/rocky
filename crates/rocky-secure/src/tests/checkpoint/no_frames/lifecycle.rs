@@ -555,7 +555,7 @@ async fn revoking_the_signer_refuses_a_no_frames_state_before_it_is_used() {
         &x.f.publisher,
         x.f.app().definition().app,
         &[],
-        &[credentials.0[2].id().unwrap()],
+        &[credentials.certificate().unwrap().id().unwrap()],
     );
     let private = x.f.private;
     // Revoked between begin and finish of a pull: refused, not corrupt.
@@ -746,7 +746,7 @@ impl DevPull {
             &self.f.publisher,
             self.f.app().definition().app,
             &[],
-            &[self.signers[signer].0[2].id().unwrap()],
+            &[self.signers[signer].certificate().unwrap().id().unwrap()],
         )
     }
     async fn pulled_scopes(&self) -> i64 {
@@ -1133,9 +1133,16 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     // An issuer closes main's tip at L; main itself stays there.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
-        Authority::owner(&f.publisher)
-            .issue_issuer(issuer.public_key(), None, crate::tests::validity())
-            .unwrap(),
+        Authority::owner_in(
+            &f.publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .unwrap(),
     ]);
     let tip = c.followed_tip().await;
     let sealed = SignedSeal::endorse(
@@ -1147,7 +1154,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
             action: SealAction::Close,
             recovery: None,
         },
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
     )
     .unwrap();
@@ -1646,9 +1653,16 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
     // An issuer seals the branch and moves `dev` on; B compacts there.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
-        Authority::owner(&f.publisher)
-            .issue_issuer(issuer.public_key(), None, crate::tests::validity())
-            .unwrap(),
+        Authority::owner_in(
+            &f.publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .unwrap(),
     ]);
     let sealed = SignedSeal::endorse(
         SealStatement {
@@ -1661,7 +1675,7 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             },
             recovery: None,
         },
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
     )
     .unwrap();
@@ -1673,7 +1687,7 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             from: Some(opened),
             to: Some(sealed.successor().unwrap().unwrap()),
         },
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
     )
     .unwrap();
@@ -1750,9 +1764,20 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             crate::now().unwrap(),
         )
         .unwrap();
+    let mut expected = b.revocations().await;
+    expected
+        .merge_in(
+            &revoked,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: domain,
+            },
+            crate::now().unwrap(),
+        )
+        .unwrap();
     b.learn_revocations(&revoked).await.unwrap();
     assert_eq!(b.followed_tip().await, opened);
-    assert_eq!(b.revocations().await, revoked);
+    assert_eq!(b.revocations().await, expected);
     assert_ne!(
         b.checkpoint(f.private)
             .await

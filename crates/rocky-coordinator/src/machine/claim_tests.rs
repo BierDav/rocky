@@ -99,9 +99,7 @@ impl Fixture {
         }
     }
     fn trusted_claim(&mut self, counter: &str, claim: Claim, time: u64) -> u64 {
-        let request = crate::machine::self_certified(
-            self.state.genesis.id().unwrap(),
-            crate::transport::nonce(),
+        let request = self.certified(
             Operation::Claim {
                 scope: self.scope,
                 counter: name(counter),
@@ -109,8 +107,7 @@ impl Fixture {
             },
             &self.nodes[0],
             time,
-        )
-        .unwrap();
+        );
         match self.state.apply_at(time, &request).unwrap() {
             Outcome::Claimed(value) => value,
             other => panic!("claim: {other:?}"),
@@ -118,7 +115,7 @@ impl Fixture {
     }
     /// The owner revokes `identity`; `pusher` pushes the statement.
     fn push_revocation(&mut self, identity: PublicKey, pusher: &PrivateKey, time: u64) -> Outcome {
-        let statement = SignedRevocation::sign(
+        let statement = SignedRevocation::sign_in(
             Revocation {
                 app: self.scope.app,
                 issuer: self.owner.public_key(),
@@ -131,6 +128,10 @@ impl Fixture {
             },
             &self.owner,
             &CredentialChain::default(),
+            rocky_credentials::DatabaseContext {
+                publisher: self.owner.public_key(),
+                scope: self.scope,
+            },
         )
         .unwrap();
         let request = Request::sign_at(

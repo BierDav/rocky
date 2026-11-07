@@ -1,12 +1,12 @@
 //! Development employees composition over authenticated loopback links and an opaque relay.
 use employees_app::Employees;
 use rocky_core::{
-    Commitment, FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right,
-    RowChange, RowSelection,
+    Commitment, FieldSelection, MeshId, ResourceGrant, ResourceScope, Right, RowChange,
+    RowSelection,
 };
 use rocky_secure::{
-    Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet,
-    SecureConfig, SignedCapability, SignedManifest,
+    CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet, SecureConfig,
+    SignedManifest,
     network::{NativeSession, link::Link},
 };
 use std::{collections::BTreeSet, path::Path};
@@ -25,7 +25,6 @@ impl SecureDemo {
     pub async fn open(dir: &Path) -> Result<Self, Error> {
         // Public fixture secrets make this reproducible development data only.
         let publisher = PrivateKey::from_bytes(&[81; 32]);
-        let user = PrivateKey::from_bytes(&[82; 32]);
         let app = Employees::new(*publisher.public_key().as_bytes());
         let scopes = [
             app.scope(MeshId([1; 16]), false),
@@ -75,63 +74,28 @@ impl SecureDemo {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| Error::Rejected("clock before the epoch".into()))?
             .as_secs();
-        let (not_before, expires) = (time.saturating_sub(DAY), time + 300 * DAY);
-        let root = SignedCapability::sign(
-            Capability {
-                subject: user.public_key(),
-                kind: PrincipalKind::User,
-                grants: full.clone(),
-                not_before,
-                expires,
-                delegations: 1,
-                extension: rocky_secure::credentials::Extension::new(
-                    rocky_secure::credentials::Extended {
-                        authors: Some(rocky_secure::credentials::AuthorRange::ALL),
-                        ..Default::default()
-                    },
-                )
-                .map_err(signing)?,
-            },
-            &publisher,
-        )
-        .map_err(signing)?;
         let config = |index: u8,
                       grants: Vec<ResourceGrant>,
                       keys: Vec<KeyMaterial>|
          -> Result<SecureConfig, Error> {
+            // Different permissions belong to different identities.
+            let identity = PrivateKey::from_bytes(&[index ^ 0x80; 32]);
             let node = PrivateKey::from_bytes(&[index; 32]);
-            let leaf = SignedCapability::sign(
-                Capability {
-                    subject: node.public_key(),
-                    kind: PrincipalKind::Node,
-                    grants,
-                    not_before,
-                    expires,
-                    delegations: 0,
-                    extension: rocky_secure::credentials::Extension::new(
-                        rocky_secure::credentials::Extended {
-                            authors: Some(
-                                rocky_secure::credentials::AuthorRange::new(
-                                    u32::from(index),
-                                    u32::from(index),
-                                )
-                                .map_err(signing)?,
-                            ),
-                            node: Some(rocky_secure::PeerId::of(node.public_key())),
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(signing)?,
-                },
-                &user,
-            )
-            .map_err(signing)?;
+            let range =
+                rocky_secure::credentials::AuthorRange::new(u32::from(index), u32::from(index))
+                    .map_err(signing)?;
+            let root = rocky_secure::credentials::Authority::owner(&publisher)
+                .issue(identity.public_key(), grants, range, (time, 300 * DAY, DAY))
+                .map_err(signing)?;
+            let credentials = CredentialChain(vec![root])
+                .certify(&identity, node.public_key(), u32::from(index))
+                .map_err(signing)?;
             Ok(SecureConfig {
                 publisher: publisher.public_key(),
                 manifest: manifest.clone(),
                 revocations: RevocationSet::new(),
                 node,
-                credentials: CredentialChain(vec![root.clone(), leaf]),
+                credentials,
                 keys,
             })
         };

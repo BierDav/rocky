@@ -61,9 +61,16 @@ impl Domain {
     /// An issuer identity the owner appointed, with its issuer chain.
     async fn issuer(&self, authors: AuthorRange) -> (FileIdentity, CredentialChain) {
         let identity = FileIdentity::new().await;
-        let link = Authority::owner(&self.owner)
-            .issue_issuer(identity.key(), Some(authors), VALIDITY)
-            .expect("issuer");
+        let link = Authority::owner_in(
+            &self.owner,
+            DatabaseContext {
+                publisher: self.publisher(),
+                scope: self.grant().scope.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(identity.key(), Some(authors), VALIDITY)
+        .expect("issuer");
         (identity, CredentialChain(vec![link]))
     }
     fn verify(&self, chain: &CredentialChain, node: &PrivateKey, set: &RevocationSet) -> bool {
@@ -115,7 +122,11 @@ impl FileIdentity {
 
 /// A node of `identity` certified under `chain`, with an author number its
 /// provider reserves from the identity's range.
-fn node(identity: &dyn IdentityProvider, chain: &CredentialChain) -> (PrivateKey, CredentialChain) {
+fn node(
+    identity: &dyn IdentityProvider,
+    chain: &CredentialChain,
+    previous: Option<&CredentialChain>,
+) -> (PrivateKey, CredentialChain) {
     let node = PrivateKey::new();
     let range = chain
         .authors()
@@ -124,7 +135,13 @@ fn node(identity: &dyn IdentityProvider, chain: &CredentialChain) -> (PrivateKey
     let author = identity.reserve_author(range).expect("author");
     let certified = chain
         .clone()
-        .certify(identity, node.public_key(), author)
+        .certify_member(
+            identity,
+            node.public_key(),
+            author,
+            u64::from(author - range.first),
+            previous.map(|chain| chain.certificate().unwrap().id().unwrap()),
+        )
         .expect("certificate");
     (node, certified)
 }
@@ -153,7 +170,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     let (issuer, issuing) = domain
         .issuer(AuthorRange::new(100, 199).expect("range"))
         .await;
-    let authority = Authority::issuer(&issuer.provider, &issuing);
+    let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     // The issuer grants a member identity a range and its grants; it signs
     // through its own chain, never with the publisher key.
     let member = FileIdentity::new().await;
@@ -171,9 +188,9 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     // Three nodes of the identity: each signs under its own certificate
     // and author number; the later ones need no issuer and no invitation.
     let set = RevocationSet::new();
-    let first = node(&member.provider, &identity_chain);
-    let second = node(&member.reopen(), &identity_chain);
-    let third = node(&member.reopen(), &identity_chain);
+    let first = node(&member.provider, &identity_chain, None);
+    let second = node(&member.reopen(), &identity_chain, Some(&first.1));
+    let third = node(&member.reopen(), &identity_chain, Some(&second.1));
     let mut authors = BTreeSet::new();
     for (key, chain) in [&first, &second, &third] {
         assert!(domain.verify(chain, key, &set));
@@ -187,20 +204,12 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
         authors.insert(chain.author_number().expect("number"));
     }
     assert_eq!(authors, (120..=122).collect());
-    // A certificate adds no rights and keeps to the identity's range.
-    let mut wider = domain.grant();
-    wider.rights.insert(Right::Delete);
+    // A certificate holds no rights of its own, never expires and keeps
+    // to the identity's range.
+    let certificate = first.1.certificate().expect("certificate");
+    assert!(certificate.capability.grants.is_empty());
+    assert_eq!(certificate.capability.expires, rocky_credentials::NEVER);
     let stranger = PrivateKey::new();
-    assert!(
-        identity_chain
-            .clone()
-            .certify_with(
-                &member.provider,
-                (stranger.public_key(), 129),
-                (vec![wider], Vec::new()),
-            )
-            .is_ok_and(|chain| !domain.verify(&chain, &stranger, &set))
-    );
     assert!(
         identity_chain
             .clone()
@@ -217,7 +226,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     );
     // A member holds no issuer authority: it neither appoints issuers nor
     // grants through an authority.
-    let member_authority = Authority::issuer(&member.provider, &identity_chain);
+    let member_authority = rocky_credentials::testing::authority(&member.provider, &identity_chain);
     assert!(
         member_authority
             .issue(
@@ -243,11 +252,10 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         )
         .expect("granted");
     let chain = CredentialChain(vec![link]);
-    let nodes = [
-        node(&member.provider, &chain),
-        node(&member.provider, &chain),
-        node(&member.provider, &chain),
-    ];
+    let first = node(&member.provider, &chain, None);
+    let second = node(&member.provider, &chain, Some(&first.1));
+    let third = node(&member.provider, &chain, Some(&second.1));
+    let nodes = [first, second, third];
     let none = RevocationSet::new();
     assert!(
         nodes
@@ -264,7 +272,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         .collect();
     assert_eq!(alive, [true, false, true]);
     // The identity certifies a fresh node after one was revoked.
-    let replacement = node(&member.provider, &chain);
+    let replacement = node(&member.provider, &chain, Some(&nodes[2].1));
     assert!(domain.verify(&replacement.1, &replacement.0, &one));
 
     let identity = domain.revoke(|statement| {
@@ -303,12 +311,13 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let (issuer, issuing) = domain
         .issuer(AuthorRange::new(100, 199).expect("range"))
         .await;
-    let authority = Authority::issuer(&issuer.provider, &issuing);
+    let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     let none = RevocationSet::new();
     // Before revocation the issuer endorses a manifest through its chain.
     let mut next = domain.manifest.clone();
     next.schema = 2;
-    let earlier = SignedManifest::endorse(&next, &issuer.provider, &issuing).expect("endorsed");
+    let earlier =
+        SignedManifest::endorse(&next, authority.signer.clone(), &issuing).expect("endorsed");
     assert_ne!(issuer.key(), domain.publisher());
     assert_eq!(
         earlier.endorsement().signer(domain.publisher()),
@@ -347,7 +356,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
             .is_err()
     );
     next.schema = 3;
-    let later = SignedManifest::endorse(&next, &issuer.provider, &issuing).expect("signed");
+    let later = SignedManifest::endorse(&next, authority.signer.clone(), &issuing).expect("signed");
     assert!(
         later
             .verify_current(domain.publisher(), &revoked, NOW)
@@ -364,7 +373,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let (other, other_chain) = domain
         .issuer(AuthorRange::new(200, 299).expect("range"))
         .await;
-    let renewer = Authority::issuer(&other.provider, &other_chain);
+    let renewer = rocky_credentials::testing::authority(&other.provider, &other_chain);
     let (request, secret) =
         RenewRequest::sign(&member_node, other.key(), member_chain.clone(), NOW).expect("request");
     let prior = request
@@ -415,28 +424,60 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
 async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
     let identity = FileIdentity::new().await;
     let (node, answering) = (PrivateKey::new(), PrivateKey::new());
-    let (request, secret) =
-        IdentityRequest::sign(&identity.provider, &node, answering.public_key(), NOW)
-            .expect("request");
+    let domain = Domain::new();
+    let database = DatabaseContext {
+        publisher: domain.publisher(),
+        scope: domain.grant().scope.domain,
+    };
+    let (request, secret) = IdentityRequest::sign(
+        &identity.provider,
+        &node,
+        answering.public_key(),
+        NOW,
+        database,
+    )
+    .expect("request");
     let request =
         IdentityRequest::from_bytes(&request.to_bytes().expect("bytes")).expect("request");
     request
-        .verify(answering.public_key(), identity.key(), (NOW, 300))
+        .verify(answering.public_key(), identity.key(), (NOW, 300), database)
         .expect("proven");
+    let foreign = DatabaseContext {
+        scope: Scope {
+            mesh: MeshId([9; 16]),
+            ..database.scope
+        },
+        ..database
+    };
+    assert!(
+        request
+            .verify(answering.public_key(), identity.key(), (NOW, 300), foreign)
+            .is_err()
+    );
     // Another identity, audience or time is refused.
     assert!(
         request
-            .verify(answering.public_key(), node.public_key(), (NOW, 300))
+            .verify(
+                answering.public_key(),
+                node.public_key(),
+                (NOW, 300),
+                database
+            )
             .is_err()
     );
     assert!(
         request
-            .verify(node.public_key(), identity.key(), (NOW, 300))
+            .verify(node.public_key(), identity.key(), (NOW, 300), database)
             .is_err()
     );
     assert!(
         request
-            .verify(answering.public_key(), identity.key(), (NOW + 301, 300))
+            .verify(
+                answering.public_key(),
+                identity.key(),
+                (NOW + 301, 300),
+                database
+            )
             .is_err()
     );
     // The answer opens only with the request's one-time key.
@@ -449,7 +490,13 @@ async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
     )
     .expect("answer");
     assert_eq!(answer.open(&request, &secret).expect("opened"), b"bundle");
-    let (_, other) = IdentityRequest::sign(&identity.provider, &node, answering.public_key(), NOW)
-        .expect("request");
+    let (_, other) = IdentityRequest::sign(
+        &identity.provider,
+        &node,
+        answering.public_key(),
+        NOW,
+        database,
+    )
+    .expect("request");
     assert!(answer.open(&request, &other).is_err());
 }

@@ -29,9 +29,16 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
         .map_or_else(CredentialChain::default, |issuer| {
             let (start, end) = lifetime();
             CredentialChain(vec![
-                rocky_credentials::Authority::owner(l.publisher())
-                    .issue_issuer(issuer.public_key(), None, (start, end - start, 0))
-                    .unwrap(),
+                rocky_credentials::Authority::owner_in(
+                    l.publisher(),
+                    rocky_credentials::DatabaseContext {
+                        publisher: (l.publisher()).public_key(),
+                        scope: l.domain,
+                    },
+                )
+                .unwrap()
+                .issue_issuer(issuer.public_key(), None, (start, end - start, 0))
+                .unwrap(),
             ])
         });
     let dir = Scratch::new().await;
@@ -76,7 +83,11 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
             schema: l.definition(3).hash(),
             minimum_in_sync: 2,
         },
-        signer,
+        if issuer.is_some() {
+            rocky_credentials::testing::lane_for(signer, &endorsement)
+        } else {
+            signer.into()
+        },
         &endorsement,
     )
     .unwrap();
@@ -170,7 +181,17 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
         .await
         .unwrap()
         .unwrap();
-    let signed = SignedMigrationPublication::endorse(s, signer, &endorsement, writer).unwrap();
+    let signed = SignedMigrationPublication::endorse(
+        s,
+        if issuer.is_some() {
+            rocky_credentials::testing::lane_for(signer, &endorsement)
+        } else {
+            signer.into()
+        },
+        &endorsement,
+        writer,
+    )
+    .unwrap();
     ((l, dir, key, replica, signed), issuer)
 }
 pub(super) async fn release(

@@ -46,6 +46,19 @@ struct Bundle {
     issuers: Vec<String>,
 }
 
+impl Bundle {
+    fn verify_database(&self, database: rocky_credentials::DatabaseContext) -> Result<(), Failure> {
+        if self.mesh != database.scope.mesh
+            || self.domain != database.scope.domain
+            || self.links.database_context(database.publisher)? != database
+        {
+            return Err("identity enrollment belongs to another database".into());
+        }
+        self.revocations.verify_in(database)?;
+        Ok(())
+    }
+}
+
 impl Settings {
     /// Answers a node of this node's own identity: everything the identity
     /// holds, sealed to that node. A request for another identity, or from
@@ -55,10 +68,22 @@ impl Settings {
         vault: &Vault,
         request: &[u8],
     ) -> Result<Vec<u8>, Failure> {
+        if self.single_use {
+            return Err("a single-use identity cannot link nodes".into());
+        }
         let request = IdentityRequest::from_bytes(request)?;
         let node = PrivateKey::from_bytes(&vault.get("node")?);
-        request.verify(node.public_key(), self.identity, (now()?, SKEW))?;
-        if self.revocations.revokes(&request.node) || self.revocations.revokes(&self.identity) {
+        request.verify(
+            node.public_key(),
+            self.identity,
+            (now()?, SKEW),
+            self.database_context()?,
+        )?;
+        if self
+            .revocations
+            .ends_node_of(self.identity, request.node, false)
+            || self.revocations.revokes(&self.identity)
+        {
             return Err("the node or its identity was revoked".into());
         }
         let mut keys = BTreeMap::<String, Vec<_>>::new();
@@ -70,20 +95,24 @@ impl Settings {
                 ));
             }
         }
-        let leaf = &self
+        let leaf = self
             .credentials
-            .0
-            .last()
-            .ok_or("missing node credential")?
-            .capability;
+            .held()
+            .ok_or("missing identity capability")?;
         let bundle = Bundle {
-            format: 3,
+            format: 6,
             mesh: self.mesh,
             domain: self.domain,
             record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
             genesis: self.genesis.clone(),
             bootstrap: self.schema_bootstrap()?,
-            revocations: self.revocations.clone(),
+            revocations: {
+                let mut known = self.revocations.clone();
+                if let Some(certificate) = self.credentials.certificate() {
+                    known.link(certificate.clone())?;
+                }
+                known
+            },
             links: self.identity_links(),
             profile: self.profile.clone(),
             ttl: self.ttl,
@@ -117,6 +146,7 @@ impl Settings {
             )),
             store,
             Some(provider),
+            false,
         )
     }
     /// Installs a new node of `provider`'s identity from a node of the
@@ -143,7 +173,8 @@ impl Settings {
             .into());
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let (request, secret) = IdentityRequest::sign(&*provider, &node, record.node, now()?)?;
+        let (request, secret) =
+            IdentityRequest::sign(&*provider, &node, record.node, now()?, record.database)?;
         let reply = exchange(
             transport,
             &addresses,
@@ -153,10 +184,11 @@ impl Settings {
         .await?;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(&request, &secret)?)?;
-        if bundle.format != 3 {
+        if bundle.format != 6 {
             return Err("unsupported identity enrollment format".into());
         }
         bundle.record.bytes()?;
+        bundle.verify_database(record.database)?;
         let identity = provider.public_key()?;
         if bundle
             .links
@@ -166,9 +198,17 @@ impl Settings {
         {
             return Err("the answer names another identity".into());
         }
+        if bundle
+            .revocations
+            .ends_node_of(identity, node.public_key(), false)
+        {
+            rocky_platform::fs::remove_file(Intent::path(path, false))?;
+            vault.forget(["node", "transport"].into_iter().map(String::from))?;
+            return Err("the previous membership link is void; retry to link a fresh node".into());
+        }
         let mut settings = Settings::installed(
-            (intent.installation.clone(), intent.stored_identity),
-            (record.publisher, identity, provider),
+            (intent.installation.clone(), intent.single_use),
+            (record.publisher, identity),
             (bundle.mesh, bundle.domain, bundle.record.schema.clone()),
             bundle.genesis.clone(),
             bundle.ttl,
@@ -187,11 +227,13 @@ impl Settings {
             .transpose()?
             .is_some_and(|extended| extended.issues);
         settings.profile = bundle.profile;
-        settings.credentials = settings.certify(&vault, bundle.links, &domain)?;
-        let grants = settings.credentials.grants().to_vec();
+        settings.credentials = crate::identities::with_identity(provider, || {
+            settings.certify(&vault, bundle.links, &domain)
+        })?;
         settings.epoch_statements = bundle.epoch_statements;
+        settings.adopt_groups(&vault, &bundle.groups)?;
         for (name, scope) in domain.scopes() {
-            if !crate::enrollment::reads(&grants, scope) {
+            if !settings.reads_whole(&domain, &scope) {
                 continue;
             }
             for (epoch, key) in bundle.keys.get(name).into_iter().flatten() {
@@ -207,11 +249,97 @@ impl Settings {
             settings.learn_revocations(&RevocationSet::new())?;
             crate::enrollment::hold_naming(&vault, bundle.naming.as_deref())?;
         }
-        settings.adopt_groups(&vault, &bundle.groups)?;
-        settings.add_peer(&vault, contact)?;
+        // An identity may relink through its last, now-unlinked installation.
+        // Its sealed bundle is provisioning evidence, not a live data peer.
+        if !settings
+            .revocations
+            .ends_node_of(identity, record.node, false)
+        {
+            settings.add_peer(&vault, contact)?;
+        }
         settings.learn_issuers(&vault, &bundle.issuers);
+        let certificate = settings
+            .credentials
+            .certificate()
+            .ok_or("missing linked certificate")?;
+        // The answering node persists the identity's certificate before any sync.
+        let reply = exchange(
+            transport,
+            &addresses,
+            Protocol::Renew,
+            &[crate::enrollment::LINK, &serde_json::to_vec(certificate)?].concat(),
+        )
+        .await?;
+        let accepted = RevocationSet::from_bytes(&reply)
+            .map_err(|error| format!("link acknowledgment: {error}"))?;
+        settings.learn_revocations(&accepted)?;
+        let linked = settings
+            .credentials
+            .certificate()
+            .ok_or("missing linked certificate")?
+            .id()?;
+        if !settings.revocations.membership()?.accepts(linked)
+            || settings
+                .revocations
+                .ends_node_of(identity, node.public_key(), false)
+        {
+            rocky_platform::fs::remove_file(Intent::path(path, false))?;
+            vault.forget(settings.roles())?;
+            return Err("the membership link is void; retry to link a fresh node".into());
+        }
         settings.save(path)?;
         rocky_platform::fs::remove_file(Intent::path(path, false))?;
         Ok(settings)
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+    use crate::{FileSecretStore, IdentityKey, RootKey, Schema, SecretStore};
+    const SCHEMA: &str = r#"{"format":6,"application":"scoped_enrollment","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+
+    #[test]
+    fn foreign_identity_answers_are_refused_before_installation() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let root = RootKey::generate();
+        let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
+        let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(directory.path()));
+        let a = Settings::create(
+            &Schema::parse(SCHEMA)?,
+            &store,
+            3600,
+            Some(person.clone()),
+            &root,
+        )?;
+        let b = Settings::create(
+            &Schema::parse(SCHEMA)?,
+            &store,
+            3600,
+            Some(person.clone()),
+            &root,
+        )?;
+        let vault = a.vault(&store);
+        let node = PrivateKey::new();
+        let audience = Settings::node_key(&vault)?.public_key();
+        let (request, secret) =
+            IdentityRequest::sign(&*person, &node, audience, now()?, a.database_context()?)?;
+        let bytes = a.answer_identity(&vault, &request.to_bytes()?)?;
+        let answer = IdentityAnswer::from_bytes(&bytes)?;
+        let mut bundle: Bundle = serde_json::from_slice(&answer.open(&request, &secret)?)?;
+        bundle.verify_database(a.database_context()?)?;
+        assert!(bundle.verify_database(b.database_context()?).is_err());
+        // Even relabeling the envelope cannot change the signed authority.
+        bundle.mesh = b.mesh;
+        bundle.domain = b.domain;
+        assert!(bundle.verify_database(b.database_context()?).is_err());
+        let (other_request, other_secret) =
+            IdentityRequest::sign(&*person, &node, audience, now()?, b.database_context()?)?;
+        assert!(answer.open(&other_request, &other_secret).is_err());
+        assert!(
+            a.answer_identity(&vault, &other_request.to_bytes()?)
+                .is_err()
+        );
+        Ok(())
     }
 }

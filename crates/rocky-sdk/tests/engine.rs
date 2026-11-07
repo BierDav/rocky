@@ -90,7 +90,7 @@ impl Db {
         }
     }
     async fn invite(&self) -> String {
-        self.ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}))
+        self.ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
             .await["uri"]
             .as_str()
             .unwrap_or_default()
@@ -406,12 +406,13 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
     // Revoking Bob adds a statement; Alice learns it on her next sync.
-    let devices = creator.ok(json!({"type": "devices"})).await;
-    assert_eq!(devices["devices"].as_array().map(Vec::len), Some(2));
-    let bob_node = bob.ok(json!({"type": "session"})).await["node"].clone();
+    // The creator's identity, Alice's and Bob's.
+    let identities = creator.ok(json!({"type": "identities"})).await;
+    assert_eq!(identities["identities"].as_array().map(Vec::len), Some(3));
+    let bob_identity = bob.ok(json!({"type": "session"})).await["principal"].clone();
     assert_eq!(
         creator
-            .ok(json!({"type": "revoke", "node": bob_node}))
+            .ok(json!({"type": "revoke", "identity": bob_identity}))
             .await["revocations"]["statements"],
         1
     );

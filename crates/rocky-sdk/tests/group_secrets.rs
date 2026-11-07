@@ -4,8 +4,9 @@
 //! left out explicitly. See `docs/runtime/partitioned-scopes.md#group-secrets`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+mod common;
 use rocky_sdk::{
-    Database, DeviceKeys, Network, Open, SecretStore, Session, credentials::ProviderError,
+    Database, Network, NodeKeys, Open, SecretStore, Session, credentials::ProviderError,
     transport::memory::Hub,
 };
 use serde_json::{Value, json};
@@ -15,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-mod support;
+use common::identity as support;
 
 const SCHEMA: &str = r#"{"format":6,"application":"groupsecrets","version":1,"tables":[
 {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
@@ -86,13 +87,23 @@ struct Peer {
 fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
-        identity: None,
+        identity: common::prepared_identity(directory),
         directory,
         schema,
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
     }
+}
+fn open_with_identity<'a>(
+    directory: &'a Path,
+    store: &Arc<Store>,
+    hub: &Arc<Hub>,
+    identity: &Arc<dyn rocky_sdk::IdentityProvider>,
+) -> Open<'a> {
+    let mut open = open(directory, SCHEMA, store, hub);
+    open.identity = Some(Arc::clone(identity));
+    open
 }
 impl Peer {
     fn new(database: Arc<Database>, store: Arc<Store>, hub: Arc<Hub>) -> Self {
@@ -187,12 +198,12 @@ impl Peer {
         }
         grants.into()
     }
-    async fn grant(&self, device: &DeviceKeys, grants: Value) -> Result<Value, String> {
+    async fn grant(&self, device: &NodeKeys, grants: Value) -> Result<Value, String> {
         self.reply(json!({"type":"partition_grant","device":device,"partitions":grants}))
             .await
             .map(|granted| granted["supplied"].clone())
     }
-    async fn share(&self, list: &str, recipients: &[&DeviceKeys]) -> Result<Value, String> {
+    async fn share(&self, list: &str, recipients: &[&NodeKeys]) -> Result<Value, String> {
         let recipients: Vec<_> = recipients.iter().map(|device| device.node).collect();
         self.reply(json!({"type":"partition_share","group":"list","values":values(list),"recipients":recipients}))
             .await
@@ -240,9 +251,9 @@ fn uniform(tables: &BTreeMap<String, Value>, epochs: Value) -> bool {
     tables.len() == TABLES.len() && tables.values().all(|held| *held == epochs)
 }
 /// A device prepared for supplied credentials, without a network.
-fn prepare(directory: &Path) -> (Arc<Store>, DeviceKeys) {
+fn prepare(directory: &Path) -> (Arc<Store>, NodeKeys) {
     let store = Arc::new(Store::default());
-    let device = Database::device(directory, Some(store.clone() as Arc<dyn SecretStore>)).unwrap();
+    let device = common::node_keys(directory, Some(store.clone() as Arc<dyn SecretStore>)).unwrap();
     (store, device)
 }
 fn install(directory: &Path, store: Arc<Store>, supplied: Value, hub: &Arc<Hub>) -> Peer {
@@ -261,7 +272,7 @@ async fn granted(
     list: &str,
     tables: &[&str],
     rights: &[&str],
-) -> (Peer, DeviceKeys) {
+) -> (Peer, NodeKeys) {
     let (store, device) = prepare(directory);
     let grants = issuer.grants(list, tables, rights).await;
     let supplied = issuer.grant(&device, grants).await.unwrap();
@@ -399,7 +410,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
 
     // The issuer knows the removed device only through its partition grant.
     let revoked = issuer
-        .ok(json!({"type":"revoke","identity":removed_device.user.to_string()}))
+        .ok(json!({"type":"revoke","identity":removed_device.identity.to_string()}))
         .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     for (list, expected) in [("A", json!([1, 2])), ("B", json!([1]))] {
@@ -425,8 +436,8 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     assert!(refused.contains("current epoch"), "{refused}");
     // Its identity is revoked: a fresh node of it gets no grant.
     let (_, fresh) = prepare(&root.path().join("fresh"));
-    let renamed = DeviceKeys {
-        user: removed_device.user,
+    let renamed = NodeKeys {
+        identity: removed_device.identity,
         node: fresh.node,
     };
     let refused = issuer
@@ -486,7 +497,7 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
         .await
         .unwrap();
     issuer
-        .ok(json!({"type":"revoke","identity":device.user.to_string()}))
+        .ok(json!({"type":"revoke","identity":device.identity.to_string()}))
         .await;
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");
@@ -495,8 +506,8 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
     let (secrets, tables) = issuer.epochs("B").await;
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])));
-    let renamed = DeviceKeys {
-        user: device.user,
+    let renamed = NodeKeys {
+        identity: device.identity,
         node: prepare(&root.path().join("fresh")).1.node,
     };
     assert!(
@@ -525,7 +536,7 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
             .unwrap();
         issuer.store.limit(Some(budget));
         let revoked = issuer
-            .reply(json!({"type":"revoke","node":device.node.to_string()}))
+            .reply(json!({"type":"revoke","identity":device.identity.to_string()}))
             .await;
         issuer.store.limit(None);
         let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
@@ -731,7 +742,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
         introduce(&issuer, &reader).await;
         readers.push((reader, device));
     }
-    let devices: Vec<&DeviceKeys> = readers.iter().map(|(_, device)| device).collect();
+    let devices: Vec<&NodeKeys> = readers.iter().map(|(_, device)| device).collect();
     let shared = issuer.share("A", &devices).await.unwrap();
     assert_eq!(shared["recipients"].as_array().unwrap().len(), 2);
     for (reader, _) in &readers {
@@ -743,7 +754,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     let (removed, removed_device) = &readers[0];
     let (remaining, _) = &readers[1];
     issuer
-        .ok(json!({"type":"revoke","node":removed_device.node.to_string()}))
+        .ok(json!({"type":"revoke","identity":removed_device.identity.to_string()}))
         .await;
     for table in TABLES {
         write(&issuer, table, "after").await;
@@ -905,6 +916,117 @@ async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
         "delivered"
     );
     for peer in [last, delegated, member, issuer] {
+        peer.database.close().await.unwrap();
+    }
+}
+
+/// A partition granted to an identity reaches a node that identity links
+/// later, from a node of it, with no further grant; the issuer lists the
+/// grant on the identity's record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
+    let root = support::small_directory().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer"));
+    issuer
+        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
+        .await;
+    for table in TABLES {
+        write(&issuer, table, "before").await;
+    }
+    let person: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(rocky_sdk::FileIdentityProvider::open(root.path().join("person")).unwrap());
+    let first_directory = root.path().join("first");
+    let first_store = Arc::new(Store::default());
+    let keys = Database::node_keys_of(
+        &first_directory,
+        Some(first_store.clone() as Arc<dyn SecretStore>),
+        Some(person.clone()),
+    )
+    .unwrap();
+    assert_eq!(keys.identity, person.public_key().unwrap());
+    let supplied = issuer
+        .grant(&keys, issuer.grants("A", &TABLES, &["Read"]).await)
+        .await
+        .unwrap();
+    let first = Peer::new(
+        Database::install(
+            open_with_identity(&first_directory, &first_store, &issuer.hub, &person),
+            serde_json::from_value(supplied).unwrap(),
+        )
+        .unwrap()
+        .database,
+        first_store,
+        issuer.hub.clone(),
+    );
+    introduce(&issuer, &first).await;
+    issuer.share("A", &[&keys]).await.unwrap();
+    first.ok(json!({"type":"sync"})).await;
+    assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
+
+    // The identity links a second node from the first; no issuer acts.
+    let contact = first.ok(json!({"type":"contact"})).await["uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_store = Arc::new(Store::default());
+    let second = Peer::new(
+        Database::enroll_identity(
+            open_with_identity(
+                &root.path().join("second"),
+                &second_store,
+                &issuer.hub,
+                &person,
+            ),
+            &contact,
+        )
+        .unwrap()
+        .database,
+        second_store,
+        issuer.hub.clone(),
+    );
+    introduce(&issuer, &second).await;
+    second.ok(json!({"type":"sync"})).await;
+    assert_eq!(rows(&second).await, vec![vec!["before".to_owned()]; 3]);
+    let session = second.ok(json!({"type":"session"})).await;
+    assert_eq!(session["principal"], json!(keys.identity));
+    assert_ne!(session["node"], json!(keys.node));
+
+    // One record, by identity, holds the grant for every node of it.
+    let listed = issuer.ok(json!({"type":"identities"})).await;
+    let record = listed["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["identity"] == json!(keys.identity))
+        .unwrap()
+        .clone();
+    assert_eq!(record["kind"], "partition");
+    assert_eq!(record["partitions"].as_array().unwrap().len(), TABLES.len());
+    assert!(
+        record["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["node"] == json!(keys.node)),
+        "{record}"
+    );
+    // Unlinking one reader rotates its partition, keeps the identity's grant,
+    // and lets the sibling read the replacement epoch.
+    let before = issuer.epochs("A").await.0;
+    first
+        .session
+        .unlink(session["node"].as_str().unwrap(), person)
+        .await
+        .unwrap();
+    first.ok(json!({"type":"sync"})).await;
+    issuer.ok(json!({"type":"sync"})).await;
+    let (epochs, tables) = issuer.epochs("A").await;
+    assert_ne!(epochs, before);
+    assert!(uniform(&tables, epochs));
+    first.ok(json!({"type":"sync"})).await;
+    assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
+    assert!(second.reply(json!({"type":"sync"})).await.is_err());
+    for peer in [first, second, issuer] {
         peer.database.close().await.unwrap();
     }
 }

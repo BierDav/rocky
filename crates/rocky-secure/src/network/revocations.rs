@@ -16,6 +16,11 @@ const MAX_IDS: usize = 4 * MAX_LIVE_REVOCATIONS;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum RevocationMessage {
+    Exchange,
+    Certificates {
+        certificates: Vec<rocky_credentials::SignedCapability>,
+        last: bool,
+    },
     Digest {
         #[serde(with = "serde_bytes")]
         digest: Commitment,
@@ -36,6 +41,39 @@ pub(super) enum RevocationMessage {
 pub(super) struct Statement(#[serde(with = "serde_bytes")] Vec<u8>);
 
 impl NativeSession {
+    /// Refreshes replicated membership and revocations on an existing link.
+    pub async fn refresh_revocations<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<(), Error> {
+        self.send(RevocationMessage::Exchange).await?;
+        self.acknowledged("authority exchange acknowledgement")
+            .await?;
+        self.refresh_authority(replica, true).await
+    }
+    pub(super) async fn refresh_authority<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        initiator: bool,
+    ) -> Result<(), Error> {
+        let own = replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone();
+        if let Some(statement) = self.exchange_revocations(replica, &own, initiator).await? {
+            return Err(Error::Application(Box::new(Revoked(Box::new(statement)))));
+        }
+        let held = replica.revocations().await;
+        if held.ends_chain(&own).map_err(credential)?
+            || held.ends_chain(&self.credentials).map_err(credential)?
+        {
+            return Err(denied("membership certificate is void"));
+        }
+        Ok(())
+    }
     /// Leaves `replica` holding every statement the peer sent but one that
     /// revokes `own`, which it returns. Both sides run it; `initiator`
     /// decides who speaks first in each step.
@@ -47,7 +85,7 @@ impl NativeSession {
     ) -> Result<Option<SignedRevocation>, Error> {
         let held = replica.revocations().await;
         let time = now()?;
-        let digest = held.digest(time).map_err(credential)?;
+        let digest = held.exchange_digest(time).map_err(credential)?;
         let RevocationMessage::Digest { digest: theirs } = self
             .swap(initiator, RevocationMessage::Digest { digest })
             .await?
@@ -57,6 +95,36 @@ impl NativeSession {
         if theirs == digest {
             return Ok(None);
         }
+        let certificates: Vec<_> = held.certificates().cloned().collect();
+        let mut pages = certificates.chunks(STATEMENTS_PAGE);
+        let (mut sent, mut received) = (false, false);
+        let mut learned_links = RevocationSet::new();
+        while !(sent && received) {
+            let page = pages.next().unwrap_or_default();
+            sent = pages.len() == 0;
+            let RevocationMessage::Certificates { certificates, last } = self
+                .swap(
+                    initiator,
+                    RevocationMessage::Certificates {
+                        certificates: page.to_vec(),
+                        last: sent,
+                    },
+                )
+                .await?
+            else {
+                return Err(denied("unexpected membership certificates"));
+            };
+            if (received && !certificates.is_empty()) || certificates.len() > STATEMENTS_PAGE {
+                return Err(denied("membership certificates outside the exchange"));
+            }
+            for certificate in certificates {
+                if !learned_links.link(certificate).map_err(credential)? {
+                    return Err(denied("duplicate membership certificate"));
+                }
+            }
+            received |= last;
+        }
+        replica.learn_revocations(&learned_links).await?;
         let ours: Vec<Commitment> = held
             .statements()
             .filter(|signed| signed.live(time))

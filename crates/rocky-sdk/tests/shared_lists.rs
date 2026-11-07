@@ -51,7 +51,15 @@ const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+fn identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
+    Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+        "fixture.lists.identity",
+        directory.to_string_lossy().as_bytes(),
+    )))
+}
+
 struct Peer {
+    identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
     database: Arc<Database>,
     session: Session,
     scope: Value,
@@ -59,18 +67,27 @@ struct Peer {
 impl Peer {
     fn new(database: Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
+            identity: None,
             session: database.session(),
             scope: serde_json::from_str(&database.scope())?,
             database,
         })
     }
+    fn with_identity(mut self, directory: &Path) -> Self {
+        self.identity = Some(identity(directory));
+        self
+    }
     async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let reply: Value = serde_json::from_str(
-            &self
-                .session
-                .call(json!({"version":1,"scope":self.scope,"request":request}).to_string())
-                .await?,
-        )?;
+        let request_text = json!({"version":1,"scope":self.scope,"request":request}).to_string();
+        let reply = match &self.identity {
+            Some(identity) => {
+                self.session
+                    .call_with_identity(request_text, identity.clone())
+                    .await?
+            }
+            None => self.session.call(request_text).await?,
+        };
+        let reply: Value = serde_json::from_str(&reply)?;
         if reply["status"] == "ok" {
             Ok(reply["value"].clone())
         } else {
@@ -111,7 +128,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
 }
 fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> Open<'a> {
     Open {
-        identity: None,
+        identity: Some(identity(directory)),
         directory,
         schema,
         secrets: Some(secrets::keys(directory)),
@@ -149,7 +166,7 @@ async fn checkpoint_writer(
         .call(json!({"type":"tips","action":"compact"}))
         .await?;
     let invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?;
     let writer_path = root.join("writer");
     let mut options = open(&writer_path, hub, "writer");
@@ -198,7 +215,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )
         .await?;
     let invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?;
     let writer = Peer::new(
         Database::join(
@@ -339,7 +356,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         [json!("Base list"), json!("Member list")]
     );
     let read_invite = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"reader","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"reader","scopes":TABLES}}))
         .await?;
     let reader = Peer::new(
         Database::join(
@@ -367,7 +384,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -484,7 +501,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .await?;
     }
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -531,7 +548,8 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let served = kinds(&issuer.call(json!({"type":"activity"})).await?);
     for kind in [
         "invitation_created",
-        "device_enrolled",
+        "identity_admitted",
+        "node_linked",
         "partition_created",
         "partition_shared",
     ] {
@@ -600,7 +618,7 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             .await?;
     }
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -670,7 +688,8 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = root.path().join("a");
-    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    let issuer =
+        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
     for action in ["create", "follow"] {
         issuer
             .call(json!({"type":"tips","action":action,"name":"main"}))
@@ -707,7 +726,7 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
         .await?;
     issuer.database.close().await?;
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -738,7 +757,7 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -826,7 +845,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         )
         .await?;
     let invitation = a
-        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -866,7 +885,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = a
-        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
@@ -913,7 +932,8 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    let issuer =
+        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
     for action in ["create", "follow"] {
         issuer
             .call(json!({"type":"tips","action":action,"name":"main"}))
@@ -929,12 +949,13 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
-    let writer = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
+    let writer =
+        Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
     // A partial replica holds only the lists shared with it.
     writer
         .call(
@@ -976,7 +997,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -991,7 +1012,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     // Before updating, the writer's older application follows the migration
     // and adds an item, which reaches the issuer.
-    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?;
+    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
     behind.call(json!({"type":"sync"})).await?;
     behind
         .insert(
@@ -1010,7 +1031,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         [json!("Bread"), json!("Jam"), json!("Milk")]
     );
     behind.database.close().await?;
-    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?;
+    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
     writer.call(json!({"type":"sync"})).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     // The writer's grants never named `item_categories`; they follow `items`.
@@ -1043,7 +1064,8 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    let issuer =
+        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
     for action in ["create", "follow"] {
         issuer
             .call(json!({"type":"tips","action":action,"name":"main"}))
@@ -1059,12 +1081,13 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = issuer
-        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
         .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
-    let writer = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
+    let writer =
+        Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
     issuer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
@@ -1100,7 +1123,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -1115,7 +1138,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     // Before updating, the writer's older application follows the migration
     // and adds an item, which reaches the issuer.
-    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?;
+    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
     behind.call(json!({"type":"sync"})).await?;
     behind
         .insert(
@@ -1134,7 +1157,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         [json!("Bread"), json!("Jam"), json!("Milk")]
     );
     behind.database.close().await?;
-    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?;
+    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
     writer.call(json!({"type":"sync"})).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     // The writer's grants never named `item_categories`; they follow `items`.

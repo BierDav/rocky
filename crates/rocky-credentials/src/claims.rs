@@ -96,15 +96,16 @@ impl Authority<'_> {
 impl CredentialChain {
     /// Delegates from the claim link `holder` holds to `subject` a right
     /// within its own, for at most its remaining validity.
-    pub fn delegate_claims(
+    pub fn delegate_claims<'s>(
         &self,
-        holder: &dyn IdentityProvider,
+        holder: impl Into<crate::Signer<'s>>,
         subject: PublicKey,
         right: ClaimRight,
         delegations: u8,
         (time, ttl): (u64, u64),
     ) -> Result<Self, Error> {
-        let key = holder.public_key()?;
+        let holder = holder.into();
+        let key = holder.principal()?;
         let parent = match self.0.last() {
             Some(last) if last.capability.subject == key => &last.capability,
             _ => return Err(denied("the chain does not end at the holder's claim link")),
@@ -165,9 +166,12 @@ impl CredentialChain {
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node)),
                 authors: Some(AuthorRange::new(author, author)?),
+                sequence: Some(0),
+                database: Some(self.database_context(self.0[0].issuer)?),
                 ..Extended::default()
             })?,
-            ..parent
+            not_before: parent.not_before,
+            expires: crate::NEVER,
         };
         self.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(self)

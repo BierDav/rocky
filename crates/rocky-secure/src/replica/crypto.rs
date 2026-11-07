@@ -83,6 +83,14 @@ impl<A: RowApplication> Inner<A> {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
+        chain
+            .verify_database(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         self.crypto
             .verify(chain, self.config.publisher, revocations, time)
     }

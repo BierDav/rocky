@@ -1,6 +1,9 @@
 # 2. Identity keys
 
-Status: planned (2026-11-05). Needs phase 1.
+Status: phase 2b SDK implementation complete (2026-11-07); focused and unit
+checks pass, while broader workspace gate limitations remain.
+[Evidence and limitations](02-identity-keys-evidence.md) distinguish prerequisite
+integration, identity lifecycle checks and remaining runtime membership work.
 
 Identity keys work like the root: a phrase or a passkey, in memory for one
 call.

@@ -46,12 +46,33 @@ async fn issuer(
     directory: &std::path::Path,
     store: Arc<dyn crate::SecretStore>,
 ) -> Result<Node, Failure> {
+    issuer_as(directory, store, None).await
+}
+async fn issuer_as(
+    directory: &std::path::Path,
+    store: Arc<dyn crate::SecretStore>,
+    identity: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+) -> Result<Node, Failure> {
+    issuer_with_root(
+        directory,
+        store,
+        identity,
+        &rocky_credentials::RootKey::generate(),
+    )
+    .await
+}
+async fn issuer_with_root(
+    directory: &std::path::Path,
+    store: Arc<dyn crate::SecretStore>,
+    identity: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+    root: &rocky_credentials::RootKey,
+) -> Result<Node, Failure> {
     let settings = Settings::create(
         &Schema::parse(SCHEMA)?,
         &store,
         crate::enrollment::DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
+        identity,
+        root,
     )?;
     let vault = settings.vault(&store);
     let domain = settings.domain()?;
@@ -105,7 +126,7 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM issuer_registry WHERE node=? AND entry='revoked'",
+        "SELECT COUNT(*) FROM issuer_registry WHERE identity=? AND entry='revoked'",
         [node.to_hex()],
         |row| row.get(0),
     )?)
@@ -209,7 +230,7 @@ async fn stop_at(
     let revoked = PrivateKey::new().public_key();
     fault::STOP.with(|at| at.set(Some(stop)));
     assert!(
-        node.revoke(crate::enrollment::Revoke::Node(revoked))
+        node.revoke(crate::enrollment::Revoke::Identity(revoked))
             .await
             .is_err(),
         "{stop:?}"
@@ -386,6 +407,194 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         }
         session.close().await;
         database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let identity = Arc::new(crate::IdentityKey::generate());
+    let node = issuer_as(
+        directory.path(),
+        Arc::new(Keys::default()),
+        Some(identity.clone()),
+    )
+    .await?;
+    let settings = node.settings.lock().await.clone();
+    let links = settings.issuer_links();
+    let first = settings.credentials.certificate().ok_or("certificate")?;
+    let predecessor = first.id()?;
+    let author = links.authors()?.ok_or("authors")?.first;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let mut known = node.replica.revocations().await;
+    let mut chains = Vec::new();
+    for key in &keys {
+        let chain = links.clone().certify_member(
+            &*identity,
+            key.public_key(),
+            author + 1,
+            1,
+            Some(predecessor),
+        )?;
+        known.link(chain.certificate().ok_or("certificate")?.clone())?;
+        chains.push(chain);
+    }
+    node.replica.learn_revocations(&known).await?;
+    let report = node.health_report().await?;
+    assert!(report.alerts.iter().any(|alert| matches!(
+        alert.kind,
+        crate::AlertKind::MembershipFork { sequence: 1, .. }
+    )));
+    for (chain, key) in chains.iter().zip(&keys) {
+        assert!(
+            chain
+                .verify_selectors(settings.publisher, key.public_key(), &known, now()?)
+                .is_err()
+        );
+    }
+    let replacement = PrivateKey::new();
+    let membership = known.membership()?;
+    let chain = links.certify_member(
+        &*identity,
+        replacement.public_key(),
+        author + 2,
+        membership.next_sequence(settings.identity)?,
+        membership
+            .head(settings.identity)
+            .map(|head| head.certificate),
+    )?;
+    known.link(chain.certificate().ok_or("certificate")?.clone())?;
+    node.replica.learn_revocations(&known).await?;
+    chain.verify_selectors(
+        settings.publisher,
+        replacement.public_key(),
+        &node.replica.revocations().await,
+        now()?,
+    )?;
+    assert_eq!(chain.author_number()?, author + 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let identity = Arc::new(crate::IdentityKey::generate());
+    let node = issuer_as(
+        directory.path(),
+        Arc::new(Keys::default()),
+        Some(identity.clone()),
+    )
+    .await?;
+    let own = Settings::node_key(&node.vault)?.public_key();
+    crate::identities::supplying(Some(identity.clone()), node.unlink(own)).await?;
+    let settings = node.settings.lock().await;
+    assert!(settings.revocation(&node.path)?.is_some());
+    assert!(!settings.revocations.revokes(&settings.identity));
+    assert!(settings.revocations.ends_node(own, true));
+    let membership = settings.revocations.membership()?;
+    let replacement = PrivateKey::new();
+    let links = settings.identity_links();
+    let first = links.authors()?.ok_or("authors")?.first;
+    let sequence = membership.next_sequence(settings.identity)?;
+    let chain = links.certify_member(
+        &*identity,
+        replacement.public_key(),
+        first + u32::try_from(sequence)?,
+        sequence,
+        membership
+            .head(settings.identity)
+            .map(|head| head.certificate),
+    )?;
+    let mut known = settings.revocations.clone();
+    known.link(chain.certificate().ok_or("certificate")?.clone())?;
+    chain.verify_selectors(settings.publisher, replacement.public_key(), &known, now()?)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreign_membership_and_unlinks_are_refused_before_runtime_mutation() -> Result<(), Failure>
+{
+    let directory = tempfile::tempdir()?;
+    let roots = [crate::RootKey::generate(), crate::RootKey::generate()];
+    let identity = Arc::new(crate::IdentityKey::generate());
+    let mut nodes = Vec::new();
+    for index in 0..3 {
+        let path = directory.path().join(index.to_string());
+        std::fs::create_dir_all(&path)?;
+        nodes.push(
+            issuer_with_root(
+                &path,
+                Arc::new(Keys::default()),
+                Some(identity.clone()),
+                &roots[usize::from(index == 1)],
+            )
+            .await?,
+        );
+    }
+    let local = &nodes[0];
+    let context = local.settings.lock().await.database_context()?;
+    for foreign in &nodes[1..] {
+        let settings = foreign.settings.lock().await.clone();
+        let foreign_context = settings.database_context()?;
+        assert_ne!(context, foreign_context);
+        let certificate = settings
+            .credentials
+            .certificate()
+            .ok_or("certificate")?
+            .clone();
+        let mut evidence = foreign.replica.revocations().await;
+        let unlink = settings.credentials.unlink(
+            &*identity,
+            foreign_context.scope.app,
+            now()?,
+            certificate.capability.subject,
+        )?;
+        evidence.merge(
+            &RevocationSet::try_from(vec![unlink])?,
+            settings.publisher,
+            foreign_context.scope.app,
+            now()?,
+        )?;
+        // These bytes are what authority-set pages and the unlink transport import.
+        let evidence = RevocationSet::from_bytes(&evidence.to_bytes()?)?;
+        let before = local.replica.revocations().await;
+        let revision = *local.replica.observe_revision().borrow();
+        let saved = std::fs::read(&local.path)?;
+        assert!(local.replica.learn_revocations(&evidence).await.is_err());
+        assert!(
+            local
+                .accept_link(&serde_json::to_vec(&certificate)?)
+                .await
+                .is_err()
+        );
+        assert!(local.accept_unlink(&evidence.to_bytes()?).await.is_err());
+        assert_eq!(local.replica.revocations().await, before);
+        assert_eq!(*local.replica.observe_revision().borrow(), revision);
+        assert_eq!(std::fs::read(&local.path)?, saved);
+        let key = PrivateKey::new();
+        let local_settings = local.settings.lock().await.clone();
+        let audience = Settings::node_key(&local.vault)?.public_key();
+        let (request, _) = rocky_credentials::IdentityRequest::sign(
+            &*identity,
+            &key,
+            audience,
+            now()?,
+            foreign_context,
+        )?;
+        assert!(
+            local_settings
+                .answer_identity(&local.vault, &request.to_bytes()?)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&local.path)?, saved);
+    }
+    for node in &nodes {
+        let known = node.replica.revocations().await;
+        let membership = known.membership()?;
+        assert_eq!(membership.next_sequence(identity.public_key())?, 1);
+        assert!(!membership.is_forked(identity.public_key()));
     }
     Ok(())
 }

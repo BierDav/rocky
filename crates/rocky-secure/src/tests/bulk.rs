@@ -359,9 +359,33 @@ async fn failed_flush_retains_exact_classification_and_retry_acknowledges_it_onc
         .admit_migration_publication(signed.clone())
         .await
         .unwrap();
+    // The handshake learns membership before the payload flush under test.
+    target
+        .learn_revocations(&source.revocations().await)
+        .await
+        .unwrap();
+    let mut payload = frames(&source).await;
+    // The publication was admitted above; exercise the payload flush itself.
+    for frame in &mut payload {
+        frame.migration.as_mut().unwrap().descriptor = None;
+    }
+    let mut membership = RevocationSet::new();
+    for frame in &payload {
+        membership
+            .link(
+                frame
+                    .chain()
+                    .unwrap()
+                    .credentials()
+                    .certificate()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+    }
+    target.learn_revocations(&membership).await.unwrap();
     let before = target.durable_commit().await;
     target.fail_flushes(1).await;
-    let payload = frames(&source).await;
     assert!(
         target
             .receive_migration_all(payload.clone())

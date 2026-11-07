@@ -192,7 +192,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         Network::Owned(hub.connector("revoked")),
     )?;
     revoked.sync().await.expect("initial bootstrap");
-    a.ok(json!({"type": "revoke", "node": revoked.node().await}))
+    a.ok(json!({"type": "revoke", "identity": revoked.identity().await}))
         .await;
     // The base a joiner imports sits at a seal after the rotation.
     a.seal_and_compact().await;
@@ -465,7 +465,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
             Network::Owned(hub.connector(name)),
         )?;
         revoked.sync().await.expect("join");
-        a.ok(json!({"type": "revoke", "node": revoked.node().await}))
+        a.ok(json!({"type": "revoke", "identity": revoked.identity().await}))
             .await;
         a.add(handle, title).await;
         revoked.close().await;
@@ -678,7 +678,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         &invitation,
     )?)?;
     c.sync().await.expect("join");
-    a.ok(json!({"type": "revoke", "node": c.node().await}))
+    a.ok(json!({"type": "revoke", "identity": c.identity().await}))
         .await;
     member.ok(json!({"type": "renew"})).await;
     // Retry after restoring authority explicitly signals connectivity again.

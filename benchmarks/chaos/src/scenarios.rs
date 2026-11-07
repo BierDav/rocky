@@ -671,15 +671,15 @@ async fn revoke_during_bootstrap() -> Result<(), Failure> {
         let _ = c.n().add_note(&format!("c-unsent{i}"), "x").await;
     }
     let _ = until_imported(b.n(), 200, Duration::from_secs(30)).await;
-    let bid = b.n().node_id().await;
-    let cid = c.n().node_id().await;
+    let bid = b.n().identity_id().await;
+    let cid = c.n().identity_id().await;
     println!(
         "  revoke b: {}",
-        short(&a.n().call(json!({"type":"revoke","node":bid})).await)
+        short(&a.n().call(json!({"type":"revoke","identity":bid})).await)
     );
     println!(
         "  revoke c: {}",
-        short(&a.n().call(json!({"type":"revoke","node":cid})).await)
+        short(&a.n().call(json!({"type":"revoke","identity":cid})).await)
     );
     mesh(&[a.n(), b.n(), c.n()]).await;
     for n in [b.n(), c.n(), b.n()] {

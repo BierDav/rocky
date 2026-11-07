@@ -343,7 +343,7 @@ impl Node {
             let signer = self.tip_signer(stage.scope).await?;
             let signed = rocky_credentials::SignedMigrationPublication::endorse(
                 statement,
-                &*signer.identity,
+                rocky_credentials::Signer::node(&signer.node, &signer.credentials)?,
                 &signer.links,
                 writer,
             )?;

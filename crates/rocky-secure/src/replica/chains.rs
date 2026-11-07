@@ -118,6 +118,21 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 }
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Every credential chain this store holds: those of retained
+    /// operations and of its own node author. Each was verified when kept.
+    pub async fn held_chains(&self) -> Result<Vec<CredentialChain>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        rows(&inner.conn, "SELECT chain FROM secure_chains")
+            .await?
+            .into_iter()
+            .map(|record| match record.as_slice() {
+                [SqlValue::Blob(bytes)] => Ok(Chain::from_bytes(bytes)?.credentials().clone()),
+                _ => Err(Error::Corrupt("stored credential chain".into())),
+            })
+            .collect()
+    }
+}
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The digests of the stored chains, and how many retained operations

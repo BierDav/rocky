@@ -1,5 +1,6 @@
 //! The Phase 7 hub, registry and group-key fixtures.
 use super::{Device, Failure};
+use crate::common;
 use rocky_sdk::{Database, Network, Open, SecretStore, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{
@@ -51,7 +52,7 @@ pub(super) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
 }
 pub(super) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
-        identity: None,
+        identity: common::prepared_identity(root),
         directory: root,
         schema: SCHEMA,
         secrets: Some(keys(root)),
@@ -93,12 +94,12 @@ pub(super) async fn join(
     settle(&device).await;
     Ok(device)
 }
-pub(super) async fn listed(device: &Device, node: &str) -> Value {
-    device.ok(json!({"type":"devices"})).await["devices"]
+pub(super) async fn listed(device: &Device, identity: &str) -> Value {
+    device.ok(json!({"type":"identities"})).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|record| record["node"] == node)
+        .find(|record| record["identity"] == identity)
         .cloned()
         .unwrap_or_default()
 }

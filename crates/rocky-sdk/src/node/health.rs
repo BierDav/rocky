@@ -443,7 +443,7 @@ impl Node {
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
-            Some(self.registry().await?)
+            Some((self.registry().await?, self.membership().await?))
         } else {
             None
         };
@@ -455,7 +455,7 @@ impl Node {
             .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
             .unwrap_or_default();
         let (granted, nodes) = match &registry {
-            Some(registry) => {
+            Some((registry, membership)) => {
                 let granted: BTreeMap<PublicKey, u64> = registry
                     .trusted_identities(&settings.revocations)
                     .into_iter()
@@ -465,13 +465,12 @@ impl Node {
                         Some((identity, record.granted))
                     })
                     .collect();
-                let nodes = registry
-                    .records
-                    .iter()
-                    .filter(|(_, record)| !record.revoked)
-                    .filter_map(|(node, record)| {
-                        let user = record.device.as_ref()?.user;
-                        granted.contains_key(&user).then_some((*node, user))
+                let nodes = granted
+                    .keys()
+                    .flat_map(|identity| {
+                        membership
+                            .nodes(identity)
+                            .map(move |linked| (linked.node, *identity))
                     })
                     .collect();
                 (granted, nodes)
@@ -586,7 +585,24 @@ impl Node {
         peer: PublicKey,
         chain: &CredentialChain,
     ) -> Result<bool, Failure> {
-        Ok(chain
+        // Link credentials include the issuer self-link so the peer can use
+        // its grants. Collector proof intentionally checks the compact
+        // trusted-grant plus node-certificate form.
+        let compact = if chain.0.len() == 2 {
+            chain.clone()
+        } else {
+            let trusted = chain
+                .0
+                .first()
+                .cloned()
+                .ok_or("collector credentials are empty")?;
+            let certificate = chain
+                .certificate()
+                .cloned()
+                .ok_or("collector credentials have no node certificate")?;
+            CredentialChain(vec![trusted, certificate])
+        };
+        Ok(compact
             .trusted_node(
                 settings.publisher,
                 self.domain().scope,
@@ -605,6 +621,16 @@ impl Node {
             *counts.entry(kind).or_default() += 1;
         }
         let mut alerts = self.alerts();
+        let known = self.replica.revocations().await;
+        let membership = known.membership()?;
+        let identity = self.settings.lock().await.identity;
+        alerts.extend(membership.forks(identity).map(|(sequence, _)| Alert {
+            kind: crate::AlertKind::MembershipFork {
+                identity: identity.to_hex(),
+                sequence,
+            },
+            since: None,
+        }));
         alerts.extend(self.tip_chain_alerts().await?);
         alerts.extend(self.escrow_alerts().await?);
         alerts.extend(self.recovery_alerts().await?);
@@ -752,6 +778,18 @@ impl Node {
             .collect()
     }
     /// Whether a live link to `node` is open here.
+    /// When `node` was last heard here: now while linked, or its latest
+    /// health report on a trusted node.
+    pub(super) fn last_seen(&self, node: PublicKey, time: u64) -> Option<u64> {
+        if self.linked(node) {
+            return Some(time);
+        }
+        self.mesh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&node)
+            .map(|held| held.received)
+    }
     fn linked(&self, node: PublicKey) -> bool {
         self.current()
             .is_some_and(|service| service.live.contains(node))

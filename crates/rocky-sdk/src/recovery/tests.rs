@@ -43,7 +43,11 @@ async fn rows(database: &crate::Database) -> Result<Vec<String>, Failure> {
 /// Grants a reader device, which records the creator's own trusted grant
 /// in its registry, the record a recovery revokes it by.
 async fn grant(database: &crate::Database, directory: &Path) -> Result<(), Failure> {
-    let device = crate::Database::device(directory, None)?;
+    let device = crate::Database::node_keys_of(
+        directory,
+        None,
+        Some(std::sync::Arc::new(crate::IdentityKey::generate())),
+    )?;
     let session = database.session();
     let call = serde_json::json!({"version": 1,
         "scope": serde_json::from_str::<Value>(&database.scope())?,

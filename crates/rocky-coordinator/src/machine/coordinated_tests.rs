@@ -88,10 +88,27 @@ impl Fixture {
         }
         fixture
     }
-    pub(super) fn request(&self, key: &PrivateKey, action: Action, time: u64) -> Request {
-        crate::machine::self_certified(
+    pub(super) fn certified(&self, operation: Operation, key: &PrivateKey, time: u64) -> Request {
+        Request::certified(
             self.state.genesis.id().unwrap(),
             crate::transport::nonce(),
+            operation,
+            (
+                key,
+                Some(crate::machine::self_certificate_in(
+                    key,
+                    rocky_credentials::DatabaseContext {
+                        publisher: self.owner.public_key(),
+                        scope: self.scope,
+                    },
+                )),
+            ),
+            time,
+        )
+        .unwrap()
+    }
+    pub(super) fn request(&self, key: &PrivateKey, action: Action, time: u64) -> Request {
+        self.certified(
             Operation::Coordinated {
                 log: tip_log(self.scope),
                 action,
@@ -99,7 +116,6 @@ impl Fixture {
             key,
             time,
         )
-        .unwrap()
     }
     pub(super) fn run(
         &mut self,
@@ -587,18 +603,25 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
 }
 
 /// `identity`'s certificate for the node `node`.
-fn certificate(identity: &PrivateKey, node: &PrivateKey) -> rocky_credentials::SignedCapability {
-    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+fn certificate(
+    identity: &PrivateKey,
+    node: &PrivateKey,
+    database: rocky_credentials::DatabaseContext,
+) -> rocky_credentials::SignedCapability {
+    use rocky_credentials::{AuthorRange, Capability, Extended, Extension, PeerId};
     rocky_credentials::SignedCapability::sign(
         Capability {
             subject: node.public_key(),
             kind: rocky_core::PrincipalKind::Node,
             grants: Vec::new(),
             not_before: T - 1,
-            expires: T + 1000,
+            expires: rocky_credentials::NEVER,
             delegations: 0,
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node.public_key())),
+                authors: Some(AuthorRange::new(1, 1).unwrap()),
+                database: Some(database),
+                sequence: Some(0),
                 ..Extended::default()
             })
             .unwrap(),
@@ -650,7 +673,18 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     let (first, second) = (PrivateKey::new(), PrivateKey::new());
     for node in [&first, &second] {
         let head = f.state.log_head(tip_log(scope)).unwrap();
-        let request = join(head, node, Some(certificate(&identity, node)));
+        let request = join(
+            head,
+            node,
+            Some(certificate(
+                &identity,
+                node,
+                rocky_credentials::DatabaseContext {
+                    publisher: owner.public_key(),
+                    scope,
+                },
+            )),
+        );
         f.state.apply_at(T, &request).unwrap();
     }
     let members = f.state.log_head(tip_log(scope)).unwrap().members;
@@ -668,9 +702,27 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
         join(
             head.clone(),
             &stranger,
-            Some(certificate(&other, &stranger)),
+            Some(certificate(
+                &other,
+                &stranger,
+                rocky_credentials::DatabaseContext {
+                    publisher: owner.public_key(),
+                    scope,
+                },
+            )),
         ),
-        join(head, &stranger, Some(certificate(&identity, &first))),
+        join(
+            head,
+            &stranger,
+            Some(certificate(
+                &identity,
+                &first,
+                rocky_credentials::DatabaseContext {
+                    publisher: owner.public_key(),
+                    scope,
+                },
+            )),
+        ),
     ] {
         assert_eq!(
             f.state.apply_at(T, &request),
@@ -758,4 +810,59 @@ fn sixty_second_clock_skew_is_explicit_and_correction_reuses_the_append() {
         f.run(0, action, T),
         Ok(Outcome::Coordinated(LogResult::Assigned(_)))
     ));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_trusted_identity_cannot_present_another_databases_node_certificate() {
+    let root = PrivateKey::new();
+    let identity = PrivateKey::new();
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    let control = DomainControl {
+        scope,
+        configuration: [4; 16],
+        revision: 1,
+        trusted: vec![identity.public_key()],
+        publisher: Some(Box::new(root.public_key())),
+        not_before: T - 1,
+        expires: T + 3600,
+    };
+    for namespace in [
+        scope,
+        Scope {
+            mesh: MeshId([9; 16]),
+            ..scope
+        },
+        Scope {
+            domain: DomainId([9; 16]),
+            ..scope
+        },
+    ] {
+        let node = PrivateKey::new();
+        let chain = rocky_credentials::CredentialChain(vec![
+            rocky_credentials::Authority::owner(&root)
+                .issue_trusted(
+                    identity.public_key(),
+                    namespace,
+                    rocky_credentials::AuthorRange::ALL,
+                    T,
+                )
+                .unwrap(),
+        ])
+        .certify(&identity, node.public_key(), 1)
+        .unwrap();
+        let request = Request::certified(
+            [0; 32],
+            [1; 32],
+            Operation::Configure { scope, minimum: 1 },
+            (&node, chain.certificate().cloned()),
+            T,
+        )
+        .unwrap();
+        request.authenticate([0; 32]).unwrap();
+        assert_eq!(Metadata::trusts(&control, &request, T), namespace == scope);
+    }
 }

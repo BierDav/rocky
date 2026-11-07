@@ -136,7 +136,8 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     let credentials = Credentials {
         publisher: domain.publisher.public_key(),
         revocations: domain.policy(),
-        chain,
+        capabilities: chain.delegable(),
+        certificate: chain.certificate().cloned(),
     };
     // Any channel may carry the bytes; they verify on arrival.
     let received = Credentials::from_bytes(&credentials.to_bytes().expect("bytes")).expect("set");
@@ -240,54 +241,11 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
             )
             .is_err()
     );
-    // A leaf cannot add a scope, a right or a field its parent lacks.
-    let root = chain.0[0].clone();
-    let widen = |change: &dyn Fn(&mut ResourceGrant)| {
-        let mut leaf = Capability {
-            subject: node.public_key(),
-            kind: PrincipalKind::Node,
-            delegations: 0,
-            extension: Extension::new(Extended {
-                authors: Some(AuthorRange::new(1, 1).unwrap()),
-                node: Some(rocky_credentials::PeerId::of(node.public_key())),
-                ..Default::default()
-            })
-            .expect("node binding"),
-            ..root.capability.clone()
-        };
-        change(&mut leaf.grants[0]);
-        CredentialChain(vec![
-            root.clone(),
-            SignedCapability::sign(leaf, &user).expect("leaf"),
-        ])
-    };
-    let other = domain.resources[1].scope;
-    assert!(
-        domain
-            .verify(&widen(&|grant| grant.scope = other), &node, &policy, NOW)
-            .is_err()
-    );
-    assert!(
-        domain
-            .verify(
-                &widen(&|grant| {
-                    grant.rights.insert(Right::PublishSchema);
-                }),
-                &node,
-                &policy,
-                NOW
-            )
-            .is_err()
-    );
-    // Narrowing is delegation: fewer rights on selected rows.
-    let narrowed = widen(&|grant| {
-        grant.rights = [Right::Read].into();
-        grant.rows = RowSelection::Only([[1; 32]].into());
-    });
-    let grants = domain
-        .verify(&narrowed, &node, &policy, NOW)
-        .expect("narrowed");
-    assert_eq!(rights(&grants), [Right::Read].into());
+    // A certificate holds no grants of its own: its node holds its
+    // identity's. One naming any is refused.
+    let mut leaf = chain.0[1].capability.clone();
+    leaf.grants = chain.0[0].capability.grants.clone();
+    assert!(SignedCapability::sign(leaf, &user).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -391,8 +349,8 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     let profile = Profile::Reader {
         scopes: Domain::names(&["notes"]),
     };
-    let mut invitation = Invitation::open(&token, profile.clone(), NOW + 600);
-    assert_eq!(invitation.profile, profile);
+    let mut invitation = Invitation::open(&token, Some(profile.clone()), NOW + 600);
+    assert_eq!(invitation.profile, Some(profile.clone()));
     assert!(invitation.is_open(&token, NOW));
     assert!(invitation.is_open(&token, NOW + 600));
     assert!(!invitation.is_open(&token, NOW + 601));
@@ -401,8 +359,11 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
         PairRequest::new(
             token,
             format!("{nonce:02x}").repeat(32),
-            PrivateKey::new().public_key(),
-            PrivateKey::new().public_key(),
+            (
+                PrivateKey::new().public_key(),
+                PrivateKey::new().public_key(),
+            ),
+            "laptop".into(),
             [3; 32],
         )
     };
@@ -434,7 +395,7 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     assert!(open_enrollment(&[6; 32], &first, &sealed).is_err());
     assert!(open_enrollment(&token, &request(&token, 1), &sealed).is_err());
     // Ten wrong tokens lock the invitation, also for the right one.
-    let mut locked = Invitation::open(&token, profile, NOW + 600);
+    let mut locked = Invitation::open(&token, Some(profile), NOW + 600);
     for attempt in 0..10 {
         assert!(
             locked
@@ -447,15 +408,18 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_joining_issuers_routes_are_bound_by_its_proof() {
+fn a_joining_devices_routes_and_name_are_bound_by_its_proof() {
     let token = [5; 32];
-    let mut invitation = Invitation::open(&token, Profile::Issuer, NOW + 600);
+    let mut invitation = Invitation::open(&token, None, NOW + 600);
     let routes = vec![("tcp".to_owned(), "127.0.0.1:4000".to_owned())];
     let request = PairRequest::new(
         &token,
         "01".repeat(32),
-        PrivateKey::new().public_key(),
-        PrivateKey::new().public_key(),
+        (
+            PrivateKey::new().public_key(),
+            PrivateKey::new().public_key(),
+        ),
+        "laptop".into(),
         [3; 32],
     )
     .with_routes(&token, routes.clone());
@@ -464,6 +428,9 @@ fn a_joining_issuers_routes_are_bound_by_its_proof() {
     let mut moved = round.clone();
     moved.routes[0].1 = "127.0.0.1:4001".into();
     assert!(invitation.admit(&token, &moved, NOW).is_err());
+    let mut renamed = round.clone();
+    renamed.name = "phone".into();
+    assert!(invitation.admit(&token, &renamed, NOW).is_err());
     assert_eq!(
         invitation.admit(&token, &round, NOW).expect("admitted"),
         Admission::First
@@ -711,7 +678,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     assert_eq!(link.expires(), NOW + 30 * DAY);
     let chain = link
         .clone()
-        .complete(&delegate, node.public_key(), 12)
+        .complete(&delegate, node.public_key(), 1)
         .expect("chain");
     assert_eq!(chain.0.len(), 3);
     assert_eq!(
@@ -797,16 +764,21 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
-    let chains: Vec<_> = nodes
-        .iter()
-        .zip([100, 101])
-        .map(|(node, number)| {
-            prefix
-                .clone()
-                .complete(&identity, node.public_key(), number)
-                .unwrap()
-        })
-        .collect();
+    let first = prefix
+        .clone()
+        .certify(&identity, nodes[0].public_key(), 100)
+        .unwrap();
+    let second = prefix
+        .clone()
+        .certify_member(
+            &identity,
+            nodes[1].public_key(),
+            101,
+            1,
+            Some(first.certificate().unwrap().id().unwrap()),
+        )
+        .unwrap();
+    let chains = [first, second];
     for (index, chain) in chains.iter().enumerate() {
         let number = 100 + index as u32;
         for resource in &domain.resources {
@@ -862,8 +834,10 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
     let mut forged = chains[0].clone();
     let mut leaf = forged.0.pop().unwrap().capability;
     leaf.extension = Extension::new(Extended {
+        database: leaf.extended().unwrap().database,
         authors: Some(AuthorRange::new(200, 200).unwrap()),
         node: Some(rocky_credentials::PeerId::of(nodes[0].public_key())),
+        sequence: Some(0),
         ..Default::default()
     })
     .unwrap();
@@ -944,21 +918,20 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         origin: None,
         sequence: None,
         previous: None,
+        database: None,
     })
     .expect("extension");
     let widened = CredentialChain(vec![
         root.clone(),
         SignedCapability::sign(wide, &holder).expect("signed"),
     ])
-    .complete(&delegate, node.public_key(), 12)
+    .complete(&delegate, node.public_key(), 5)
     .expect("chain");
     assert!(verify(&widened).is_err());
     // A node link cannot carry a user extension.
     let mut leaf = chain.0[2].capability.clone();
     leaf.extension = narrowed.0[1].capability.extension.clone();
-    let mut tagged = chain.clone();
-    tagged.0[2] = SignedCapability::sign(leaf, &delegate).expect("signed");
-    assert!(verify(&tagged).is_err());
+    assert!(SignedCapability::sign(leaf, &delegate).is_err());
     // A later extension version is refused with a clear error.
     #[derive(serde::Serialize)]
     struct Later {
@@ -967,7 +940,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 11,
+        version: 12,
         authors: range,
         rotation: 9,
     })

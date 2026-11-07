@@ -62,7 +62,7 @@ impl Discovery {
 }
 /// The owner, or an issuer through its chain, signs discovery values.
 pub(crate) type Signer<'a> = (
-    &'a dyn rocky_credentials::IdentityProvider,
+    rocky_credentials::Signer<'a>,
     &'a rocky_credentials::CredentialChain,
 );
 pub(crate) fn create_root(vault: &Vault, signer: Signer<'_>, scope: Scope) -> Result<(), Failure> {
@@ -477,23 +477,26 @@ mod tests {
             &rocky_credentials::RootKey::generate(),
         )?;
         let av = a.vault(&store);
-        let publisher = PrivateKey::from_bytes(&av.get("identity")?);
+        let publisher = a.identity;
         let owner = a.issuer_links();
+        let node = PrivateKey::from_bytes(&av.get("node")?);
+        let credentials = a.credentials.clone();
         let old = a.discovery_topics(&av, now()?)?.0;
         let statement = Revocation {
             app: a.domain()?.manifest().app,
-            issuer: publisher.public_key(),
+            issuer: publisher,
             time: now()?,
-            nodes: [rocky_credentials::PeerId::of(
-                PrivateKey::new().public_key(),
-            )]
-            .into(),
-            identities: BTreeSet::new(),
+            nodes: BTreeSet::new(),
+            identities: [PrivateKey::new().public_key()].into(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
             recovery: None,
         };
-        let signed = SignedRevocation::sign(statement.clone(), &publisher, &owner)?;
+        let signed = SignedRevocation::sign(
+            statement.clone(),
+            rocky_credentials::Signer::node(&node, &credentials)?,
+            &owner,
+        )?;
         a.revocations.merge(
             &rocky_credentials::RevocationSet::try_from(vec![signed])?,
             a.publisher,
@@ -502,7 +505,10 @@ mod tests {
         )?;
         mint_value(
             &av,
-            (&publisher, &owner),
+            (
+                rocky_credentials::Signer::node(&node, &credentials)?,
+                &owner,
+            ),
             a.domain()?.scope,
             &a.revocations,
             &statement,

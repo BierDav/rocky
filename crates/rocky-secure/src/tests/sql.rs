@@ -209,17 +209,31 @@ impl Typed {
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: grants.clone(),
+            grants: if kind == PrincipalKind::Node {
+                Vec::new()
+            } else {
+                grants.clone()
+            },
             not_before: crate::tests::lifetime().0,
-            expires,
+            expires: if kind == PrincipalKind::Node {
+                rocky_credentials::NEVER
+            } else {
+                expires
+            },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {
                     rocky_credentials::AuthorRange::new(number, number).unwrap()
                 } else {
-                    rocky_credentials::AuthorRange::ALL
+                    rocky_credentials::AuthorRange::new(number, rocky_credentials::MAX_AUTHOR)
+                        .unwrap()
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                database: Some(rocky_credentials::DatabaseContext {
+                    publisher: self.publisher.public_key(),
+                    scope: self.items.domain,
+                }),
+                sequence: (kind == PrincipalKind::Node).then_some(0),
                 ..Default::default()
             })
             .unwrap(),
@@ -1882,6 +1896,27 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
+    let initial = prefix
+        .clone()
+        .certify(&principal, nodes[0].public_key(), 100)
+        .unwrap();
+    let next = prefix
+        .clone()
+        .certify_member(
+            &principal,
+            nodes[1].public_key(),
+            101,
+            1,
+            Some(initial.certificate().unwrap().id().unwrap()),
+        )
+        .unwrap();
+    let mut membership = fixture.policy.clone();
+    for chain in [&initial, &next] {
+        membership
+            .link(chain.certificate().unwrap().clone())
+            .unwrap();
+    }
+
     let open = async |name: &str, index: usize, number: u32| {
         let replica = EncryptedReplica::open(
             directory.path().join(name),
@@ -1889,11 +1924,21 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
             SecureConfig {
                 publisher: fixture.publisher.public_key(),
                 manifest: fixture.manifest.clone(),
-                revocations: fixture.policy.clone(),
+                revocations: membership.clone(),
                 node: nodes[index].clone(),
                 credentials: prefix
                     .clone()
-                    .complete(&principal, nodes[index].public_key(), number)
+                    .certify_member(
+                        &principal,
+                        nodes[index].public_key(),
+                        number,
+                        u64::from(number - 100),
+                        match number {
+                            100 => None,
+                            101 => Some(initial.certificate().unwrap().id().unwrap()),
+                            _ => Some(next.certificate().unwrap().id().unwrap()),
+                        },
+                    )
                     .unwrap(),
                 keys: [fixture.items, fixture.salaries]
                     .into_iter()
@@ -2013,7 +2058,13 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
             .contains("different author numbers")
     );
     let changed = prefix
-        .complete(&principal, nodes[0].public_key(), 102)
+        .certify_member(
+            &principal,
+            nodes[0].public_key(),
+            102,
+            2,
+            Some(next.certificate().unwrap().id().unwrap()),
+        )
         .unwrap();
     assert!(
         first
@@ -2167,4 +2218,156 @@ async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
     )
     .0;
     assert!(opened.is_ok(), "{:?}", opened.err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_direct_replayed_import_blocks_the_full_audit_until_its_switch() {
+    let f = Typed::new();
+    let directory = Scratch::new().await;
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let grants = vec![f.writer(f.items, "items")];
+    let a = f
+        .open(
+            &directory.path().join("audit-a.db"),
+            &a_key,
+            grants.clone(),
+            &[f.items],
+        )
+        .await;
+    let writer = sql(&a, &[f.items]).await;
+    insert(
+        &writer,
+        "INSERT INTO items(key,title,done) VALUES('a','row',0)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    drop(writer);
+    let statements = seal_and_compact(&a, &f.publisher, f.domain).await;
+    let checkpoint = a.checkpoint(f.items).await.unwrap();
+    let id = checkpoint.id().unwrap();
+    let b = f
+        .open(
+            &directory.path().join("audit-b.db"),
+            &b_key,
+            grants,
+            &[f.items],
+        )
+        .await;
+    b.publish_tip_statements(&statements).await.unwrap();
+    b.follow_bookmark(f.domain, "main").await.unwrap();
+    let credentials = b
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
+    a.admit_peer(b_key.public_key(), &credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    b.begin_rebootstrap(checkpoint).await.unwrap();
+    let page = a
+        .checkpoint_page(
+            b_key.public_key(),
+            &credentials,
+            f.items,
+            id,
+            None,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+    assert!(page.next.is_none());
+    b.stage_checkpoint_page(page).await.unwrap();
+    assert!(matches!(b.audit(f.items).await, Err(Error::Blocked(_))));
+    b.finish_rebootstrap(f.items).await.unwrap();
+    assert_eq!(b.audit(f.items).await.unwrap().rows, 1);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn checkpoint_pages_reserve_escrow_proofs_before_filling_the_package() {
+    use rocky_credentials::{RootEscrow, RootKey, escrow_tag};
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
+    let a = t
+        .open(&dir.path().join("a.db"), &alice, t.full(), &[t.items])
+        .await;
+    let b = t
+        .open(&dir.path().join("b.db"), &bob, t.full(), &[t.items])
+        .await;
+    let b_credentials = b
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
+    let writer = sql(&a, &[t.items]).await;
+    for index in 1..=8 {
+        insert(
+            &writer,
+            "INSERT INTO items(key,title,done) VALUES(?,?,0)",
+            vec![text(&index.to_string()), text(&"x".repeat(12_000))],
+        )
+        .await
+        .unwrap();
+    }
+    let epoch = *a.key_epochs(t.items).await.last().unwrap();
+    let root = RootKey::generate();
+    let payload = vec![17; rocky_credentials::MAX_ESCROW_PAYLOAD];
+    a.keep_escrow(vec![(
+        Some((t.items, epoch)),
+        RootEscrow::seal(
+            root.public_key(),
+            escrow_tag(root.public_key(), &[17; 32]),
+            &payload,
+        )
+        .unwrap(),
+    )])
+    .await
+    .unwrap();
+    let signed = compacted_base(&a, &t.publisher, t.items).await;
+    exchange_graphs(&a, &b, t.items.domain).await;
+    a.admit_peer(bob.public_key(), &b_credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let quota = MAX_SECURE_FRAME / 2;
+    let mut after = None;
+    loop {
+        let page = a
+            .checkpoint_page(
+                bob.public_key(),
+                &b_credentials,
+                t.items,
+                signed.id().unwrap(),
+                after,
+                quota,
+            )
+            .await
+            .unwrap();
+        assert!(crate::encode(&page).unwrap().len() <= quota);
+        assert!(page.rows.open(&[31; 32]).unwrap().len() <= rocky_core::MAX_PAYLOAD_BYTES);
+        assert!(page.next.is_none() || page.next != after);
+        after = page.next;
+        b.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    b.finish_rebootstrap(t.items).await.unwrap();
+    let reader = sql(&b, &[t.items]).await;
+    assert_eq!(
+        select(
+            &reader,
+            "SELECT count(*) FROM items WHERE length(title)=12000"
+        )
+        .await,
+        vec![vec![SqlValue::Integer(8)]]
+    );
+    let escrow = b.escrow_of(&[(t.items, epoch)].into()).await.unwrap();
+    assert_eq!(escrow.len(), 1);
+    assert_eq!(escrow[0].record().open(&root).unwrap(), payload);
 }

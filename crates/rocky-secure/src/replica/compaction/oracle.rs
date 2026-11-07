@@ -149,6 +149,27 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<(), Error> {
+        // A direct import exposes a verified prefix, not a complete replay.
+        // Refuse the full audit until its atomic switch finishes.
+        if self.direct.contains(&scope) && self.replayed_scope(scope) {
+            let id = self
+                .find_scope_id(scope)
+                .await?
+                .ok_or_else(|| Error::Corrupt("direct import scope".into()))?;
+            let staging = self
+                .staging(id)
+                .await?
+                .ok_or_else(|| Error::Corrupt("direct import staging".into()))?;
+            return Err(Error::Blocked(vec![rocky_core::Blocker {
+                scope: rocky_core::scope_label(&scope),
+                kind: rocky_core::BlockerKind::StagedImport {
+                    sealed: staging.signed.statement.seal.is_some(),
+                    pages_complete: staging.complete,
+                },
+                clears_by: rocky_core::ClearsBy::AnyPeer,
+                since: None,
+            }]));
+        }
         // An interrupted installation has an explicitly partial typed image;
         // verify_tail still checks all of its staged canonical row transforms.
         if self.schema_switching().await? || self.plan_status().await?.is_some() {

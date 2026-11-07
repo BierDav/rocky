@@ -34,9 +34,14 @@ const FIXED: &str = r#"{"application":"shopping","version":3,"format":6,"tables"
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
 
+fn reopen(options: Open<'_>) -> Result<Device, Failure> {
+    let signer = common::external_identity(options.directory);
+    Device::new(Database::open(options)?).map(|device| device.with_identity(signer))
+}
+
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
-        identity: None,
+        identity: Some(common::external_identity(directory)),
         directory,
         schema,
         secrets: None,
@@ -117,7 +122,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
             .contains("migration to version 2 failed at statement 2"),
         "{failed}"
     );
-    let a = Device::new(Database::open(open(root.path(), common::SCHEMA, None))?)?;
+    let a = reopen(open(root.path(), common::SCHEMA, None))?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -126,7 +131,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     a.close().await;
 
     // The fixed release runs the migration again, once.
-    let a = Device::new(Database::open(open(root.path(), FIXED, None))?)?;
+    let a = reopen(open(root.path(), FIXED, None))?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 3, "{status}");
     assert_eq!(
@@ -143,7 +148,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     a.close().await;
 
     // Its publication is recorded with its rows: reopening repeats nothing.
-    let a = Device::new(Database::open(open(root.path(), FIXED, None))?)?;
+    let a = reopen(open(root.path(), FIXED, None))?;
     assert_eq!(rows(&a, POSITIONS).await, positions);
     assert_eq!(rows(&a, TAGS).await, tags);
     assert_eq!(
@@ -175,12 +180,12 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
 
     // Apart, each signs the generation and migrates what it holds.
     for directory in [&a_dir, &b_dir] {
-        let device = Device::new(Database::open(open(directory, POSITIONED, None))?)?;
+        let device = reopen(open(directory, POSITIONED, None))?;
         assert_eq!(generation(&device).await["current"]["schema"], 2);
         device.close().await;
     }
-    let a = Device::new(Database::open(open(&a_dir, POSITIONED, network("a")))?)?;
-    let b = Device::new(Database::open(open(&b_dir, POSITIONED, network("b")))?)?;
+    let a = reopen(open(&a_dir, POSITIONED, network("a")))?;
+    let b = reopen(open(&b_dir, POSITIONED, network("b")))?;
     sync(&b).await;
     sync(&a).await;
     sync(&b).await;
@@ -262,11 +267,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     a.close().await;
 
     // Holding no key of that list, `a` does not sign.
-    let a = Device::new(Database::open(open(
-        &a_dir,
-        POSITIONED_LISTS,
-        network("a"),
-    ))?)?;
+    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "ahead");
@@ -288,11 +289,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         sync(&a).await;
     }
     a.close().await;
-    let a = Device::new(Database::open(open(
-        &a_dir,
-        POSITIONED_LISTS,
-        network("a"),
-    ))?)?;
+    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists ORDER BY title").await,
@@ -303,11 +300,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     );
     // An explicit schema open installs the signed generation before sync.
     b.close().await;
-    let b = Device::new(Database::open(open(
-        &b_dir,
-        POSITIONED_LISTS,
-        network("b"),
-    ))?)?;
+    let b = reopen(open(&b_dir, POSITIONED_LISTS, network("b")))?;
     sync(&b).await;
     sync(&b).await;
     assert_eq!(
@@ -413,19 +406,19 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     } else {
         seed.clone()
     };
-    let a = Device::new(Database::open(open(&a_dir, &seed, None))?)?;
+    let a = reopen(open(&a_dir, &seed, None))?;
     let seeded = clock.elapsed();
     eprintln!("STAGE rows={large} seed_open={seeded:?}");
     a.close().await;
     let between = size(&a_dir)?;
     if multi_step {
         let tagged_schema = TAGGED.replace("100000", &large.to_string());
-        let a = Device::new(Database::open(open(&a_dir, &tagged_schema, None))?)?;
+        let a = reopen(open(&a_dir, &tagged_schema, None))?;
         assert_eq!(generation(&a).await["current"]["schema"], 3);
         a.close().await;
     }
     let clock = std::time::Instant::now();
-    let a = Device::new(Database::open(open(&a_dir, &fill, network("a")))?)?;
+    let a = reopen(open(&a_dir, &fill, network("a")))?;
     let filled = clock.elapsed();
     let open_stage = if multi_step {
         "fill_open"
@@ -552,7 +545,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     // The returning member pulls what it lacks.
     let member_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
-    let b = Device::new(Database::open(open(&b_dir, &fill, network("b")))?)?;
+    let b = reopen(open(&b_dir, &fill, network("b")))?;
     let member_open = clock.elapsed();
     eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
@@ -635,7 +628,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
             .ok_or("columns")?
             .push(json!({"name":"later", "type":"text"}));
         let later = later.to_string();
-        let a = Device::new(Database::open(open(&a_dir, &later, None))?)?;
+        let a = reopen(open(&a_dir, &later, None))?;
         assert_eq!(
             generation(&a).await["migration"],
             Value::Null,
@@ -667,14 +660,10 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     a.close().await;
     // The issuer migrates; the member follows `main` onto the migration's
     // line, where it writes under another node of its identity.
-    let a = Device::new(Database::open(open(
-        &a_dir,
-        POSITIONED_LISTS,
-        network("a"),
-    ))?)?;
+    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
     // The member's application stays at the first version.
     b.close().await;
-    let b = Device::new(Database::open(open(&b_dir, LISTS, network("b")))?)?;
+    let b = reopen(open(&b_dir, LISTS, network("b")))?;
     introduce(&a, &b).await;
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -695,8 +684,6 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
 
 struct DescriptorIdentity {
     provider: rocky_sdk::FileIdentityProvider,
-    database: std::path::PathBuf,
-    refuse: std::sync::atomic::AtomicBool,
     attempts: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 impl rocky_sdk::IdentityProvider for DescriptorIdentity {
@@ -718,29 +705,21 @@ impl rocky_sdk::IdentityProvider for DescriptorIdentity {
     ) -> Result<rocky_sdk::credentials::Signature, rocky_sdk::credentials::Error> {
         let label = b"rocky.migration-publication.v1";
         if message.windows(label.len()).any(|part| part == label) {
-            // An external provider can access the file: no replica SQL transaction is held.
-            let db = rusqlite::Connection::open(&self.database).unwrap();
-            db.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
-                .expect("identity called in a write transaction");
             self.attempts.lock().unwrap().push(message.to_vec());
-            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(rocky_sdk::credentials::Error::Provider(
-                    "signer unavailable".into(),
-                ));
-            }
+            return Err(rocky_sdk::credentials::Error::Provider(
+                "signer unavailable".into(),
+            ));
         }
         self.provider.sign(purpose, message)
     }
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn an_external_identity_resumes_the_exact_committed_descriptor_without_rerunning_sql()
--> Result<(), Failure> {
+async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() -> Result<(), Failure>
+{
     let root = common::identity::small_directory()?;
     let directory = root.path().join("database");
     let identity = Arc::new(DescriptorIdentity {
         provider: rocky_sdk::FileIdentityProvider::open(root.path().join("identity"))?,
-        database: directory.join("rocky.sqlite"),
-        refuse: std::sync::atomic::AtomicBool::new(false),
         attempts: Default::default(),
     });
     let options = |schema| Open {
@@ -751,40 +730,19 @@ async fn an_external_identity_resumes_the_exact_committed_descriptor_without_rer
     a.follow_main_migrating().await;
     a.add(1, "once").await;
     a.close().await;
-    identity
-        .refuse
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let error = Database::open(options(POSITIONED))
-        .err()
-        .ok_or("unavailable signer released the migration")?;
-    assert!(error.to_string().contains("signer unavailable"), "{error}");
-    {
-        let db = rusqlite::Connection::open(&identity.database)?;
-        let state: String = db.query_row(
-            "SELECT state FROM secure_staged_schema WHERE state!='released'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(state, "committed");
-        let public: i64 = db.query_row(
-            "SELECT count(*) FROM secure_tip_statements WHERE staged=1",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(public, 3);
-    }
-    identity
-        .refuse
-        .store(false, std::sync::atomic::Ordering::SeqCst);
     let a = Device::new(Database::open(options(POSITIONED))?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
         json!([[text("once"), text("once")]])
     );
     a.close().await;
-    let attempts = identity.attempts.lock().unwrap();
-    assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0], attempts[1]);
+    let a = Device::new(Database::open(options(POSITIONED))?)?;
+    assert_eq!(
+        rows(&a, POSITIONS).await,
+        json!([[text("once"), text("once")]])
+    );
+    a.close().await;
+    assert!(identity.attempts.lock().unwrap().is_empty());
     Ok(())
 }
 
@@ -798,7 +756,7 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     a.follow_main_migrating().await;
     a.add(1, "inherited").await;
     a.close().await;
-    let a = Device::new(Database::open(open(&source, POSITIONED, network("a")))?)?;
+    let a = reopen(open(&source, POSITIONED, network("a")))?;
     let invitation = a.invite().await;
     let b = Device::new(Database::join(
         open(&root.path().join("member"), POSITIONED, network("b")),
@@ -861,27 +819,19 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     let a = Device::create(&source, None)?;
     a.follow_main_migrating().await;
     a.close().await;
-    let a = Device::new(Database::open(open(
-        &source,
-        &SEEDED.replace("100000", "8"),
-        None,
-    ))?)?;
+    let a = reopen(open(&source, &SEEDED.replace("100000", "8"), None))?;
     a.close().await;
-    let a = Device::new(Database::open(open(
-        &source,
-        &TAGGED.replace("100000", "8"),
-        None,
-    ))?)?;
+    let a = reopen(open(&source, &TAGGED.replace("100000", "8"), None))?;
     a.ok(json!({"type":"tips","action":"compact","keep":0}))
         .await;
     a.close().await;
     let hub = Arc::new(Hub::default());
     let schema = FILLED.replace("100000", "8");
-    let a = Device::new(Database::open(open(
+    let a = reopen(open(
         &source,
         &schema,
         Some(Network::Owned(hub.connector("a"))),
-    ))?)?;
+    ))?;
     let c = Device::new(Database::join(
         open(
             &root.path().join("member"),

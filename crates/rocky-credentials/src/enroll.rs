@@ -2,9 +2,10 @@
 //! bytes in, bytes out. Enrollment is optional plumbing over issuance; a
 //! device may equally install credentials supplied another way.
 use crate::{
-    Authority, Capability, CredentialChain, Error, IdentityProvider, MAX_CREDENTIAL_BYTES,
-    MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile, PublicKey, Purpose,
-    RevocationSet, SignedCapability, decode_bounded, denied, encode, signing_bytes,
+    Attestation, Authority, Capability, CredentialChain, Error, IdentityProvider,
+    MAX_CREDENTIAL_BYTES, MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile,
+    PublicKey, Purpose, RevocationSet, SignedCapability, decode_bounded, denied, encode,
+    signing_bytes,
 };
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
@@ -57,8 +58,9 @@ pub struct Invitation {
     attempts: u8,
     /// The pairing nonce that consumed it; that device may retry.
     consumed: Option<String>,
-    /// What the invited device is granted.
-    pub profile: Profile,
+    /// What the invited device is granted; `None` when an issuer admits
+    /// each requesting device with a profile of its choice.
+    pub profile: Option<Profile>,
 }
 /// How a verified pairing request relates to its invitation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +79,7 @@ impl Invitation {
             && commitment("rocky.credentials.invitation.v1", token) == self.digest
     }
 
-    pub fn open(token: &[u8; 32], profile: Profile, expires: u64) -> Self {
+    pub fn open(token: &[u8; 32], profile: Option<Profile>, expires: u64) -> Self {
         Self {
             digest: commitment("rocky.credentials.invitation.v1", token),
             expires,
@@ -121,7 +123,8 @@ impl Invitation {
 }
 
 /// What a joining node sends: its node key, the identity the invitation
-/// grants to, a retry nonce and proof that it holds the invitation token.
+/// grants to, its self-reported name, a retry nonce and proof that it holds
+/// the invitation token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairRequest {
     pub version: u32,
@@ -130,6 +133,9 @@ pub struct PairRequest {
     pub node: PublicKey,
     /// The identity the invitation grants to.
     pub user: PublicKey,
+    /// What the device calls itself, for the issuer that admits it. Not
+    /// verified by anyone.
+    pub name: String,
     proof: Commitment,
     /// What the device expects to join, such as its application schema.
     pub context: Commitment,
@@ -139,12 +145,12 @@ pub struct PairRequest {
     pub routes: Vec<(String, String)>,
 }
 impl PairRequest {
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     pub fn new(
         token: &[u8; 32],
         nonce: String,
-        node: PublicKey,
-        user: PublicKey,
+        (node, user): (PublicKey, PublicKey),
+        name: String,
         context: Commitment,
     ) -> Self {
         let mut request = Self {
@@ -152,6 +158,7 @@ impl PairRequest {
             nonce,
             node,
             user,
+            name,
             proof: [0; 32],
             context,
             routes: Vec::new(),
@@ -174,18 +181,19 @@ impl PairRequest {
             &self.context,
         ]
         .concat();
-        // A request without routes keeps the proof of earlier versions.
-        for (transport, address) in &self.routes {
-            for part in [transport, address] {
-                bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
-                bound.extend_from_slice(part.as_bytes());
-            }
+        for part in std::iter::once(&self.name).chain(
+            self.routes
+                .iter()
+                .flat_map(|(transport, address)| [transport, address]),
+        ) {
+            bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bound.extend_from_slice(part.as_bytes());
         }
-        commitment("rocky.credentials.pair-proof.v3", &bound)
+        commitment("rocky.credentials.pair-proof.v4", &bound)
     }
     fn aad(&self) -> Vec<u8> {
         [
-            b"rocky.credentials.pairing.v3".as_slice(),
+            b"rocky.credentials.pairing.v4".as_slice(),
             self.nonce.as_bytes(),
             self.node.as_bytes(),
             self.user.as_bytes(),
@@ -194,7 +202,7 @@ impl PairRequest {
     }
     fn key(&self, token: &[u8; 32]) -> Commitment {
         commitment(
-            "rocky.credentials.pair-key.v3",
+            "rocky.credentials.pair-key.v4",
             &[token.as_slice(), self.nonce.as_bytes()].concat(),
         )
     }
@@ -318,9 +326,10 @@ impl RenewRequest {
         }
         let identity = self.chain.provenance(publisher, self.node)?;
         // The identity's link follows the publisher or an issuer link.
-        let granted = match self.chain.0.len().checked_sub(3) {
+        let capabilities = self.chain.capabilities();
+        let granted = match capabilities.0.len().checked_sub(2) {
             None => true,
-            Some(parent) => self.chain.0[parent].capability.extended()?.issues,
+            Some(parent) => capabilities.0[parent].capability.extended()?.issues,
         };
         if !granted {
             return Err(denied("a delegated credential is renewed by its delegator"));
@@ -343,8 +352,8 @@ impl RenewRequest {
 
 /// An issuer's answer: a renewed identity capability with the issuer links
 /// it follows, the revocations the issuer holds and a payload sealed to the
-/// requesting node, such as its reader keys. The issuer's identity signs the
-/// whole answer.
+/// requesting node, such as its reader keys. The issuer's node signs the
+/// whole answer under its certificate; the root signs with its key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Renewal {
     pub capability: SignedCapability,
@@ -354,7 +363,7 @@ pub struct Renewal {
     pub revocations: RevocationSet,
     exchange: [u8; 32],
     sealed: Vec<u8>,
-    signature: Signature,
+    attestation: Attestation,
 }
 impl Renewal {
     fn key(
@@ -374,21 +383,35 @@ impl Renewal {
         ))
     }
     fn body(&self, request: &RenewRequest) -> Result<Vec<u8>, Error> {
+        Self::body_of(
+            request,
+            &self.capability,
+            &self.issuers,
+            &self.revocations,
+            self.exchange,
+            &self.sealed,
+        )
+    }
+    fn body_of(
+        request: &RenewRequest,
+        capability: &SignedCapability,
+        issuers: &CredentialChain,
+        revocations: &RevocationSet,
+        exchange: [u8; 32],
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.renewal.v4",
+            "rocky.credentials.renewal.v5",
             &(
                 request.id()?,
-                self.capability.id()?,
+                capability.id()?,
+                commitment("rocky.credentials.renewal-issuers.v5", &encode(issuers)?),
                 commitment(
-                    "rocky.credentials.renewal-issuers.v4",
-                    &encode(&self.issuers)?,
+                    "rocky.credentials.renewal-revocations.v5",
+                    &encode(revocations)?,
                 ),
-                commitment(
-                    "rocky.credentials.renewal-revocations.v4",
-                    &encode(&self.revocations)?,
-                ),
-                self.exchange,
-                commitment("rocky.credentials.renewal-payload.v4", &self.sealed),
+                exchange,
+                commitment("rocky.credentials.renewal-payload.v5", sealed),
             ),
         )
     }
@@ -422,12 +445,10 @@ impl Renewal {
             .verify_selectors(publisher, request.node, &revocations, time)?;
         let capability = request
             .chain
+            .capabilities()
             .0
-            .iter()
-            .rev()
-            .nth(1)
-            .ok_or_else(|| denied("empty epoch request chain"))?
-            .clone();
+            .pop()
+            .ok_or_else(|| denied("empty epoch request chain"))?;
         Self::seal_capability(authority, request, capability, revocations, payload)
     }
     fn seal_capability(
@@ -444,19 +465,22 @@ impl Renewal {
             b"rocky.credentials.renewal.v4",
             payload,
         )?;
-        let mut renewal = Self {
+        let body = Self::body_of(
+            request,
+            &capability,
+            authority.prefix(),
+            &revocations,
+            exchange,
+            &sealed,
+        )?;
+        Ok(Self {
             capability,
             issuers: authority.prefix().clone(),
             revocations,
             exchange,
             sealed,
-            // Replaced below; a signature has no neutral value.
-            signature: PrivateKey::new().sign(&[]),
-        };
-        renewal.signature = authority
-            .identity
-            .sign(Purpose::Statement, &renewal.body(request)?)?;
-        Ok(renewal)
+            attestation: authority.signer.attest(Purpose::Statement, &body)?,
+        })
     }
     /// The identity that answered: the owner or an issuer of `publisher`.
     pub fn signer(&self, publisher: PublicKey) -> Result<PublicKey, Error> {
@@ -466,8 +490,8 @@ impl Renewal {
             self.issuers.issuer(publisher, None)
         }
     }
-    /// Checks that the owner or an issuer of the pinned `publisher` answered
-    /// exactly `request`, and opens the payload. The renewed chain is
+    /// Checks that the owner's key or an issuer's node of the pinned
+    /// `publisher` answered exactly `request`, and opens the payload. The renewed chain is
     /// `chain`; its receiver verifies it under its revocations.
     pub fn open(
         &self,
@@ -478,7 +502,12 @@ impl Renewal {
         let signer = self
             .signer(publisher)
             .map_err(|_| denied("renewal is not signed by the domain's owner or an issuer"))?;
-        if !signer.verify(&self.body(request)?, &self.signature) {
+        if self.issuers.0.is_empty() != self.attestation.certificate().is_none()
+            || self
+                .attestation
+                .verify(signer, &self.body(request)?)
+                .is_err()
+        {
             return Err(denied(
                 "renewal is not signed by the domain's owner or an issuer",
             ));
@@ -515,6 +544,7 @@ pub struct IdentityRequest {
     version: u32,
     /// The answering node's key: a request is not replayable to another.
     audience: PublicKey,
+    database: crate::DatabaseContext,
     pub identity: PublicKey,
     pub node: PublicKey,
     time: u64,
@@ -526,19 +556,21 @@ pub struct IdentityRequest {
 struct IdentityBody<'a> {
     version: u32,
     audience: &'a PublicKey,
+    database: crate::DatabaseContext,
     identity: &'a PublicKey,
     node: &'a PublicKey,
     time: u64,
     exchange: &'a [u8; 32],
 }
 impl IdentityRequest {
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     fn body(&self) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.identity-request.v1",
+            "rocky.credentials.identity-request.v2",
             &IdentityBody {
                 version: self.version,
                 audience: &self.audience,
+                database: self.database,
                 identity: &self.identity,
                 node: &self.node,
                 time: self.time,
@@ -551,11 +583,13 @@ impl IdentityRequest {
         node: &PrivateKey,
         audience: PublicKey,
         time: u64,
+        database: crate::DatabaseContext,
     ) -> Result<(Self, Exchange), Error> {
         let (secret, exchange) = Exchange::new();
         let mut request = Self {
             version: Self::VERSION,
             audience,
+            database,
             identity: identity.public_key()?,
             node: node.public_key(),
             time,
@@ -576,9 +610,11 @@ impl IdentityRequest {
         audience: PublicKey,
         identity: PublicKey,
         (time, skew): (u64, u64),
+        database: crate::DatabaseContext,
     ) -> Result<(), Error> {
         let body = self.body()?;
         if self.version != Self::VERSION
+            || self.database != database
             || self.audience != audience
             || self.identity != identity
             || self.node == identity
@@ -592,13 +628,13 @@ impl IdentityRequest {
     }
     fn id(&self) -> Result<Commitment, Error> {
         Ok(commitment(
-            "rocky.credentials.identity-request.id.v1",
+            "rocky.credentials.identity-request.id.v2",
             &encode(self)?,
         ))
     }
     fn key(&self, exchange: &[u8; 32], shared: &[u8; 32]) -> Result<Commitment, Error> {
         Ok(commitment(
-            "rocky.credentials.identity-key.v1",
+            "rocky.credentials.identity-key.v2",
             &[shared.as_slice(), &self.exchange, exchange, &self.id()?].concat(),
         ))
     }
@@ -609,7 +645,7 @@ impl IdentityRequest {
         Ok(IdentityAnswer {
             sealed: seal(
                 self.key(&exchange, &shared)?,
-                b"rocky.credentials.identity-answer.v1",
+                b"rocky.credentials.identity-answer.v2",
                 payload,
             )?,
             exchange,
@@ -633,7 +669,7 @@ impl IdentityAnswer {
         let shared = secret.shared(&self.exchange)?;
         open(
             request.key(&self.exchange, &shared)?,
-            b"rocky.credentials.identity-answer.v1",
+            b"rocky.credentials.identity-answer.v2",
             &self.sealed,
         )
     }

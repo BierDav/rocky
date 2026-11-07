@@ -8,6 +8,7 @@ mod discovery;
 mod health;
 mod held;
 mod live_links;
+mod membership;
 mod mesh;
 mod partition;
 mod recovery;
@@ -594,10 +595,8 @@ impl Node {
             return Ok(reader.clone());
         }
         *cached = None;
-        let session = self
-            .replica
-            .session(self.app_scopes().into_iter().collect())
-            .await?;
+        let scopes = self.app_scopes();
+        let session = self.replica.session(scopes.into_iter().collect()).await?;
         let sql = Arc::new(session.sql(SqlOptions::default()).await?);
         let reader = Reader { session, sql };
         *cached = Some(reader.clone());
@@ -820,11 +819,11 @@ impl Node {
         let transport = attached.as_ref().map(|link| &*link.transport);
         let work = async {
             match kind {
-                "pairing" => {
-                    // There is no default grant: the issuer names a profile.
-                    let profile: Profile = serde_json::from_value(request["profile"].clone())
-                        .map_err(|_| {
-                            refused("pairing needs a grant profile: reader, writer or issuer")
+                "invitation" => {
+                    // Without a profile the issuer admits each device.
+                    let profile: Option<Profile> =
+                        serde_json::from_value(request["profile"].clone()).map_err(|_| {
+                            refused("an invitation's grant profile is reader, writer or issuer")
                         })?;
                     let label: Option<Vec<u8>> = request
                         .get("label")
@@ -836,19 +835,23 @@ impl Node {
                     {
                         return Err(refused("invitation label exceeds 256 bytes"));
                     }
-                    let transport = transport.ok_or(ServiceError::NetworkRequired("pairing"))?;
+                    let transport =
+                        transport.ok_or(ServiceError::NetworkRequired("an invitation"))?;
                     let registry = self.registry().await?;
-                    let mut settings = self.settings.lock().await;
-                    let (uri, expires) = settings
-                        .invite(
-                            &self.path,
-                            &self.vault,
-                            transport,
-                            (profile.clone(), label),
-                            &registry,
-                        )
-                        .await
-                        .map_err(named)?;
+                    let (uri, expires, notes) = {
+                        let mut settings = self.settings.lock().await;
+                        settings
+                            .invite(
+                                &self.path,
+                                &self.vault,
+                                transport,
+                                (profile.clone(), label),
+                                &registry,
+                            )
+                            .await
+                            .map_err(named)?
+                    };
+                    self.note(&notes).await;
                     let sequence = self.activity.record(
                         "invitation_created",
                         json!({"profile": profile, "expires": expires.to_string()}),
@@ -938,11 +941,11 @@ impl Node {
                     .iter()
                     .find(|(_, record)| {
                         record
-                            .device
+                            .admitted
                             .as_ref()
-                            .is_some_and(|device| device.invitation.as_deref() == Some(&id))
+                            .is_some_and(|admitted| admitted.invitation.as_deref() == Some(&id))
                     })
-                    .map(|(node, _)| node.to_hex());
+                    .map(|(identity, _)| identity.to_hex());
                 Ok(
                     json!({"id": id, "expires": expires.to_string(), "open": open, "enrolled": enrolled}),
                 )
@@ -1063,7 +1066,9 @@ impl Node {
                 Ok(json!({}))
             }
             "network" => Ok(serde_json::to_value(self.observed_network().await?)?),
-            "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
+            "invitation" | "renew" | "sync" | "contact" => {
+                self.networked(client, kind, request).await
+            }
             "sql" | "next_id" => {
                 let begins = kind == "sql"
                     && request["sql"]
@@ -1080,8 +1085,11 @@ impl Node {
                 }
             }
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
-            "devices" => self.devices().await,
-            "device_label" => self.label(request).await,
+            "identities" => self.identities().await,
+            "identity_label" => self.label(request).await,
+            "discovered" => self.discovered().await,
+            "admit" => self.admit(request).await,
+            "refuse" => self.refuse(request).await,
             "grant" | "delegate" => self.grant(request).await,
 
             "install" => self.install_supplied(client, request).await,
@@ -1196,8 +1204,15 @@ impl Node {
                 self.wake_sync();
                 Ok(json!({}))
             }
+            "unlink" => {
+                let node: PublicKey = request["node"]
+                    .as_str()
+                    .ok_or_else(|| refused("unlink names a node"))?
+                    .parse()?;
+                self.unlink(node).await
+            }
             "revoke" => {
-                // One node's certificate, or an identity and all its nodes.
+                // An identity and all its nodes; issuers never revoke a node.
                 let key = |name: &str| -> Result<Option<PublicKey>, Failure> {
                     match request[name].as_str() {
                         Some(key) => Ok(Some(key.parse()?)),
@@ -1224,33 +1239,33 @@ impl Node {
                     }
                     None => None,
                 };
-                let target = match (key("node")?, key("identity")?, trust) {
-                    (Some(node), None, None) => crate::enrollment::Revoke::Node(node),
-                    (None, Some(identity), None) | (None, None, Some(identity)) => {
+                if !request["node"].is_null() {
+                    return Err(refused(
+                        "an issuer revokes identities, never nodes: an identity unlinks its own",
+                    ));
+                }
+                let target = match (key("identity")?, trust) {
+                    (Some(identity), None) | (None, Some(identity)) => {
                         crate::enrollment::Revoke::Identity(identity)
                     }
                     _ => {
-                        return Err(refused(
-                            "revoke names one node, one identity or one trusted grant",
-                        ));
+                        return Err(refused("revoke names one identity or one trusted grant"));
                     }
                 };
                 // The root keeps what the revoked trusted nodes signed up
                 // to the heads this node holds, unless told to keep none.
                 let keep = request["cut"].as_bool().unwrap_or(true);
                 let revoked = self.revoke_with(target, root, keep).await?;
-                self.activity.record(
-                    "device_revoked",
-                    match target {
-                        crate::enrollment::Revoke::Node(node) => json!({"node": node.to_hex()}),
-                        crate::enrollment::Revoke::Identity(identity) => {
-                            json!({"identity": identity.to_hex()})
-                        }
-                        crate::enrollment::Revoke::Claims(link) => {
-                            json!({"claims": HEXLOWER.encode(&link)})
-                        }
-                    },
-                );
+                match target {
+                    crate::enrollment::Revoke::Identity(identity) => {
+                        self.activity
+                            .record("identity_revoked", json!({"identity": identity.to_hex()}));
+                    }
+                    crate::enrollment::Revoke::Claims(link) => {
+                        self.activity
+                            .record("claims_revoked", json!({"claims": HEXLOWER.encode(&link)}));
+                    }
+                }
                 Ok(revoked)
             }
             "logout" => {
@@ -1356,7 +1371,7 @@ impl Node {
     /// credentials it installs: signed by the publisher on an issuer, or
     /// delegated from this device's own chain.
     async fn grant(&self, request: &Value) -> Result<Value, Failure> {
-        let device: crate::DeviceKeys = serde_json::from_value(request["device"].clone())
+        let device: crate::NodeKeys = serde_json::from_value(request["device"].clone())
             .map_err(|_| refused("device must be the keys a prepared device reports"))?;
         let profile = match (&request["grants"], &request["profile"]) {
             (Value::Null, profile) => serde_json::from_value(profile.clone()),
@@ -1722,12 +1737,31 @@ impl Node {
             "migration": migration,
         }))
     }
-    /// Revokes a node, or an identity with every node of it, and rotates
-    /// the keys they could read. The intent, the new keys and the identity
-    /// are saved before the replica learns them, so an interruption
-    /// completes at the next open.
     async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<Value, Failure> {
         self.revoke_with(target, &Root::default(), false).await
+    }
+    /// Records that `statement` ended this node: alone, as an unlink, or
+    /// with its identity.
+    fn record_ended(
+        &self,
+        statement: &rocky_credentials::Revocation,
+        identity: PublicKey,
+    ) -> Result<(), Failure> {
+        let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        if !statement.identities.contains(&identity)
+            && statement
+                .nodes
+                .contains(&rocky_credentials::PeerId::of(node))
+        {
+            self.activity.record(
+                "node_unlinked",
+                json!({"identity": identity.to_hex(), "node": node.to_hex()}),
+            );
+        } else {
+            self.activity
+                .record("identity_revoked", json!({"identity": identity.to_hex()}));
+        }
+        Ok(())
     }
     /// A recovery's root revokes every other trusted identity this node
     /// knows, lost with its devices, with the identities it first enrolled;
@@ -1767,7 +1801,7 @@ impl Node {
                 .await
                 .map_err(|error| format!("revoking lost trusted identity {identity}: {error}"))?;
             self.activity
-                .record("device_revoked", json!({"identity": identity.to_hex()}));
+                .record("identity_revoked", json!({"identity": identity.to_hex()}));
         }
         if let Some(directory) = self.path.parent() {
             crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Named)?;
@@ -1819,27 +1853,15 @@ impl Node {
     async fn revocation_cut(
         &self,
         target: crate::enrollment::Revoke,
-        registry: &crate::registry::Registry,
+        membership: &crate::membership::Membership,
     ) -> Result<RevocationCut, Failure> {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
-        let user_of = |node: &PublicKey| {
-            registry
-                .get(node)
-                .and_then(|record| record.device.as_ref())
-                .map(|device| device.user)
-        };
         let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match target {
             crate::enrollment::Revoke::Identity(identity) => {
                 let mut lanes = graph.lanes_of(&identity)?;
-                lanes.extend(registry.records.iter().filter_map(|(node, record)| {
-                    (record.device.as_ref()?.user == identity).then_some(*node)
-                }));
+                lanes.extend(membership.nodes(&identity).map(|linked| linked.node));
                 (identity, lanes)
             }
-            crate::enrollment::Revoke::Node(node) => match user_of(&node) {
-                Some(identity) => (identity, [node].into()),
-                None => return Ok(Default::default()),
-            },
             crate::enrollment::Revoke::Claims(_) => return Ok(Default::default()),
         };
         graph.proposed_cut(&identity, &lanes).map_err(refused)
@@ -1851,8 +1873,9 @@ impl Node {
         keep: bool,
     ) -> Result<Value, Failure> {
         let registry = self.registry().await?;
+        let membership = self.membership().await?;
         let (cut, dropped) = if keep && root.signer().is_some() {
-            self.revocation_cut(target, &registry).await?
+            self.revocation_cut(target, &membership).await?
         } else {
             Default::default()
         };
@@ -1872,7 +1895,7 @@ impl Node {
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         draft
-            .begin_revocation_cut(target, &registry, root.signer(), cut)
+            .begin_revocation_cut(target, (&registry, &membership), root.signer(), cut)
             .map_err(|error| -> Failure {
                 if error.is::<crate::enrollment::RevocationSetFull>()
                     || error.is::<crate::enrollment::PublisherRequired>()
@@ -2000,15 +2023,7 @@ impl Node {
             Err(error) => {
                 if let Some(revoked) = error.downcast_ref::<crate::enrollment::Revoked>() {
                     current.record_revocation(&self.path, revoked.0.clone())?;
-                    let node = current
-                        .credentials
-                        .0
-                        .last()
-                        .ok_or("missing device credential")?
-                        .capability
-                        .subject;
-                    self.activity
-                        .record("device_revoked", json!({"node": node.to_hex()}));
+                    self.record_ended(&revoked.0.statement, current.identity)?;
                     self.wake_sync();
                 }
                 return Err(error);
@@ -2093,9 +2108,9 @@ impl Node {
     }
     async fn logout(&self, purge: bool) -> Result<Value, Failure> {
         let registry = self.registry().await?;
-        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
-        if settings.issuer() && !settings.another_issuer(&registry, own) {
+        if settings.issuer() && !settings.another_issuer(&registry, &membership) {
             return Err(refused(
                 "this device holds the only known copy of the domain's publisher key and cannot log out",
             ));
@@ -2917,6 +2932,15 @@ impl Node {
     /// keep, is recorded as after a refused renewal; rows of a newly revoked
     /// author arrive by checkpoint.
     async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
+        let rotates_locally = {
+            let settings = self.settings.lock().await;
+            settings.issuer() && settings.issuers.is_empty()
+        };
+        let registry = if rotates_locally {
+            Some(self.registry().await?)
+        } else {
+            None
+        };
         let held = self.replica.revocations().await;
         let revoking = outcome.and_then(revoked_by);
         let mut settings = self.settings.lock().await;
@@ -2925,29 +2949,47 @@ impl Node {
         }
         let mut draft = settings.clone();
         if draft.lacks(&held)? {
-            draft.learn_revocations(&held)?;
-            draft.forget_revoked();
-            draft.drop_revoked_deliveries();
-            self.learned.store(true, Ordering::SeqCst);
-            // Issuers retain sibling epochs; members restore newly revoked authors by checkpoint.
-            if !draft.issuer() {
+            let added = draft.learn_revocations(&held)?;
+            if !added.is_empty() {
+                draft.forget_revoked();
+                draft.drop_revoked_deliveries();
+                self.learned.store(true, Ordering::SeqCst);
+            }
+            // Membership evidence alone does not require importing a checkpoint.
+            if !draft.issuer() && !added.is_empty() {
                 rocky_credentials::write_private(
                     &self.path.with_file_name("bootstrap.json"),
                     b"true",
                 )?;
             }
-            draft.save(&self.path)?;
         }
         if let Some(statement) = revoking
             && draft.revocation(&self.path)?.is_none()
         {
+            self.record_ended(&statement.statement, draft.identity)?;
             draft.record_revocation(&self.path, statement)?;
-            let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-            self.activity
-                .record("device_revoked", json!({"node": node.to_hex()}));
         }
+        let mut rotated = false;
+        if let Some(registry) = registry
+            && draft.begin_exposure_rotation(&registry)?
+        {
+            draft.save(&self.path)?;
+            let keys = draft
+                .rotate(&self.vault)?
+                .ok_or("missing exposure rotation")?;
+            draft.save(&self.path)?;
+            self.apply(&mut draft, keys).await?;
+            for partition in draft.partitions(&self.domain())? {
+                self.hold_keys(&draft, &partition).await?;
+            }
+            rotated = true;
+        }
+        draft.save(&self.path)?;
         *settings = draft;
         drop(settings);
+        if rotated {
+            Box::pin(self.complete_revocation()).await?;
+        }
         self.refresh_importing().await?;
         self.sweep_deliveries().await
     }
@@ -3544,11 +3586,16 @@ impl Node {
                     }
                     let mut settings = self.settings.lock().await.clone();
                     settings.bootstrap = Some(self.enrollment_bootstrap().await?);
+                    if let Some(bytes) = request.strip_prefix(crate::enrollment::UNLINK) {
+                        return self.accept_unlink(bytes).await;
+                    }
+                    if let Some(bytes) = request.strip_prefix(crate::enrollment::LINK) {
+                        return self.accept_link(bytes).await;
+                    }
+                    settings.learn_revocations(&self.replica.revocations().await)?;
                     // Any node answers another node of its own identity.
                     if let Some(asked) = request.strip_prefix(crate::enrollment::IDENTITY) {
-                        let reply = settings.answer_identity(&self.vault, asked)?;
-                        self.activity.record("identity_node_enrolled", json!({}));
-                        return Ok(reply);
+                        return settings.answer_identity(&self.vault, asked);
                     }
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
@@ -3557,6 +3604,7 @@ impl Node {
                         let request: crate::enrollment::EpochRequest =
                             serde_json::from_slice(bytes)?;
                         let signed = rocky_credentials::RenewRequest::from_bytes(&request.request)?;
+                        signed.chain.verify_database(settings.database_context()?)?;
                         signed.verify(
                             PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
                             settings.publisher,
@@ -3570,12 +3618,7 @@ impl Node {
                         if let Some(statement) = current.revoking(&request.revocations)? {
                             if current.revocation(&self.path)?.is_none() {
                                 current.record_revocation(&self.path, statement.clone())?;
-                                self.activity.record(
-                                    "device_revoked",
-                                    json!({"node": PrivateKey::from_bytes(&self.vault.get("node")?)
-                                        .public_key()
-                                        .to_hex()}),
-                                );
+                                self.record_ended(&statement.statement, current.identity)?;
                             }
                             return Err(Box::new(crate::enrollment::Revoked(statement)));
                         }
@@ -4030,6 +4073,26 @@ fn subscription(request: &Value) -> Result<u64, Failure> {
         .ok_or("subscription must be a string")?
         .parse()?)
 }
+/// A key a request supplies as `{"phrase": ...}` or `{"secret": hex}`,
+/// as a root or an identity key.
+fn supplied_key<K>(
+    given: &Value,
+    name: &str,
+    phrase: fn(&str) -> Result<K, rocky_credentials::Error>,
+    secret: fn([u8; 32]) -> K,
+) -> Result<K, Failure> {
+    Ok(match (given["phrase"].as_str(), given["secret"].as_str()) {
+        (Some(words), None) => phrase(words)?,
+        (None, Some(hex)) => secret(
+            HEXLOWER
+                .decode(hex.as_bytes())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| refused(format!("{name} secret must be 64 hexadecimal digits")))?,
+        ),
+        _ => return Err(refused(format!("{name} names one phrase or one secret"))),
+    })
+}
 /// The root signer one call carries: the application's signer, or a
 /// `"root"` of the request, `{"phrase": ...}` or `{"secret": hex}`. It is
 /// dropped when the call ends; only root-only actions look at it.
@@ -4044,18 +4107,15 @@ impl Root {
             return Ok(Self(Some(supplied)));
         }
         let given = &request["root"];
-        let key = match (given["phrase"].as_str(), given["secret"].as_str()) {
-            (None, None) if given.is_null() => return Ok(Self(None)),
-            (Some(phrase), None) => rocky_credentials::RootKey::from_phrase(phrase)?,
-            (None, Some(secret)) => rocky_credentials::RootKey::from_secret(
-                HEXLOWER
-                    .decode(secret.as_bytes())
-                    .ok()
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or_else(|| refused("root secret must be 64 hexadecimal digits"))?,
-            ),
-            _ => return Err(refused("root names one phrase or one secret")),
-        };
+        if given.is_null() {
+            return Ok(Self(None));
+        }
+        let key = supplied_key(
+            given,
+            "root",
+            rocky_credentials::RootKey::from_phrase,
+            rocky_credentials::RootKey::from_secret,
+        )?;
         Ok(Self(Some(Arc::new(key))))
     }
     pub(crate) fn signer(&self) -> Option<&dyn rocky_credentials::IdentityProvider> {
@@ -4064,6 +4124,29 @@ impl Root {
     pub(crate) fn shared(&self) -> Option<Arc<dyn rocky_credentials::IdentityProvider>> {
         self.0.clone()
     }
+}
+/// The identity one call carries: the application's provider, or an
+/// `"identity"` object of the request, `{"phrase": ...}` or
+/// `{"secret": hex}`. A string `"identity"` names a request's target, not
+/// a key. It is dropped when the call ends.
+pub(crate) fn call_identity(
+    request: &Value,
+    supplied: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+) -> Result<Option<Arc<dyn rocky_credentials::IdentityProvider>>, Failure> {
+    if supplied.is_some() {
+        return Ok(supplied);
+    }
+    let given = &request["identity"];
+    if !given.is_object() {
+        return Ok(None);
+    }
+    let key = supplied_key(
+        given,
+        "identity",
+        rocky_credentials::IdentityKey::from_phrase,
+        rocky_credentials::IdentityKey::from_secret,
+    )?;
+    Ok(Some(Arc::new(key)))
 }
 /// The statement that revokes this device, when a session ended on it.
 fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {

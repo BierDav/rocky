@@ -1,5 +1,6 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+mod common;
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -7,7 +8,7 @@ const SCHEMA: &str = r#"{"format":6,"application":"partitionsdk","version":1,"ta
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
-        identity: None,
+        identity: common::prepared_identity(directory),
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -110,7 +111,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let parts = address["tuple"].as_array().unwrap();
     let selector = json!([[parts[0][0],{"Only":[parts[0][1]]}]]);
     let reader_path = root.path().join("reader");
-    let device = Database::device(&reader_path, None).unwrap();
+    let device = common::node_keys(&reader_path, None).unwrap();
     let supplied=call(&session,&scope,json!({"type":"partition_grant","device":device,"partitions":[{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}]})).await;
     let reader = Database::install(
         open(&reader_path, &hub),
@@ -197,7 +198,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let revoked = call(
         &session,
         &scope,
-        json!({"type":"revoke","node":device.node.to_string()}),
+        json!({"type":"revoke","identity":device.identity.to_string()}),
     )
     .await;
     assert_eq!(revoked["revocations"]["statements"], 1);

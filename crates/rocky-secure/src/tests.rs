@@ -324,7 +324,20 @@ pub(crate) fn revoking(
         recovery: None,
     };
     RevocationSet::try_from(vec![
-        SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),
+        SignedRevocation::sign_in(
+            statement,
+            publisher,
+            &CredentialChain::default(),
+            rocky_credentials::DatabaseContext {
+                publisher: publisher.public_key(),
+                scope: rocky_core::Scope {
+                    mesh: MeshId([1; 16]),
+                    app,
+                    domain: rocky_core::DomainId([1; 16]),
+                },
+            },
+        )
+        .unwrap(),
     ])
     .unwrap()
 }
@@ -376,13 +389,20 @@ impl Fixture {
         user: &PrivateKey,
         (not_before, expires): (u64, u64),
     ) -> CredentialChain {
-        let deployment = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: grants.clone(),
+            grants: if kind != PrincipalKind::Node {
+                grants.clone()
+            } else {
+                Vec::new()
+            },
             not_before,
-            expires,
+            expires: if kind == PrincipalKind::Node {
+                rocky_credentials::NEVER
+            } else {
+                expires
+            },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {
@@ -392,26 +412,27 @@ impl Fixture {
                     )
                     .unwrap()
                 } else {
-                    rocky_credentials::AuthorRange::ALL
+                    rocky_credentials::AuthorRange::new(
+                        crate::tests::node_number(node.public_key()),
+                        rocky_credentials::MAX_AUTHOR,
+                    )
+                    .unwrap()
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                database: Some(rocky_credentials::DatabaseContext {
+                    publisher: root.public_key(),
+                    scope: self.public.domain,
+                }),
+                sequence: (kind == PrincipalKind::Node).then_some(0),
                 ..Default::default()
             })
             .unwrap(),
         };
         CredentialChain(vec![
-            SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 2), root)
+            SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 1), root)
                 .unwrap(),
-            SignedCapability::sign(
-                capability(deployment.public_key(), PrincipalKind::Deployment, 1),
-                user,
-            )
-            .unwrap(),
-            SignedCapability::sign(
-                capability(node.public_key(), PrincipalKind::Node, 0),
-                &deployment,
-            )
-            .unwrap(),
+            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), user)
+                .unwrap(),
         ])
     }
     fn config(
@@ -871,7 +892,7 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     };
     assert!(verify(&chain, &fixture.policy).is_ok());
     let mut tampered = chain.clone();
-    tampered.0[2].capability.grants[0].fields = FieldSelection::All;
+    tampered.0[0].capability.grants[0].fields = FieldSelection::All;
     assert!(verify(&tampered, &fixture.policy).is_err());
     let app = fixture.app().definition().app;
     let ended = revoking(&fixture.publisher, app, &[], &[chain.0[0].id().unwrap()]);
@@ -1111,6 +1132,7 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
             .unwrap()
             .is_empty()
     );
+    let expected = target.revocations().await;
     drop(target);
     // Reopened with an empty supplied set, the file keeps what it learned.
     let mut config = fixture.config(&target_key, fixture.full(), &[]);
@@ -1121,7 +1143,7 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
             .unwrap()
             .revocations()
             .await,
-        revoked
+        expected
     );
     assert!(
         EncryptedReplica::open(&target_path, fixture.app(), {
@@ -1145,6 +1167,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     let fixture = Fixture::new();
     let user = PrivateKey::new();
     let node = PrivateKey::new();
+    let delegate = PrivateKey::new();
     let narrow = grant(
         fixture.public,
         &[Right::Update],
@@ -1156,7 +1179,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         grants: vec![narrow.clone()],
         not_before: 0,
         expires: 100,
-        delegations: 1,
+        delegations: 2,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             authors: Some(rocky_credentials::AuthorRange::ALL),
             ..Default::default()
@@ -1164,12 +1187,11 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         .unwrap(),
     };
     let base = Capability {
-        subject: node.public_key(),
-        kind: PrincipalKind::Node,
-        delegations: 0,
+        subject: delegate.public_key(),
+        kind: PrincipalKind::User,
+        delegations: 1,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
-            node: Some(rocky_credentials::PeerId::of(node.public_key())),
             ..Default::default()
         })
         .unwrap(),
@@ -1189,7 +1211,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
             2 => {
                 child.grants[0].scope = fixture.private;
             }
-            _ => child.delegations = 1,
+            _ => child.delegations = 2,
         }
         let chain = CredentialChain(vec![
             SignedCapability::sign(root.clone(), &fixture.publisher).unwrap(),
@@ -1197,12 +1219,13 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         ]);
         assert!(
             chain
-                .verify(
+                .certify(&delegate, node.public_key(), 12)
+                .and_then(|chain| chain.verify(
                     fixture.publisher.public_key(),
                     node.public_key(),
                     &fixture.policy,
                     1
-                )
+                ))
                 .is_err()
         );
     }
@@ -1212,12 +1235,13 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     ]);
     assert!(
         chain
-            .verify(
+            .certify(&delegate, node.public_key(), 12)
+            .and_then(|chain| chain.verify(
                 fixture.publisher.public_key(),
                 node.public_key(),
                 &fixture.policy,
                 1
-            )
+            ))
             .is_ok()
     );
 }
@@ -1638,4 +1662,5 @@ fn node_number(node: PublicKey) -> u32 {
 
 mod bulk;
 
+mod membership;
 mod positions;

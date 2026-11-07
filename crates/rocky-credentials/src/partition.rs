@@ -74,15 +74,11 @@ impl crate::CredentialChain {
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<PartitionGrant>), Error> {
-        let leaf = self.links(publisher, Some((revocations, time)))?;
-        if leaf.kind != rocky_core::PrincipalKind::Node
-            || leaf.subject != subject
-            || leaf.extended()?.node != Some(crate::PeerId::of(subject))
-            || leaf.delegations != 0
-        {
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
+        if leaf.subject != subject {
             return Err(denied("session requires a node credential"));
         }
-        Ok((leaf.grants.clone(), leaf.extended()?.partitions))
+        Ok((held.grants.clone(), held.extended()?.partitions))
     }
 
     /// Verifies a node chain and resolves its paired grants on this partition.
@@ -95,14 +91,11 @@ impl crate::CredentialChain {
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, Some((revocations, time)))?;
-        if leaf.extended()?.node != Some(crate::PeerId::of(subject))
-            || leaf.kind != rocky_core::PrincipalKind::Node
-            || leaf.delegations != 0
-        {
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
+        if leaf.subject != subject {
             return Err(denied("partition session requires a node credential"));
         }
-        resolve_leaf(leaf, scope, tuple)
+        resolve_leaf(held, scope, tuple)
     }
     /// Verifies a node's number and partition grant without a reader key.
     #[allow(clippy::too_many_arguments)]
@@ -116,22 +109,21 @@ impl crate::CredentialChain {
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, Some((revocations, time)))?;
-        if leaf.kind != rocky_core::PrincipalKind::Node
-            || leaf.subject != signer
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
+        if leaf.subject != signer
             || leaf.authors()?.and_then(|range| range.single()) != Some(author)
         {
             return Err(denied(
                 "the partition author number does not belong to the signing key",
             ));
         }
-        resolve_leaf(leaf, scope, tuple)
+        resolve_leaf(held, scope, tuple)
     }
     /// Delegates selected partitions, with the same attenuation checks as receipt.
     #[allow(clippy::too_many_arguments)]
-    pub fn delegate_partitions(
+    pub fn delegate_partitions<'s>(
         &self,
-        holder: &dyn crate::IdentityProvider,
+        holder: impl Into<crate::Signer<'s>>,
         subject: PublicKey,
         kind: rocky_core::PrincipalKind,
         grants: Vec<ResourceGrant>,
@@ -149,7 +141,7 @@ impl crate::CredentialChain {
             ));
         }
         self.append_partition_link(
-            holder,
+            holder.into(),
             subject,
             kind,
             grants,
@@ -165,7 +157,7 @@ impl crate::CredentialChain {
     #[allow(clippy::too_many_arguments)]
     fn append_partition_link(
         &self,
-        holder: &dyn crate::IdentityProvider,
+        holder: crate::Signer<'_>,
         subject: PublicKey,
         kind: rocky_core::PrincipalKind,
         grants: Vec<ResourceGrant>,
@@ -175,7 +167,7 @@ impl crate::CredentialChain {
     ) -> Result<Self, Error> {
         let root = self.0.first().ok_or_else(|| denied("credential depth"))?;
         let parent = self.links(root.issuer, None)?;
-        if parent.subject != holder.public_key()? {
+        if parent.subject != holder.principal()? {
             return Err(denied("partition delegator holds another key"));
         }
         if parent.extended()?.issues {
@@ -198,7 +190,8 @@ impl crate::CredentialChain {
         Ok(chain)
     }
 }
-/// `scope` must be `tuple`'s keyed scope, which the caller bound.
+/// The grants `held`, a node's identity link, gives on `tuple`; `scope`
+/// must be `tuple`'s keyed scope, which the caller bound.
 fn resolve_leaf(
     leaf: &crate::Capability,
     scope: ResourceScope,
@@ -264,7 +257,7 @@ impl crate::VerifiedChain {
                 "the partition author number does not belong to the signing key",
             ));
         }
-        resolve_leaf(&self.leaf, scope, tuple)
+        resolve_leaf(&self.held, scope, tuple)
     }
     /// Whether a node may write some partition of `scope`'s table, for a
     /// verifier that cannot see which: a covered position's signed header

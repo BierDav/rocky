@@ -42,7 +42,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     }
     // Supported set reconciliation; revoke only the writer node, keeping the opening reachable.
     let time = now().unwrap();
-    let statement = SignedRevocation::sign(
+    let statement = SignedRevocation::sign_in(
         Revocation {
             app: l.domain.app,
             issuer: l.publisher().public_key(),
@@ -58,6 +58,10 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
         },
         l.publisher(),
         &CredentialChain::default(),
+        rocky_credentials::DatabaseContext {
+            publisher: l.publisher().public_key(),
+            scope: l.domain,
+        },
     )
     .unwrap();
     let revoked = RevocationSet::try_from(vec![statement]).unwrap();
@@ -91,14 +95,14 @@ async fn warm_bad_signatures_parse_but_actual_acquisition_refuses_every_time() {
     let mut other = signed.statement.clone();
     other.bytes += 1;
     bad_endorsement.endorsement = rocky_credentials::Endorsement::sign(
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &signed.endorsement.chain),
         &signed.endorsement.chain,
         "rocky.migration-publication.v1",
         &other,
     )
     .unwrap();
     let mut binding = serde_json::to_value(&signed.writer).unwrap();
-    binding["signature"] =
+    binding["attestation"]["signature"] =
         serde_json::to_value(l.publisher().sign(b"different writer signature")).unwrap();
     let mut bad_writer = signed.clone();
     bad_writer.writer = serde_json::from_value(binding).unwrap();

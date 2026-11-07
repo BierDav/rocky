@@ -111,6 +111,25 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// A reset can retain canonical seal images without applied frames or a base.
+    pub(in crate::replica) async fn holds_replayed_rows(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        let Some((table, condition, values)) = self.scope_rows(scope)? else {
+            return Ok(false);
+        };
+        Ok(self
+            .count(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {condition})",
+                    typed::quoted(&table)
+                ),
+                values,
+            )
+            .await?
+            != 0)
+    }
     async fn count(&self, sql: &str, values: Vec<SqlValue>) -> Result<i64, Error> {
         match collect_rows(self.conn.query(sql, bindings(values)).await?)
             .await?

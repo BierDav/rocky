@@ -81,10 +81,14 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
                 cut: Default::default(),
                 recovery: None,
             };
-            SignedRevocation::sign(
+            SignedRevocation::sign_in(
                 statement,
                 &f.publisher,
                 &rocky_credentials::CredentialChain::default(),
+                rocky_credentials::DatabaseContext {
+                    publisher: f.publisher.public_key(),
+                    scope: f.public.domain,
+                },
             )
             .unwrap()
         })
@@ -268,7 +272,14 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
     let spent = right.unwrap().handshake_bytes;
     left.unwrap();
     eprintln!("1,024 statements against none: {spent} bytes, handshake {elapsed:?}");
-    assert_eq!(c.revocations().await, full);
+    assert_eq!(
+        c.revocations()
+            .await
+            .statements()
+            .cloned()
+            .collect::<Vec<_>>(),
+        full.statements().cloned().collect::<Vec<_>>()
+    );
     assert_eq!(
         c.revocation_digest().await.unwrap(),
         a.revocation_digest().await.unwrap()

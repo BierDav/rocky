@@ -2,46 +2,226 @@
 //! endorsement by which the owner or an issuer signs a domain statement.
 use crate::{
     AuthorRange, Error, Extended, Extension, IdentityProvider, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
-    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PublicKey, Purpose,
-    RevocationSet, decode_bounded, denied, encode, signing_bytes,
+    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, PublicKey,
+    Purpose, RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
 use rocky_core::{AppId, ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
 use serde::{Deserialize, Serialize};
 
-/// Most bytes an issuer chain adds to an endorsed statement.
+/// Most bytes an issuer chain and its node certificate add to an endorsed
+/// statement.
 pub const MAX_ENDORSEMENT_BYTES: usize = 16 * 1024;
 
-/// A domain statement's signature: by the owner, whose identity key is the
-/// publisher key, or by an issuer identity through its chain of issuer
-/// links from the publisher. Nobody else endorses.
+/// A node certificate as its node presents it beside what it signs: the
+/// capability its identity signed for the node key. It carries no grants
+/// and never expires; its identity's capability decides what it may do.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Endorsement {
-    /// The issuer links from the publisher to the signer; empty when the
-    /// owner signs.
-    pub chain: CredentialChain,
+pub struct Certificate {
+    pub capability: Capability,
     signature: Signature,
 }
+impl Certificate {
+    /// The certificate a chain's node leaf is.
+    pub fn of(link: &SignedCapability) -> Result<Self, Error> {
+        if link.attestation.certificate.is_some() || link.capability.kind != PrincipalKind::Node {
+            return Err(denied("not a node certificate"));
+        }
+        Ok(Self {
+            capability: link.capability.clone(),
+            signature: link.attestation.signature,
+        })
+    }
+    /// The certified node key, once `identity` is found to have signed this
+    /// as a node certificate.
+    pub fn node_of(&self, identity: PublicKey) -> Result<PublicKey, Error> {
+        node_shape(&self.capability)?;
+        if !identity.verify(
+            &signing_bytes(CAPABILITY_LABEL, &self.capability)?,
+            &self.signature,
+        ) {
+            return Err(denied("invalid node certificate"));
+        }
+        Ok(self.capability.subject)
+    }
+    /// The node key, as named, unverified.
+    pub fn node(&self) -> PublicKey {
+        self.capability.subject
+    }
+}
+/// What every node certificate is: one author number, its own node
+/// reference, no grants, no authority and no expiry.
+fn node_shape(capability: &Capability) -> Result<(), Error> {
+    let extended = capability.extended()?;
+    if capability.kind != PrincipalKind::Node
+        || capability.delegations != 0
+        || !capability.grants.is_empty()
+        || capability.expires != crate::NEVER
+        || !extended.partitions.is_empty()
+        || extended.node != Some(crate::PeerId::of(capability.subject))
+        || !extended
+            .authors
+            .is_some_and(|range| range.single().is_some())
+        || extended.issues
+        || extended.trusted.is_some()
+        || extended.claims.is_some()
+        || extended.origin.is_some()
+        || extended.database.is_none()
+        || extended.sequence.is_none()
+        || extended
+            .sequence
+            .is_some_and(|sequence| (sequence == 0) != extended.previous.is_none())
+    {
+        return Err(denied("invalid node certificate"));
+    }
+    Ok(())
+}
+
+/// Who signs for a principal: its own key (the root, or an identity
+/// certifying its nodes), or one of its nodes under the certificate the
+/// principal signed for it, which needs no principal key.
+#[derive(Clone)]
+pub enum Signer<'a> {
+    Key(&'a dyn IdentityProvider),
+    Node {
+        key: &'a PrivateKey,
+        identity: PublicKey,
+        certificate: Box<Certificate>,
+    },
+}
+impl<'a, T: IdentityProvider> From<&'a T> for Signer<'a> {
+    fn from(key: &'a T) -> Self {
+        Self::Key(key)
+    }
+}
+impl<'a> From<&'a dyn IdentityProvider> for Signer<'a> {
+    fn from(key: &'a dyn IdentityProvider) -> Self {
+        Self::Key(key)
+    }
+}
+impl<'a> Signer<'a> {
+    /// The node `key` signing for its identity under `chain`, whose leaf is
+    /// its certificate.
+    pub fn node(key: &'a PrivateKey, chain: &CredentialChain) -> Result<Self, Error> {
+        let leaf = chain
+            .0
+            .last()
+            .ok_or_else(|| denied("missing node certificate"))?;
+        let certificate = Certificate::of(leaf)?;
+        if certificate.node_of(leaf.issuer)? != key.public_key() {
+            return Err(denied("the certificate names another node"));
+        }
+        Ok(Self::Node {
+            key,
+            identity: leaf.issuer,
+            certificate: Box::new(certificate),
+        })
+    }
+    /// The principal it signs for.
+    pub fn principal(&self) -> Result<PublicKey, Error> {
+        match self {
+            Self::Key(key) => key.public_key(),
+            Self::Node { identity, .. } => Ok(*identity),
+        }
+    }
+    /// The signing node, when a node signs.
+    pub fn signing_node(&self) -> Option<PublicKey> {
+        match self {
+            Self::Key(_) => None,
+            Self::Node { key, .. } => Some(key.public_key()),
+        }
+    }
+    pub(crate) fn attest(&self, purpose: Purpose, message: &[u8]) -> Result<Attestation, Error> {
+        Ok(match self {
+            Self::Key(key) => Attestation {
+                certificate: None,
+                signature: key.sign(purpose, message)?,
+            },
+            Self::Node {
+                key, certificate, ..
+            } => Attestation {
+                certificate: Some(certificate.as_ref().clone()),
+                signature: key.sign(message),
+            },
+        })
+    }
+}
+
+/// A principal's signature: by its own key, or by a node it certified,
+/// whose certificate it carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attestation {
+    certificate: Option<Certificate>,
+    signature: Signature,
+}
+impl Attestation {
+    /// Checks that `principal`, or a node it certified, signed `message`;
+    /// returns that node.
+    pub(crate) fn verify(
+        &self,
+        principal: PublicKey,
+        message: &[u8],
+    ) -> Result<Option<PublicKey>, Error> {
+        let node = match &self.certificate {
+            None => None,
+            Some(certificate) => Some(certificate.node_of(principal)?),
+        };
+        if !node.unwrap_or(principal).verify(message, &self.signature) {
+            return Err(denied("invalid signature"));
+        }
+        Ok(node)
+    }
+    /// Whether `revocations` ends the signing node at `time`: a certificate
+    /// not yet valid, or one a statement names; a `protected` one only the
+    /// root's.
+    pub(crate) fn node_ended(
+        &self,
+        (revocations, time): (&RevocationSet, u64),
+        protected: bool,
+        identity: PublicKey,
+    ) -> bool {
+        self.certificate.as_ref().is_some_and(|certificate| {
+            certificate.capability.not_before > time
+                || revocations.ends_node_of(identity, certificate.node(), protected)
+        })
+    }
+    pub fn certificate(&self) -> Option<&Certificate> {
+        self.certificate.as_ref()
+    }
+}
+
+/// A domain statement's signature: by the owner, whose key is the
+/// publisher key, or by a node of an issuer identity, carrying the issuer
+/// links from the publisher and the node's certificate. Nobody else
+/// endorses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endorsement {
+    /// The issuer links from the publisher to the signing identity; empty
+    /// when the owner signs.
+    pub chain: CredentialChain,
+    attestation: Attestation,
+}
 impl Endorsement {
-    /// `signer` signs `value` under `label`; `chain` ends at its identity,
-    /// or is empty when it is the owner's.
-    pub fn sign<T: Serialize>(
-        signer: &dyn IdentityProvider,
+    /// `signer` signs `value` under `label`: the owner by its key with an
+    /// empty `chain`, an issuer by its node with `chain` ending at its
+    /// identity.
+    pub fn sign<'s, T: Serialize>(
+        signer: impl Into<Signer<'s>>,
         chain: &CredentialChain,
         label: &str,
         value: &T,
     ) -> Result<Self, Error> {
-        let key = signer.public_key()?;
-        if chain
-            .0
-            .last()
-            .is_some_and(|last| last.capability.subject != key)
-        {
-            return Err(denied("the issuer chain ends at another identity"));
+        let signer = signer.into();
+        let principal = signer.principal()?;
+        match (chain.0.last(), signer.signing_node()) {
+            (None, None) => {}
+            (Some(last), Some(_)) if last.capability.subject == principal => {}
+            (Some(_), None) => return Err(denied("an issuer signs through its node")),
+            _ => return Err(denied("the issuer chain ends at another identity")),
         }
         Ok(Self {
             chain: chain.clone(),
-            signature: signer.sign(Purpose::Statement, &signing_bytes(label, value)?)?,
+            attestation: signer.attest(Purpose::Statement, &signing_bytes(label, value)?)?,
         })
     }
     /// Checks that the owner or an issuer of `publisher` signed `value`,
@@ -54,9 +234,9 @@ impl Endorsement {
     ) -> Result<PublicKey, Error> {
         self.check(publisher, label, value, None)
     }
-    /// As `verify`, with the signer's chain valid at `time` and ended by no
-    /// statement of `revocations`: what a newly met statement needs. A
-    /// revoked issuer signs nothing that verifies here.
+    /// As `verify`, with the signer's chain valid at `time` and its links
+    /// and node ended by no statement of `revocations`: what a newly met
+    /// statement needs. A revoked issuer signs nothing that verifies here.
     pub fn verify_current<T: Serialize>(
         &self,
         publisher: PublicKey,
@@ -79,11 +259,46 @@ impl Endorsement {
         } else {
             self.chain.issuer(publisher, current)?
         };
-        if !signer.verify(&signing_bytes(label, value)?, &self.signature) {
-            return Err(denied("invalid endorsement signature"));
-        }
+        self.attested(signer, &signing_bytes(label, value)?, current)
+            .map_err(|_| denied("invalid endorsement signature"))?;
         Ok(signer)
     }
+    /// Checks the signature by `signer`: the owner's key, anyone else's
+    /// node, unrevoked under `current`. Returns the node.
+    fn attested(
+        &self,
+        signer: PublicKey,
+        message: &[u8],
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<Option<PublicKey>, Error> {
+        if self.chain.0.is_empty() != self.attestation.certificate.is_none() {
+            return Err(denied("only the owner signs with its own key"));
+        }
+        if !self.chain.0.is_empty() {
+            let database = self.chain.database_context(self.chain.0[0].issuer)?;
+            if self
+                .attestation
+                .certificate()
+                .and_then(|certificate| certificate.capability.extended().ok())
+                .and_then(|extended| extended.database)
+                != Some(database)
+            {
+                return Err(denied("endorsement belongs to another database"));
+            }
+        }
+        let node = self.attestation.verify(signer, message)?;
+        // A trusted identity's node only the root revokes.
+        let protected = self
+            .chain
+            .trusted_subject()
+            .is_ok_and(|trusted| trusted == Some(signer));
+        if current.is_some_and(|current| self.attestation.node_ended(current, protected, signer)) {
+            return Err(denied("the signing node is revoked"));
+        }
+        Ok(node)
+    }
+    /// Verifies a tip statement; returns whether a trusted identity signed
+    /// it and the signing node, its lane.
     pub(crate) fn verify_tip_statement<T: Serialize>(
         &self,
         publisher: PublicKey,
@@ -91,7 +306,13 @@ impl Endorsement {
         label: &str,
         value: &T,
         current: Option<(&RevocationSet, u64)>,
-    ) -> Result<bool, Error> {
+    ) -> Result<(bool, Option<PublicKey>), Error> {
+        if !self.chain.0.is_empty()
+            && self.chain.database_context(publisher)?
+                != (crate::DatabaseContext { publisher, scope })
+        {
+            return Err(denied("tip endorsement belongs to another database"));
+        }
         let (signer, trusted) = if self.chain.0.is_empty() {
             (publisher, true)
         } else {
@@ -113,10 +334,10 @@ impl Endorsement {
             }
             (leaf.subject, trusted)
         };
-        if !signer.verify(&signing_bytes(label, value)?, &self.signature) {
-            return Err(denied("invalid tip statement signature"));
-        }
-        Ok(trusted)
+        let node = self
+            .attested(signer, &signing_bytes(label, value)?, current)
+            .map_err(|_| denied("invalid tip statement signature"))?;
+        Ok((trusted, node))
     }
     /// The identity at the end of a non-empty chain: who signed through it.
     pub fn signer_of(chain: &CredentialChain) -> Option<PublicKey> {
@@ -128,6 +349,10 @@ impl Endorsement {
             .0
             .last()
             .map_or(publisher, |last| last.capability.subject)
+    }
+    /// The signing node, as named, unverified; none when the owner signs.
+    pub fn node(&self) -> Option<PublicKey> {
+        self.attestation.certificate.as_ref().map(Certificate::node)
     }
 }
 
@@ -145,10 +370,10 @@ impl SignedManifest {
     ) -> Result<Self, Error> {
         Self::endorse(manifest, owner, &CredentialChain(Vec::new()))
     }
-    /// The owner, or an issuer through `chain`, signs.
-    pub fn endorse(
+    /// The owner, or an issuer's node through `chain`, signs.
+    pub fn endorse<'s>(
         manifest: &ApplicationManifest,
-        signer: &dyn IdentityProvider,
+        signer: impl Into<Signer<'s>>,
         chain: &CredentialChain,
     ) -> Result<Self, Error> {
         manifest.validate()?;
@@ -231,53 +456,90 @@ impl Capability {
     }
 }
 /// The signing label of the current capability format; others are refused.
-const CAPABILITY_LABEL: &str = "rocky.capability.v2";
+const CAPABILITY_LABEL: &str = "rocky.capability.v3";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCapability {
     /// Portable assignment provenance; carries no partition tuples.
     pub author_binding: crate::AuthorBinding,
+    /// The principal that grants it: the publisher or the parent link's
+    /// subject.
     pub issuer: PublicKey,
     pub capability: Capability,
-    signature: Signature,
+    attestation: Attestation,
 }
 impl SignedCapability {
-    /// `issuer` signs: a node certificate when `capability` names a node.
-    pub fn sign(capability: Capability, issuer: &dyn IdentityProvider) -> Result<Self, Error> {
+    /// `signer` signs: a node certificate, which only an identity's own key
+    /// signs, when `capability` names a node.
+    pub fn sign<'s>(capability: Capability, signer: impl Into<Signer<'s>>) -> Result<Self, Error> {
+        let signer = signer.into();
         let purpose = match capability.kind {
+            PrincipalKind::Node if signer.signing_node().is_some() => {
+                return Err(denied("only an identity's own key certifies its node"));
+            }
             PrincipalKind::Node => Purpose::NodeCertificate,
             _ => Purpose::Capability,
         };
-        let signature = issuer.sign(purpose, &signing_bytes(CAPABILITY_LABEL, &capability)?)?;
+        if capability.kind == PrincipalKind::Node {
+            node_shape(&capability)?;
+        }
         Ok(Self {
-            author_binding: crate::AuthorBinding::sign(&capability, issuer)?,
-            issuer: issuer.public_key()?,
+            author_binding: crate::AuthorBinding::sign(&capability, &signer)?,
+            issuer: signer.principal()?,
+            attestation: signer.attest(purpose, &signing_bytes(CAPABILITY_LABEL, &capability)?)?,
             capability,
-            signature,
         })
     }
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.capability.id.v2",
+            "rocky.capability.id.v3",
             &encode(self)?,
         ))
     }
+    /// The issuer's signature, by its key or one of its nodes.
+    pub fn attestation(&self) -> &Attestation {
+        &self.attestation
+    }
+    /// Checks the signature; returns the node that signed for the issuer.
+    fn verify_signature(&self) -> Result<Option<PublicKey>, Error> {
+        if self.capability.kind == PrincipalKind::Node && self.attestation.certificate.is_some() {
+            return Err(denied("only an identity's own key certifies its node"));
+        }
+        self.attestation.verify(
+            self.issuer,
+            &signing_bytes(CAPABILITY_LABEL, &self.capability)?,
+        )
+    }
     /// The identity whose certificate this is for the node key `node`,
-    /// valid at `time`: what a coordinator checks without the rest of the
-    /// chain. Revocation is the domain's to enforce.
+    /// valid from before `time`: what a coordinator checks without the
+    /// rest of the chain. Revocation and the identity's capability are the
+    /// domain's to enforce.
+    pub fn certifies_in(
+        &self,
+        database: crate::DatabaseContext,
+        node: PublicKey,
+        time: u64,
+    ) -> Result<PublicKey, Error> {
+        if self.capability.extended()?.database != Some(database) {
+            return Err(denied("certificate belongs to another database"));
+        }
+        self.certifies(node, time)
+    }
     pub fn certifies(&self, node: PublicKey, time: u64) -> Result<PublicKey, Error> {
-        let capability = &self.capability;
-        if capability.kind != PrincipalKind::Node
-            || capability.delegations != 0
-            || capability.extended()?.node != Some(crate::PeerId::of(node))
-            || capability.not_before > time
-            || capability.expires <= time
-            || !self.issuer.verify(
-                &signing_bytes(CAPABILITY_LABEL, capability)?,
-                &self.signature,
-            )
+        if Certificate::of(self)
+            .and_then(|certificate| certificate.node_of(self.issuer))
+            .ok()
+            != Some(node)
+            || self.capability.not_before > time
         {
             return Err(denied("not a current certificate of this node"));
         }
+        let author = self
+            .capability
+            .authors()?
+            .and_then(|range| range.single())
+            .ok_or_else(|| denied("node certificate requires one author"))?;
+        self.author_binding
+            .verify_node_issuer(self.issuer, node, author)?;
         Ok(self.issuer)
     }
 
@@ -299,6 +561,8 @@ pub struct CredentialChain(pub Vec<SignedCapability>);
 #[derive(Clone, Debug)]
 pub struct VerifiedChain {
     pub(crate) leaf: Capability,
+    /// The identity link the leaf's node certificate names: what it holds.
+    pub(crate) held: Capability,
     not_before: u64,
     expires: u64,
 }
@@ -309,17 +573,14 @@ impl VerifiedChain {
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
         let leaf = &self.leaf;
-        let extension = leaf.extended()?;
         if time < self.not_before
             || time >= self.expires
             || leaf.kind != PrincipalKind::Node
             || leaf.subject != subject
-            || extension.node != Some(crate::PeerId::of(subject))
-            || leaf.delegations != 0
         {
             return Err(denied("invalid or expired node credential"));
         }
-        Ok((leaf.grants.clone(), extension.partitions))
+        Ok((self.held.grants.clone(), self.held.extended()?.partitions))
     }
     pub fn author(
         &self,
@@ -353,9 +614,10 @@ impl CredentialChain {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<VerifiedChain, Error> {
-        let leaf = self.links(publisher, Some((revocations, time)))?.clone();
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
         Ok(VerifiedChain {
-            leaf,
+            leaf: leaf.clone(),
+            held: held.clone(),
             not_before: self
                 .0
                 .iter()
@@ -398,18 +660,15 @@ impl CredentialChain {
     /// Whether the publisher once delegated to the node `subject` through
     /// this chain, whatever the time and later revocations. It proves who a
     /// renewal is for; it authorizes nothing. Returns the identity's link:
-    /// the one its node certificate names.
+    /// the one its issuer granted, below any links it signed itself.
     pub fn provenance(
         &self,
         publisher: PublicKey,
         subject: PublicKey,
     ) -> Result<&Capability, Error> {
         self.check(publisher, subject, None)?;
-        self.0
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|identity| &identity.capability)
+        self.identity_index()
+            .map(|index| &self.0[index].capability)
             .ok_or_else(|| denied("credential depth"))
     }
     fn check(
@@ -418,19 +677,91 @@ impl CredentialChain {
         subject: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, current)?;
-        if leaf.extended()?.node != Some(crate::PeerId::of(subject))
-            || leaf.kind != PrincipalKind::Node
-            || leaf.delegations != 0
-        {
+        let (leaf, held) = self.node(publisher, current)?;
+        if leaf.subject != subject {
             return Err(denied("operation/session requires a node credential"));
         }
-        if current.is_some() && !leaf.extended()?.partitions.is_empty() {
+        if current.is_some() && !held.extended()?.partitions.is_empty() {
             return Err(denied(
                 "partition credentials require a concrete partition tuple",
             ));
         }
-        Ok(leaf.grants.clone())
+        Ok(held.grants.clone())
+    }
+    /// The stable database named by the root's authority chain.
+    pub fn database_context(&self, publisher: PublicKey) -> Result<crate::DatabaseContext, Error> {
+        let first = self
+            .0
+            .first()
+            .ok_or_else(|| denied("missing database authority"))?;
+        if first.issuer != publisher {
+            return Err(denied("another database publisher"));
+        }
+        for signed in &self.0 {
+            if signed.capability.kind == PrincipalKind::Node {
+                continue;
+            }
+            let extended = signed.capability.extended()?;
+            if let Some(database) = extended.database {
+                if database.publisher != publisher {
+                    return Err(denied("database publisher mismatch"));
+                }
+                return Ok(database);
+            }
+            let scope = extended
+                .trusted
+                .or_else(|| {
+                    signed
+                        .capability
+                        .grants
+                        .first()
+                        .map(|grant| grant.scope.domain)
+                })
+                .or_else(|| extended.partitions.first().map(|grant| grant.domain))
+                .or_else(|| extended.claims.map(|claims| claims.scope));
+            if let Some(scope) = scope {
+                return Ok(crate::DatabaseContext { publisher, scope });
+            }
+        }
+        Err(denied("missing database namespace"))
+    }
+    /// Refuses a certificate from another root or stable namespace.
+    pub fn verify_database(&self, expected: crate::DatabaseContext) -> Result<(), Error> {
+        if self.database_context(expected.publisher)? != expected
+            || self.certificate().is_none_or(|certificate| {
+                certificate
+                    .capability
+                    .extended()
+                    .ok()
+                    .and_then(|extended| extended.database)
+                    != Some(expected)
+            })
+        {
+            return Err(denied("credential belongs to another database"));
+        }
+        Ok(())
+    }
+    /// Checks every link of a chain that ends at a node certificate and
+    /// returns that certificate and the identity link it names, whose
+    /// grants and partitions the node holds.
+    pub(crate) fn node(
+        &self,
+        publisher: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<(&Capability, &Capability), Error> {
+        let leaf = self.links(publisher, current)?;
+        if leaf.kind != PrincipalKind::Node {
+            return Err(denied("operation/session requires a node credential"));
+        }
+        let held = self
+            .0
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|link| &link.capability)
+            .ok_or_else(|| denied("credential depth"))?;
+        self.verify_database(self.database_context(publisher)?)?;
+        Ok((leaf, held))
     }
     /// Checks a node's alias-bound grants without requiring its public node key.
     pub fn verify_reference_selectors(
@@ -440,13 +771,11 @@ impl CredentialChain {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
-        let leaf = self.links(publisher, Some((revocations, time)))?;
-        let extension = leaf.extended()?;
-        if leaf.kind != PrincipalKind::Node || leaf.delegations != 0 || extension.node != Some(node)
-        {
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
+        if leaf.extended()?.node != Some(node) {
             return Err(denied("credential does not bind the node reference"));
         }
-        Ok((leaf.grants.clone(), extension.partitions))
+        Ok((held.grants.clone(), held.extended()?.partitions))
     }
     /// The issuer identity a chain of issuer links ends at: every link is
     /// signed by its parent's subject, the first by the publisher, and
@@ -471,10 +800,14 @@ impl CredentialChain {
         Ok(leaf.subject)
     }
     /// Checks every link and returns the leaf: each is signed by its
-    /// parent's subject, narrows it in grants, validity, depth and author
-    /// range, lives at most `MAX_CHAIN_LIFETIME` and, with `current`, is
-    /// valid at its time and ended by no statement of its set. A link with
-    /// issuer authority may delegate any grant and author range.
+    /// parent's subject or a node it certified, the first by the publisher,
+    /// narrows it in grants, validity, depth and author range, lives at
+    /// most `MAX_CHAIN_LIFETIME` and, with `current`, is valid at its time
+    /// and ended by no statement of its set, nor is the node that signed it.
+    /// A link with issuer authority may delegate any grant and author
+    /// range. A node certificate narrows nothing but the author range: it
+    /// never expires, holds no grants and lasts while its identity's link
+    /// does.
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
@@ -483,47 +816,75 @@ impl CredentialChain {
         if self.0.is_empty() || self.0.len() > MAX_CREDENTIAL_DEPTH {
             return Err(denied("credential depth"));
         }
+        let database = self.database_context(publisher)?;
         let mut issuer = publisher;
         let mut parent: Option<(&Capability, Extended)> = None;
         for (index, signed) in self.0.iter().enumerate() {
             let capability = &signed.capability;
             let extended = capability.extended()?;
+            let node = capability.kind == PrincipalKind::Node;
+            if capability
+                .grants
+                .iter()
+                .any(|grant| grant.scope.domain != database.scope)
+                || extended
+                    .partitions
+                    .iter()
+                    .any(|grant| grant.domain != database.scope)
+                || extended
+                    .trusted
+                    .is_some_and(|scope| scope != database.scope)
+                || extended
+                    .claims
+                    .as_ref()
+                    .is_some_and(|claims| claims.scope != database.scope)
+                || extended.database.is_some_and(|context| context != database)
+                || signed.attestation.certificate().is_some_and(|certificate| {
+                    certificate
+                        .capability
+                        .extended()
+                        .ok()
+                        .and_then(|extended| extended.database)
+                        != Some(database)
+                })
+            {
+                return Err(denied("credential belongs to another database"));
+            }
             let stale = match current {
                 Some((revocations, time)) => {
                     capability.not_before > time
                         || capability.expires <= time
                         || revocations.ends_at(signed, self.protected(index)?)?
+                        || signed.attestation.node_ended(
+                            (revocations, time),
+                            self.protected_signer(index)?,
+                            signed.issuer,
+                        )
                 }
                 None => false,
             };
-            // Only the root's trusted grant, and a node certificate directly
-            // under it, live until the root revokes them.
+            // Only the root's trusted grant, and its identity's own links
+            // and node certificates, live until the root revokes them.
             let forever = match &parent {
                 None => extended.trusted.is_some() && extended.issues,
                 Some((parent, _)) => parent.expires == crate::NEVER && self.protected(index)?,
             };
-            let lifetime = if capability.expires == crate::NEVER && forever {
+            let lifetime = if node || (capability.expires == crate::NEVER && forever) {
                 0
             } else {
                 capability.expires - capability.not_before
             };
             let held = capability.grants.len() + extended.partitions.len();
-            // A node certificate under a trusted or claim link holds no
-            // grants: its parent's authority is what it certifies.
-            let authorized_node = capability.kind == PrincipalKind::Node
-                && parent
-                    .as_ref()
-                    .is_some_and(|(_, held)| held.trusted.is_some() || held.claims.is_some());
             if signed.issuer != issuer
                 || stale
                 || capability.not_before >= capability.expires
                 || lifetime > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
                 || (held == 0
+                    && !node
                     && !extended.issues
                     && extended.trusted.is_none()
-                    && extended.claims.is_none()
-                    && !authorized_node)
+                    && extended.claims.is_none())
                 || held > 64
                 || (extended.claims.is_some()
                     && (held != 0
@@ -532,25 +893,23 @@ impl CredentialChain {
                         || extended.trusted.is_some()
                         || capability.expires - capability.not_before
                             > crate::CLAIM_LIFETIME + crate::CLAIM_SKEW))
-                || !signed.issuer.verify(
-                    &signing_bytes(CAPABILITY_LABEL, capability)?,
-                    &signed.signature,
-                )
+                || signed.verify_signature().is_err()
             {
                 return Err(denied("invalid or revoked credential"));
             }
             if capability.grants.iter().any(|grant| grant.fields.named() > 256 || matches!(&grant.rows, rocky_core::RowSelection::Only(rows) if rows.is_empty() || rows.len() > 256)) {
                 return Err(denied("credential resource quota"));
             }
-            Self::shape(capability, &extended, parent.is_none())?;
+            Self::shape(capability, &extended)?;
             if let Some((parent, parent_extended)) = &parent {
                 // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
-                    || capability.not_before < parent.not_before
-                    || capability.expires > parent.expires
+                    || (!node
+                        && (capability.not_before < parent.not_before
+                            || capability.expires > parent.expires))
                     || (parent.kind == PrincipalKind::Deployment
                         && capability.kind == PrincipalKind::User)
                     || extended.trusted.is_some()
@@ -584,6 +943,15 @@ impl CredentialChain {
                 {
                     return Err(denied("delegation expands authority"));
                 }
+                if node && let Some(range) = parent_extended.authors {
+                    let expected = extended
+                        .sequence
+                        .and_then(|sequence| u32::try_from(sequence).ok())
+                        .and_then(|sequence| range.first.checked_add(sequence));
+                    if expected != extended.authors.and_then(|authors| authors.single()) {
+                        return Err(denied("node author differs from its membership sequence"));
+                    }
+                }
                 // An origin naming the signer, or the signer's origin, has
                 // that grant's time: a recovery judges the origin by it.
                 let named = if parent_extended.trusted.is_some() {
@@ -610,33 +978,45 @@ impl CredentialChain {
             .map(|(leaf, _)| leaf)
             .ok_or_else(|| denied("missing leaf credential"))
     }
-    /// Whether link `index` is a trusted identity's own: its root-signed
-    /// grant or a node certificate directly under it. Only the root's
-    /// statements end those; a trusted node never revokes another.
-    pub(crate) fn protected(&self, index: usize) -> Result<bool, Error> {
-        Ok(match index {
-            0 => true,
-            1 => {
-                self.0[0].capability.extended()?.trusted.is_some()
-                    && self.0[1].capability.kind == PrincipalKind::Node
-            }
-            _ => false,
-        })
+    /// The trusted identity whose root-signed grant starts this chain.
+    pub(crate) fn trusted_subject(&self) -> Result<Option<PublicKey>, Error> {
+        let Some(first) = self.0.first() else {
+            return Ok(None);
+        };
+        Ok(first
+            .capability
+            .extended()?
+            .trusted
+            .map(|_| first.capability.subject))
     }
-    /// Node certificates carry exactly one number, attenuated from their
-    /// identity's range, and name their subject. Only identities hold issuer
+    /// Whether link `index` is a trusted identity's own: its root-signed
+    /// grant, a link it signed itself or one of its node certificates.
+    /// Only the root's statements end those; a trusted node never revokes
+    /// another.
+    pub(crate) fn protected(&self, index: usize) -> Result<bool, Error> {
+        if index == 0 {
+            return Ok(true);
+        }
+        let link = &self.0[index];
+        Ok(self.trusted_subject()?.is_some_and(|trusted| {
+            link.issuer == trusted
+                && (link.capability.subject == trusted
+                    || link.capability.kind == PrincipalKind::Node)
+        }))
+    }
+    /// Whether link `index` was signed by a node of the trusted identity
+    /// starting this chain, which only the root revokes.
+    fn protected_signer(&self, index: usize) -> Result<bool, Error> {
+        Ok(self
+            .trusted_subject()?
+            .is_some_and(|trusted| self.0[index].issuer == trusted))
+    }
+    /// Node certificates carry exactly one number of their identity's range
+    /// and nothing else (see `node_shape`). Only identities hold issuer
     /// authority.
-    fn shape(capability: &Capability, extended: &Extended, _root: bool) -> Result<(), Error> {
+    fn shape(capability: &Capability, extended: &Extended) -> Result<(), Error> {
         let valid = match capability.kind {
-            PrincipalKind::Node => {
-                extended
-                    .authors
-                    .is_some_and(|range| range.single().is_some())
-                    && extended.node == Some(crate::PeerId::of(capability.subject))
-                    && !extended.issues
-                    && extended.trusted.is_none()
-                    && extended.claims.is_none()
-            }
+            PrincipalKind::Node => node_shape(capability).is_ok(),
             PrincipalKind::User => extended.node.is_none(),
             PrincipalKind::Deployment => {
                 extended.node.is_none()
@@ -695,12 +1075,8 @@ impl CredentialChain {
         node: crate::PeerId,
         alias: PublicKey,
     ) -> Result<(), Error> {
-        let leaf = self.links(publisher, None)?;
-        if leaf.kind != PrincipalKind::Node
-            || leaf.delegations != 0
-            || leaf.subject != alias
-            || leaf.extended()?.node != Some(node)
-        {
+        let (leaf, _) = self.node(publisher, None)?;
+        if leaf.subject != alias || leaf.extended()?.node != Some(node) {
             return Err(denied("credential alias does not bind the node reference"));
         }
         Ok(())
@@ -722,16 +1098,58 @@ impl CredentialChain {
             .min()
             .unwrap_or(0)
     }
+    /// The node certificate this chain ends at, if any.
+    pub fn certificate(&self) -> Option<&SignedCapability> {
+        self.0
+            .last()
+            .filter(|leaf| leaf.capability.kind == PrincipalKind::Node)
+    }
+    /// The index of the identity's link: the one its issuer granted, below
+    /// which only links the identity signed itself and its node
+    /// certificate follow.
+    fn identity_index(&self) -> Option<usize> {
+        let identity = self.certificate()?.issuer;
+        let mut index = self.0.len().checked_sub(2)?;
+        if self.0[index].capability.subject != identity {
+            return None;
+        }
+        while index > 0 && self.0[index].issuer == identity {
+            index -= 1;
+        }
+        Some(index)
+    }
+    /// The identity's capability chain as its issuers granted it: without
+    /// the node certificate and the links the identity signed itself. A
+    /// renewal replaces this part only. A chain without a node certificate
+    /// is returned whole.
+    pub fn capabilities(&self) -> Self {
+        match self.identity_index() {
+            Some(index) => Self(self.0[..=index].to_vec()),
+            None => self.delegable(),
+        }
+    }
+    /// This chain with `certificate` as its node leaf instead of any it had.
+    pub fn with_certificate(&self, certificate: SignedCapability) -> Self {
+        let mut chain = self.delegable();
+        chain.0.push(certificate);
+        chain
+    }
 }
 
 /// Everything a device presents to use a domain, from any issuer: the
-/// pinned publisher, the revocations it knows and the device's chain. It
-/// names no generation; any generation of the domain admits it.
+/// pinned publisher, the revocations it knows, its identity's capability
+/// chain and its node certificate. It names no generation; any generation
+/// of the domain admits it. A renewal replaces the capabilities only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Credentials {
     pub publisher: PublicKey,
     pub revocations: RevocationSet,
-    pub chain: CredentialChain,
+    /// The links from the publisher to the identity, with any the identity
+    /// signed itself.
+    pub capabilities: CredentialChain,
+    /// The identity's certificate of this node; none while an issuer hands
+    /// the capabilities to an identity whose node certifies itself.
+    pub certificate: Option<SignedCapability>,
 }
 /// What verified credentials establish.
 #[derive(Clone, Debug)]
@@ -745,26 +1163,52 @@ pub struct Verified {
     pub grants: Vec<ResourceGrant>,
 }
 impl Credentials {
+    /// The node's whole chain: the capabilities, then any certificate.
+    pub fn chain(&self) -> CredentialChain {
+        let mut chain = self.capabilities.clone();
+        chain.0.extend(self.certificate.clone());
+        chain
+    }
+    /// The two parts of a node's whole `chain`.
+    pub fn of(publisher: PublicKey, revocations: RevocationSet, chain: &CredentialChain) -> Self {
+        Self {
+            publisher,
+            revocations,
+            capabilities: chain.delegable(),
+            certificate: chain.certificate().cloned(),
+        }
+    }
     /// Verifies the whole set for `device` of application `app` at `time`.
     /// Needs no database, endpoint or issuer.
     pub fn verify(&self, device: PublicKey, app: AppId, time: u64) -> Result<Verified, Error> {
         self.revocations.verify(self.publisher, app)?;
-        let grants = self
-            .chain
-            .verify(self.publisher, device, &self.revocations, time)?;
+        let chain = self.chain();
+        let grants = chain.verify(self.publisher, device, &self.revocations, time)?;
         if grants.iter().any(|grant| grant.scope.domain.app != app) {
             return Err(denied("credentials for another application"));
         }
         Ok(Verified {
-            principal: self
-                .chain
+            principal: chain
                 .principal()
                 .ok_or_else(|| denied("credential depth"))?,
             device,
             revocations: self.revocations.digest(time)?,
-            expires: self.chain.expires(),
+            expires: chain.expires(),
             grants,
         })
+    }
+    pub fn verify_in(
+        &self,
+        device: PublicKey,
+        database: crate::DatabaseContext,
+        time: u64,
+    ) -> Result<Verified, Error> {
+        if self.publisher != database.publisher {
+            return Err(denied("another database publisher"));
+        }
+        self.revocations.verify_in(database)?;
+        self.chain().verify_database(database)?;
+        self.verify(device, database.scope.app, time)
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
@@ -812,8 +1256,8 @@ mod tests {
                 .is_ok()
         );
         let mut earlier = root;
-        earlier.signature =
-            publisher.sign(&signing_bytes("rocky.capability.v1", &earlier.capability).unwrap());
+        earlier.attestation.signature =
+            publisher.sign(&signing_bytes("rocky.capability.v2", &earlier.capability).unwrap());
         let earlier = crate::device_chain(earlier, &user, node.public_key(), 1).unwrap();
         assert!(
             earlier

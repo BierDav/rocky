@@ -34,7 +34,10 @@
 //! Reuse configuration with `open().await` for an existing installation or
 //! `join(invitation).await` to enroll. Networking is opt-in through
 //! [`Configuration::network`]; [`Network::Borrowed`] keeps ownership with the app.
-//! [`Session::pairing`] requires an explicit [`GrantProfile`].
+//! A device answering [`Session::invitation`] waits, its `join` failing with
+//! [`AwaitingAdmission`], until an issuer confirms the code both devices
+//! show and admits it ([`Session::admit`]); [`Session::invitation_with`]
+//! admits it on arrival with an explicit [`GrantProfile`].
 //!
 //! Queries buffer one page; collect only results that fit in memory. Register
 //! [`Database::observe_tables`] before querying to avoid missing invalidations.
@@ -157,6 +160,8 @@ mod escrow;
 mod generation;
 mod groups;
 mod identities;
+mod join_requests;
+mod membership;
 mod mesh;
 mod node;
 mod owner;
@@ -196,7 +201,9 @@ pub use custody::CustodyPeer;
 pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
 #[cfg(not(target_family = "wasm"))]
 pub use engine::Engine;
-pub use enrollment::{DeviceKeys, PublisherRequired, Supplied, route_enrollment};
+pub use enrollment::{
+    AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, route_enrollment,
+};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 /// Named domain counters whose idempotent claims hand out unique,
@@ -221,12 +228,14 @@ pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
-pub use rocky_credentials::{FileIdentityProvider, IdentityProvider, Purpose, RootKey};
+pub use rocky_credentials::{
+    FileIdentityProvider, IdentityKey, IdentityProvider, Purpose, RootKey,
+};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
-pub use session::Invitation;
+pub use session::{Admit, Discovered, Invitation, JoinRequest};
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use tips::*;

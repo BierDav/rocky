@@ -467,6 +467,11 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
             )
             .unwrap(),
     ]);
+    let node_chain = chain
+        .clone()
+        .certify(&trusted, trusted.public_key(), 1)
+        .unwrap();
+    let signer = || rocky_credentials::Signer::node(&trusted, &node_chain).unwrap();
     let lane = trusted.public_key();
     let create = |name: &str, link| {
         TipStatement::Bookmark(
@@ -478,7 +483,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
                     from: None,
                     to: Some(source),
                 },
-                &trusted,
+                signer(),
                 &chain,
                 Some(link),
             )
@@ -502,7 +507,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
         schema: lineage.definition(3).hash(),
     };
     let staged = link.branch(&statement).unwrap();
-    let seal = SignedSeal::endorse_linked(statement, &trusted, &chain, Some(staged)).unwrap();
+    let seal = SignedSeal::endorse_linked(statement, signer(), &chain, Some(staged)).unwrap();
     let target = seal.successor().unwrap().unwrap();
     let movement = SignedBookmarkMove::endorse_linked(
         BookmarkMoveStatement {
@@ -512,7 +517,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
             from: Some(source),
             to: Some(target),
         },
-        &trusted,
+        signer(),
         &chain,
         Some(staged.next(seal.id().unwrap())),
     )

@@ -32,6 +32,7 @@ fn delegated(
             authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             node: None,
             issues: false,
+            ..rocky_credentials::Extended::default()
         })
         .unwrap(),
     };
@@ -41,16 +42,28 @@ fn delegated(
         delegations: 1,
         ..root.clone()
     };
+    middle.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
+        authors: Some(rocky_credentials::AuthorRange::new(12, 20).unwrap()),
+        ..rocky_credentials::Extended::default()
+    })
+    .unwrap();
     widen(&mut middle, f);
     let leaf = Capability {
         subject: node.public_key(),
         kind: PrincipalKind::Node,
         delegations: 0,
+        grants: Vec::new(),
+        expires: rocky_credentials::NEVER,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             trusted: None,
             claims: None,
             authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
+            database: Some(rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            }),
+            sequence: Some(0),
             ..Default::default()
         })
         .unwrap(),
@@ -98,6 +111,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
                 node: None,
                 issues: false,
+                ..rocky_credentials::Extended::default()
             })
             .unwrap()
         },

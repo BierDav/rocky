@@ -19,9 +19,17 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
     let capability = |subject, kind, delegations| Capability {
         subject,
         kind,
-        grants: grants.clone(),
+        grants: if kind == PrincipalKind::Node {
+            Vec::new()
+        } else {
+            grants.clone()
+        },
         not_before,
-        expires,
+        expires: if kind == PrincipalKind::Node {
+            rocky_credentials::NEVER
+        } else {
+            expires
+        },
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             authors: Some(if kind == PrincipalKind::Node {
@@ -31,9 +39,18 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
                 )
                 .unwrap()
             } else {
-                rocky_credentials::AuthorRange::ALL
+                rocky_credentials::AuthorRange::new(
+                    crate::tests::node_number(node.public_key()),
+                    rocky_credentials::MAX_AUTHOR,
+                )
+                .unwrap()
             }),
             node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+            database: Some(rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            }),
+            sequence: (kind == PrincipalKind::Node).then_some(0),
             ..Default::default()
         })
         .unwrap(),

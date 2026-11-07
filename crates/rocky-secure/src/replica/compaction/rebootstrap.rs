@@ -243,7 +243,10 @@ impl<A: RowApplication> Inner<A> {
         self.store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
             .await?;
         if self.replayed_scope(scope) {
-            return self.clear_replayed(scope).await;
+            self.clear_replayed(scope).await?;
+            // Retained seal images cover rows whose earlier keys this node
+            // never held. Restore that prefix while pending frames return.
+            return self.replay_from_frames(now()?).await;
         }
         self.reproject(scope).await
     }

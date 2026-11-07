@@ -14,9 +14,15 @@ fn member_chain(
 
 const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
+/// The registry and an empty membership view.
+fn known(registry: &Registry) -> (&Registry, &'static Membership) {
+    static EMPTY: std::sync::LazyLock<Membership> = std::sync::LazyLock::new(Membership::default);
+    (registry, &EMPTY)
+}
+
 #[test]
-fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
--> Result<(), Failure> {
+fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> Result<(), Failure>
+{
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -48,13 +54,13 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
     }];
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
-    let device = DeviceKeys {
-        user: user.public_key(),
+    let device = NodeKeys {
+        identity: user.public_key(),
         node: node.public_key(),
     };
-    let identity = PrivateKey::from_bytes(&vault.get("identity")?);
     let issuer_links = issuer.issuer_links();
-    let capability = Authority::issuer(&identity, &issuer_links).issue_partition_terms(
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
+    let capability = Authority::issuer(&issuer_node, &issuer.credentials)?.issue_partition_terms(
         user.public_key(),
         vec![],
         grants.clone(),
@@ -62,10 +68,13 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         issuer.validity()?,
     )?;
     let mut rows = BTreeMap::new();
-    let changes = issuer.holder_changes(&vault, &device, &grants, 1, &Registry::default())?;
+    let changes = issuer.holder_changes(&device, &grants, 1, &Registry::default())?;
     let registry = Registry::merged(&mut rows, &changes)?;
-    assert_eq!(registry.devices(), 1);
-    assert_eq!(registry.get(&device.node).ok_or("record")?.grants.len(), 1);
+    assert_eq!(registry.identities(), 1);
+    assert_eq!(
+        registry.get(&device.identity).ok_or("record")?.grants.len(),
+        1
+    );
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let mut links = issuer_links.clone();
     links.0.push(capability.clone());
@@ -79,33 +88,27 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
     // Before revocation the same request renews, also under a new node key.
     renew(&issuer, &node)?;
     renew(&issuer, &PrivateKey::new())?;
-
-    // Revoking the node ends its certificate only: another node of the
-    // same identity still renews.
-    issuer.begin_revocation(Revoke::Node(node.public_key()), &registry, None)?;
-    issuer.rotate(&vault)?;
-    issuer.authority.as_mut().ok_or("authority")?.rotation = None;
-    assert!(issuer.revoked_device(&node.public_key(), &registry));
-    assert!(renew(&issuer, &node).is_err());
-    renew(&issuer, &PrivateKey::new())?;
     // Revoking the identity ends every node of it, a fresh one too.
-    issuer.begin_revocation(Revoke::Identity(user.public_key()), &registry, None)?;
+    issuer.begin_revocation(Revoke::Identity(user.public_key()), known(&registry), None)?;
     issuer.rotate(&vault)?;
+    assert!(issuer.revoked_node(&device, &registry));
+    assert!(renew(&issuer, &node).is_err());
     assert!(renew(&issuer, &PrivateKey::new()).is_err());
-    let renamed = DeviceKeys {
-        user: user.public_key(),
+    let renamed = NodeKeys {
+        identity: user.public_key(),
         node: PrivateKey::new().public_key(),
     };
     assert!(
         issuer
-            .holder_changes(&vault, &renamed, &grants, 1, &registry)
+            .holder_changes(&renamed, &grants, 1, &registry)
             .is_err()
     );
     Ok(())
 }
 
 #[test]
-fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), Failure> {
+fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopenable()
+-> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -122,6 +125,7 @@ fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), F
     let record = ContactRecord {
         v: CONTACT_VERSION,
         publisher: issuer.publisher,
+        database: issuer.database_context()?,
         node,
         routes: vec![Route {
             transport: "tcp".into(),
@@ -136,14 +140,22 @@ fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), F
     );
     issuer.add_peer(&vault, &uri)?;
     assert!(issuer.contact_meta.contains_key(&node));
-    issuer.begin_revocation(Revoke::Node(node), &Registry::default(), None)?;
+    let identity = PrivateKey::new().public_key();
+    let mut seen = BTreeMap::new();
+    crate::membership::see(&mut seen, identity, node, now()?);
+    let membership = Membership::of([], &seen);
+    issuer.begin_revocation(
+        Revoke::Identity(identity),
+        (&Registry::default(), &membership),
+        None,
+    )?;
     issuer.rotate(&vault)?;
     let path = directory.path().join("identity.json");
     issuer.save(&path)?;
     let reopened = Settings::load(&path)?;
     assert!(!reopened.peers.contains_key(&node));
     assert!(!reopened.contact_meta.contains_key(&node));
-    assert!(reopened.revocations.revokes(&node));
+    assert!(reopened.revocations.revokes(&identity));
     Ok(())
 }
 
@@ -153,6 +165,14 @@ fn contact_versions_are_independent_of_routing_flags() {
     let mut record = ContactRecord {
         v: CONTACT_VERSION,
         publisher: key,
+        database: rocky_credentials::DatabaseContext {
+            publisher: key,
+            scope: rocky_core::Scope {
+                mesh: MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
         node: key,
         routes: Vec::new(),
         issuer: true,
@@ -171,7 +191,7 @@ fn contact_versions_are_independent_of_routing_flags() {
             enrollment_only
         );
     }
-    for version in [0, 1, 3, u32::MAX] {
+    for version in [0, 1, 2, 4, u32::MAX] {
         record.v = version;
         assert_eq!(
             ContactRecord::parse(&uri(&record))
@@ -198,8 +218,8 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
     )?;
     let vault = issuer.vault(&store);
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
-    let device = DeviceKeys {
-        user: user.public_key(),
+    let device = NodeKeys {
+        identity: user.public_key(),
         node: node.public_key(),
     };
     let (supplied, _) = issuer.grant(
@@ -215,7 +235,7 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         &Registry::default(),
     )?;
     let domain = issuer.domain()?;
-    let chain = member_chain(&supplied.credentials.chain, &user, node.public_key())?;
+    let chain = member_chain(&supplied.credentials.chain(), &user, node.public_key())?;
     let (_, selectors) = chain.verify_selectors(
         issuer.publisher,
         node.public_key(),
@@ -313,7 +333,7 @@ fn issuer_at(
 fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 -> Result<(), Failure> {
     use fault::Stage;
-    // A device without a record may have read every collection, the
+    // An identity without a record may have read every collection, the
     // registry included: three keys.
     let stops = [
         (Stage::Begun, 0),
@@ -326,8 +346,12 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
     for stop in stops {
         let directory = tempfile::tempdir()?;
         let (mut issuer, vault, path) = issuer_at(TWO, directory.path())?;
-        let node = PrivateKey::new().public_key();
-        issuer.begin_revocation(Revoke::Node(node), &Registry::default(), None)?;
+        let identity = PrivateKey::new().public_key();
+        issuer.begin_revocation(
+            Revoke::Identity(identity),
+            known(&Registry::default()),
+            None,
+        )?;
         issuer.save(&path)?;
         let intent = issuer
             .authority
@@ -358,14 +382,14 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         // No completion before the registry transaction has committed.
         assert!(
             reopened
-                .complete_revocation(&vault, &domain, &Registry::default())
+                .complete_revocation(&vault, &domain, known(&Registry::default()))
                 .is_err()
         );
         let mut rows = BTreeMap::new();
         let mut changes = registry::Changes::default();
-        changes.revoked(&node)?;
+        changes.revoked(&identity)?;
         let completed = Registry::merged(&mut rows, &changes)?;
-        reopened.complete_revocation(&vault, &domain, &completed)?;
+        reopened.complete_revocation(&vault, &domain, known(&completed))?;
         reopened.save(&path)?;
         assert_eq!(reopened.revocations.len(), 1, "{stop:?}");
         assert!(
@@ -397,8 +421,10 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let (mut issuer, vault, _) = issuer_at(TWO, directory.path())?;
-    let publisher = PrivateKey::from_bytes(&vault.get("identity")?);
+    let publisher = issuer.identity;
     let links = issuer.issuer_links();
+    let credentials = issuer.credentials.clone();
+    let node = PrivateKey::from_bytes(&vault.get("node")?);
     let app = issuer.domain()?.manifest().app;
     let time = now()?;
     let full = RevocationSet::try_from(
@@ -407,18 +433,15 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                 rocky_credentials::SignedRevocation::sign(
                     Revocation {
                         app,
-                        issuer: publisher.public_key(),
+                        issuer: publisher,
                         time,
-                        nodes: [rocky_credentials::PeerId::of(
-                            PrivateKey::new().public_key(),
-                        )]
-                        .into(),
-                        identities: BTreeSet::new(),
+                        nodes: BTreeSet::new(),
+                        identities: [PrivateKey::new().public_key()].into(),
                         capabilities: BTreeSet::new(),
                         cut: Default::default(),
                         recovery: None,
                     },
-                    &publisher,
+                    rocky_credentials::Signer::node(&node, &credentials)?,
                     &links,
                 )
             })
@@ -429,8 +452,8 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
     let (keys, groups) = (issuer.keys.clone(), issuer.groups.len());
     let error = issuer
         .begin_revocation(
-            Revoke::Node(PrivateKey::new().public_key()),
-            &Registry::default(),
+            Revoke::Identity(PrivateKey::new().public_key()),
+            known(&Registry::default()),
             None,
         )
         .unwrap_err();
@@ -462,8 +485,8 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
         let (user, node) = (PrivateKey::new(), PrivateKey::new());
         let (supplied, changes) = issuer.grant(
             &vault,
-            DeviceKeys {
-                user: user.public_key(),
+            NodeKeys {
+                identity: user.public_key(),
                 node: node.public_key(),
             },
             (
@@ -476,30 +499,30 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
             registry,
         )?;
         *registry = Registry::merged(&mut rows, &changes)?;
-        Ok((
-            user,
-            node.public_key(),
-            CredentialChain(supplied.credentials.chain.0),
-        ))
+        Ok((user, node.public_key(), supplied.credentials.chain()))
     };
-    let (revoked_user, revoked_node, revoked_root) = enroll(&mut a, &mut registry)?;
+    let (revoked_user, _, revoked_root) = enroll(&mut a, &mut registry)?;
     let (kept_user, _, kept_root) = enroll(&mut a, &mut registry)?;
     // B is an issuer too but never saw either device or its record.
     let mut b = a.clone();
     b.authority = Some(Issuing::default());
     b.revocations = RevocationSet::new();
-    a.begin_revocation(Revoke::Identity(revoked_user.public_key()), &registry, None)?;
+    a.begin_revocation(
+        Revoke::Identity(revoked_user.public_key()),
+        known(&registry),
+        None,
+    )?;
     a.rotate(&vault)?;
     // B learns the statement as a renewal answer brings it.
     b.learn_revocations(&a.revocations)?;
     let mut changes = registry::Changes::default();
-    changes.revoked(&revoked_node)?;
+    changes.revoked(&revoked_user.public_key())?;
     registry = Registry::merged(&mut rows, &changes)?;
     // The statement leaves both sets, as it does a year after it was made.
     let later = now()? + 2 * rocky_credentials::MAX_CHAIN_LIFETIME;
     for issuer in [&mut a, &mut b] {
         issuer.revocations = issuer.revocations.pruned(later);
-        assert!(issuer.revocations.is_empty());
+        assert_eq!(issuer.revocations.live(later), 0);
     }
     let renew = |issuer: &Settings,
                  registry: &Registry,
@@ -550,13 +573,8 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
-    let mut a = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let owner = rocky_credentials::RootKey::generate();
+    let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None, &owner)?;
     let av = a.vault(&store);
     let domain = a.domain()?;
     let mut partition = GroupPartition::resolve(
@@ -587,36 +605,44 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
         }
     }
     bv.create("node")?;
-    b.credentials = b.renew_locally(&bv)?;
+    b.revocations
+        .link(a.credentials.certificate().ok_or("certificate")?.clone())?;
+    b.credentials =
+        crate::identities::with_identity(std::sync::Arc::new(owner.identity()), || {
+            b.renew_locally(&bv)
+        })?;
     let mut registry = Registry::default();
     let readers = [
         PrivateKey::new().public_key(),
         PrivateKey::new().public_key(),
     ];
-    for node in readers {
+    let issuer = a.identity;
+    let admitted = |profile| -> Result<registry::IdentityRecord, Failure> {
+        Ok(registry::IdentityRecord {
+            admitted: Some(registry::Admitted {
+                origin: None,
+                kind: registry::Kind::Paired,
+                profile: Some(profile),
+                issuer,
+                enrolled: now()?,
+                invitation: None,
+                single_use: false,
+            }),
+            ..Default::default()
+        })
+    };
+    for identity in readers {
         registry.records.insert(
-            node,
-            registry::Record {
-                device: Some(registry::Device {
-                    user: PrivateKey::new().public_key(),
-                    origin: None,
-                    kind: registry::Kind::Paired,
-                    profile: Some(Profile::Reader {
-                        scopes: ["lists".into()].into(),
-                    }),
-                    issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
-
-                    enrolled: now()?,
-                    invitation: None,
-                }),
-                ..Default::default()
-            },
+            identity,
+            admitted(Profile::Reader {
+                scopes: ["lists".into()].into(),
+            })?,
         );
     }
-    a.begin_revocation(Revoke::Node(readers[0]), &registry, None)?;
+    a.begin_revocation(Revoke::Identity(readers[0]), known(&registry), None)?;
     a.rotate(&av)?;
     a.authority.as_mut().ok_or("authority")?.rotation = None;
-    b.begin_revocation(Revoke::Node(readers[1]), &registry, None)?;
+    b.begin_revocation(Revoke::Identity(readers[1]), known(&registry), None)?;
     b.rotate(&bv)?;
     b.authority.as_mut().ok_or("authority")?.rotation = None;
     let sibling_a = a.groups[&address].current().ok_or("epoch")?;
@@ -714,30 +740,18 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
             );
         }
     }
-    // A recorded custody device read neither the collection nor the group.
+    // A recorded custody identity read neither the collection nor the group.
     let nonreader = PrivateKey::new().public_key();
     registry.records.insert(
         nonreader,
-        registry::Record {
-            device: Some(registry::Device {
-                user: PrivateKey::new().public_key(),
-                origin: None,
-                kind: registry::Kind::Paired,
-                profile: Some(Profile::Custody {
-                    scopes: ["lists".into()].into(),
-                }),
-                issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
-
-                enrolled: now()?,
-                invitation: None,
-            }),
-            ..Default::default()
-        },
+        admitted(Profile::Custody {
+            scopes: ["lists".into()].into(),
+        })?,
     );
     let before = a.groups[&address].epochs.clone();
     let before_keys = a.keys.clone();
     assert_eq!(b.keys, before_keys);
-    a.begin_revocation(Revoke::Node(nonreader), &registry, None)?;
+    a.begin_revocation(Revoke::Identity(nonreader), known(&registry), None)?;
     a.rotate(&av)?;
     a.authority.as_mut().ok_or("authority")?.rotation = None;
     b.learn_revocations(&a.revocations)?;
@@ -768,6 +782,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
     let record = ContactRecord {
         v: CONTACT_VERSION,
         publisher: settings.publisher,
+        database: settings.database_context()?,
         node,
         routes: vec![Route {
             transport: "tcp".into(),
@@ -837,17 +852,16 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let profile = Profile::Reader {
         scopes: ["lists".into()].into(),
     };
-    let identity = issuer.identity(&vault)?;
-    let links = issuer.issuer_links();
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
     let capability = issuer.issue(
-        &issuer.authority(&*identity, &links)?,
+        &issuer.authority(&issuer_node)?,
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,
         (false, Some(AuthorRange::new(2, 1025)?)),
     )?;
     let chain = member_chain(
-        &issuer.authority(&*identity, &links)?.chain_of(capability),
+        &issuer.authority(&issuer_node)?.chain_of(capability),
         &user,
         node.public_key(),
     )?;
@@ -1023,8 +1037,10 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
     let directory = tempfile::tempdir()?;
     let (mut a, vault, _) = issuer_at(TWO, directory.path())?;
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-    let owner = PrivateKey::from_bytes(&vault.get("identity")?);
+    let owner = a.identity;
     let owner_links = a.issuer_links();
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
+    let credentials = a.credentials.clone();
     let mut rows = BTreeMap::new();
     let mut registry = Registry::default();
     let mut holders = Vec::new();
@@ -1032,8 +1048,8 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
         let (user, node) = (PrivateKey::new(), PrivateKey::new());
         let (supplied, changes) = a.grant(
             &vault,
-            DeviceKeys {
-                user: user.public_key(),
+            NodeKeys {
+                identity: user.public_key(),
                 node: node.public_key(),
             },
             (
@@ -1053,7 +1069,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
             1,
         )?;
         registry = Registry::merged(&mut rows, &changes)?;
-        holders.push((user, CredentialChain(supplied.credentials.chain.0), grant));
+        holders.push((user, supplied.credentials.chain(), grant));
     }
     // B is another issuer that granted nothing: it renews from the registry
     // alone, after A's links lapsed.
@@ -1091,7 +1107,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
         let statement = rocky_credentials::SignedRevocation::sign(
             rocky_credentials::Revocation {
                 app: a.domain()?.manifest().app,
-                issuer: owner.public_key(),
+                issuer: owner,
                 time,
                 nodes: BTreeSet::new(),
                 identities,
@@ -1099,7 +1115,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
                 cut: Default::default(),
                 recovery: None,
             },
-            &owner,
+            rocky_credentials::Signer::node(&issuer_node, &credentials)?,
             &owner_links,
         )?;
         Ok::<_, Failure>(RevocationSet::try_from(vec![statement])?)

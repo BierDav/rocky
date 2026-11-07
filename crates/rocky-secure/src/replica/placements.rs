@@ -137,6 +137,14 @@ impl<A: RowApplication> Inner<A> {
                 chains: Vec::new(),
             });
         };
+        credentials
+            .verify_database(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         let (grants, selectors) = credentials
             .verify_selectors(self.config.publisher, peer, &self.config.revocations, time)
             .map_err(credential)?;

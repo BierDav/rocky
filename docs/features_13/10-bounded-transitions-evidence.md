@@ -60,6 +60,12 @@ replayed by preparation, publication or cleanup. Restart therefore cannot
 repeat a non-idempotent operation. There is no partially copied live table to
 reconstruct from disposable scratch.
 
+Checkpoint-only transfer includes the covered key epoch's opaque escrow rows in
+the first encrypted, signed page. Import evaluates every record with the
+existing `keep_carried_escrow` rules inside the page staging transaction, so
+issuer-slot replacement, revocation cleanup and refusal accounting remain
+shared with frame transfer and a rolled-back page leaves no escrow state.
+
 The previous overflow counterexample remains relevant to future kinds: live
 `(10,20)` replaced one chunk at a time under a `preparing` marker can restart
 from `(100,20)` and produce `(1000,200)` instead of `(100,200)`. That proposal

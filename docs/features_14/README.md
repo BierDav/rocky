@@ -1,7 +1,11 @@
-# features_14: identities hold access
+ # features_14: identities hold access
 
-Status: planned (2026-11-05). Sketch; no phase has started. Phase briefs
-record their own status; evidence goes beside each brief as
+Status: implementation in progress (2026-11-07). Phases 1, 2, 4 and 5a are
+integrated. Phase 3 database-scoped membership is implemented and verified:
+the full workspace gate passes native tests, supported feature checks,
+browser tests and browser/native sync. See its evidence for measured results
+and limits. Phases 5b and 6 still follow separately.
+Phase briefs record their own status; evidence goes beside each brief as
 `NN-<name>-evidence.md`. Source code and tests define current behavior.
 
 ## Destination
@@ -10,6 +14,10 @@ An **identity** is the only principal. Issuers grant it permissions and
 revoke it; the root trusts it and revokes that trust. An identity's key
 works like the root's: a 24-word phrase or a passkey, supplied for one
 call and never stored by Rocky.
+
+The same linkable identity may hold access to several databases. Each database
+independently grants permissions, links nodes and manages trust and revocation.
+Using an identity in one database grants nothing in another.
 
 A **node** is a key an identity linked to itself. It holds no rights of
 its own: it acts with its identity's rights for as long as the identity
@@ -64,13 +72,17 @@ widens its own permissions.
 | --- | --- | --- |
 | 1 | [Node-signed authority](01-node-signed-authority.md) | routine statements signed by node keys; node certificates independent of capability expiry |
 | 2 | [Identity keys](02-identity-keys.md) | `IdentityKey` with phrase or passkey; single-use keys for identities with one node |
-| 3 | [Membership](03-membership.md) | link and unlink statements, author numbers from the membership sequence, forks as equivocation |
+| 3 | [Membership](03-membership.md) | database-bound link and unlink statements, author numbers from each database's membership sequence, forks as equivocation within that database |
 | 4 | [Identity registry](04-identity-registry.md) | registry and calls keyed by identity; no node records |
 | 5 | [Admission and discovery](05-admission-and-discovery.md) | join requests as discovered devices, verified admission, approve-first invitations |
 | 6 | [Trusted identities with many nodes](06-trusted-many-nodes.md) | trust and staleness per identity, alerts when a trusted identity links a node, lane cuts over every node |
+| 7 | [Bounded live publication](07-live-publication.md) (proposed) | shared credentials, publication completion and scoped repair for live refresh; [investigation evidence](07-live-publication-evidence.md) |
 
 1 → 2 → 3 is the critical path. 4 can start after 1. 5 needs 3 and 4. 6
 needs 3.
+
+Phase 7 is an independent performance follow-up against phases 3 and 5a;
+its runtime changes are proposed, not integrated.
 
 ## Goals
 
@@ -99,6 +111,10 @@ instead of choosing differently.
 - **Only identities hold permissions.** Capabilities, partition grants,
   claim rights and trusted grants name identities. A node certificate
   carries no grants; verifiers take the rights of the identity it names.
+- **One identity, independent databases.** A supplied `IdentityProvider` may
+  represent the same identity in several databases. Permissions, registry
+  records, trust, membership heads, author numbers, node bounds and revocations
+  stay local to each database. Revoking access in one does not revoke another.
 - **Issuers revoke identities, never nodes.** `Revoke::Node` is gone from
   issuer authority. A revocation signed by an issuer names identities and
   capabilities only.
@@ -136,9 +152,17 @@ instead of choosing differently.
   grant is still a separate root signature, so revoking the owner identity
   still works. An owner who wants them separate passes an
   `IdentityProvider` explicitly.
+  An application reusing a personal identity across databases supplies that
+  identity explicitly and keeps each database's root authority separate.
 
 ### Nodes
 
+- **Membership is bound to the database.** Signed certificates and unlinks
+  identify the database context, including its pinned publisher root and
+  stable mesh/domain identifiers. Enrollment and authority-set verification
+  reject foreign context before membership, fork or revocation state changes.
+  A matching identity signature alone is insufficient. The binding survives
+  schema changes and does not depend on a local path or bookmark.
 - **Node certificates do not expire.** A certificate is valid until its
   identity unlinks the node or the identity is revoked. The identity's
   capability expires and is renewed; the certificate does not need
@@ -155,13 +179,15 @@ instead of choosing differently.
   both certificates are void and the identity's other nodes raise an
   alert. The holder links again. Linking is rare and interactive, so this
   costs nothing in practice.
-- **At most 32 linked nodes per identity**, equal to `MAX_CUT_LANES`, so a
-  root cut of a trusted identity always covers every lane. Unlinked nodes
-  free their slot but not their author number.
+- **At most 32 linked nodes per identity per database**, equal to
+  `MAX_CUT_LANES`, so a root cut of a trusted identity always covers every
+  lane. Unlinked nodes free their slot but not their author number.
 
 ### Admission
 
 - **A new device becomes a new single-use identity** unless it is linked.
+  An application may instead supply an existing linkable identity for admission
+  to a different database; that database's issuer must still grant it access.
 - **Approval is the default.** `Session::invitation()` carries no profile;
   a device answering it becomes a pending discovered device until an
   issuer admits it with a profile. `Session::invitation_with(profile)` is
@@ -202,6 +228,12 @@ instead of choosing differently.
 
 ## Non-goals
 
+- **Application accounts and onboarding.** Applications own passkey ceremonies
+  and stable identity derivation, QR/deep links, database selection, and an
+  encrypted personal directory of database IDs, pinned roots and connection
+  hints. Directory bootstrap, synchronization and recovery are application
+  concerns. Rocky accepts the supplied identity and verifies database-local
+  authority; it provides no global account service or database directory.
 - **Groups of identities.** A team or role identity is an identity whose
   holder links the members' devices. A delegation graph between identities
   is not part of this roadmap.

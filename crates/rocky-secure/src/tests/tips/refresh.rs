@@ -384,11 +384,23 @@ async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
     statement.action = SealAction::Continue { schema };
     let issuer = PrivateKey::from_bytes(&[104; 32]);
     let chain = CredentialChain(vec![
-        Authority::owner(&f.publisher)
-            .issue_issuer(issuer.public_key(), None, validity())
-            .unwrap(),
+        Authority::owner_in(
+            &f.publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), None, validity())
+        .unwrap(),
     ]);
-    let continued = SignedSeal::endorse(statement, &issuer, &chain).unwrap();
+    let continued = SignedSeal::endorse(
+        statement,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
+        &chain,
+    )
+    .unwrap();
     a.receive_tip_statements(&[TipStatement::Seal(continued)])
         .await
         .unwrap();

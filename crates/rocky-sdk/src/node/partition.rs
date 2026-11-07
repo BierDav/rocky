@@ -175,30 +175,30 @@ impl Node {
         .await
     }
     async fn issue_partitions(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
-        let device: crate::DeviceKeys = serde_json::from_value(request["device"].clone())?;
+        let device: crate::NodeKeys = serde_json::from_value(request["device"].clone())?;
         let grants: Vec<PartitionGrant> = serde_json::from_value(request["partitions"].clone())?;
         let registry = self.registry().await?;
         let settings = self.settings.lock().await.clone();
         let delegations: u8 = request["delegations"].as_u64().unwrap_or(1).try_into()?;
         let validity = (now()?, settings.ttl, 300);
-        if settings.revoked_device(&device.node, &registry) {
+        if settings.revoked_node(&device, &registry) {
             return Err(refused("the device was revoked"));
         }
         if settings.issuer() {
-            settings.holder_changes(&self.vault, &device, &grants, delegations, &registry)?;
+            settings.holder_changes(&device, &grants, delegations, &registry)?;
         }
         let chain = self
             .configure(|settings| {
                 if kind != "partition_delegate" && !settings.issuer() {
                     return Err("partition grant requires an issuer".into());
                 }
-                let authors = settings.reserve_authors(device.user, Some(&registry), None)?;
+                let authors = settings.reserve_authors(device.identity, Some(&registry), None)?;
                 let terms = (delegations, Some(authors));
-                let identity = settings.identity(&self.vault)?;
+                let node = Settings::node_key(&self.vault)?;
                 if kind == "partition_delegate" && !settings.issuer() {
                     Ok(settings.credentials.delegable().delegate_partitions(
-                        &*identity,
-                        device.user,
+                        rocky_credentials::Signer::node(&node, &settings.credentials)?,
+                        device.identity,
                         rocky_core::PrincipalKind::User,
                         vec![],
                         grants.clone(),
@@ -207,10 +207,9 @@ impl Node {
                     )?)
                 } else {
                     // An issuer grants and delegates through its authority.
-                    let links = settings.issuer_links();
-                    let authority = settings.authority(&*identity, &links)?;
+                    let authority = settings.authority(&node)?;
                     Ok(authority.chain_of(authority.issue_partition_terms(
-                        device.user,
+                        device.identity,
                         vec![],
                         grants.clone(),
                         terms,
@@ -228,11 +227,11 @@ impl Node {
             mesh: settings.mesh,
             domain: settings.domain,
             manifest: settings.manifest()?,
-            credentials: rocky_credentials::Credentials {
-                publisher: settings.publisher,
-                revocations: settings.revocations.clone(),
-                chain,
-            },
+            credentials: rocky_credentials::Credentials::of(
+                settings.publisher,
+                settings.revocations.clone(),
+                &chain,
+            ),
             keys: vec![],
             issuers: vec![],
         };
@@ -397,6 +396,7 @@ impl Node {
     /// the deliveries before any network call; sync delivers them.
     async fn share(&self, partition: GroupPartition, request: &Value) -> Result<Value, Failure> {
         let registry = self.registry().await?;
+        let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
         self.reads_group(&settings, &partition)?;
         if settings
@@ -430,10 +430,12 @@ impl Node {
             return Err(refused("share with at most 256 recipients at once"));
         }
         let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        if let Some(revoked) = recipients
-            .iter()
-            .find(|recipient| settings.revoked_device(recipient, &registry))
-        {
+        if let Some(revoked) = recipients.iter().find(|recipient| {
+            settings.tombstoned(recipient)
+                || membership
+                    .identity_of(recipient)
+                    .is_some_and(|identity| settings.revoked_identity(&identity, &registry))
+        }) {
             return Err(refused(format!(
                 "recipient {} was revoked",
                 revoked.to_hex()
@@ -487,8 +489,8 @@ impl Node {
     }
     async fn group_status(&self, partition: GroupPartition) -> Result<Value, Failure> {
         let address = record_key(&partition.record.address);
-        let registry = if self.settings.lock().await.issuer() {
-            Some(self.registry().await?)
+        let membership = if self.settings.lock().await.issuer() {
+            Some(self.membership().await?)
         } else {
             None
         };
@@ -501,7 +503,7 @@ impl Node {
                 .filter(|pending| pending.address == address)
                 .map(|pending| {
                     json!({
-                        "node": settings.delivery_nodes.values().chain(settings.peers.keys()).chain(registry.iter().flat_map(|registry| registry.records.keys()))
+                        "node": settings.delivery_nodes.values().chain(settings.peers.keys()).chain(membership.iter().flat_map(|membership| membership.all().map(|(_, linked)| &linked.node)))
                             .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
                             .map(PublicKey::to_hex),
                         "reference": pending.recipient.to_hex(),

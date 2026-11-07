@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::rows;
 use network::NativeSession;
 use rocky_core::SqlValue;
+use rocky_credentials::{RootEscrow, RootKey, escrow_tag};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -1465,6 +1466,53 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
         .audit(f.public)
         .await
         .unwrap();
+}
+
+/// A checkpoint-only restore carries the covered epoch's escrow through the
+/// signed encrypted page and judges it before publishing the staged rows.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn checkpoint_pages_carry_and_judge_escrow() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    a.author_buffered(handle(1), insert(&f, 1, "escrow"), vec![])
+        .await
+        .unwrap();
+    let epoch = *a.key_epochs(f.public).await.last().unwrap();
+    let root = RootKey::generate();
+    let secret = [17; 32];
+    a.keep_escrow(vec![(
+        Some((f.public, epoch)),
+        RootEscrow::seal(
+            root.public_key(),
+            escrow_tag(root.public_key(), &secret),
+            &secret,
+        )
+        .unwrap(),
+    )])
+    .await
+    .unwrap();
+    let signed = compacted(&f, &a).await;
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let mut page = a
+        .checkpoint_page(
+            b_key.public_key(),
+            &b_credentials,
+            f.public,
+            signed.id().unwrap(),
+            None,
+            MAX_SECURE_FRAME / 2,
+        )
+        .await
+        .unwrap();
+    page.carrier = Some(a_key.public_key());
+    b.stage_checkpoint_page(page).await.unwrap();
+    let kept = b.escrow_of(&[(f.public, epoch)].into()).await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].record().open(&root).unwrap(), secret);
 }
 
 /// A page whose rows a key holder changed, dropped or reordered, or one

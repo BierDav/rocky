@@ -75,7 +75,7 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     // A keyless custodian cannot issue enrollment or renewal.
     assert!(
         relay
-            .call(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["items"]}}))
+            .call(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
             .await
             .is_err()
     );
@@ -270,7 +270,7 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
     );
     assert!(
         relay
-            .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":["items"]}}))
+            .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":["items"]}}))
             .await
             .is_err()
     );
@@ -315,13 +315,13 @@ async fn routed_records_preserve_authority_with_the_current_version() -> Result<
     };
     let original = decode(&invitation)?;
     let routed = decode(&route_enrollment(&invitation, &contact)?)?;
-    assert_eq!(routed["v"], 5);
-    for name in ["token", "publisher", "profile", "expires"] {
+    assert_eq!(routed["v"], 7);
+    for name in ["token", "publisher", "node", "profile", "expires"] {
         assert_eq!(routed[name], original[name]);
     }
     let original = decode(&contact)?;
     let routed = decode(&route_enrollment(&contact, &contact)?)?;
-    assert_eq!(routed["v"], 2);
+    assert_eq!(routed["v"], 3);
     assert_eq!(routed["enrollment_only"], true);
     assert_eq!(routed["node"], original["node"]);
     assert_eq!(routed["publisher"], original["publisher"]);

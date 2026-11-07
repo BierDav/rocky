@@ -31,6 +31,16 @@ pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
         delegations: 0,
         extension: Extension::new(Extended {
             node: Some(PeerId::of(key.public_key())),
+            authors: Some(rocky_credentials::AuthorRange::new(1, 1).unwrap()),
+            database: Some(rocky_credentials::DatabaseContext {
+                publisher: key.public_key(),
+                scope: rocky_core::Scope {
+                    mesh: rocky_core::MeshId([1; 16]),
+                    app: rocky_core::AppId([2; 16]),
+                    domain: rocky_core::DomainId([3; 16]),
+                },
+            }),
+            sequence: Some(0),
             ..Extended::default()
         })
         .unwrap(),

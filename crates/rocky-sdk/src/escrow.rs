@@ -250,7 +250,6 @@ impl Recovered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn settings(root: &RootKey) -> Settings {
         let schema: crate::schema::Schema = serde_json::from_str(
@@ -259,11 +258,7 @@ mod tests {
         .unwrap();
         Settings::installed(
             ("escrow".into(), true),
-            (
-                root.public_key(),
-                RootKey::generate().public_key(),
-                Arc::new(RootKey::generate()),
-            ),
+            (root.public_key(), RootKey::generate().public_key()),
             (
                 rocky_core::MeshId([1; 16]),
                 rocky_core::DomainId([2; 16]),

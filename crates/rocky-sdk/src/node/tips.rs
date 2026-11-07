@@ -9,9 +9,9 @@ use crate::tips::{
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
     BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, GENESIS_LINE_FORMAT,
-    GenesisLineStatement, IdentityProvider, SEAL_FORMAT, SealAction, SealStatement,
-    SignedBookmarkMove, SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
-    TipGraph, TipOpeningStatement,
+    GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove,
+    SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT, TipGraph,
+    TipOpeningStatement,
 };
 use rocky_secure::TipStatement;
 
@@ -42,7 +42,9 @@ fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
 /// Who signs tip statements: the identity and the links its authority
 /// comes through.
 pub(super) struct Signer {
-    pub(super) identity: Arc<dyn IdentityProvider>,
+    pub(super) node: PrivateKey,
+    pub(super) identity: PublicKey,
+    pub(super) credentials: CredentialChain,
     pub(super) links: CredentialChain,
     /// A trusted identity, which opens tips.
     opens: bool,
@@ -65,7 +67,7 @@ pub(super) trait Linked: Sized {
     type Statement: rocky_credentials::OpensStage;
     fn endorse_linked(
         statement: Self::Statement,
-        signer: &dyn IdentityProvider,
+        signer: rocky_credentials::Signer<'_>,
         chain: &CredentialChain,
         link: Option<rocky_credentials::ChainLink>,
     ) -> Result<Self, rocky_credentials::Error>;
@@ -91,7 +93,7 @@ macro_rules! linked {
             }
             fn endorse_linked(
                 statement: $statement,
-                signer: &dyn IdentityProvider,
+                signer: rocky_credentials::Signer<'_>,
                 chain: &CredentialChain,
                 link: Option<rocky_credentials::ChainLink>,
             ) -> Result<Self, rocky_credentials::Error> {
@@ -122,7 +124,7 @@ impl Signer {
         }) {
             return Ok(T::endorse_linked(
                 statement,
-                &*self.identity,
+                rocky_credentials::Signer::node(&self.node, &self.credentials)?,
                 &self.links,
                 Some(link),
             )?);
@@ -142,7 +144,12 @@ impl Signer {
                     .ok_or("a staged schema switch signs its seal first")?,
             );
         }
-        let signed = T::endorse_linked(statement, &*self.identity, &self.links, link)?;
+        let signed = T::endorse_linked(
+            statement,
+            rocky_credentials::Signer::node(&self.node, &self.credentials)?,
+            &self.links,
+            link,
+        )?;
         if let (Some(next), Some(link)) = (next.as_mut(), link) {
             **next = link.next(signed.id()?);
         }
@@ -673,7 +680,8 @@ impl Node {
         if let Some(statement) = settings.revocation(&self.path)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
-        let identity = settings.identity(&self.vault)?;
+        let node = Settings::node_key(&self.vault)?;
+        let identity = settings.identity;
         let (links, opens) = if let Some(trusted) = settings.trusted_links().filter(|links| {
             links.0[0]
                 .capability
@@ -689,7 +697,9 @@ impl Node {
             ));
         };
         Ok(Signer {
+            node,
             identity,
+            credentials: settings.credentials.clone(),
             links,
             opens,
             chain: None,
@@ -708,10 +718,7 @@ impl Node {
         }
         let held = self.tip_chain.clone().lock_owned().await;
         let lane = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        let (next, known) = self
-            .replica
-            .own_chain(scope, signer.identity.public_key()?, lane)
-            .await?;
+        let (next, known) = self.replica.own_chain(scope, signer.identity, lane).await?;
         signer.chain = Some(Chain {
             _held: held,
             next: std::sync::Mutex::new(next),
@@ -1006,9 +1013,13 @@ impl Node {
         let Some(links) = settings.trusted_links() else {
             return Ok(());
         };
-        let author = self.replica.terminal_author().await?;
-        let identity = settings.identity(&self.vault)?;
-        let chain = settings.certify_node(&*identity, links, &self.domain(), author)?;
+        let (node, _) = self.replica.terminal_author().await?;
+        let certificate = settings
+            .credentials
+            .certificate()
+            .filter(|certificate| certificate.capability.subject == node)
+            .ok_or("missing certificate for the composed log's node")?;
+        let chain = links.with_certificate(certificate.clone());
         self.replica.install_terminal_credentials(chain).await?;
         Ok(())
     }

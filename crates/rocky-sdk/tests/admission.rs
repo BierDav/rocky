@@ -60,7 +60,8 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     );
 
     // A revokes D while D is away and tells C, then is gone.
-    a.ok(json!({"type": "revoke", "node": d_node})).await;
+    a.ok(json!({"type": "revoke", "identity": d.identity().await}))
+        .await;
     a.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(statements(c).await, 1);
     a.close().await;

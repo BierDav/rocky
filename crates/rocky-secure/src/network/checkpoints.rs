@@ -477,7 +477,9 @@ impl NativeSession {
                 .await?;
                 left = window;
             }
-            replica.stage_checkpoint_page(*page).await?;
+            let mut page = *page;
+            page.carrier = Some(self.peer);
+            replica.stage_checkpoint_page(page).await?;
         }
         Ok(true)
     }

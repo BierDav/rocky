@@ -11,7 +11,7 @@ pub const RECOVERY_FIRST: u32 = 1 << 30;
 pub const RECOVERY_SLOT: u32 = 1 << 16;
 /// Recoveries the reserved numbers hold.
 pub const RECOVERY_SLOTS: u32 = (MAX_AUTHOR - RECOVERY_FIRST + 1) / RECOVERY_SLOT;
-const EXTENSION_VERSION: u32 = 10;
+const EXTENSION_VERSION: u32 = 11;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -88,6 +88,7 @@ struct Body {
     origin: Option<Origin>,
     sequence: Option<u64>,
     previous: Option<rocky_core::Commitment>,
+    database: Option<DatabaseContext>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -117,6 +118,16 @@ pub struct Extended {
     pub sequence: Option<u64>,
     /// The preceding membership certificate, or none for sequence zero.
     pub previous: Option<rocky_core::Commitment>,
+    /// Stable database authority and namespace, independent of its schema.
+    pub database: Option<DatabaseContext>,
+}
+
+/// The pinned root and stable namespace of one database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseContext {
+    pub publisher: crate::PublicKey,
+    pub scope: rocky_core::Scope,
 }
 /// A trusted identity and when its root grant became valid: a recovery
 /// ends every link whose origin's grant predates its own.
@@ -140,6 +151,7 @@ impl Extension {
             origin: extended.origin,
             sequence: extended.sequence,
             previous: extended.previous,
+            database: extended.database,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -181,6 +193,7 @@ impl Extension {
             origin: body.origin,
             sequence: body.sequence,
             previous: body.previous,
+            database: body.database,
         })
     }
 }
@@ -195,7 +208,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -208,6 +221,7 @@ mod tests {
                     origin: None,
                     sequence: None,
                     previous: None,
+                    database: None,
                 })
                 .unwrap(),
             );

@@ -73,6 +73,10 @@ pub enum Purpose {
 /// Supplies an identity: its public key and signatures. It never returns
 /// the private key; how the key is stored or derived is the provider's.
 pub trait IdentityProvider: Send + Sync {
+    /// The owner signer a root can derive for creation.
+    fn owner_identity(&self) -> Option<std::sync::Arc<dyn IdentityProvider>> {
+        None
+    }
     fn public_key(&self) -> Result<PublicKey, Error>;
     /// Signs `message`, the domain-separated bytes of a statement.
     fn sign(&self, purpose: Purpose, message: &[u8]) -> Result<Signature, Error>;

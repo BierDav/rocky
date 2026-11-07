@@ -3,7 +3,7 @@
 use crate::{
     Failure,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
-    enrollment::{DEFAULT_TTL, DeviceKeys, Settings, Supplied, now},
+    enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
     node::{self, Client, Node},
     schema::Schema,
     secrets::{FileSecretStore, SecretStore},
@@ -22,15 +22,14 @@ use std::{
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
 /// What opening a database takes. Without `secrets`, keys are owner-only
-/// files in the data directory. Without `identity`, the node's identity is
-/// made in, and kept in, the secret store. Without `network`, nothing is
+/// files in the data directory. Identity providers are used only during
+/// installation. Without `network`, nothing is
 /// dialed or listened on.
 pub struct Open<'a> {
     pub directory: &'a Path,
     pub schema: &'a str,
     pub secrets: Option<Arc<dyn SecretStore>>,
-    /// The application's identity provider. A database installed under one
-    /// needs it at every open.
+    /// The identity signer for this installation call; opening needs no signer.
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
     /// Optional metadata log or coordination service.
@@ -51,6 +50,8 @@ pub struct Opened {
     /// once, or keep its secret behind a passkey: Rocky keeps no copy, and
     /// only it adds or revokes trusted nodes and recovers the domain.
     pub root: Option<crate::RootKey>,
+    /// A generated linkable identity's phrase, returned once.
+    pub identity: Option<String>,
     /// The lost trusted identities a recovery revoked with the root, with
     /// the identities each first enrolled, whose devices enroll again; every
     /// key rotated. All of them, also those an interrupted attempt revoked.
@@ -61,7 +62,7 @@ pub struct Opened {
 }
 
 // The blocking constructors make the other installs; a browser has create,
-// join, recover and open (`Configuration`).
+// join, restore, recover and open (`Configuration`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) enum Install {
     Create {
@@ -71,6 +72,8 @@ pub(crate) enum Install {
     },
     Join {
         invitation: String,
+        /// What the device calls itself in its join request.
+        name: String,
     },
     Supplied(Box<Supplied>),
     /// Another node of the identity `open.identity` supplies, from a node
@@ -118,6 +121,8 @@ enum Command {
         ending: Arc<AtomicBool>,
         /// The root signer of a root-only call, dropped when it ends.
         root: Option<Arc<dyn crate::IdentityProvider>>,
+        /// The identity the call signs with, dropped when it ends.
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
         reply: oneshot::Sender<Vec<u8>>,
     },
     End(u64, oneshot::Sender<()>),
@@ -305,15 +310,16 @@ impl Database {
     /// Enrolls this device with the issuer an invitation names, as the
     /// grant profile it names, over `open.network`, which stays attached.
     pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation)?;
+        let install = Self::join_install(&open, invitation, "")?;
         Self::start(open, install)
     }
-    fn join_install(open: &Open<'_>, invitation: &str) -> Result<Install, Failure> {
+    fn join_install(open: &Open<'_>, invitation: &str, name: &str) -> Result<Install, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("join").into());
         }
         Ok(Install::Join {
             invitation: invitation.into(),
+            name: name.into(),
         })
     }
     // Blocks the caller until the database is open, which a browser cannot.
@@ -336,21 +342,13 @@ impl Database {
             },
         )
     }
-    /// Makes the keys of a device that will receive credentials from
-    /// outside the SDK, and returns their public halves for whoever issues
-    /// them. Asking again returns the same keys. Nothing is contacted.
-    pub fn device(
-        directory: &Path,
-        secrets: Option<Arc<dyn SecretStore>>,
-    ) -> Result<DeviceKeys, Failure> {
-        Self::device_of(directory, secrets, None)
-    }
-    /// As `device`, for a node of the identity `identity` supplies.
-    pub fn device_of(
+    /// Prepares public node keys for external enrollment under an explicit identity.
+    /// Keep the provider outside Rocky and supply it again when installing the answer.
+    pub fn node_keys_of(
         directory: &Path,
         secrets: Option<Arc<dyn SecretStore>>,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<DeviceKeys, Failure> {
+    ) -> Result<NodeKeys, Failure> {
         rocky_platform::fs::create_dir_all(directory)?;
         let path = directory.join("identity.json");
         if rocky_platform::fs::exists(&path) {
@@ -387,19 +385,32 @@ impl Database {
     /// signing identity, which `invitation` enrolls over `open.network`.
     /// The archive's operations, handles, tickets, results and effects keep
     /// their original identities; nothing is sent again as new work. An
-    /// interrupted restore continues when called again. See
-    /// `docs/runtime/backup-and-restore.md`.
+    /// interrupted restore continues when called again.
+    /// `Configuration::restore` does the same without blocking.
     pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
+        let install = Self::restore_install(&open, archive, invitation)?;
+        Self::start(open, install)
+    }
+    pub(crate) async fn launch_restore(
+        open: Open<'_>,
+        archive: &Path,
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        let install = Self::restore_install(&open, archive, invitation)?;
+        Self::launch(open, install, None).await
+    }
+    fn restore_install(
+        open: &Open<'_>,
+        archive: &Path,
+        invitation: &str,
+    ) -> Result<Install, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("restore").into());
         }
-        Self::start(
-            open,
-            Install::Restore {
-                archive: archive.to_path_buf(),
-                invitation: invitation.into(),
-            },
-        )
+        Ok(Install::Restore {
+            archive: archive.to_path_buf(),
+            invitation: invitation.into(),
+        })
     }
     // Blocks the caller until the database is open, which a browser cannot.
     #[cfg(not(target_family = "wasm"))]
@@ -521,8 +532,12 @@ impl Database {
     ) -> Result<Opened, Failure> {
         Self::launch(open, Self::create_install(credential_ttl, root)?, None).await
     }
-    pub(crate) async fn launch_join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation)?;
+    pub(crate) async fn launch_join(
+        open: Open<'_>,
+        invitation: &str,
+        name: &str,
+    ) -> Result<Opened, Failure> {
+        let install = Self::join_install(&open, invitation, name)?;
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
@@ -534,7 +549,7 @@ impl Database {
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
         let directory = open.directory.to_path_buf();
-        if let Install::Join { invitation } = &install {
+        if let Install::Join { invitation, .. } = &install {
             crate::enrollment::Invite::parse(invitation)?;
         }
         let setup = Setup {
@@ -569,6 +584,7 @@ impl Database {
                 });
                 Ok(Opened {
                     root: None,
+                    identity: None,
                     revoked,
                     network: network.map(|id| NetworkService::new(&shared, id)),
                     database: Arc::new(Self {
@@ -939,9 +955,24 @@ impl Session {
         request: Value,
         root: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<Value, Failure> {
+        self.request_signed(request, root, None).await
+    }
+    pub(crate) async fn request_with_identity(
+        &self,
+        request: Value,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<Value, Failure> {
+        self.request_signed(request, None, Some(identity)).await
+    }
+    async fn request_signed(
+        &self,
+        request: Value,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<Value, Failure> {
         let call = json!({"version":1,"scope":serde_json::from_str::<Value>(&self.scope)?,"request":request});
         let response: Value =
-            serde_json::from_str(&self.call_with_root(call.to_string(), root).await?)?;
+            serde_json::from_str(&self.call_supplied(call.to_string(), root, identity).await?)?;
         if response["status"] != "ok" {
             return Err(Box::new(crate::CallFailure {
                 code: response["error"]["code"]
@@ -1201,6 +1232,26 @@ impl Session {
         request: String,
         root: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<String, Failure> {
+        self.call_supplied(request, root, None).await
+    }
+    /// As `call`, with the identity this database's node belongs to, for a
+    /// call that signs as it. It must be the identity the database was
+    /// installed under; it signs inside this call and is dropped when the
+    /// call ends. A request may instead carry `"identity": {"phrase": ...}`
+    /// or `{"secret": ...}`.
+    pub async fn call_with_identity(
+        &self,
+        request: String,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<String, Failure> {
+        self.call_supplied(request, None, Some(identity)).await
+    }
+    async fn call_supplied(
+        &self,
+        request: String,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<String, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
         }
@@ -1224,6 +1275,7 @@ impl Session {
                 bytes,
                 ending: self.closed.clone(),
                 root,
+                identity,
                 reply,
             })
             .await?;
@@ -1313,7 +1365,14 @@ async fn identity(
         return Err("no domain in this directory: create or join one".into());
     }
     if exists && !resuming && !rocky_platform::fs::exists(directory.join("rocky.sqlite")) {
-        return Err("existing identity has no runtime database; recovery is required".into());
+        return Err(
+            if rocky_platform::fs::exists(directory.join(crate::backup::MARKER)) {
+                "a restore is unfinished in this directory: restore again with its backup"
+            } else {
+                "existing identity has no runtime database; recovery is required"
+            }
+            .into(),
+        );
     }
     match install {
         Install::Create { ttl, root } => {
@@ -1341,10 +1400,10 @@ async fn identity(
                 }
             }
         }
-        Install::Join { invitation } => {
+        Install::Join { invitation, name } => {
             let network = network.ok_or(ServiceError::NetworkRequired("join"))?;
             let joining =
-                Settings::prepare_join(path, invitation, secrets, setup.identity.clone())?;
+                Settings::prepare_join(path, (invitation, name), secrets, setup.identity.clone())?;
             let key = Settings::transport_key(&joining.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match joining.enroll(path, schema, &*transport).await {
@@ -1386,7 +1445,6 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(false, key).await?)))
         }
-        #[cfg(not(target_family = "wasm"))]
         Install::Restore {
             archive,
             invitation,
@@ -1426,13 +1484,8 @@ async fn identity(
             let key = Settings::transport_key(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(true, key).await?)))
         }
-        // A restore enrolls through an invitation, which a browser takes
-        // only through `Configuration::join`.
-        #[cfg(target_family = "wasm")]
-        Install::Restore { .. } => Err("restoring a backup is unavailable in a browser".into()),
         Install::Installed => {
             let mut settings = Settings::load(path)?;
-            settings.provider = setup.identity.clone();
             if settings.logged_out {
                 return Err("this device logged out; join the domain again".into());
             }
@@ -1610,7 +1663,6 @@ pub(crate) async fn insert_rows(
     }
     Ok(())
 }
-#[cfg(not(target_family = "wasm"))]
 /// Verifies the archive, enrolls a fresh identity with the invitation's
 /// issuer and puts the archive's files in place. The marker, written
 /// before enrolling, names the predecessor whose file is rebound at open.
@@ -1655,8 +1707,8 @@ async fn restore(
         let link = network.start(settings.issuer(), key).await?;
         (settings, link)
     } else {
-        // A restored node's identity is made in the secret store.
-        let joining = Settings::prepare_join(path, invitation, secrets, None)?;
+        // Restores admit a fresh single-use identity.
+        let joining = Settings::prepare_join(path, (invitation, ""), secrets, None)?;
         let key = Settings::transport_key(&joining.vault)?;
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {
@@ -1678,15 +1730,25 @@ async fn restore(
             }
         }
     };
-    if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
-        return Err("the enrolled domain differs from the backup's".into());
-    }
-    for (name, staged) in &opened.files {
-        if name != "identity.json" {
-            rocky_platform::fs::rename(staged, directory.join(name))?;
+    let placed = (|| -> Result<(), Failure> {
+        if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
+            return Err("the enrolled domain differs from the backup's".into());
         }
+        crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Enrolled)?;
+        for (name, staged) in &opened.files {
+            if name != "identity.json" {
+                rocky_platform::fs::rename(staged, directory.join(name))?;
+            }
+        }
+        rocky_platform::fs::remove_dir_all(&staging)?;
+        Ok(())
+    })();
+    if let Err(error) = placed {
+        if link.1 {
+            link.0.close().await;
+        }
+        return Err(error);
     }
-    rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, Some(link)))
 }
 
@@ -1728,7 +1790,7 @@ async fn run(
 }
 
 async fn run_inner(
-    setup: Setup,
+    mut setup: Setup,
     network: Option<Network>,
     mut input: mpsc::Receiver<Command>,
     mut cleanups: mpsc::UnboundedReceiver<Command>,
@@ -1799,6 +1861,7 @@ async fn run_inner(
             &serde_json::to_vec(&serde_json::json!({"intent": true, "inviter": inviter.to_hex()}))?,
         )?;
     }
+    let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
         // A revocation interrupted after its intent was saved completes
@@ -1983,7 +2046,7 @@ async fn run_inner(
         let _ = expose.send(Arc::downgrade(&node));
     }
     node.coordinate(log);
-    if let Err(error) = async {
+    if let Err(error) = crate::identities::supplying(startup_identity, async {
         node.restore_line_signers().await?;
         node.complete_revocation().await?;
         node.refresh_importing().await?;
@@ -1993,7 +2056,7 @@ async fn run_inner(
                 .await?;
         }
         Ok::<_, Failure>(())
-    }
+    })
     .await
     {
         if let Some((transport, true)) = &link {
@@ -2076,6 +2139,7 @@ async fn run_inner(
                 bytes,
                 ending,
                 root,
+                identity,
                 mut reply,
             } => {
                 let Ok(permit) = budget.clone().try_acquire_owned() else {
@@ -2100,11 +2164,11 @@ async fn run_inner(
                     let _permit = permit;
                     let response = if waits {
                         tokio::select! {
-                            response = dispatch(&bytes, client, &node, None) => response,
+                            response = dispatch(&bytes, client, &node, (None, None)) => response,
                             () = reply.closed() => return,
                         }
                     } else {
-                        dispatch(&bytes, client, &node, root).await
+                        dispatch(&bytes, client, &node, (root, identity)).await
                     };
                     if ending.load(Ordering::SeqCst) {
                         node.end_sessions(Some(session));
@@ -2346,11 +2410,15 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
+type CallProviders = (
+    Option<Arc<dyn crate::IdentityProvider>>,
+    Option<Arc<dyn crate::IdentityProvider>>,
+);
 async fn dispatch(
     bytes: &[u8],
     client: Result<Arc<Client>, Failure>,
     node: &Node,
-    root: Option<Arc<dyn crate::IdentityProvider>>,
+    (root, identity): CallProviders,
 ) -> Vec<u8> {
     let result: Result<Value, Failure> = async {
         let call: Value = serde_json::from_slice(bytes)?;
@@ -2358,7 +2426,10 @@ async fn dispatch(
             return Err("foreign scope or SDK version".into());
         }
         let root = node::Root::of(&call["request"], root)?;
-        Box::pin(node.dispatch_with(&*client?, &call["request"], &root)).await
+        let identity = node::call_identity(&call["request"], identity)?;
+        let client = client?;
+        let call = node.dispatch_with(&client, &call["request"], &root);
+        Box::pin(crate::identities::supplying(identity, call)).await
     }
     .await;
     let response = match result {
@@ -2670,6 +2741,7 @@ mod tests {
                     bytes: bytes.clone(),
                     ending: session.closed.clone(),
                     root: None,
+                    identity: None,
                     reply,
                 })
                 .await?;

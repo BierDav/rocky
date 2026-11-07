@@ -333,6 +333,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .trusted
             .ok_or_else(|| denied("missing trusted grant"))?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        chain
+            .verify_database(
+                inner
+                    .config
+                    .credentials
+                    .database_context(inner.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         let owned = node == inner.config.node.public_key()
             || inner
                 .line_nodes

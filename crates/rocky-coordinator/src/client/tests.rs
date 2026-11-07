@@ -4,7 +4,7 @@
 use super::*;
 use crate::{
     counters::{CLAIM_WINDOW, Claim, Lookup, Name},
-    machine::{Metadata, self_certificate},
+    machine::{Metadata, self_certificate_in},
     retention::DAY,
 };
 use rocky_core::net::{BoxFuture, Failure, Stream};
@@ -229,7 +229,13 @@ impl Service {
             Arc::new(Lane(self.voter.clone(), KIND)),
         )
         .unwrap();
-        client.certify(self_certificate(key));
+        client.certify(self_certificate_in(
+            key,
+            rocky_credentials::DatabaseContext {
+                publisher: self.publisher.public_key(),
+                scope: self.scope,
+            },
+        ));
         client
     }
 }
@@ -376,7 +382,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         Ok(2)
     );
 
-    let statement = SignedRevocation::sign(
+    let statement = SignedRevocation::sign_in(
         Revocation {
             app: service.scope.app,
             issuer: service.publisher.public_key(),
@@ -389,6 +395,10 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         },
         &service.publisher,
         &CredentialChain::default(),
+        rocky_credentials::DatabaseContext {
+            publisher: service.publisher.public_key(),
+            scope: service.scope,
+        },
     )
     .unwrap();
     // The revoked holder itself may push it; it holds from then on.

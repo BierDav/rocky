@@ -182,7 +182,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .database;
     let session = issuer.session();
     let invitation = session
-        .pairing(GrantProfile::Writer {
+        .invitation_with(GrantProfile::Writer {
             scopes: ["notes".into()].into(),
         })
         .await?;

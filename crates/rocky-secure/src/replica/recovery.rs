@@ -63,7 +63,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// rows are restored from a checkpoint, never kept from frames.
     pub async fn holds_revoked_frames(&self, scope: ResourceScope) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        if inner.config.revocations.is_empty() {
+        if !inner.config.revocations.has_revocations() {
             return Ok(false);
         }
         for record in collect_rows(

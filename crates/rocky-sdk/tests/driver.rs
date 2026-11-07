@@ -656,7 +656,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     .database;
     let invitation = call(
         &a,
-        json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["lists", "items"]}}),
+        json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["lists", "items"]}}),
     )
     .await?;
     let b = Database::join(
@@ -1088,7 +1088,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     let a = Database::create(setup(&a_path, "a"), None)?.database;
     let invitation = call(
         &a,
-        json!({"type":"pairing", "profile":{"kind":"reader", "scopes":["lists"]}}),
+        json!({"type": "invitation", "profile":{"kind":"reader", "scopes":["lists"]}}),
     )
     .await?;
     let b = Database::join(

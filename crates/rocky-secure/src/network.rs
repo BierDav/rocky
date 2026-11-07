@@ -520,6 +520,11 @@ impl NativeSession {
         {
             return Err(denied(PEER_REVOKED));
         }
+        if held.ends_chain(&hello.credentials).map_err(credential)?
+            || held.ends_chain(&session.credentials).map_err(credential)?
+        {
+            return Err(denied("membership certificate is void"));
+        }
         session
             .exchange_tips(replica, side == Side::Initiator)
             .await?;
@@ -828,6 +833,10 @@ impl NativeSession {
     ) -> Result<(), Error> {
         self.guard_message(replica, &message).await?;
         match message {
+            Message::Revocations(RevocationMessage::Exchange) => {
+                self.send(Message::Acknowledged).await?;
+                self.refresh_authority(replica, false).await
+            }
             Message::Holdings(message) => self.answer_holdings(replica, message).await,
             Message::Rows(message) => self.answer_rows(replica, message).await,
             Message::Checkpoints(message) => self.answer_checkpoints(replica, message).await,

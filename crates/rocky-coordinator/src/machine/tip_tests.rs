@@ -11,14 +11,7 @@ fn dev() -> TipId {
 }
 impl Fixture {
     fn on(&self, key: &PrivateKey, log: TipLog, action: Action, time: u64) -> Request {
-        crate::machine::self_certified(
-            self.state.genesis.id().unwrap(),
-            crate::transport::nonce(),
-            Operation::Coordinated { log, action },
-            key,
-            time,
-        )
-        .unwrap()
+        self.certified(Operation::Coordinated { log, action }, key, time)
     }
     fn apply_on(
         &mut self,

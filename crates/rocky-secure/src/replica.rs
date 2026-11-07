@@ -1,6 +1,7 @@
 mod admission;
 pub(crate) mod lock;
 mod maintenance;
+mod membership;
 mod wal;
 #[cfg(any(test, feature = "qualification"))]
 pub use lock::LockMeasurements;
@@ -367,6 +368,7 @@ pub(super) struct Inner<A> {
     /// Grows whenever policy, credentials or keys change; sessions opened
     /// under an earlier value are refused.
     pub(super) authority: u64,
+    membership_events: watch::Sender<()>,
     pub(super) authority_events: watch::Sender<u64>,
     /// The recovery context after the last call that committed or changed
     /// keys, grants, schemas or the tip graph; see `quarantine_context`.
@@ -877,9 +879,24 @@ pub(super) fn check_config(
     config: &SecureConfig,
     manifest: &rocky_core::ApplicationManifest,
 ) -> Result<(), Error> {
+    if config
+        .credentials
+        .database_context(config.publisher)
+        .map_err(credential)?
+        .scope
+        .app
+        != manifest.app
+    {
+        return Err(denied("credentials belong to another application"));
+    }
     config
         .revocations
-        .verify(config.publisher, manifest.app)
+        .verify_in(
+            config
+                .credentials
+                .database_context(config.publisher)
+                .map_err(credential)?,
+        )
         .map_err(credential)?;
     let (grants, selectors) = config
         .credentials
@@ -951,6 +968,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             || genesis.domains != manifest.domains
         {
             return Err(denied("compiled application differs from the domain root"));
+        }
+        if let Some(certificate) = config.credentials.certificate() {
+            config
+                .revocations
+                .link(certificate.clone())
+                .map_err(credential)?;
         }
         check_config(&config, &manifest)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
@@ -1037,6 +1060,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             definition: manifest,
             revision: 0,
             authority: 1,
+            membership_events: watch::channel(()).0,
             authority_events: watch::channel(1).0,
             recovery_events: watch::channel(0).0,
             rebuilding_tip: false,
@@ -1338,6 +1362,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .frames
             .subscribe()
     }
+    /// Wakes when replicated membership evidence commits, without a row revision.
+    pub async fn observe_membership(&self) -> watch::Receiver<()> {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .membership_events
+            .subscribe()
+    }
     /// Ends authority-bound network links without polling.
     pub async fn observe_authority(&self) -> watch::Receiver<u64> {
         self.inner
@@ -1481,6 +1513,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(frames) => frames,
             Err(error) => return (0..count).map(|_| Err(group::shared(&error))).collect(),
         };
+        if let Err(error) = self.learn_carried_membership(&frames).await {
+            return (0..count).map(|_| Err(group::shared(&error))).collect();
+        }
         let mut work = Vec::new();
         let mut positions = Vec::new();
         let mut results: Vec<Option<Result<Buffered<ReceiveStatus>, Error>>> =
@@ -1708,6 +1743,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         revocations: &RevocationSet,
     ) -> Result<Vec<SignedRevocation>, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        revocations
+            .verify_in(
+                inner
+                    .config
+                    .credentials
+                    .database_context(inner.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         let mut merged = inner.config.revocations.clone();
         let added = merged
             .merge(
@@ -1720,6 +1764,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if merged == inner.config.revocations {
             return Ok(added);
         }
+        let authority_changed = !added.is_empty()
+            || inner.config.revocations.certificates().any(|certificate| {
+                let node = certificate.capability.subject;
+                merged.ends_node_of(certificate.issuer, node, false)
+                    != inner
+                        .config
+                        .revocations
+                        .ends_node_of(certificate.issuer, node, false)
+            });
+        let membership_changed = merged
+            .certificates()
+            .ne(inner.config.revocations.certificates());
+        let update = if authority_changed {
+            "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1"
+        } else {
+            "UPDATE secure_metadata SET revocations=? WHERE id=1"
+        };
         let bytes = merged.to_bytes().map_err(credential)?;
         // Seals and moves of a revoked signer leave resolution with the
         // set, and the followed bookmark moves in the same commit.
@@ -1739,15 +1800,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.node_author = old_author.clone();
             inner.line_nodes = old_nodes.clone();
             inner.workspace.followed = old_followed.clone();
-            inner
-                .conn
-                .execute(
-                    "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1",
-                    [bytes.clone()],
-                )
-                .await?;
-            inner.resolve_revoked(&merged).await?;
-            inner.drop_revoked_escrow(None).await?;
+            inner.conn.execute(update, [bytes.clone()]).await?;
+            if authority_changed {
+                inner.resolve_revoked(&merged).await?;
+                inner.drop_revoked_escrow(None).await?;
+            }
             Ok(())
         });
         if let Err(error) = result {
@@ -1762,8 +1819,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.invalidate_context();
         inner.config.revocations = merged;
-        inner.bump_authority();
-        inner.publish_revision().await?;
+        if authority_changed {
+            inner.bump_authority();
+        }
+        if authority_changed {
+            inner.publish_revision().await?;
+        }
+        if membership_changed {
+            inner.membership_events.send_replace(());
+        }
         drop(inner);
         self.settle().await?;
         Ok(added)
@@ -1786,6 +1850,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for signed in statements {
             signed.verify(publisher, app).map_err(credential)?;
             let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
+            single
+                .verify_in(own.database_context(publisher).map_err(credential)?)
+                .map_err(credential)?;
             if single.revoking_holder(own).map_err(credential)?.is_some() {
                 revoking.get_or_insert(signed);
             } else {
@@ -2334,6 +2401,14 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("secure file identity mismatch"));
         }
         let stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
+        stored
+            .verify_in(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
         let mut merged = supplied.clone();
         merged
             .merge(&stored, self.config.publisher, self.definition.app, now()?)

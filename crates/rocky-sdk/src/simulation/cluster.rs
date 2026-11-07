@@ -67,6 +67,7 @@ pub(super) struct Member {
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
     /// The offline root of the domain this member created: its user holds it.
     pub(super) root: Option<Arc<crate::RootKey>>,
+    pending_join: Option<crate::AwaitingAdmission>,
 }
 
 impl Member {
@@ -81,6 +82,7 @@ impl Member {
             revoked: false,
             ahead: Arc::default(),
             root: None,
+            pending_join: None,
         }
     }
     /// Starts the node: creating, joining or opening its directory.
@@ -91,14 +93,27 @@ impl Member {
                 directory: &self.directory,
                 schema: self.schema,
                 secrets: Some(secrets),
-                identity: None,
+                identity: self
+                    .pending_join
+                    .as_ref()
+                    .map(|pending| pending.identity.clone()),
                 network: Some(Network::Owned(hub.connector(&self.name))),
                 coordination: None,
             },
             install,
             self.ahead.clone(),
         )
-        .await?;
+        .await;
+        let hosted = match hosted {
+            Ok(hosted) => hosted,
+            Err(error) => {
+                if let Some(pending) = error.downcast_ref::<crate::AwaitingAdmission>() {
+                    self.pending_join = Some(pending.clone());
+                }
+                return Err(error);
+            }
+        };
+        self.pending_join = None;
         let database = hosted.opened.database;
         self.running = Some(Running {
             session: database.session(),
@@ -130,6 +145,7 @@ impl Member {
             hub,
             Install::Join {
                 invitation: invitation.into(),
+                name: self.name.clone(),
             },
         )
         .await
@@ -154,8 +170,18 @@ impl Member {
     /// The value of a call, or its error object as an error.
     pub(super) async fn call(&self, request: Value) -> Result<Value, Failure> {
         let running = self.running.as_ref().ok_or("the node is not running")?;
-        let call = json!({"version": 1, "scope": running.scope, "request": request});
-        let reply: Value = serde_json::from_str(&running.session.call(call.to_string()).await?)?;
+        // Interactive branch changes may certify an additional writer node.
+        let identity = self
+            .root
+            .as_ref()
+            .filter(|_| request["type"] == "tips")
+            .map(|root| Arc::new(root.identity()) as Arc<dyn crate::IdentityProvider>);
+        let call = json!({"version": 1, "scope": running.scope, "request": request}).to_string();
+        let reply = match identity {
+            Some(identity) => running.session.call_with_identity(call, identity).await?,
+            None => running.session.call(call).await?,
+        };
+        let reply: Value = serde_json::from_str(&reply)?;
         if reply["status"] == "ok" {
             Ok(reply["value"].clone())
         } else {

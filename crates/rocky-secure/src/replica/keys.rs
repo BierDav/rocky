@@ -106,6 +106,38 @@ impl<A: RowApplication> Inner<A> {
             _ => Err("its signer could not read the scope's key"),
         }
     }
+    /// Judges carried records while the caller's import transaction is open.
+    pub(super) async fn keep_carried_escrow_rows(
+        &self,
+        peer: PublicKey,
+        records: &[VouchedEscrow],
+        time: u64,
+    ) -> Result<(), Error> {
+        let own = self.config.node.public_key();
+        let mut refused: Option<(u64, &'static str)> = None;
+        let mut accepted = BTreeSet::new();
+        for vouched in records {
+            match self.judge_escrow(vouched, time) {
+                Err(reason) => {
+                    refused = Some((refused.map_or(0, |(count, _)| count) + 1, reason));
+                }
+                Ok(_) if vouched.signer() == own => {}
+                Ok(issuer) => {
+                    let bytes = vouched.to_bytes().map_err(credential)?;
+                    self.store_escrow(&Some(vouched.slot()), issuer, peer, bytes)
+                        .await?;
+                    accepted.insert(vouched.slot());
+                }
+            }
+        }
+        if let Some((count, reason)) = refused {
+            self.refuse_escrow(peer.as_bytes(), count, reason).await?;
+        }
+        for epoch in accepted {
+            self.drop_revoked_escrow(Some(epoch)).await?;
+        }
+        Ok(())
+    }
     /// Keeps a record in its issuer's slot of `slot`. A carried record
     /// never replaces one this node sealed.
     async fn store_escrow(
@@ -621,34 +653,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let own = inner.config.node.public_key();
         transaction!(@cache_neutral inner, |inner| {
-            let mut refused: Option<(u64, &'static str)> = None;
-            let mut accepted = BTreeSet::new();
-            for vouched in &records {
-                match inner.judge_escrow(vouched, time) {
-                    Err(reason) => {
-                        refused = Some((refused.map_or(0, |(count, _)| count) + 1, reason));
-                    }
-                    Ok(_) if vouched.signer() == own => {}
-                    Ok(issuer) => {
-                        let bytes = vouched.to_bytes().map_err(credential)?;
-                        inner
-                            .store_escrow(&Some(vouched.slot()), issuer, peer, bytes)
-                            .await?;
-                        accepted.insert(vouched.slot());
-                    }
-                }
-            }
-            if let Some((count, reason)) = refused {
-                inner.refuse_escrow(peer.as_bytes(), count, reason).await?;
-            }
-            // A revoked issuer's record kept as its epoch's only one goes
-            // once an accepted record arrives.
-            for epoch in accepted {
-                inner.drop_revoked_escrow(Some(epoch)).await?;
-            }
-            Ok(())
+            inner.keep_carried_escrow_rows(peer, &records, time).await
         })
     }
     /// The carried root escrow records refused, by peer: how many and the

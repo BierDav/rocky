@@ -502,9 +502,17 @@ impl Lineage {
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
-            grants: self.grants_of(generation, tables),
+            grants: if kind != PrincipalKind::Node {
+                self.grants_of(generation, tables)
+            } else {
+                Vec::new()
+            },
             not_before,
-            expires,
+            expires: if kind == PrincipalKind::Node {
+                rocky_credentials::NEVER
+            } else {
+                expires
+            },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
                 authors: Some(if kind == PrincipalKind::Node {
@@ -514,10 +522,23 @@ impl Lineage {
                     )
                     .unwrap()
                 } else {
-                    rocky_credentials::AuthorRange::ALL
+                    rocky_credentials::AuthorRange::new(
+                        crate::tests::node_number(node.public_key()),
+                        rocky_credentials::MAX_AUTHOR,
+                    )
+                    .unwrap()
                 }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
-                partitions: self.partition_grants_of(generation),
+                partitions: if kind == PrincipalKind::Node {
+                    Vec::new()
+                } else {
+                    self.partition_grants_of(generation)
+                },
+                database: Some(rocky_credentials::DatabaseContext {
+                    publisher: self.publisher.public_key(),
+                    scope: self.domain,
+                }),
+                sequence: (kind == PrincipalKind::Node).then_some(0),
                 trusted: trusted.filter(|_| kind == PrincipalKind::User),
                 ..Default::default()
             })

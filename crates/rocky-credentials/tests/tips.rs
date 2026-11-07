@@ -141,13 +141,28 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
     let mut seals = Vec::new();
     for (index, issuer) in issuers.iter().enumerate() {
         let chain = CredentialChain(vec![
-            Authority::owner(&owner)
-                .issue_issuer(issuer.public_key(), None, (100, 1000, 0))
-                .unwrap(),
+            Authority::owner_in(
+                &owner,
+                rocky_credentials::DatabaseContext {
+                    publisher: owner.public_key(),
+                    scope: Scope {
+                        mesh: MeshId([1; 16]),
+                        app: AppId([2; 16]),
+                        domain: DomainId([3; 16]),
+                    },
+                },
+            )
+            .unwrap()
+            .issue_issuer(
+                issuer.public_key(),
+                Some(rocky_credentials::AuthorRange::ALL),
+                (100, 1000, 0),
+            )
+            .unwrap(),
         ]);
         let signed = SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), index as u64, &owner).statement,
-            issuer,
+            rocky_credentials::testing::lane_for(issuer, &chain),
             &chain,
             link(&graph, issuer, &chain),
         )
@@ -256,21 +271,47 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     let trusted = PrivateKey::new();
     let mut graph = graph();
     let issuer_chain = CredentialChain(vec![
-        Authority::owner(&owner)
-            .issue_issuer(issuer.public_key(), None, (100, 1000, 0))
-            .unwrap(),
+        Authority::owner_in(
+            &owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .issue_issuer(
+            issuer.public_key(),
+            Some(rocky_credentials::AuthorRange::ALL),
+            (100, 1000, 0),
+        )
+        .unwrap(),
     ]);
     let trusted_chain = CredentialChain(vec![
-        Authority::owner(&owner)
-            .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
-            .unwrap(),
+        Authority::owner_in(
+            &owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
+        .unwrap(),
     ]);
     let first = seal(&graph, graph.genesis(), 1, &owner);
     let next = first.successor().unwrap().unwrap();
     graph.seals.push(first.clone());
     let opened = SignedTipOpening::endorse_linked(
         opening(&graph, &first, &owner).statement,
-        &trusted,
+        rocky_credentials::testing::lane_for(&trusted, &trusted_chain),
         &trusted_chain,
         link(&graph, &trusted, &trusted_chain),
     )
@@ -285,7 +326,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     assert!(
         SignedTipOpening::endorse_linked(
             opened.statement,
-            &issuer,
+            rocky_credentials::testing::lane_for(&issuer, &issuer_chain),
             &issuer_chain,
             link(&graph, &issuer, &issuer_chain)
         )
@@ -303,7 +344,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         let statement = movement(&graph, "main", from, to, &owner).statement;
         let signed = SignedBookmarkMove::endorse_linked(
             statement.clone(),
-            &issuer,
+            rocky_credentials::testing::lane_for(&issuer, &issuer_chain),
             &issuer_chain,
             link(&graph, &issuer, &issuer_chain),
         )
@@ -316,7 +357,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         );
         SignedBookmarkMove::endorse_linked(
             statement,
-            &trusted,
+            rocky_credentials::testing::lane_for(&trusted, &trusted_chain),
             &trusted_chain,
             link(&graph, &trusted, &trusted_chain),
         )
@@ -325,7 +366,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         .unwrap();
     }
     assert!(
-        Authority::issuer(&issuer, &issuer_chain)
+        rocky_credentials::testing::authority(&issuer, &issuer_chain)
             .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
             .is_err()
     );
@@ -334,7 +375,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     assert!(
         SignedTipOpening::endorse_linked(
             opening(&graph, &first, &owner).statement,
-            &trusted,
+            rocky_credentials::testing::lane_for(&trusted, &forged_chain),
             &forged_chain,
             link(&graph, &trusted, &forged_chain)
         )
@@ -345,7 +386,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     // A trusted grant never expires; only the root's revocation ends it.
     let opened = SignedTipOpening::endorse_linked(
         opening(&graph, &first, &owner).statement,
-        &trusted,
+        rocky_credentials::testing::lane_for(&trusted, &trusted_chain),
         &trusted_chain,
         link(&graph, &trusted, &trusted_chain),
     )
@@ -374,7 +415,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     other.scope.domain = DomainId([7; 16]);
     let wrong = SignedSeal::endorse_linked(
         seal(&other, other.genesis(), 0, &owner).statement,
-        &trusted,
+        rocky_credentials::testing::lane_for(&trusted, &trusted_chain),
         &trusted_chain,
         link(&graph, &trusted, &trusted_chain),
     )
@@ -454,7 +495,7 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
     assert!(
         SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), 1, &owner).statement,
-            &user,
+            rocky_credentials::testing::lane_for(&user, &chain),
             &chain,
             link(&graph, &user, &chain)
         )
@@ -470,9 +511,20 @@ fn node_signatures_never_inherit_trusted_identity_control() {
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
     let graph = graph();
-    let root = Authority::owner(&owner)
-        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
-        .unwrap();
+    let root = Authority::owner_in(
+        &owner,
+        rocky_credentials::DatabaseContext {
+            publisher: owner.public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    )
+    .unwrap()
+    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .unwrap();
     let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
     chain
         .verify(
@@ -496,7 +548,7 @@ fn node_signatures_never_inherit_trusted_identity_control() {
     assert!(
         SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), 1, &owner).statement,
-            &node,
+            rocky_credentials::testing::lane_for(&node, &chain),
             &chain,
             link(&graph, &node, &chain)
         )
@@ -509,21 +561,47 @@ fn node_signatures_never_inherit_trusted_identity_control() {
 /// An issuer's chain, issued by the owner.
 fn issuer_chain(owner: &PrivateKey, issuer: &PrivateKey) -> CredentialChain {
     CredentialChain(vec![
-        Authority::owner(owner)
-            .issue_issuer(issuer.public_key(), None, (100, 1000, 0))
-            .unwrap(),
+        Authority::owner_in(
+            owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .issue_issuer(
+            issuer.public_key(),
+            Some(rocky_credentials::AuthorRange::ALL),
+            (100, 1000, 0),
+        )
+        .unwrap(),
     ])
 }
 fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> CredentialChain {
     CredentialChain(vec![
-        Authority::owner(owner)
-            .issue_trusted(
-                trusted.public_key(),
-                graph.scope,
-                AuthorRange::new(5, 5).unwrap(),
-                100,
-            )
-            .unwrap(),
+        Authority::owner_in(
+            owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .issue_trusted(
+            trusted.public_key(),
+            graph.scope,
+            AuthorRange::new(5, 5).unwrap(),
+            100,
+        )
+        .unwrap(),
     ])
 }
 /// One seal of `tip` per signer, varied by `sequence` so their digests differ.
@@ -537,7 +615,7 @@ fn endorsed(
 ) -> SignedSeal {
     let signed = SignedSeal::endorse_linked(
         seal(graph, tip, sequence, owner).statement,
-        signer,
+        rocky_credentials::testing::lane_for(signer, chain),
         chain,
         link(graph, signer, chain),
     )
@@ -558,7 +636,20 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
         cut: Default::default(),
         recovery: None,
     };
-    let signed = Authority::owner(owner).revoke(statement).unwrap();
+    let signed = Authority::owner_in(
+        owner,
+        rocky_credentials::DatabaseContext {
+            publisher: owner.public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    )
+    .unwrap()
+    .revoke(statement)
+    .unwrap();
     RevocationSet::try_from(vec![signed]).unwrap()
 }
 
@@ -679,7 +770,7 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
     graph.seals.push(forward_seal.clone());
     let forward = SignedBookmarkMove::endorse_linked(
         movement(&graph, "main", Some(main_tip), Some(forward_tip), &owner).statement,
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
         link(&graph, &issuer, &chain),
     )
@@ -718,9 +809,20 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
 fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, CredentialChain) {
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
-    let root = Authority::owner(owner)
-        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
-        .unwrap();
+    let root = Authority::owner_in(
+        owner,
+        rocky_credentials::DatabaseContext {
+            publisher: owner.public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    )
+    .unwrap()
+    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .unwrap();
     let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
     (node, chain)
 }
@@ -805,7 +907,7 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
     assert!(
         rocky_credentials::SignedGenesisLine::endorse_linked(
             line(1).statement,
-            &issuer,
+            rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
             &issuer_chain(&owner, &issuer),
             link(&graph, &issuer, &issuer_chain(&owner, &issuer))
         )
@@ -882,7 +984,7 @@ fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
     };
     let record = SignedCheckpointRecord::endorse_linked(
         statement(&sealed, 4),
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
         &issuer_chain(&owner, &issuer),
         link(&graph, &issuer, &issuer_chain(&owner, &issuer)),
     )
@@ -956,7 +1058,7 @@ fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entr
     ] {
         let other = SignedSeal::endorse_linked(
             recovered(recovery),
-            &trusted,
+            rocky_credentials::testing::lane_for(&trusted, &chain),
             &chain,
             link(&graph, &trusted, &chain),
         )
@@ -1185,9 +1287,20 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
     let owner = PrivateKey::new();
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
-    let grant = Authority::owner(&owner)
-        .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
-        .unwrap();
+    let grant = Authority::owner_in(
+        &owner,
+        rocky_credentials::DatabaseContext {
+            publisher: owner.public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    )
+    .unwrap()
+    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .unwrap();
     let chain = CredentialChain(vec![grant])
         .certify(&identity, node.public_key(), 1)
         .unwrap();
@@ -1218,7 +1331,10 @@ fn link(
     let trusted = matches!(chain.0.as_slice(), [only] if only.capability.extended().is_ok_and(|e| e.trusted.is_some()));
     trusted.then(|| {
         graph
-            .next_link(&signer.public_key(), &signer.public_key())
+            .next_link(
+                &signer.public_key(),
+                &rocky_credentials::testing::lane_of(signer),
+            )
             .unwrap()
     })
 }
@@ -1239,7 +1355,7 @@ fn linked_move(
             from: None,
             to: Some(graph.genesis()),
         },
-        signer,
+        rocky_credentials::testing::lane_for(signer, chain),
         chain,
         Some(link),
     )
@@ -1254,7 +1370,7 @@ fn cutting(
 ) -> RevocationSet {
     let cut = head.map(|head| rocky_credentials::Cut {
         identity,
-        lane: identity,
+        lane: rocky_credentials::testing::lane_key(identity),
         statements: vec![rocky_credentials::Head {
             sequence: head.link.unwrap().sequence,
             id: head.id().unwrap(),
@@ -1271,7 +1387,23 @@ fn cutting(
         cut: cut.into_iter().collect(),
         recovery: None,
     };
-    RevocationSet::try_from(vec![Authority::owner(owner).revoke(statement).unwrap()]).unwrap()
+    RevocationSet::try_from(vec![
+        Authority::owner_in(
+            owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .revoke(statement)
+        .unwrap(),
+    ])
+    .unwrap()
 }
 fn ids(moves: &[&SignedBookmarkMove]) -> std::collections::BTreeSet<[u8; 32]> {
     moves
@@ -1286,7 +1418,7 @@ fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
     let mut graph = graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     graph.moves.push(base.clone());
     // Two statements name the same predecessor: a fork of the chain.
@@ -1312,7 +1444,7 @@ fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
         graph.equivocations.iter().copied().collect::<Vec<_>>(),
         [rocky_credentials::Equivocation {
             identity: trusted.public_key(),
-            lane: trusted.public_key(),
+            lane: rocky_credentials::testing::lane_of(&trusted),
             sequence: 1,
             acknowledgment: false,
         }]
@@ -1352,7 +1484,7 @@ fn a_cut_refuses_what_follows_its_head_and_prunes_only_what_nothing_kept_needs()
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
     let mut graph = graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     graph.moves.push(base.clone());
     let late = linked_move(
@@ -1391,7 +1523,7 @@ fn a_cut_refuses_what_follows_its_head_and_prunes_only_what_nothing_kept_needs()
     let next = late.link.unwrap().next(late.id().unwrap());
     let sealed = SignedSeal::endorse_linked(
         seal(&graph, graph.genesis(), 1, &owner).statement,
-        &trusted,
+        rocky_credentials::testing::lane_for(&trusted, &chain),
         &chain,
         Some(next),
     )
@@ -1422,7 +1554,8 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
     let cut_chain = trusted_chain(&graph(), &owner, &cut_identity);
     let impostor_chain = trusted_chain(&graph(), &owner, &impostor);
     let mut graph = graph();
-    let lane = rocky_credentials::ChainLink::first(cut_identity.public_key());
+    let lane =
+        rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&cut_identity));
     let head = linked_move(&graph, "head", &cut_identity, &cut_chain, lane);
     graph.moves.push(head.clone());
     // The root keeps the first identity's chain up to its head and ends
@@ -1436,7 +1569,7 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
         capabilities: Default::default(),
         cut: vec![rocky_credentials::Cut {
             identity: cut_identity.public_key(),
-            lane: cut_identity.public_key(),
+            lane: rocky_credentials::testing::lane_of(&cut_identity),
             statements: vec![rocky_credentials::Head {
                 sequence: 0,
                 id: head.id().unwrap(),
@@ -1445,11 +1578,42 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
         }],
         recovery: None,
     };
-    let revocations =
-        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
-    // The impostor signs on the cut identity's lane: the cut does not
-    // judge it, so its own revocation refuses it.
-    let forged = linked_move(&graph, "forged", &impostor, &impostor_chain, lane);
+    let revocations = RevocationSet::try_from(vec![
+        Authority::owner_in(
+            &owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .revoke(statement)
+        .unwrap(),
+    ])
+    .unwrap();
+    // The impostor cannot sign on the cut identity's lane: a lane is its
+    // signing node.
+    assert!(
+        SignedBookmarkMove::endorse_linked(
+            head.statement.clone(),
+            rocky_credentials::testing::lane_for(&impostor, &impostor_chain),
+            &impostor_chain,
+            Some(lane),
+        )
+        .is_err()
+    );
+    // On its own lane, the cut does not judge it: its revocation refuses it.
+    let forged = linked_move(
+        &graph,
+        "forged",
+        &impostor,
+        &impostor_chain,
+        rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&impostor)),
+    );
     assert!(
         forged
             .verify_current(owner.public_key(), &graph, &revocations, 300)
@@ -1472,13 +1636,28 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
         capabilities: Default::default(),
         cut: vec![rocky_credentials::Cut {
             identity: cut_identity.public_key(),
-            lane: cut_identity.public_key(),
+            lane: rocky_credentials::testing::lane_of(&cut_identity),
             statements: Vec::new(),
             acknowledgments: None,
         }],
         recovery: None,
     };
-    assert!(Authority::owner(&owner).revoke(unrevoked).is_err());
+    assert!(
+        Authority::owner_in(
+            &owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16])
+                }
+            }
+        )
+        .unwrap()
+        .revoke(unrevoked)
+        .is_err()
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -1487,7 +1666,7 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
     let mut graph = graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     // A later link whose predecessor the graph does not hold.
     let ahead = linked_move(
@@ -1515,15 +1694,22 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
     );
     assert!(wrong.verify(owner.public_key(), &graph).is_err());
     // A trusted statement without a link, or an issuer's with one, is refused.
-    let unlinked =
-        SignedBookmarkMove::endorse_linked(base.statement.clone(), &trusted, &chain, None).unwrap();
+    let unlinked = SignedBookmarkMove::endorse_linked(
+        base.statement.clone(),
+        rocky_credentials::testing::lane_for(&trusted, &chain),
+        &chain,
+        None,
+    )
+    .unwrap();
     assert!(unlinked.verify(owner.public_key(), &graph).is_err());
     let issuer = PrivateKey::new();
     let linked_issuer = SignedBookmarkMove::endorse_linked(
         base.statement.clone(),
-        &issuer,
+        rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
         &issuer_chain(&owner, &issuer),
-        Some(rocky_credentials::ChainLink::first(issuer.public_key())),
+        Some(rocky_credentials::ChainLink::first(
+            rocky_credentials::testing::lane_of(&issuer),
+        )),
     )
     .unwrap();
     assert!(linked_issuer.verify(owner.public_key(), &graph).is_err());
@@ -1535,7 +1721,7 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
     let mut graph = graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     graph.moves.push(base.clone());
     // A stage, opened by its schema seal, and the live chain both continue
@@ -1554,14 +1740,20 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     // The live chain goes on past every branch, so no place repeats.
     assert_eq!(
         graph
-            .next_link(&trusted.public_key(), &trusted.public_key())
+            .next_link(
+                &trusted.public_key(),
+                &rocky_credentials::testing::lane_of(&trusted)
+            )
             .unwrap()
             .sequence,
         3
     );
     // The proposer's cut names both heads and keeps both.
     let heads = graph
-        .heads(&trusted.public_key(), &trusted.public_key())
+        .heads(
+            &trusted.public_key(),
+            &rocky_credentials::testing::lane_of(&trusted),
+        )
         .unwrap();
     assert_eq!(heads.statements.len(), 2);
     let app = graph.scope.app;
@@ -1576,7 +1768,23 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
             cut: vec![cut],
             recovery: None,
         };
-        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap()
+        RevocationSet::try_from(vec![
+            Authority::owner_in(
+                &owner,
+                rocky_credentials::DatabaseContext {
+                    publisher: owner.public_key(),
+                    scope: Scope {
+                        mesh: MeshId([1; 16]),
+                        app: AppId([2; 16]),
+                        domain: DomainId([3; 16]),
+                    },
+                },
+            )
+            .unwrap()
+            .revoke(statement)
+            .unwrap(),
+        ])
+        .unwrap()
     };
     graph.exclude_revoked(&keep(heads.clone())).unwrap();
     assert!(graph.revoked.is_empty());
@@ -1605,7 +1813,13 @@ fn stage(
     let mut statement = seal(graph, graph.genesis(), 1, &PrivateKey::new()).statement;
     statement.action = rocky_credentials::SealAction::Continue { schema: [8; 32] };
     let opened = link.branch(&statement).unwrap();
-    let sealed = SignedSeal::endorse_linked(statement, trusted, chain, Some(opened)).unwrap();
+    let sealed = SignedSeal::endorse_linked(
+        statement,
+        rocky_credentials::testing::lane_for(trusted, chain),
+        chain,
+        Some(opened),
+    )
+    .unwrap();
     let staged = linked_move(
         graph,
         "staged",
@@ -1622,7 +1836,7 @@ fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
     let mut graph = graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&graph, "base", &trusted, &chain, first);
     graph.moves.push(base.clone());
     let after = first.next(base.id().unwrap());
@@ -1637,7 +1851,13 @@ fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
     // Nor may a seal carry another seal's tag, or a move open the branch.
     let mut other = stage_seal.statement.clone();
     other.action = rocky_credentials::SealAction::Continue { schema: [7; 32] };
-    let borrowed = SignedSeal::endorse_linked(other, &trusted, &chain, stage_seal.link).unwrap();
+    let borrowed = SignedSeal::endorse_linked(
+        other,
+        rocky_credentials::testing::lane_for(&trusted, &chain),
+        &chain,
+        stage_seal.link,
+    )
+    .unwrap();
     assert!(borrowed.verify(owner.public_key(), &graph).is_err());
     let opening_move = linked_move(&graph, "open", &trusted, &chain, stage_seal.link.unwrap());
     assert!(opening_move.verify(owner.public_key(), &graph).is_err());
@@ -1720,8 +1940,23 @@ fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
         }],
         recovery: None,
     };
-    let revocations =
-        RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
+    let revocations = RevocationSet::try_from(vec![
+        Authority::owner_in(
+            &owner,
+            rocky_credentials::DatabaseContext {
+                publisher: owner.public_key(),
+                scope: Scope {
+                    mesh: MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: DomainId([3; 16]),
+                },
+            },
+        )
+        .unwrap()
+        .revoke(statement)
+        .unwrap(),
+    ])
+    .unwrap();
     assert!(!graph.ack_beyond_cut(&revocations, &kept).unwrap());
     assert!(graph.ack_beyond_cut(&revocations, &late).unwrap());
 
@@ -1768,11 +2003,12 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
     let owner = PrivateKey::new();
     let trusted = PrivateKey::new();
     let chain = trusted_chain(&graph(), &owner, &trusted);
-    let lanes = [trusted.public_key()].into();
+    let lanes = [rocky_credentials::testing::lane_of(&trusted)].into();
     let mut graph = graph();
     // A live chain of 70 moves; off each of the first 69 a stage branch
     // opens with its own schema seal, and the live chain signs past it.
-    let mut link = rocky_credentials::ChainLink::first(trusted.public_key());
+    let mut link =
+        rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let mut stages = Vec::new();
     for n in 0..70u64 {
         let live = linked_move(&graph, &format!("live{n}"), &trusted, &chain, link);
@@ -1782,8 +2018,13 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
             let mut statement = seal(&graph, graph.genesis(), n, &owner).statement;
             statement.action = rocky_credentials::SealAction::Continue { schema: [8; 32] };
             let branch = link.branch(&statement).unwrap();
-            let sealed =
-                SignedSeal::endorse_linked(statement, &trusted, &chain, Some(branch)).unwrap();
+            let sealed = SignedSeal::endorse_linked(
+                statement,
+                rocky_credentials::testing::lane_for(&trusted, &chain),
+                &chain,
+                Some(branch),
+            )
+            .unwrap();
             graph.seals.push(sealed.clone());
             stages.push(rocky_credentials::Head {
                 sequence: branch.sequence,
@@ -1801,7 +2042,7 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
         dropped,
         stages[..6]
             .iter()
-            .map(|head| (trusted.public_key(), *head))
+            .map(|head| (rocky_credentials::testing::lane_of(&trusted), *head))
             .collect::<Vec<_>>()
     );
     assert!(stages[6..].iter().all(|head| cut.statements.contains(head)));
@@ -1809,7 +2050,7 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
 
     // Live forks are never left out: 65 of them refuse the cut.
     let mut forked = self::graph();
-    let first = rocky_credentials::ChainLink::first(trusted.public_key());
+    let first = rocky_credentials::ChainLink::first(rocky_credentials::testing::lane_of(&trusted));
     let base = linked_move(&forked, "base", &trusted, &chain, first);
     forked.moves.push(base.clone());
     for n in 0..65 {
@@ -1839,7 +2080,7 @@ fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() 
         };
         let signed = rocky_credentials::SignedGenesisLine::endorse_linked(
             statement,
-            signer,
+            rocky_credentials::testing::lane_for(signer, &chain),
             &chain,
             link(graph, signer, &chain),
         )

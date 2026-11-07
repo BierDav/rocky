@@ -49,7 +49,7 @@ fn signed() -> SignedCheckpoint {
         .issue(
             user.public_key(),
             vec![grant],
-            AuthorRange::ALL,
+            AuthorRange::new(7, rocky_credentials::MAX_AUTHOR).unwrap(),
             (1_800_000_000, 86400, 0),
         )
         .unwrap();
@@ -279,6 +279,21 @@ fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn signed_checkpoint_reproduces_and_verifies_the_software_fixture() {
     let checkpoint = signed();
+    #[cfg(not(target_family = "wasm"))]
+    if std::env::var_os("ROCKY_UPDATE_CHECKPOINT_VECTORS").is_some() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/replica/checkpoint/backend_vectors");
+        for (name, bytes) in [
+            ("statement.cbor", encode(&checkpoint.statement).unwrap()),
+            ("signing.bin", checkpoint.signing_bytes().unwrap()),
+            ("signed.cbor", checkpoint.to_bytes().unwrap()),
+            ("signature.bin", checkpoint.signature.to_bytes().to_vec()),
+            ("checkpoint-id.bin", checkpoint.id().unwrap().to_vec()),
+        ] {
+            std::fs::write(directory.join(name), bytes).unwrap();
+        }
+        return;
+    }
     assert_eq!(
         encode(&checkpoint.statement).unwrap(),
         frozen!("statement.cbor")

@@ -335,11 +335,13 @@ impl Node {
     pub(super) async fn publish_links(self: Arc<Self>, service: Arc<Link>) {
         let mut stage = service.stage.subscribe();
         let mut frames = self.replica.observe_frames().await;
+        let mut membership = self.replica.observe_membership().await;
         let mut revisions = self.replica.observe_revision();
         let mut ready = service.live.events.subscribe();
         loop {
             tokio::select! {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
+                changed = membership.changed() => { if changed.is_err() { break; } },
                 changed = frames.changed() => { if changed.is_err() { break; } },
                 changed = ready.changed() => { if changed.is_err() { break; } },
                 changed = revisions.changed() => { if changed.is_err() { break; } },

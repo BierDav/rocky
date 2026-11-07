@@ -41,7 +41,19 @@ async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
     replica
         .register_line_node(LineNode {
             credentials: identity_chain
-                .complete(&identity, node.public_key(), 2)
+                .certify_member(
+                    &identity,
+                    node.public_key(),
+                    2,
+                    1,
+                    replica
+                        .revocations()
+                        .await
+                        .membership()
+                        .unwrap()
+                        .head(identity.public_key())
+                        .map(|head| head.certificate),
+                )
                 .unwrap(),
             key: node,
         })
@@ -87,11 +99,25 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
     for _ in 0..2 {
         let issuer = PrivateKey::new();
         let chain = CredentialChain(vec![
-            Authority::owner(&f.publisher)
-                .issue_issuer(issuer.public_key(), None, validity())
-                .unwrap(),
+            Authority::owner_in(
+                &f.publisher,
+                rocky_credentials::DatabaseContext {
+                    publisher: f.publisher.public_key(),
+                    scope: f.public.domain,
+                },
+            )
+            .unwrap()
+            .issue_issuer(issuer.public_key(), None, validity())
+            .unwrap(),
         ]);
-        seals.push(SignedSeal::endorse(statement.clone(), &issuer, &chain).unwrap());
+        seals.push(
+            SignedSeal::endorse(
+                statement.clone(),
+                rocky_credentials::testing::lane_for(&issuer, &chain),
+                &chain,
+            )
+            .unwrap(),
+        );
         policies.push(crate::tests::revoking(
             &f.publisher,
             f.public.domain.app,

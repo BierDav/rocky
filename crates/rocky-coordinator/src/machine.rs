@@ -172,16 +172,36 @@ pub struct Request {
 pub(crate) fn self_certificate(
     key: &p2panda_core::PrivateKey,
 ) -> rocky_credentials::SignedCapability {
-    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    self_certificate_in(
+        key,
+        rocky_credentials::DatabaseContext {
+            publisher: key.public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    )
+}
+#[cfg(test)]
+pub(crate) fn self_certificate_in(
+    key: &p2panda_core::PrivateKey,
+    database: rocky_credentials::DatabaseContext,
+) -> rocky_credentials::SignedCapability {
+    use rocky_credentials::{AuthorRange, Capability, Extended, Extension, PeerId};
     let capability = Capability {
         subject: key.public_key(),
         kind: rocky_core::PrincipalKind::Node,
         grants: Vec::new(),
         not_before: 0,
-        expires: u64::MAX,
+        expires: rocky_credentials::NEVER,
         delegations: 0,
         extension: Extension::new(Extended {
             node: Some(PeerId::of(key.public_key())),
+            authors: Some(AuthorRange::new(1, 1).expect("author range")),
+            database: Some(database),
+            sequence: Some(0),
             ..Extended::default()
         })
         .expect("extension"),
@@ -628,6 +648,15 @@ impl Metadata {
         ) else {
             return false;
         };
+        if chain
+            .verify_database(rocky_credentials::DatabaseContext {
+                publisher,
+                scope: control.scope,
+            })
+            .is_err()
+        {
+            return false;
+        }
         chain
             .claimant(
                 publisher,
@@ -660,6 +689,9 @@ impl Metadata {
         if !domain.open() {
             return Err(CoordinationError::Denied);
         }
+        pushed
+            .verify_in(rocky_credentials::DatabaseContext { publisher, scope })
+            .map_err(|_| CoordinationError::Denied)?;
         let mut merged = domain.revocations.clone();
         merged
             .merge(pushed, publisher, scope.app, time)
@@ -1085,6 +1117,21 @@ impl Metadata {
     }
     /// Whether the request's node certificate is a trusted identity's.
     fn trusts(control: &DomainControl, request: &Request, time: u64) -> bool {
+        if let Some(publisher) = control.publisher.as_deref().copied() {
+            let expected = rocky_credentials::DatabaseContext {
+                publisher,
+                scope: control.scope,
+            };
+            if request
+                .certificate
+                .as_ref()
+                .and_then(|certificate| certificate.capability.extended().ok())
+                .and_then(|extended| extended.database)
+                != Some(expected)
+            {
+                return false;
+            }
+        }
         request
             .identity(time)
             .is_some_and(|identity| control.trusted.contains(&identity))

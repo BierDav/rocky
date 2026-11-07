@@ -5,7 +5,7 @@ use super::*;
 use rocky_credentials::CredentialChain;
 
 pub(crate) const ROLE: &str = "tip-nodes";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,24 +20,6 @@ struct SavedNode {
     line: String,
     key: [u8; 32],
     credentials: CredentialChain,
-}
-
-impl Settings {
-    /// A stored identity's one number is its first node's; another node
-    /// takes the next free number of the ledger grants also draw from.
-    fn reserve_line_author(&mut self) -> Result<u32, Failure> {
-        let minting = self
-            .minting
-            .as_mut()
-            .ok_or("no free author number for another node")?;
-        let author = minting.next;
-        if !minting.range.contains(author) {
-            return Err("no free author number for another node".into());
-        }
-        minting.next = author.checked_add(1).ok_or("author numbers exhausted")?;
-        self.author_high_water = self.author_high_water.max(minting.next);
-        Ok(author)
-    }
 }
 
 impl Node {
@@ -120,9 +102,27 @@ impl Node {
         if saved.format != FORMAT {
             return Err("unsupported line node format".into());
         }
-        let identity = settings.identity(&self.vault)?;
-        let grants =
-            |chain: &CredentialChain| chain.0.last().map(|leaf| leaf.capability.grants.clone());
+        let mut known = self.replica.revocations().await;
+        known.merge(
+            &settings.revocations,
+            settings.publisher,
+            self.domain().manifest().app,
+            now()?,
+        )?;
+        for certificate in saved
+            .nodes
+            .iter()
+            .filter_map(|node| node.credentials.certificate())
+            .chain(settings.credentials.certificate())
+        {
+            known.link(certificate.clone())?;
+        }
+        if settings.lacks(&known)? {
+            settings.learn_revocations(&known)?;
+            settings.save(&self.path)?;
+        }
+        self.replica.learn_revocations(&known).await?;
+        let grants = |chain: &CredentialChain| chain.grants().to_vec();
         let indexes: Vec<_> = (0..saved.nodes.len())
             .rev()
             .filter(|index| saved.nodes[*index].line == line)
@@ -131,17 +131,19 @@ impl Node {
             let key = PrivateKey::from_bytes(&saved.nodes[index].key);
             // A schema change may grant new tables: the same node and
             // number are certified again for the installed definition.
-            if let Some(author) = saved.nodes[index]
-                .credentials
-                .authors()?
-                .and_then(|range| range.single())
-            {
-                let current = settings.certify_node(
-                    &*identity,
+            if saved.nodes[index].credentials.certificate().is_some() {
+                let certificate = saved.nodes[index]
+                    .credentials
+                    .certificate()
+                    .ok_or("saved line node has no certificate")?;
+                let Ok(current) = settings.chain_for(
+                    &key,
                     settings.identity_links(),
+                    certificate.clone(),
                     &self.domain(),
-                    (key.public_key(), author),
-                )?;
+                ) else {
+                    continue;
+                };
                 if grants(&current) != grants(&saved.nodes[index].credentials) {
                     saved.nodes[index].credentials = current;
                     self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
@@ -160,22 +162,32 @@ impl Node {
         if !needed {
             return Ok(());
         }
-        let author = if settings.stored_identity {
-            let mut draft = (**settings).clone();
-            let author = draft.reserve_line_author()?;
-            draft.save(&self.path)?;
-            *settings = Shared::new(draft);
-            author
-        } else {
-            identity.reserve_author(settings.node_numbers(range))?
-        };
+        let identity = settings.identity()?;
+        let membership = known.membership()?;
+        if !membership.can_link(settings.identity, |node| {
+            known.identity_unlinks(settings.identity, node)
+        }) {
+            return Err("identity membership limit reached".into());
+        }
+        let sequence = membership.next_sequence(settings.identity)?;
+        let previous = membership
+            .head(settings.identity)
+            .map(|head| head.certificate);
+        let author = range
+            .first
+            .checked_add(u32::try_from(sequence)?)
+            .filter(|author| settings.node_numbers(range).contains(*author))
+            .ok_or("no free author number for another node")?;
         let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-        let credentials = settings.certify_node(
-            &*identity,
-            settings.identity_links(),
-            &self.domain(),
-            (key.public_key(), author),
-        )?;
+        let links = settings.identity_links();
+        let certificate = links
+            .clone()
+            .certify_member(&*identity, key.public_key(), author, sequence, previous)?
+            .0
+            .pop()
+            .ok_or("missing node certificate")?;
+        known.link(certificate.clone())?;
+        let credentials = settings.chain_for(&key, links, certificate, &self.domain())?;
         let node = rocky_secure::LineNode { key, credentials };
         saved.nodes.push(SavedNode {
             line,
@@ -184,6 +196,9 @@ impl Node {
         });
         // Saved before registration, so a retry reuses this certificate.
         self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
+        settings.learn_revocations(&known)?;
+        settings.save(&self.path)?;
+        self.replica.learn_revocations(&known).await?;
         self.replica.register_line_node(node).await?;
         Ok(())
     }

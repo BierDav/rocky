@@ -97,11 +97,10 @@ impl Settings {
         };
         right.validate()?;
         let time = now()?;
-        let signer = self.identity(vault)?;
+        let node = Self::node_key(vault)?;
         let mut changes = Changes::default();
         let (links, issuer) = if self.issuer() {
-            let prefix = self.issuer_links();
-            let authority = self.authority(&*signer, &prefix)?;
+            let authority = self.authority(&node)?;
             let link = authority.issue_claims(
                 identity,
                 right.clone(),
@@ -125,7 +124,7 @@ impl Settings {
                 .as_ref()
                 .ok_or("only an issuer or a holder of a delegable claim right grants one")?;
             let links = held.links.delegate_claims(
-                &*signer,
+                rocky_credentials::Signer::node(&node, &self.credentials)?,
                 identity,
                 right.clone(),
                 delegations,
@@ -187,9 +186,8 @@ impl Settings {
         {
             return Ok(None);
         }
-        let signer = self.identity(vault)?;
-        let prefix = self.issuer_links();
-        let authority = self.authority(&*signer, &prefix)?;
+        let node = Self::node_key(vault)?;
+        let authority = self.authority(&node)?;
         let link = authority.issue_claims(
             identity,
             record.right.clone(),
@@ -215,20 +213,19 @@ impl Settings {
     /// The claim chain this node presents: its certificate under the held
     /// claim link, while that link is current.
     #[cfg(feature = "iroh")]
-    pub(crate) fn claim_chain(&self, vault: &Vault) -> Result<Option<CredentialChain>, Failure> {
+    pub(crate) fn claim_chain(&self, _vault: &Vault) -> Result<Option<CredentialChain>, Failure> {
         let Some(held) = &self.claims else {
             return Ok(None);
         };
         if held.links.expires() <= now()? {
             return Ok(None);
         }
-        let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let author = self.credentials.author_number().unwrap_or(1);
-        Ok(Some(held.links.clone().certify_claims(
-            &*self.identity(vault)?,
-            node,
-            author,
-        )?))
+        let certificate = self
+            .credentials
+            .certificate()
+            .ok_or("missing node certificate")?
+            .clone();
+        Ok(Some(held.links.with_certificate(certificate)))
     }
     /// Whether a member should ask its issuer for a claim link: it holds
     /// none, or one past half its lifetime.

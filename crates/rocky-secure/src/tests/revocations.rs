@@ -60,7 +60,12 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
     let revoked = revoking(
         &f.publisher,
         f.app().definition().app,
-        &[carol.public_key()],
+        &[early_carol
+            .chain()
+            .unwrap()
+            .credentials()
+            .principal()
+            .unwrap()],
         &[],
     );
     assert_eq!(d.learn_revocations(&revoked).await.unwrap().len(), 1);
@@ -84,7 +89,14 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
     // The set survives a reopen of the file without being supplied again.
     drop(d);
     let d = open(&f, &dir, "dave.db", &dave).await;
-    assert_eq!(d.revocations().await, revoked);
+    assert_eq!(
+        d.revocations()
+            .await
+            .statements()
+            .cloned()
+            .collect::<Vec<_>>(),
+        revoked.statements().cloned().collect::<Vec<_>>()
+    );
 }
 
 /// `right` dials `left` over an in-memory pipe; returns both sides' results.
@@ -150,6 +162,15 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
 /// own revocation set ends that chain.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it() {
+    ended_head_resolves(false).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_forked_membership_head_resolves_by_evidence_from_a_peer_that_holds_it() {
+    ended_head_resolves(true).await;
+}
+
+async fn ended_head_resolves(fork: bool) {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let (alice, carol, dave, erin) = (
@@ -158,7 +179,12 @@ async fn a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it() {
         PrivateKey::new(),
         PrivateKey::new(),
     );
-    let a = open(&f, &dir, "alice.db", &alice).await;
+    let identity = PrivateKey::new();
+    let mut config = f.config(&alice, f.full(), &[f.public]);
+    config.credentials = f.chain_under(&alice, f.full(), &f.publisher, &identity, lifetime());
+    let a = EncryptedReplica::open(dir.path().join("alice.db"), f.app(), config)
+        .await
+        .unwrap();
     let c = open(&f, &dir, "carol.db", &carol).await;
     let d = open(&f, &dir, "dave.db", &dave).await;
     let e = open(&f, &dir, "erin.db", &erin).await;
@@ -179,12 +205,35 @@ async fn a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it() {
         )
         .await
         .unwrap();
-    let revoked = revoking(
-        &f.publisher,
-        f.app().definition().app,
-        &[alice.public_key()],
-        &[],
-    );
+    let revoked = if fork {
+        let chain = read.chain().unwrap();
+        let sibling = chain
+            .credentials()
+            .capabilities()
+            .certify(
+                &identity,
+                PrivateKey::new().public_key(),
+                chain.credentials().author_number().unwrap(),
+            )
+            .unwrap();
+        let mut evidence = RevocationSet::new();
+        evidence
+            .link(chain.credentials().certificate().unwrap().clone())
+            .unwrap();
+        evidence
+            .link(sibling.certificate().unwrap().clone())
+            .unwrap();
+        assert_eq!(evidence.len(), 0);
+        assert!(evidence.has_revocations());
+        evidence
+    } else {
+        revoking(
+            &f.publisher,
+            f.app().definition().app,
+            &[identity.public_key()],
+            &[],
+        )
+    };
     let ask = |key: &PrivateKey, heads: Vec<Hash>| {
         let credentials = f.credentials(key, f.full());
         let (c, key) = (&c, key.public_key());

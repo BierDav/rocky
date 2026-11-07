@@ -3,7 +3,7 @@
 use super::*;
 use crate::network::link::Link;
 
-pub(super) async fn open(
+pub(crate) async fn open(
     f: &Fixture,
     dir: &Scratch,
     name: &str,
@@ -17,7 +17,7 @@ pub(super) async fn open(
     .await
     .unwrap()
 }
-pub(super) async fn insert(
+pub(crate) async fn insert(
     replica: &EncryptedReplica<Employees>,
     f: &Fixture,
     row: u8,
@@ -100,7 +100,7 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
 }
 
 /// `right` dials `left` over an in-memory pipe; returns both sides' results.
-pub(super) async fn hello(
+pub(crate) async fn hello(
     (left_key, left): (&PrivateKey, &EncryptedReplica<Employees>),
     (right_key, right): (&PrivateKey, &EncryptedReplica<Employees>),
     f: &Fixture,

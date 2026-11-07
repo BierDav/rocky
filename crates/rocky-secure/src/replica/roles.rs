@@ -652,7 +652,7 @@ impl<A: RowApplication> Inner<A> {
         byte_quota: usize,
     ) -> Result<RangePage, Error> {
         let mut page = self
-            .range_frames(peer, credentials, request, after, byte_quota)
+            .range_frames(peer, credentials, request, after, byte_quota, None)
             .await?;
         if !page.behind
             && let Some(signed) = self
@@ -706,13 +706,14 @@ impl<A: RowApplication> Inner<A> {
         Ok(missing)
     }
 
-    async fn range_frames(
+    pub(super) async fn range_frames(
         &mut self,
         peer: PublicKey,
         credentials: &CredentialChain,
         request: &ScopeFrontier,
         after: Option<(PublicKey, u64)>,
         byte_quota: usize,
+        upper: Option<&ScopeFrontier>,
     ) -> Result<RangePage, Error> {
         request.validate()?;
         let scope = request.scope;
@@ -724,7 +725,11 @@ impl<A: RowApplication> Inner<A> {
         if !self.holds(scope).await? {
             return Err(denied("scope is not held by this replica"));
         }
-        let own = self.frontier(scope).await?;
+        let own = match upper {
+            Some(upper) if upper.scope == scope => upper.clone(),
+            Some(_) => return Err(denied("range upper scope")),
+            None => self.frontier(scope).await?,
+        };
         let mut page = RangePage {
             state: None,
             scope,
@@ -759,11 +764,12 @@ impl<A: RowApplication> Inner<A> {
             let records = collect_rows(
                 self.conn
                     .query(
-                        "SELECT sequence,header,body FROM secure_operations WHERE scope=? AND author=? AND sequence>=? ORDER BY sequence LIMIT ?",
+                        "SELECT sequence,header,body FROM secure_operations WHERE scope=? AND author=? AND sequence>=? AND sequence<? ORDER BY sequence LIMIT ?",
                         bindings(vec![
                             SqlValue::Blob(blob.clone()),
                             SqlValue::Blob(log.author.as_bytes().to_vec()),
                             SqlValue::Integer(start as i64),
+                            SqlValue::Integer(if upper.is_some() { i64::try_from(log.held).map_err(|_| denied("range upper position"))? } else { i64::MAX }),
                             SqlValue::Integer(RANGE_FRAMES as i64 + 1),
                         ]),
                     )
@@ -775,6 +781,7 @@ impl<A: RowApplication> Inner<A> {
                 .voids_from(scope, log.author, start, RANGE_FRAMES + 1)
                 .await?
                 .into_iter()
+                .take_while(|(sequence, _, _)| upper.is_none() || *sequence < log.held)
                 .peekable();
             let mut records = records.into_iter().peekable();
             loop {

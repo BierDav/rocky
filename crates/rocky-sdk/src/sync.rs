@@ -18,6 +18,8 @@ pub(crate) struct Upstream<'a> {
     pub link: Handle,
     pub observations: &'a crate::status::Observations,
     pub peer: PublicKey,
+    pub refresh_control: bool,
+    pub control_started: std::cell::Cell<bool>,
     pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
@@ -93,6 +95,7 @@ impl Moved {
 /// What a reconcile did, by scope, in first-change order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Transfer {
+    pub repair_generation: Option<u64>,
     pub scopes: Vec<(ResourceScope, Moved)>,
     /// Scopes the peer and this device did not exchange: one side's
     /// credentials, as the other sees them, grant no whole-scope access.
@@ -242,7 +245,9 @@ pub(crate) async fn bootstrap(
                 None => session(replica, upstream).await?,
             };
             if !tips_synced {
-                planning.sync_tip_graph(replica).await?;
+                if upstream.refresh_control {
+                    planning.sync_tip_graph(replica).await?;
+                }
                 tips_synced = true;
             }
             if !planning.follows_same_tip(replica).await {
@@ -421,9 +426,11 @@ pub(crate) async fn session(
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
     let mut session = upstream.link.open().await?;
-    session.refresh_revocations(replica).await?;
-    if let Some(handler) = upstream.contacts {
-        crate::mesh::exchange(&mut session, handler).await?;
+    if upstream.refresh_control && !upstream.control_started.replace(true) {
+        session.refresh_revocations(replica).await?;
+        if let Some(handler) = upstream.contacts {
+            crate::mesh::exchange(&mut session, handler).await?;
+        }
     }
     if let Some(digest) = upstream.renew_from
         && replica.revocation_digest().await? != digest
@@ -446,22 +453,49 @@ async fn rows(
         Some(session) => session,
         None => session(replica, upstream).await?,
     };
-    planning.sync_tip_graph(replica).await?;
-    planning.close().await?;
-    let mut pending = stream::iter(scopes.iter().copied().map(|scope| {
+    if upstream.refresh_control {
+        planning.sync_tip_graph(replica).await?;
+    }
+    if !planning
+        .rebootstrap_scopes_at_seals(replica, scopes)
+        .await?
+        || !planning
+            .pull_wanted_seals_for_scopes(replica, scopes)
+            .await?
+    {
+        planning.close().await?;
+        return Err(Box::new(Unfinished));
+    }
+    if !replica.tip_statements(None, 1).await?.is_empty() {
+        for scope in scopes {
+            if planning.sync_held_changes(replica, *scope, QUOTA).await? {
+                planning.close().await?;
+                return Err(Box::new(Unfinished));
+            }
+        }
+    }
+    let mut exchange = planning.changed_scopes(replica, scopes).await?;
+    for scope in scopes {
+        if !exchange.refused.contains(scope)
+            && !exchange.importing.contains(scope)
+            && !exchange.changed.contains(scope)
+            && replica.rebootstrap_progress(*scope).await?.is_some()
+        {
+            exchange.changed.push(*scope);
+        }
+    }
+    transfer.refuse(&exchange.refused);
+    transfer.wait(&exchange.importing);
+    for scope in scopes {
+        if !exchange.refused.contains(scope) && !transfer.held.contains(scope) {
+            transfer.held.push(*scope);
+        }
+    }
+    let mut pending = stream::iter(exchange.changed.iter().copied().map(|scope| {
         let progress = &progress;
         async move {
             let mut moved = Transfer::default();
-            let result = rows_scope(
-                replica,
-                upstream,
-                &[scope],
-                progress,
-                &mut moved,
-                None,
-                false,
-            )
-            .await;
+            let result = rows_scope(replica, upstream, &[scope], progress, &mut moved, None).await;
             (scope, moved, result)
         }
     }))
@@ -479,9 +513,10 @@ async fn rows(
             }
         }
     }
-    let mut session = session(replica, upstream).await?;
-    session.pull_placements(replica).await?;
-    session.close().await?;
+    if upstream.refresh_control {
+        planning.pull_placements(replica).await?;
+    }
+    planning.close().await?;
     Ok(())
 }
 async fn rows_scope(
@@ -491,58 +526,26 @@ async fn rows_scope(
     progress: impl Fn(bool),
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
-    refresh: bool,
 ) -> Result<NativeSession, Failure> {
     for _ in 0..SESSIONS {
         let mut session = match first.take() {
             Some(session) => session,
-            None => session(replica, upstream).await?,
-        };
-        if refresh {
-            session.sync_tip_graph(replica).await?;
-        }
-        // A compacted seal that lost, or a base at another cut, moves to a
-        // seal of the followed path before the scopes sync.
-        if !session.rebootstrap_scopes_at_seals(replica, scopes).await? {
-            session.close().await?;
-            continue;
-        }
-        // Seals the application asked to hold, from a peer that keeps them.
-        if !session
-            .pull_wanted_seals_for_scopes(replica, scopes)
-            .await?
-        {
-            session.close().await?;
-            continue;
-        }
-        let mut exhausted = false;
-        if !replica.tip_statements(None, 1).await?.is_empty() {
-            for scope in scopes {
-                if session.sync_held_changes(replica, *scope, QUOTA).await? {
-                    exhausted = true;
-                    break;
+            None => {
+                let session = upstream.link.open().await?;
+                if let Some(digest) = upstream.renew_from
+                    && replica.revocation_digest().await? != digest
+                {
+                    session.close().await?;
+                    return Err(Box::new(Learned));
                 }
+                session
             }
-        }
-        let mut exchange = session.changed_scopes(replica, scopes).await?;
-        // Equal frontiers do not finish an import interrupted at its switch.
-        for scope in scopes {
-            if !exchange.refused.contains(scope)
-                && !exchange.importing.contains(scope)
-                && !exchange.changed.contains(scope)
-                && replica.rebootstrap_progress(*scope).await?.is_some()
-            {
-                exchange.changed.push(*scope);
-            }
-        }
-        transfer.refuse(&exchange.refused);
-        // An importing peer takes the checkpoint, not this device's history.
-        transfer.wait(&exchange.importing);
-        for scope in scopes {
-            if !exchange.refused.contains(scope) && !transfer.held.contains(scope) {
-                transfer.held.push(*scope);
-            }
-        }
+        };
+        let mut exhausted = false;
+        let exchange = rocky_secure::network::FrontierExchange {
+            changed: scopes.to_vec(),
+            ..Default::default()
+        };
         for scope in &exchange.changed {
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session

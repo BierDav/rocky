@@ -24,6 +24,13 @@ impl Node {
             })
             .ok_or_else(|| refused("this identity did not link that node"))?
             .clone();
+        let cut = graph.heads(&settings.identity, &node)?;
+        let cut = if cut.statements.is_empty() && cut.acknowledgments.is_none() {
+            // Identity-owned unlink already defines the empty cut implicitly.
+            Vec::new()
+        } else {
+            vec![cut]
+        };
         let statement = rocky_credentials::Revocation {
             app: self.domain().manifest().app,
             issuer: settings.identity,
@@ -31,7 +38,7 @@ impl Node {
             nodes: [rocky_credentials::PeerId::of(node)].into(),
             identities: Default::default(),
             capabilities: Default::default(),
-            cut: vec![graph.heads(&settings.identity, &node)?],
+            cut,
             recovery: None,
         };
         // The identity signs outside the replica transaction. The target certificate proves ownership.

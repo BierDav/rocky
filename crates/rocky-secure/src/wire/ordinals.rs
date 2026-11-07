@@ -33,6 +33,28 @@ struct Bundle {
     outcome: Option<rocky_core::replay::OutcomeRecord>,
 }
 
+pub(super) fn charge_publication(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
+    crate::network::publication::charge(bytes, used)?;
+    // These byte strings contain further CBOR which expansion decodes.
+    #[derive(Deserialize)]
+    struct Metadata {
+        origins: Vec<serde_bytes::ByteBuf>,
+        headers: BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,
+        bindings: BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,
+    }
+    let metadata: Metadata = p2panda_core::cbor::decode_cbor(bytes)
+        .map_err(|_| denied("invalid publication row metadata"))?;
+    for bytes in metadata
+        .origins
+        .iter()
+        .chain(metadata.headers.values())
+        .chain(metadata.bindings.values())
+    {
+        crate::network::publication::charge(bytes, used)?;
+    }
+    Ok(())
+}
+
 fn ordinal(fields: &FieldOrdinals<'_>, field: Commitment) -> Result<u32, Error> {
     fields
         .ordinal(field)

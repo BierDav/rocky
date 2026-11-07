@@ -1,4 +1,94 @@
 use super::*;
+use rocky_secure::network::link;
+
+#[derive(Debug, Default)]
+struct PublicationTraffic {
+    sessions: usize,
+    families: BTreeMap<&'static str, usize>,
+    messages: BTreeMap<&'static str, usize>,
+    signed_bytes: usize,
+    queue_us: Vec<u64>,
+    receipts: usize,
+    repair_scopes: usize,
+    repair_all: usize,
+    repair_reasons: BTreeMap<rocky_secure::network::PublicationRepairReason, usize>,
+}
+
+fn traffic_snapshot(a: &Link, b: &Link) -> Vec<link::channels::Traffic> {
+    a.live
+        .traffic()
+        .into_iter()
+        .chain(b.live.traffic())
+        .collect()
+}
+
+impl PublicationTraffic {
+    fn between(before: &[link::channels::Traffic], after: Vec<link::channels::Traffic>) -> Self {
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "link replacement during publication"
+        );
+        let mut delta = Self::default();
+        for (before, after) in before.iter().zip(after) {
+            delta.sessions += after.sessions - before.sessions;
+            delta.signed_bytes += after.signed_bytes - before.signed_bytes;
+            delta.receipts += after.receipts - before.receipts;
+            delta.repair_scopes += after.repair_scopes - before.repair_scopes;
+            delta.repair_all += after.repair_all - before.repair_all;
+            for (key, count) in after.families {
+                let count = count - before.families.get(key).copied().unwrap_or_default();
+                if count > 0 {
+                    *delta.families.entry(key).or_default() += count;
+                }
+            }
+            for (key, count) in after.publication_parts {
+                let count = count
+                    - before
+                        .publication_parts
+                        .get(key)
+                        .copied()
+                        .unwrap_or_default();
+                if count > 0 {
+                    *delta.messages.entry(key).or_default() += count;
+                }
+            }
+            for (key, count) in after.repair_reasons {
+                let count = count - before.repair_reasons.get(&key).copied().unwrap_or_default();
+                if count > 0 {
+                    *delta.repair_reasons.entry(key).or_default() += count;
+                }
+            }
+            if after.intakes > before.intakes {
+                delta
+                    .queue_us
+                    .push(after.last_queue_us.expect("intake queue measurement"));
+            }
+        }
+        delta
+    }
+    fn assert_complete(&self) {
+        assert_eq!(self.sessions, 2, "one channel's two endpoints: {self:?}");
+        assert_eq!(
+            self.families,
+            [("chains", 1), ("escrow", 1), ("publication", 4)].into(),
+            "unexpected control/discovery/row traffic: {self:?}"
+        );
+        assert_eq!(
+            self.messages,
+            ["start", "chains", "escrow", "page", "finish", "receipt"]
+                .into_iter()
+                .map(|part| (part, 1))
+                .collect(),
+            "{self:?}"
+        );
+        assert_eq!(self.receipts, 1, "{self:?}");
+        assert_eq!(self.repair_scopes, 0, "{self:?}");
+        assert_eq!(self.repair_all, 0, "{self:?}");
+        assert!(self.repair_reasons.is_empty(), "{self:?}");
+        assert_eq!(self.queue_us.len(), 1, "{self:?}");
+    }
+}
 
 async fn pair(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Arc<Node>, Arc<Node>), Failure> {
     let a = enrolled(&root.join("a"), hub, "a", None).await?;
@@ -64,35 +154,77 @@ async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcile()
--> Result<(), Failure> {
+async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
+            crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain())
+                .await?;
+            let service_a = a.current().ok_or("service")?;
+            let service_b = b.current().ok_or("service")?;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
             let before = [hub.dials_to("a"), hub.dials_to("b")];
             let messages = [hub.link_messages("a"), hub.link_messages("b")];
             let activity = b.activity.after(0)["token"]
                 .as_str()
                 .ok_or("activity token")?
                 .parse()?;
-            add(&a, 1).await?;
-            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            let traffic_before = traffic_snapshot(&service_a, &service_b);
+            let bytes_before = *hub.written().borrow();
+            let mut changes = b.replica.observe_tables(Some(&["items"])).await?;
+            let (committed, observed) = tokio::join!(
+                async {
+                    add(&a, 1).await?;
+                    Ok::<_, Failure>(std::time::Instant::now())
+                },
+                async {
+                    let change = changes.next().await?;
+                    assert!(change.causes.contains(&rocky_storage::observe::Cause::Sync));
+                    let notified = std::time::Instant::now();
+                    assert_eq!(rows(&b).await?, ["1"]);
+                    Ok::<_, Failure>((notified, std::time::Instant::now()))
+                }
+            );
+            let committed = committed?;
+            let (notified, snapshot) = observed?;
             settled(&a).await;
             settled(&b).await;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
             assert_eq!(rows(&b).await?, ["1"]);
+            let traffic = PublicationTraffic::between(&traffic_before, traffic_snapshot(&service_a, &service_b));
+            traffic.assert_complete();
+            let notification_us = if notified >= committed { notified.duration_since(committed).as_micros() as i128 }
+                else { -(committed.duration_since(notified).as_micros() as i128) };
+            eprintln!("tiny publication diagnostic: commit_return_to_notification_us={notification_us} notification_to_snapshot_us={} framed_signed_link_bytes={} traffic={traffic:?}",
+                snapshot.duration_since(notified).as_micros(), *hub.written().borrow() - bytes_before);
+            eprintln!(
+                "tiny publication complete link messages: {:?}",
+                [
+                    hub.link_messages("a") - messages[0],
+                    hub.link_messages("b") - messages[1]
+                ]
+            );
             assert_eq!(hub.dials_to("b"), before[1], "publisher must not dial");
             assert_eq!(hub.dials_to("a"), before[0], "receiver must not dial");
             assert_eq!(
                 hub.link_messages("a"),
-                messages[0] + 1,
-                "one committed push"
+                messages[0] + 7,
+                "one declaration, five native messages including escrow, and channel close"
             );
             assert_eq!(
                 hub.link_messages("b"),
-                messages[1],
-                "no receipt or reconcile traffic"
+                messages[1] + 2,
+                "one receipt and channel close"
             );
             assert!(
                 b.activity.after(activity)["events"]
@@ -1204,15 +1336,18 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_burst_exceeds_push_bound_and_finishes_by_link_catch_up_in_log_order()
--> Result<(), Failure> {
+async fn an_in_budget_burst_spans_publication_pages_without_reconciliation() -> Result<(), Failure>
+{
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
             let before = hub.counts();
-            let reconcile = b.syncing.lock().await;
+            let activity = b.activity.after(0)["token"]
+                .as_str()
+                .ok_or("activity")?
+                .parse()?;
             let service = a.current().ok_or("service")?;
             let publish = service.live.publishing.lock().await;
             for key in 1..=40 {
@@ -1220,33 +1355,98 @@ async fn a_burst_exceeds_push_bound_and_finishes_by_link_catch_up_in_log_order()
             }
             drop(publish);
             until(|| *b.replica.observe_revision().borrow() > 0).await;
-            let partial = rows(&b).await?;
-            assert!(
-                !partial.is_empty() && partial.len() < 40,
-                "the bounded push sends only a prefix"
-            );
-            let mut numbers = partial
-                .iter()
-                .map(|value| value.parse::<usize>())
-                .collect::<Result<Vec<_>, _>>()?;
-            numbers.sort();
-            assert_eq!(numbers, (1..=partial.len()).collect::<Vec<_>>());
-            let frontier = b.replica.frontier(b.app_scopes()[0]).await?;
-            let author = a.replica.frontier(a.app_scopes()[0]).await?.logs[0].author;
-            assert_eq!(
-                frontier.log(author).ok_or("author log")?.applied,
-                partial.len() as u64
-            );
-            drop(reconcile);
             while rows(&b).await?.len() != 40 {
                 tokio::task::yield_now().await;
             }
             settled(&a).await;
             settled(&b).await;
             assert_eq!(rows(&a).await?, rows(&b).await?);
-            assert_eq!(hub.counts(), before, "push and catch-up reuse the stream");
+            assert_eq!(hub.counts(), before, "publication reuses the stream");
+            assert!(
+                b.activity.after(activity)["events"]
+                    .as_array()
+                    .ok_or("events")?
+                    .iter()
+                    .all(|event| event["kind"] != "peer_reconciliation_completed"
+                        && event["kind"] != "rows_synced")
+            );
+            let author = a.replica.frontier(a.app_scopes()[0]).await?.logs[0].author;
             let frontier = b.replica.frontier(b.app_scopes()[0]).await?;
             assert_eq!(frontier.log(author).ok_or("author log")?.applied, 40);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publication()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&a).await;
+            settled(&b).await;
+            let service_a = a.current().ok_or("service")?;
+            let service_b = b.current().ok_or("service")?;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            let gate = Arc::new(crate::node::live_links::ReceiptGate {
+                entered: Semaphore::new(0),
+                resume: Semaphore::new(0),
+            });
+            *service_b.live.receipt_gate.lock().unwrap() = Some(gate.clone());
+            let dials = [hub.dials_to("a"), hub.dials_to("b")];
+            let activity = a.activity.after(0)["token"]
+                .as_str()
+                .ok_or("activity")?
+                .parse()?;
+            add(&a, 1).await?;
+            gate.entered.acquire().await?.forget();
+            assert_eq!(rows(&b).await?, ["1"]);
+            // Intake ownership prevents reverse publication until the receipt is processed.
+            add(&b, 2).await?;
+            gate.resume.add_permits(1);
+            while rows(&a).await? != ["1", "2"] {
+                tokio::task::yield_now().await;
+            }
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            assert_eq!(rows(&b).await?, ["1", "2"]);
+            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
+            assert!(
+                a.activity.after(activity)["events"]
+                    .as_array()
+                    .ok_or("events")?
+                    .iter()
+                    .all(|event| event["kind"] != "peer_reconciliation_completed"
+                        && event["kind"] != "rows_synced")
+            );
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1661,8 +1861,8 @@ async fn incoming_pushes_do_not_wait_for_page_publication() -> Result<(), Failur
 }
 
 #[tokio::test(start_paused = true)]
-async fn pushes_over_the_handler_limit_reconcile_without_reopening_the_link() -> Result<(), Failure>
-{
+async fn publication_backpressure_preserves_committed_work_without_reopening_the_link()
+-> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
@@ -1676,31 +1876,8 @@ async fn pushes_over_the_handler_limit_reconcile_without_reopening_the_link() ->
                 add(&a, index).await?;
                 tokio::task::yield_now().await;
             }
-            // Send enough duplicate pages to exceed the handler limit even when
-            // the publisher coalesces all commits into only a few pages.
-            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-            let contact = a
-                .settings
-                .lock()
-                .await
-                .targets()
-                .into_iter()
-                .find(|(node, _)| *node == peer)
-                .ok_or("peer contact")?
-                .1;
-            let source = a.current().ok_or("source service")?;
-            let handle = a.request_link(&*source.transport, peer, &contact).await?;
-            let cursor = rocky_secure::ScopeFrontier {
-                scope: a.app_scopes()[0],
-                logs: vec![],
-            };
-            for _ in 0..24 {
-                handle.push_committed(&a.replica, &cursor).await?;
-                tokio::task::yield_now().await;
-            }
-            until(|| service.live.dropped_pushes.load(Ordering::SeqCst) > 0).await;
-            gate.add_permits(8);
             *service.live.push_gate.lock().unwrap() = None;
+            gate.add_permits(1);
             b.sync(&*service.transport).await?;
             assert_eq!(rows(&b).await?.len(), 24);
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
@@ -1733,5 +1910,196 @@ async fn link_control_round_trip_runs_while_the_database_executor_is_blocked() -
             b.detach(None).await;
             Ok(())
         })
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new().run_until(frozen(async {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let names: Vec<String> = ["contacts", "receipts", "versions"].into_iter().map(str::to_owned)
+            .chain((3..32).map(|n| format!("held_{n}"))).collect();
+        let mut schema: Value = serde_json::from_str(SCHEMA)?;
+        let mut table = schema["tables"][0].clone();
+        for n in 0..6 {
+            table["columns"].as_array_mut().ok_or("columns")?.push(json!({"name":format!("extra_{n}"),"type":"text"}));
+        }
+        schema["tables"] = Value::Array(names.iter().map(|name| {
+            let mut table = table.clone();
+            table["name"] = json!(name);
+            table
+        }).collect());
+        let schema = Schema::parse(&schema.to_string())?;
+        let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
+        crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain()).await?;
+        let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, Profile::Reader {
+            scopes: names.iter().cloned().collect(),
+        })), &schema).await?;
+        targets(&a, std::slice::from_ref(&b)).await?;
+        targets(&b, std::slice::from_ref(&a)).await?;
+        start(&a, true).await?;
+        start(&b, true).await?;
+        until(|| a.current().is_some_and(|s| s.live.len() == 1)
+            && b.current().is_some_and(|s| s.live.len() == 1)).await;
+        settled(&a).await;
+        settled(&b).await;
+        assert_eq!(b.scopes().len(), 32);
+        let service_a = a.current().ok_or("service")?;
+        let service_b = b.current().ok_or("service")?;
+        until(|| !service_a.live.publishing_or_receiving() && !service_b.live.publishing_or_receiving()).await;
+        let dials = [hub.dials_to("a"), hub.dials_to("b")];
+        let activity = b.activity.after(0)["token"].as_str().ok_or("activity")?.parse()?;
+        for version in 1..=3 {
+            let traffic_before = traffic_snapshot(&service_a, &service_b);
+            let mut changes = b.replica.observe_tables(Some(&["contacts", "receipts", "versions"])).await?;
+            let bytes_before = *hub.written().borrow();
+            let messages_before = [hub.link_messages("a"), hub.link_messages("b")];
+            let client = a.client(1)?;
+            a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"})).await.map_err(|error| format!("source begin: {error}"))?;
+            for table in ["contacts", "receipts", "versions"] {
+                let id = a.dispatch(&client, &json!({"type":"next_id","table":table})).await.map_err(|error| format!("source allocation in {table}: {error}"))?["id"].clone();
+                a.dispatch(&client, &json!({"type":"sql", "sql":format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)"),
+                    "values":[{"type":"text","value":version.to_string()},{"type":"integer","value":id}]})).await?;
+            }
+            let commit = async {
+                a.dispatch(&client, &json!({"type":"sql","sql":"COMMIT","handle":vec![version;32]})).await?;
+                Ok::<_, Failure>(std::time::Instant::now())
+            };
+            let observe = async {
+                let change = changes.next().await?;
+                assert_eq!(change.tables, ["contacts", "receipts", "versions"].into_iter().map(str::to_owned).collect());
+                assert!(change.causes.contains(&rocky_storage::observe::Cause::Sync), "{change:?}");
+                let notified = std::time::Instant::now();
+                let snapshot = b.dispatch(&*b.client(1)?, &json!({"type":"read", "query":{
+                    "sql":"SELECT (SELECT count(*) FROM contacts),(SELECT count(*) FROM receipts),(SELECT count(*) FROM versions)", "max_rows":1
+                }})).await.map_err(|error| format!("notification snapshot: {error}"))?;
+                Ok::<_, Failure>((notified, snapshot, std::time::Instant::now()))
+            };
+            let (committed, observed) = tokio::join!(commit, observe);
+            let committed = committed?;
+            let (notified, snapshot, read) = observed?;
+            assert_eq!(snapshot["rows"][0], json!([
+                {"type":"integer","value":version.to_string()},
+                {"type":"integer","value":version.to_string()},
+                {"type":"integer","value":version.to_string()}
+            ]));
+            until(|| !service_a.live.publishing_or_receiving() && !service_b.live.publishing_or_receiving()).await;
+            settled(&a).await;
+            settled(&b).await;
+            let traffic = PublicationTraffic::between(&traffic_before, traffic_snapshot(&service_a, &service_b));
+            traffic.assert_complete();
+            eprintln!("publication native traffic: {traffic:?}");
+            assert_eq!(
+                [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
+                [9, 2],
+                "one fragmented publication and receipt"
+            );
+            let notification_us = if notified >= committed {
+                notified.duration_since(committed).as_micros() as i128
+            } else {
+                -(committed.duration_since(notified).as_micros() as i128)
+            };
+            eprintln!("publication diagnostic: scopes=32 edit={version} commit_return_to_notification_us={notification_us} notification_to_snapshot_us={} framed_signed_link_bytes={} link_messages={:?}",
+                read.duration_since(notified).as_micros(),
+                *hub.written().borrow() - bytes_before,
+                [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]]);
+        }
+        assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
+        assert!(b.activity.after(activity)["events"].as_array().ok_or("events")?.iter().all(|event|
+            event["kind"] != "peer_reconciliation_completed" && event["kind"] != "rows_synced"));
+        a.detach(None).await;
+        b.detach(None).await;
+        Ok(())
+    })).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_scope()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            // Partition selectors cover several concrete scopes without extra grants.
+            let names: Vec<_> = std::iter::once("items".to_owned())
+                .chain((1..62).map(|n| format!("held_{n}")))
+                .collect();
+            let mut schema: Value = serde_json::from_str(SCHEMA)?;
+            let table = schema["tables"][0].clone();
+            schema["tables"] = Value::Array(
+                names
+                    .iter()
+                    .map(|name| {
+                        let mut table = table.clone();
+                        table["name"] = json!(name);
+                        if name == "held_1" {
+                            table["partition_by"] = json!(["key"]);
+                            table["partition_group"] = json!("held");
+                        }
+                        table
+                    })
+                    .collect(),
+            );
+            let schema = Schema::parse(&schema.to_string())?;
+            let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await.map_err(|error| format!("multi-batch source enrollment: {error}"))?;
+            crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain())
+                .await?;
+            let b = enrolled_schema(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+                &schema,
+            )
+            .await.map_err(|error| format!("multi-batch receiver enrollment: {error}"))?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let (client_a, client_b) = (a.client(1)?, b.client(1)?);
+            for n in 0..3 {
+                let values = json!([{"type":"text","value":format!("partition_{n}")}]);
+                a.dispatch(&client_a, &json!({"type":"partition_create","group":"held","values":values})).await.map_err(|error| format!("create partition {n}: {error}"))?;
+                let shared = a.dispatch(&client_a, &json!({"type":"partition_share","group":"held","values":values,"recipients":[peer.to_hex()]})).await.map_err(|error| format!("share partition {n}: {error}"))?;
+                b.dispatch(&client_b, &json!({"type":"partition_install","group":"held","values":values,
+                    "envelope":shared["envelopes"][0]["envelope"],"sender":shared["sender"]})).await.map_err(|error| format!("install partition {n}: {error}"))?;
+            }
+            targets(&a, std::slice::from_ref(&b)).await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&a).await;
+            settled(&b).await;
+            assert_eq!(b.scopes().len(), 66);
+            assert_eq!(b.scopes().iter().filter(|scope| !b.domain().partitioned_table(scope)).count(), 65);
+            let service_a = a.current().ok_or("service")?;
+            let service_b = b.current().ok_or("service")?;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            let before = traffic_snapshot(&service_a, &service_b);
+            let dials = [hub.dials_to("a"), hub.dials_to("b")];
+            add(&a, 1).await?;
+            while rows(&b).await? != ["1"] {
+                tokio::task::yield_now().await;
+            }
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            PublicationTraffic::between(&before, traffic_snapshot(&service_a, &service_b))
+                .assert_complete();
+            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
         .await
 }

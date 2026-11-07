@@ -166,7 +166,56 @@ struct Vouch {
     chain: CredentialChain,
     record: RootEscrow,
 }
+/// Transient transfer of a signed escrow vouch through a session's chain table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedEscrow {
+    version: u32,
+    scope: ResourceScope,
+    epoch: KeyEpoch,
+    signer: PublicKey,
+    signed_at: u64,
+    chain: Commitment,
+    record: RootEscrow,
+    signature: Signature,
+}
+impl CarriedEscrow {
+    pub fn chain_digest(&self) -> Commitment {
+        self.chain
+    }
+    /// Reconstructs the original vouch; its signature and authority still need checking.
+    pub fn complete(self, chain: CredentialChain) -> Result<VouchedEscrow, Error> {
+        if commitment("rocky.credential-chain.v1", &encode(&chain)?) != self.chain {
+            return Err(denied("escrow chain digest mismatch"));
+        }
+        Ok(VouchedEscrow {
+            body: Vouch {
+                version: self.version,
+                scope: self.scope,
+                epoch: self.epoch,
+                signer: self.signer,
+                signed_at: self.signed_at,
+                chain,
+                record: self.record,
+            },
+            signature: self.signature,
+        })
+    }
+}
 impl VouchedEscrow {
+    pub fn carried(&self) -> Result<CarriedEscrow, Error> {
+        Ok(CarriedEscrow {
+            version: self.body.version,
+            scope: self.body.scope,
+            epoch: self.body.epoch,
+            signer: self.body.signer,
+            signed_at: self.body.signed_at,
+            chain: commitment("rocky.credential-chain.v1", &encode(&self.body.chain)?),
+            record: self.body.record.clone(),
+            signature: self.signature,
+        })
+    }
+
     pub fn sign(
         node: &PrivateKey,
         chain: CredentialChain,
@@ -225,6 +274,37 @@ impl VouchedEscrow {
 mod tests {
     use super::*;
     use crate::PrivateKey;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_chain_reference_reconstructs_the_exact_signed_persisted_vouch() -> Result<(), Error> {
+        let node = PrivateKey::new();
+        let root = RootKey::generate();
+        let record = RootEscrow::seal(root.public_key(), [9; 32], &[7; 32])?;
+        let scope = ResourceScope {
+            domain: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+            encryption: [4; 32],
+            table: [5; 32],
+        };
+        let original = VouchedEscrow::sign(
+            &node,
+            CredentialChain::default(),
+            (scope, KeyEpoch::new(1, &[7; 32])),
+            record,
+            0,
+        )?;
+        let carried = original.carried()?;
+        let mut conflicting = carried.clone();
+        conflicting.chain = [0; 32];
+        assert!(conflicting.complete(CredentialChain::default()).is_err());
+        let complete = carried.complete(CredentialChain::default())?;
+        assert_eq!(complete.to_bytes()?, original.to_bytes()?);
+        complete.verify()?;
+        Ok(())
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_the_root_opens_a_record_and_it_names_nothing() -> Result<(), Error> {

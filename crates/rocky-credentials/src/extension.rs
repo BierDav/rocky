@@ -139,6 +139,11 @@ pub struct Origin {
     pub since: u64,
 }
 impl Extension {
+    /// Canonical metadata bytes, for allocation checks before decoding.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     pub fn new(extended: Extended) -> Result<Self, Error> {
         let body = Body {
             version: EXTENSION_VERSION,

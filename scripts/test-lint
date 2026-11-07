@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Check lint failure propagation without builds or external lint tools."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+SCRIPTS = Path(__file__).resolve().parent
+WORKFLOW_CHECKS = ("actionlint", "test-test-tiers", "test-rust-publish",
+                   "test-release-version", "test-lint")
+
+
+class LintStatus(unittest.TestCase):
+    def test_workflow_failures_survive_later_successes_and_other_modules_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            modules = scripts / "lint.d"
+            modules.mkdir(parents=True)
+            binary = root / "local/bin"
+            binary.mkdir(parents=True)
+            shutil.copy2(SCRIPTS / "lint", scripts / "lint")
+            shutil.copy2(SCRIPTS / "lint.d/workflows", modules / "workflows")
+            (modules / "after").write_text(
+                'check() { echo after >> "$LINT_CALLS"; }\n')
+            for name in (*WORKFLOW_CHECKS, "shellcheck"):
+                target = (scripts if name.startswith("test-") else binary) / name
+                target.write_text(
+                    '#!/bin/sh\n'
+                    'name=${0##*/}\n'
+                    'echo "$name" >> "$LINT_CALLS"\n'
+                    '[ "$name" != "$LINT_FAIL" ]\n')
+                target.chmod(0o755)
+            calls = root / "calls"
+            for failing in ("", *WORKFLOW_CHECKS):
+                with self.subTest(failing=failing or "none"):
+                    calls.write_text("")
+                    result = subprocess.run(
+                        [str(scripts / "lint"), "workflows", "after"],
+                        cwd=root, capture_output=True, text=True,
+                        env=dict(os.environ, LINT_FAIL=failing, LINT_CALLS=str(calls)))
+                    self.assertEqual(result.returncode, 1 if failing else 0, result.stderr)
+                    completed = len(WORKFLOW_CHECKS) if not failing else WORKFLOW_CHECKS.index(failing) + 1
+                    self.assertEqual(calls.read_text().splitlines(),
+                                     [*WORKFLOW_CHECKS[:completed], "after"])
+                    if failing:
+                        self.assertIn("lint: failed: workflows", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

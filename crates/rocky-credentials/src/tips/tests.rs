@@ -293,3 +293,71 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
     assert!(!graph.revoked.contains(&survivor));
     assert_eq!(revocations.pruned(u64::MAX).cut_lanes().count(), 2);
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    let root = PrivateKey::new();
+    let identity = PrivateKey::new();
+    let node = PrivateKey::new();
+    let sibling = PrivateKey::new();
+    let chain = CredentialChain(vec![
+        Authority::owner(&root)
+            .issue_trusted(
+                identity.public_key(),
+                scope,
+                AuthorRange::new(10, 41).unwrap(),
+                100,
+            )
+            .unwrap(),
+    ])
+    .certify(&identity, node.public_key(), 10)
+    .unwrap();
+    let graph = TipGraph::new(scope, [4; 32]);
+    let statement = Revocation {
+        app: scope.app,
+        issuer: identity.public_key(),
+        time: 200,
+        nodes: [crate::PeerId::of(node.public_key())].into(),
+        identities: Default::default(),
+        capabilities: Default::default(),
+        cut: vec![],
+        recovery: None,
+    };
+    let implicit = crate::SignedRevocation::sign(statement.clone(), &identity, &chain).unwrap();
+    let explicit = crate::SignedRevocation::sign(
+        Revocation {
+            cut: vec![
+                graph
+                    .heads(&identity.public_key(), &node.public_key())
+                    .unwrap(),
+            ],
+            ..statement
+        },
+        &identity,
+        &chain,
+    )
+    .unwrap();
+    implicit.verify(root.public_key(), scope.app).unwrap();
+    explicit.verify(root.public_key(), scope.app).unwrap();
+    assert!(implicit.to_bytes().unwrap().len() < explicit.to_bytes().unwrap().len());
+    let implicit = RevocationSet::try_from(vec![implicit]).unwrap();
+    let explicit = RevocationSet::try_from(vec![explicit]).unwrap();
+    let cut = implicit.cut(&identity.public_key(), &node.public_key());
+    assert!(cut.is_some());
+    assert_eq!(
+        cut,
+        explicit.cut(&identity.public_key(), &node.public_key())
+    );
+    for set in [&implicit, &explicit] {
+        assert!(set.identity_unlinks(identity.public_key(), crate::PeerId::of(node.public_key())));
+        assert!(!set.identity_unlinks(
+            identity.public_key(),
+            crate::PeerId::of(sibling.public_key())
+        ));
+    }
+}

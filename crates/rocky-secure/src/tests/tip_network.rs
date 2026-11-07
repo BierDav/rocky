@@ -305,16 +305,13 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
         })
         .await
         .unwrap();
-    let pushed = super::revocations::insert(&a, &f, 1, "bulk").await;
     left.writer
-        .send(Frame::new(
-            false,
-            Message::Push {
-                scope: f.public,
-                frames: vec![pushed],
-                voids: Vec::new(),
-            },
-        ))
+        .send(Frame {
+            channel: 4,
+            through: Vec::new(),
+            direction: false,
+            message: Message::Channel(Packet::Open { generation: 0 }),
+        })
         .await
         .unwrap();
     left.writer
@@ -347,7 +344,7 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
     for _ in 0..3 {
         let frame = right.reader.receive().await.unwrap();
         found |= frame.channel == 3;
-        pushed |= matches!(frame.message, Message::Push { .. });
+        pushed |= frame.channel == 4;
     }
     assert!(found && pushed);
 }

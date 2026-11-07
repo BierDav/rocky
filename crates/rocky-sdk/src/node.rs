@@ -1,6 +1,8 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod repair;
+use repair::RepairWork;
 mod claims;
 mod coordinated;
 mod delivery;
@@ -213,10 +215,12 @@ impl Drop for SyncActivity {
 struct PeerRetry {
     short: bool,
     retry: crate::scheduling::Retry,
-    pending: bool,
+    pending: RepairWork,
     link: bool,
     link_retry: crate::scheduling::Retry,
+    // Retry resets and newly hinted work invalidate different completions.
     generation: u64,
+    work_generation: u64,
 }
 struct SyncFailure {
     refused: bool,
@@ -2327,7 +2331,7 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .values_mut()
         {
-            state.pending = true;
+            state.repair_all();
         }
     }
     fn pending_without_links(&self, service: &Link) {
@@ -2338,7 +2342,7 @@ impl Node {
             .iter_mut()
         {
             if !service.live.contains(*peer) {
-                state.pending = true;
+                state.repair_all();
             }
         }
     }
@@ -2349,7 +2353,7 @@ impl Node {
             .values()
             .flat_map(|state| {
                 [
-                    if state.pending {
+                    if state.pending.pending() {
                         state.retry.deadline()
                     } else {
                         None
@@ -2514,7 +2518,7 @@ impl Node {
                 targets.iter().all(|(peer, _)| retries.contains_key(peer))
                     && !retries
                         .values()
-                        .any(|state| state.pending && state.retry.ready())
+                        .any(|state| state.pending.pending() && state.retry.ready())
             }
             && self
                 .resolution_retries
@@ -2612,6 +2616,9 @@ impl Node {
         }
         // A sync the app asked for tries every peer now; only automatic
         // passes wait out a peer's backoff.
+        if !automatic {
+            self.pending_sync();
+        }
         let targets = self.dialed(&*self.settings.lock().await, automatic);
         self.replica.configure_peers(settings.kept()).await;
         let needs_initial = {
@@ -2643,12 +2650,16 @@ impl Node {
                 .into_iter()
                 .filter_map(|(peer, contact)| {
                     let state = retries.entry(peer).or_insert_with(|| PeerRetry {
-                        pending: has_frames,
+                        pending: if has_frames {
+                            RepairWork::All
+                        } else {
+                            RepairWork::Empty
+                        },
                         ..self.peer_retry(peer)
                     });
                     let skip = if automatic && !state.retry.ready() {
                         Some(crate::SkipReason::Backoff)
-                    } else if automatic && retry_only && !state.pending {
+                    } else if automatic && retry_only && !state.pending.pending() {
                         Some(crate::SkipReason::NoPendingWork)
                     } else if automatic
                         && self
@@ -2663,7 +2674,7 @@ impl Node {
                         Self::add_peer_report(report, Self::skipped_peer(peer.to_hex(), skip));
                         None
                     } else {
-                        Some((peer, contact, state.generation))
+                        Some((peer, contact, (state.generation, state.work_generation)))
                     }
                 })
                 .collect()
@@ -2856,20 +2867,22 @@ impl Node {
             {
                 let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
                 if let Some(state) = retries.get_mut(&peer)
-                    && state.generation == generation
+                    && state.generation == generation.0
                 {
                     match &result {
-                        Ok((false, _)) => {
+                        Ok((false, transfer)) => {
                             state.retry.reset();
                             state.link_retry.reset();
-                            state.pending = false;
+                            state.finish_repair(transfer.repair_generation.unwrap_or(generation.1));
                         }
                         Ok((true, _)) => {
-                            state.pending = true;
+                            if !state.pending.pending() {
+                                state.repair_all();
+                            }
                             state.retry.failed();
                         }
                         Err(_) if *imports.borrow() != imported => {
-                            state.pending = true;
+                            state.repair_all();
                             state.retry.soon();
                         }
                         Err(_) => state.retry.failed(),
@@ -3403,6 +3416,13 @@ impl Node {
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
         let link = self.request_link(transport, peer, contact).await?;
+        // This pass covers admission's full repair; hints arriving after this stay pending.
+        let repair_generation = self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .map(|state| state.work_generation);
         attempt.stage(crate::AttemptStage::Reconciliation);
         let _short = service.live.short(peer);
         let renewable = {
@@ -3410,11 +3430,21 @@ impl Node {
             !settings.issuer() || !settings.issuers.is_empty()
         };
         let keep = |scope, signer, cursor| self.keeps_import_source(scope, signer, cursor);
+        let control = *self.sync_control.borrow();
+        let scoped = self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .is_some_and(|state| state.pending.selected().is_some());
+        let (control_link, refresh_control) = service.live.begin_control(peer, control, scoped);
         let upstream = Upstream {
             observations: &self.observations,
             link,
             peer,
             contacts: Some(self),
+            refresh_control,
+            control_started: Default::default(),
             renew_from: match renewable {
                 true => Some(revocations),
                 false => None,
@@ -3436,7 +3466,10 @@ impl Node {
         // Recovery during ordinary sync shares the same staged checkpoint state as bootstrap.
         let _bootstrap = self.bootstrap.lock().await;
         let marker = self.path.with_file_name("bootstrap.json");
-        let mut bootstrapped = sync::Transfer::default();
+        let mut bootstrapped = sync::Transfer {
+            repair_generation,
+            ..Default::default()
+        };
         let mut importing = Vec::new();
         let mut bootstrap_retry = false;
         if rocky_platform::fs::exists(&marker) {
@@ -3505,11 +3538,26 @@ impl Node {
         }
         self.sync_state.send_replace("syncing");
         // Table roots remain in the SQL catalog; only concrete holdings sync.
-        let scopes: Vec<_> = self
+        let selected = self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .and_then(|state| state.pending.selected())
+            .cloned();
+        let eligible: Vec<_> = self
             .scopes()
             .into_iter()
             .filter(|scope| !self.domain().partitioned_table(scope) && !importing.contains(scope))
             .collect();
+        let scopes = match selected {
+            Some(selected) => {
+                self.replica
+                    .expand_repair_scopes(&selected.into_iter().collect::<Vec<_>>(), &eligible)
+                    .await?
+            }
+            None => eligible,
+        };
         let reconciled = sync::reconcile(
             &self.replica,
             &upstream,
@@ -3547,6 +3595,9 @@ impl Node {
             self.observations
                 .record_partial(peer.to_hex(), bootstrapped);
             return Err(error.into());
+        }
+        if !retry && !bootstrap_retry {
+            service.live.finish_control(peer, control_link, control);
         }
         Ok((retry || bootstrap_retry, bootstrapped))
     }

@@ -83,10 +83,13 @@ jobs:
       - name: Run the relational soak
         working-directory: source
         env:
-          ROCKY_SIM_FIRST: ${{ inputs.first || format('{0}', 100000 + github.run_number * 1000) }}
+          ROCKY_SIM_FIRST: ${{ inputs.first }}
           ROCKY_SIM_SEEDS: ${{ inputs.seeds || '300' }}
           ROCKY_SIM_WALL: ${{ matrix.wall == 'frozen' && 'frozen' || '' }}
         run: |
+          if [ -z "$ROCKY_SIM_FIRST" ]; then
+            export ROCKY_SIM_FIRST=$((100000 + GITHUB_RUN_NUMBER * 1000))
+          fi
           echo "seeds $ROCKY_SIM_SEEDS from $ROCKY_SIM_FIRST, wall ${ROCKY_SIM_WALL:-running}"
           cargo test --locked --release -p rocky-sdk --lib \
             simulation::relational_tests::relational_soak -- --ignored --nocapture

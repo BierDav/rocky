@@ -1,8 +1,8 @@
 # features_15: bounded live publication
 
-Status: proposed (2026-11-07). Investigation is complete; runtime changes and
-performance qualification remain unimplemented. This work is independent of
-features_14 phase 6 and consumes its phases 3 and 5a authority contracts.
+Status: implemented and native/wasm correctness checks passed (2026-11-08);
+consumer performance unqualified.
+Consumes the completed features_14 authority contracts integrated at `5b937088`.
 
 ## Scope
 
@@ -18,10 +18,11 @@ transport allocation bounds.
 The phase keeps its original number after moving from features_14. Its brief
 defines the implementation and acceptance work; evidence records measured
 results and limitations. Implement against the latest integrated source and
-preserve the independent [features_14 work](../features_14/README.md).
+preserve the integrated authority implementation.
 
-Before changing runtime code, finalize the wire state machine, early byte and
+The phase brief records the implemented wire state machine, early byte and
 metadata quotas, captured export bounds, completion predicate and absolute
-publication deadline in the phase brief. Resolve routine engineering choices
-from source. Performance gains remain unproven until measured; compression
-and set reconciliation are follow-up research outside the initial fix.
+publication deadline. Evidence records the final native/wasm and browser/native
+relay correctness gates and disposable native diagnostics. Real consumer,
+relay and browser performance still need measurement; compression and set
+reconciliation remain follow-up research outside the initial fix.

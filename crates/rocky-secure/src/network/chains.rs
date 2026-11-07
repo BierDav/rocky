@@ -21,7 +21,7 @@ pub(super) enum ChainMessage {
 #[derive(Default)]
 pub(super) struct ChainTable {
     sent: BTreeSet<Commitment>,
-    received: BTreeMap<Commitment, Chain>,
+    pub(super) received: BTreeMap<Commitment, Chain>,
     /// Marks chains sent without sending them, as a faulty peer would.
     #[cfg(test)]
     pub(super) withhold: bool,
@@ -34,13 +34,19 @@ impl NativeSession {
         &mut self,
         frames: &mut [EncryptedFrame],
     ) -> Result<(), Error> {
-        let mut batch = Vec::new();
-        let mut bytes = 0;
+        let mut chains = Vec::new();
         for frame in frames {
             frame.chain()?;
-            let Some(chain) = frame.take_chain() else {
-                continue;
-            };
+            if let Some(chain) = frame.take_chain() {
+                chains.push(chain);
+            }
+        }
+        self.carry_credentials(chains).await
+    }
+    pub(super) async fn carry_credentials(&mut self, chains: Vec<Chain>) -> Result<(), Error> {
+        let mut batch = Vec::new();
+        let mut bytes = 0;
+        for chain in chains {
             if !self.chains.sent.insert(chain.digest()) {
                 continue;
             }

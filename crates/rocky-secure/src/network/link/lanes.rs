@@ -41,13 +41,7 @@ impl Drop for LaneWriter {
     }
 }
 fn lane(frame: &Frame) -> usize {
-    // Optimistic row pushes share a bulk lane, leaving signals and control
-    // on their own stream even when a pushed frame waits for delivery.
-    if matches!(frame.message, Message::Push { .. }) {
-        1
-    } else {
-        usize::from(frame.channel.saturating_sub(1))
-    }
+    usize::from(frame.channel.saturating_sub(1))
 }
 fn lane_binding(binding: Commitment, index: usize) -> Result<Commitment, Error> {
     Ok(rocky_core::commitment(

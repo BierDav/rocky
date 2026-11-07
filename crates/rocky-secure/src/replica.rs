@@ -1,4 +1,5 @@
 mod admission;
+mod live_publication;
 pub(crate) mod lock;
 mod maintenance;
 mod membership;

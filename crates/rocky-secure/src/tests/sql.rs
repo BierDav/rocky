@@ -4,6 +4,7 @@ use super::*;
 #[cfg(not(target_family = "wasm"))]
 mod catch_up;
 mod intents;
+mod live_publication;
 mod maintenance;
 use crate::sql::{AbortReason, SqlError, SqlOptions, SqlState};
 use crate::storage::collect_rows;

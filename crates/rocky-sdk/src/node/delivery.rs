@@ -160,6 +160,9 @@ impl Node {
         upstream: &Upstream<'_>,
     ) -> Result<rocky_secure::network::NativeSession, Failure> {
         let mut session = sync::session(&self.replica, upstream).await?;
+        if !upstream.refresh_control {
+            return Ok(session);
+        }
         let report = session
             .deliver(&Port {
                 node: self,

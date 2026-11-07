@@ -12,7 +12,7 @@ impl Node {
         service: &Link,
         opened: link::Link,
         mut close: watch::Receiver<Option<CloseReason>>,
-        changed: watch::Sender<Option<Vec<ResourceScope>>>,
+        changed: watch::Sender<Option<ChangeHint>>,
         mut authority: watch::Receiver<u64>,
     ) -> Result<&'static str, Failure> {
         let peer = opened.peer;
@@ -20,7 +20,6 @@ impl Node {
         let expires = opened.expires;
         let offered = opened.offered.clone();
         let chain = opened.credentials.clone();
-        let handle = opened.channels.handle.clone();
         let mut io = io::Io::start(
             opened,
             Some(io::Cancellation {
@@ -58,7 +57,43 @@ impl Node {
                     }
                     let frame = match frame {
                         io::Incoming::Request(mut session) => {
+                            if requests.len() >= 8 {
+                                #[cfg(test)]
+                                service.live.dropped_pushes.fetch_add(1, Ordering::SeqCst);
+                                self.link_pending(peer);
+                                continue;
+                            }
+                            let receiving = session
+                                .is_publication()
+                                .then(|| service.live.receiving(peer));
                             requests.push(Box::pin(async move {
+                                if session.is_publication() {
+                                    #[cfg(test)]
+                                    let gate = service
+                                        .live
+                                        .push_gate
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .clone();
+                                    #[cfg(test)]
+                                    let _permit = match gate {
+                                        Some(gate) => Some(gate.acquire_owned().await?),
+                                        None => None,
+                                    };
+                                    let receipt =
+                                        session.receive_publication(&self.replica).await?;
+                                    let id = receiving.as_ref().and_then(|r| r.id);
+                                    self.received_publication(service, peer, id, &receipt)
+                                        .await?;
+                                    if receipt.repair_all {
+                                        self.link_pending(peer);
+                                    } else if !receipt.repair.is_empty() {
+                                        self.link_pending_scopes(peer, &receipt.repair);
+                                    }
+                                    session.close().await?;
+                                    drop(receiving);
+                                    return Ok(());
+                                }
                                 let result = session
                                     .serve_all(
                                         &self.replica,
@@ -82,52 +117,19 @@ impl Node {
                         io::Incoming::Signal(frame) => frame,
                     };
                     match frame.message {
-                        Message::Push {
-                            scope,
-                            frames,
-                            voids,
+                        Message::Changed {
+                            scopes,
+                            token,
+                            control,
                         } if frame.direction != direction => {
-                            if requests.len() >= 8 {
-                                #[cfg(test)]
-                                service.live.dropped_pushes.fetch_add(1, Ordering::SeqCst);
-                                self.link_pending(peer);
-                                continue;
-                            }
-                            let handle = handle.clone();
-                            let receiving = service.live.receiving(peer);
-                            #[cfg(test)]
-                            let gate = service
-                                .live
-                                .push_gate
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .clone();
-                            requests.push(Box::pin(async move {
-                                #[cfg(test)]
-                                let _permit = match gate {
-                                    Some(gate) => Some(gate.acquire_owned().await?),
-                                    None => None,
-                                };
-                                let (complete, received) = handle
-                                    .receive_push(&self.replica, scope, frames, voids)
-                                    .await?;
-                                self.received_push(service, peer, scope, received).await?;
-                                drop(receiving);
-                                if !complete {
-                                    self.link_pending(peer);
-                                }
-                                Ok(())
-                            }));
-                        }
-                        Message::Changed { scopes, token } if frame.direction != direction => {
                             if scopes.iter().any(|scope| !offered.contains(scope)) {
                                 return Err("unproved link signal scope".into());
                             }
-                            if !seen.contains(&token) {
+                            if !seen.contains(&(token, control)) {
                                 if seen.len() == 64 {
                                     seen.pop_front();
                                 }
-                                seen.push_back(token);
+                                seen.push_back((token, control));
                                 if requests.len() >= 8 {
                                     self.link_pending(peer);
                                     continue;
@@ -135,8 +137,10 @@ impl Node {
                                 // Handlers may hold the replica while awaiting storage. Poll
                                 // signal work beside them instead of blocking their progress.
                                 requests.push(Box::pin(async move {
-                                    if self.signal_token(&scopes).await? != token {
+                                    if control {
                                         self.link_pending(peer);
+                                    } else if self.signal_token(&scopes).await? != token {
+                                        self.link_pending_scopes(peer, &scopes);
                                     }
                                     Ok(())
                                 }));
@@ -175,13 +179,13 @@ impl Node {
                         _ = changes.changed() => {
                             changes.borrow_and_update();
                             let pending = take_signal(&changed);
-                            if let Some(scopes) = pending {
-                                writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
+                            if let Some(ChangeHint { scopes, control }) = pending {
+                                writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes, control })).await?;
                             }
                         }
                         _ = std::future::ready(()), if initial.is_some() => {
-                            let scopes = initial.take().ok_or("initial link signal")?;
-                            writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
+                            let ChangeHint { scopes, control } = initial.take().ok_or("initial link signal")?;
+                            writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes, control })).await?;
                         }
                     }
                 }
@@ -229,7 +233,7 @@ impl Node {
 }
 
 // Taking a queued batch must clear it so later scopes cannot be hidden by it.
-fn take_signal(changed: &watch::Sender<Option<Vec<ResourceScope>>>) -> Option<Vec<ResourceScope>> {
+fn take_signal(changed: &watch::Sender<Option<ChangeHint>>) -> Option<ChangeHint> {
     let mut pending = None;
     changed.send_if_modified(|value| {
         pending = value.take();

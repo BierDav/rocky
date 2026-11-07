@@ -199,6 +199,8 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                         observations: &c.observations,
                         peer: owner,
                         contacts: None,
+                        refresh_control: true,
+                        control_started: Default::default(),
                         renew_from: None,
                         keep: Some(&keep),
                     };
@@ -251,6 +253,8 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
                 observations: &b.observations,
                 peer,
                 contacts: None,
+                refresh_control: true,
+                control_started: Default::default(),
                 renew_from: None,
                 keep: None,
             };

@@ -474,6 +474,12 @@ pub(crate) struct RowPayload {
     creations: Vec<(Commitment, Commitment)>,
 }
 impl RowPayload {
+    pub(crate) fn charge_publication(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
+        crate::network::publication::charge(bytes, used)?;
+        let envelope: WitnessBody = decode(bytes)?;
+        ordinals::charge_publication(&envelope.body, used)
+    }
+
     #[cfg(test)]
     pub(crate) fn decode_test(
         bytes: &[u8],

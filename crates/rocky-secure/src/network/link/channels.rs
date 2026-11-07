@@ -9,10 +9,30 @@ use tokio::sync::mpsc;
 const FRAGMENT: usize = IO_CHUNK;
 const QUEUE: usize = 64;
 
+/// Bounded qualification counters; keys are fixed protocol families, never payloads.
+#[cfg(any(test, feature = "qualification"))]
+#[derive(Clone, Debug, Default)]
+pub struct Traffic {
+    pub sessions: usize,
+    pub signed_bytes: usize,
+    pub families: BTreeMap<&'static str, usize>,
+    pub publication_parts: BTreeMap<&'static str, usize>,
+    pub intakes: usize,
+    pub last_queue_us: Option<u64>,
+    pub receipts: usize,
+    pub repair_scopes: usize,
+    pub repair_all: usize,
+    pub repair_reasons: BTreeMap<crate::network::PublicationRepairReason, usize>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Packet {
     Open {
         generation: u64,
+    },
+    Publication {
+        generation: u64,
+        bytes: usize,
     },
     Data {
         generation: u64,
@@ -39,6 +59,7 @@ impl Packet {
     fn generation(&self) -> u64 {
         match self {
             Self::Open { generation }
+            | Self::Publication { generation, .. }
             | Self::Data { generation, .. }
             | Self::End { generation }
             | Self::Working { generation } => *generation,
@@ -58,15 +79,20 @@ struct Admission {
 }
 struct Slot {
     generation: u64,
+    publication: Option<(usize, rocky_platform::time::Instant)>,
     receive: Option<mpsc::Sender<Vec<u8>>>,
     bytes: Vec<u8>,
     total: usize,
+    fragments: usize,
     closed: bool,
     ended: bool,
+    finished: bool,
     progress: u64,
 }
 #[derive(Default)]
 struct State {
+    #[cfg(any(test, feature = "qualification"))]
+    traffic: Traffic,
     closed: bool,
     retired_frames: u64,
     next: u64,
@@ -95,6 +121,9 @@ pub(crate) struct Io {
     generation: u64,
     receive: mpsc::Receiver<Vec<u8>>,
     closed: bool,
+    pub(crate) publication: Option<(usize, rocky_platform::time::Instant)>,
+    pub(crate) decoded: usize,
+    pub(crate) opened: web_time::Instant,
 }
 impl Channels {
     pub(super) fn new(session: &NativeSession, direction: bool) -> Self {
@@ -164,7 +193,21 @@ impl Channels {
         if state.closed {
             return Err(denied("link ended"));
         }
-        if let Packet::Open { .. } = packet {
+        if matches!(packet, Packet::Open { .. } | Packet::Publication { .. }) {
+            let publication = match packet {
+                Packet::Publication { bytes, .. } => {
+                    if bytes == 0
+                        || bytes > crate::network::publication::MAX_BYTES
+                        || state.slots.iter().any(|(key, slot)| {
+                            key.0 == frame.direction && slot.publication.is_some()
+                        })
+                    {
+                        return Err(denied("publication open quota"));
+                    }
+                    Some((bytes, rocky_platform::time::Instant::now() + REQUEST_LIMIT))
+                }
+                _ => None,
+            };
             if frame.direction == self.handle.direction
                 || state.slots.contains_key(&key)
                 || generation < state.remote.get(&frame.channel).copied().unwrap_or(0)
@@ -182,15 +225,27 @@ impl Channels {
                 key,
                 Slot {
                     generation,
+                    publication,
                     receive: Some(send),
                     bytes: Vec::new(),
                     total: 0,
+                    fragments: 0,
                     closed: false,
                     ended: false,
+                    finished: false,
                     progress: 0,
                 },
             );
-            return Ok(Some(self.handle.session(key, generation, receive)?));
+            #[cfg(any(test, feature = "qualification"))]
+            {
+                state.traffic.sessions = state.traffic.sessions.saturating_add(1);
+            }
+            return Ok(Some(self.handle.session(
+                key,
+                generation,
+                receive,
+                publication,
+            )?));
         }
         let slot = state
             .slots
@@ -198,6 +253,9 @@ impl Channels {
             .ok_or_else(|| denied("unknown link channel"))?;
         if slot.generation != generation {
             return Err(denied("stale link channel"));
+        }
+        if slot.finished && matches!(packet, Packet::Data { .. }) {
+            return Err(denied("data after publication finish"));
         }
         if slot.closed {
             if matches!(packet, Packet::End { .. }) {
@@ -219,10 +277,33 @@ impl Channels {
         }
         match packet {
             Packet::Data { bytes, last, .. } => {
+                if let Some((limit, deadline)) = slot.publication {
+                    if rocky_platform::time::Instant::now() >= deadline
+                        || (!last && bytes.len() != FRAGMENT)
+                    {
+                        return Err(denied("publication fragment/deadline quota"));
+                    }
+                    let messages = if key.0 == self.handle.direction {
+                        1
+                    } else {
+                        crate::network::publication::MAX_PARTS + 2
+                    };
+                    let max_fragments = messages + limit.div_ceil(FRAGMENT);
+                    slot.fragments = slot
+                        .fragments
+                        .checked_add(1)
+                        .filter(|n| *n <= max_fragments)
+                        .ok_or_else(|| denied("publication fragment count quota"))?;
+                }
                 slot.total = slot
                     .total
                     .checked_add(bytes.len())
-                    .filter(|total| *total <= MAX_SECURE_BYTES)
+                    .filter(|total| {
+                        *total
+                            <= slot
+                                .publication
+                                .map_or(MAX_SECURE_BYTES, |(limit, _)| limit)
+                    })
                     .ok_or_else(|| denied("link channel byte quota"))?;
                 if slot.bytes.len() + bytes.len() > MAX_SECURE_FRAME {
                     return Err(denied("link channel message quota"));
@@ -247,6 +328,12 @@ impl Channels {
                 }
             }
             Packet::Working { .. } => {
+                if let Some((_, deadline)) = slot.publication
+                    && (rocky_platform::time::Instant::now() >= deadline
+                        || slot.progress > REQUEST_LIMIT.as_secs() / WORKING_INTERVAL.as_secs())
+                {
+                    return Err(denied("publication progress/deadline quota"));
+                }
                 slot.progress = slot.progress.saturating_add(1);
                 self.handle.events.send_replace(());
             }
@@ -257,7 +344,9 @@ impl Channels {
                 slot.ended = true;
                 slot.receive.take();
             }
-            Packet::Open { .. } => return Err(denied("duplicate link channel")),
+            Packet::Open { .. } | Packet::Publication { .. } => {
+                return Err(denied("duplicate link channel"));
+            }
         }
         Ok(None)
     }
@@ -338,6 +427,14 @@ impl Drop for Reconcile {
     }
 }
 impl Handle {
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn traffic(&self) -> Traffic {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .traffic
+            .clone()
+    }
     pub fn retired_frames(&self) -> u64 {
         self.state
             .lock()
@@ -423,110 +520,29 @@ impl Handle {
         .map_err(|_| timed_out("link drain timeout"))?
     }
 
-    /// Captures one bounded page after a committed cursor, without querying the peer.
-    pub async fn push_committed<A: RowApplication>(
+    pub(crate) fn publication_peer(
         &self,
-        replica: &EncryptedReplica<A>,
-        cursor: &ScopeFrontier,
-    ) -> Result<bool, Error> {
-        if !self.admission.proved.contains(&cursor.scope) {
-            return Err(denied("unproved link push scope"));
-        }
-        let page = match replica
-            .range_page(
-                self.admission.peer,
-                &self.admission.credentials,
-                cursor,
-                None,
-                FRAME_BYTES / 8,
-            )
-            .await
-        {
-            Err(Error::Rejected(reason)) if reason == "byte quota smaller than one frame" => {
-                return Ok(false);
-            }
-            other => other?,
-        };
-        if page.behind {
-            return Ok(false);
-        }
-        if page.frames.is_empty() && page.voids.is_empty() {
-            return Ok(true);
-        }
-        let frame = Frame::new(
-            self.direction,
-            Message::Push {
-                scope: cursor.scope,
-                frames: page.frames,
-                voids: page.voids,
-            },
-        );
-        let bytes = encode(&frame)?;
-        if encode(&SignedMessage {
-            sequence: u64::MAX,
-            signature: self.admission.local.sign(b"push bound"),
-            bytes,
-        })?
-        .len()
-            > FRAME_BYTES
-        {
-            return Ok(false);
-        }
-        timeout(TIMEOUT, self.send.send(frame))
-            .await
-            .map_err(|_| timed_out("link push write timeout"))?
-            .map_err(|_| denied("link ended"))?;
-        Ok(page.next.is_none())
-    }
-    /// Applies self-contained frames using the same authorization and receive path as a catch-up page.
-    pub async fn receive_push<A: RowApplication>(
-        &self,
-        replica: &EncryptedReplica<A>,
-        scope: ResourceScope,
-        frames: Vec<EncryptedFrame>,
-        voids: Vec<SignedVoid>,
-    ) -> Result<(bool, Vec<(PublicKey, u64)>), Error> {
-        if !self.admission.offered.contains(&scope)
-            || (frames.is_empty() && voids.is_empty())
-            || frames.len() + voids.len() > rows::MAX_SECURE_PAGE
-        {
-            return Err(denied("unproved or overfull link push"));
-        }
-        replica
-            .authorize_scope_peer(self.admission.peer, &self.admission.credentials, scope)
-            .await?;
-        rows::receive_voids(replica, &voids, &[scope]).await?;
-        let mut received = Vec::new();
-        for void in &voids {
-            for (_, header, _) in void.verify()? {
-                received.push((header.public_key, header.seq_num.saturating_add(1)));
-            }
-        }
-        for frame in &frames {
-            if frame.scope()? != scope {
-                return Err(denied("pushed frame outside its scope"));
-            }
-            frame.chain()?;
-            let header = frame.operation_ref()?.header.clone();
-            received.push((
-                header.public_key,
-                header
-                    .seq_num
-                    .checked_add(1)
-                    .ok_or_else(|| denied("push log exhausted"))?,
-            ));
-        }
-        let mut complete = true;
-        for status in replica.receive_migration_all(frames).await {
-            complete &= !matches!(
-                status?,
-                ReceiveStatus::PendingDependencies | ReceiveStatus::MissingKey
-            );
-        }
-        Ok((complete, received))
+    ) -> (
+        PublicKey,
+        &CredentialChain,
+        &std::collections::BTreeSet<ResourceScope>,
+    ) {
+        (
+            self.admission.peer,
+            &self.admission.credentials,
+            &self.admission.proved,
+        )
     }
 
     pub async fn open(&self) -> Result<NativeSession, Error> {
+        self.open_mode(None).await
+    }
+    pub(crate) async fn open_publication(&self, bytes: usize) -> Result<NativeSession, Error> {
+        self.open_mode(Some(bytes)).await
+    }
+    async fn open_mode(&self, publication: Option<usize>) -> Result<NativeSession, Error> {
+        let deadline = rocky_platform::time::Instant::now() + REQUEST_LIMIT;
+        let incoming = publication.map(|_| (crate::network::publication::RECEIPT_BYTES, deadline));
         let mut events = self.events.subscribe();
         let (key, generation, receive) = timeout(TIMEOUT, async {
             loop {
@@ -535,6 +551,13 @@ impl Handle {
                     let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                     if state.closed {
                         return Err(denied("link ended"));
+                    }
+                    if publication.is_some()
+                        && state.slots.iter().any(|(key, slot)| {
+                            key.0 == self.direction && slot.publication.is_some()
+                        })
+                    {
+                        return Err(denied("publication already active"));
                     }
                     if let Some(channel) = (2..CHANNELS)
                         .find(|channel| !state.slots.contains_key(&(self.direction, *channel)))
@@ -549,14 +572,21 @@ impl Handle {
                             key,
                             Slot {
                                 generation,
+                                publication: incoming,
                                 receive: Some(send),
                                 bytes: Vec::new(),
                                 total: 0,
+                                fragments: 0,
                                 closed: false,
                                 ended: false,
+                                finished: false,
                                 progress: 0,
                             },
                         );
+                        #[cfg(any(test, feature = "qualification"))]
+                        {
+                            state.traffic.sessions = state.traffic.sessions.saturating_add(1);
+                        }
                         Some((key, generation, receive))
                     } else {
                         None
@@ -570,8 +600,12 @@ impl Handle {
         })
         .await
         .map_err(|_| timed_out("link channel quota timeout"))??;
-        let session = self.session(key, generation, receive)?;
-        self.send_frame(key, Packet::Open { generation }).await?;
+        let session = self.session(key, generation, receive, incoming)?;
+        let packet = match publication {
+            Some(bytes) => Packet::Publication { generation, bytes },
+            None => Packet::Open { generation },
+        };
+        self.send_frame(key, packet).await?;
         Ok(session)
     }
     fn session(
@@ -579,6 +613,7 @@ impl Handle {
         key: (bool, u16),
         generation: u64,
         receive: mpsc::Receiver<Vec<u8>>,
+        publication: Option<(usize, rocky_platform::time::Instant)>,
     ) -> Result<NativeSession, Error> {
         let admission = &self.admission;
         let binding = signing_bytes(
@@ -592,6 +627,9 @@ impl Handle {
                 generation,
                 receive,
                 closed: false,
+                publication,
+                decoded: 0,
+                opened: web_time::Instant::now(),
             })),
             local: admission.local.clone(),
             peer: admission.peer,
@@ -663,6 +701,68 @@ impl Progress {
     }
 }
 impl Io {
+    #[cfg(any(test, feature = "qualification"))]
+    pub(crate) fn record_sent(
+        &self,
+        family: &'static str,
+        part: Option<&'static str>,
+        bytes: usize,
+        receipt: Option<&crate::network::PublicationReceipt>,
+    ) {
+        let mut state = self
+            .handle
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let traffic = &mut state.traffic;
+        traffic.signed_bytes = traffic.signed_bytes.saturating_add(bytes);
+        *traffic.families.entry(family).or_default() += 1;
+        if let Some(part) = part {
+            *traffic.publication_parts.entry(part).or_default() += 1;
+        }
+        if let Some(receipt) = receipt {
+            traffic.receipts = traffic.receipts.saturating_add(1);
+            traffic.repair_scopes = traffic.repair_scopes.saturating_add(receipt.repair.len());
+            traffic.repair_all = traffic
+                .repair_all
+                .saturating_add(usize::from(receipt.repair_all));
+            for reason in &receipt.reasons {
+                *traffic.repair_reasons.entry(*reason).or_default() += 1;
+            }
+        }
+    }
+    #[cfg(any(test, feature = "qualification"))]
+    pub(crate) fn record_intake(&self) {
+        let mut state = self
+            .handle
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.traffic.intakes = state.traffic.intakes.saturating_add(1);
+        state.traffic.last_queue_us =
+            Some(self.opened.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    }
+    pub(crate) fn finish_publication(&mut self) -> Result<(), Error> {
+        let mut state = self
+            .handle
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let slot = state
+            .slots
+            .get_mut(&self.key)
+            .filter(|slot| slot.generation == self.generation)
+            .ok_or_else(|| denied("publication channel retired"))?;
+        if self.publication.is_none()
+            || !self.receive.is_empty()
+            || !slot.bytes.is_empty()
+            || slot.finished
+        {
+            return Err(denied("data after publication finish"));
+        }
+        slot.finished = true;
+        Ok(())
+    }
     pub(crate) fn progress(&self) -> Progress {
         Progress {
             handle: self.handle.clone(),
@@ -827,6 +927,244 @@ impl Drop for Channels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn publication_limits_apply_before_reassembly_and_retention() {
+        let channels = channels();
+        for bytes in [0, crate::network::publication::MAX_BYTES + 1] {
+            assert!(
+                channels
+                    .accept(frame(
+                        2,
+                        Packet::Publication {
+                            generation: 0,
+                            bytes
+                        }
+                    ))
+                    .is_err()
+            );
+            assert!(channels.handle.state.lock().unwrap().slots.is_empty());
+        }
+        let mut session = channels
+            .accept(frame(
+                2,
+                Packet::Publication {
+                    generation: 0,
+                    bytes: 2,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(
+            channels
+                .accept(frame(
+                    3,
+                    Packet::Publication {
+                        generation: 1,
+                        bytes: 2
+                    }
+                ))
+                .is_err()
+        );
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1],
+                        last: false
+                    }
+                ))
+                .is_err()
+        );
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![1, 2],
+                    last: true,
+                },
+            ))
+            .unwrap();
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![3],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        let SessionIo::Channel(io) = &mut session.stream else {
+            panic!("channel");
+        };
+        assert_eq!(io.receive().await.unwrap(), [1, 2]);
+        io.finish_publication().unwrap();
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![4],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        assert!(
+            channels.handle.state.lock().unwrap().slots[&(true, 2)]
+                .bytes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn publication_outer_framing_bound_uses_the_signed_encoder() {
+        for packet in [
+            Packet::Publication {
+                generation: u64::MAX,
+                bytes: crate::network::publication::MAX_BYTES,
+            },
+            Packet::Data {
+                generation: u64::MAX,
+                bytes: vec![255; FRAGMENT],
+                last: false,
+            },
+            Packet::Working {
+                generation: u64::MAX,
+            },
+            Packet::End {
+                generation: u64::MAX,
+            },
+        ] {
+            let data = match &packet {
+                Packet::Data { bytes, .. } => bytes.len(),
+                _ => 0,
+            };
+            let encoded =
+                crate::network::publication::sized_encoding(&frame(CHANNELS - 1, packet)).unwrap();
+            assert!(encoded.len() - data <= 256);
+            assert!(encoded.len() <= FRAME_BYTES);
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn publication_tiny_fragments_and_progress_have_independent_count_bounds() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(
+                2,
+                Packet::Publication {
+                    generation: 0,
+                    bytes: crate::network::publication::MAX_BYTES,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        let SessionIo::Channel(io) = &mut session.stream else {
+            unreachable!()
+        };
+        let limit = crate::network::publication::MAX_PARTS
+            + 2
+            + crate::network::publication::MAX_BYTES.div_ceil(FRAGMENT);
+        for _ in 0..limit {
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1],
+                        last: true,
+                    },
+                ))
+                .unwrap();
+            io.receive.try_recv().unwrap();
+        }
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        {
+            let state = channels.handle.state.lock().unwrap();
+            let slot = &state.slots[&(true, 2)];
+            assert_eq!(slot.total, limit);
+            assert!(slot.bytes.is_empty());
+        }
+        drop(session);
+        let channels = self::channels();
+        let _session = channels
+            .accept(frame(
+                2,
+                Packet::Publication {
+                    generation: 0,
+                    bytes: crate::network::publication::MAX_BYTES,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        for _ in 0..31 {
+            channels
+                .accept(frame(2, Packet::Working { generation: 0 }))
+                .unwrap();
+        }
+        assert!(
+            channels
+                .accept(frame(2, Packet::Working { generation: 0 }))
+                .is_err()
+        );
+    }
+
+    // Working traffic and full fragments cannot extend the absolute publication lifetime.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(start_paused = true)]
+    async fn publication_lifetime_starts_at_open_before_handler_dispatch() {
+        let channels = channels();
+        let _session = channels
+            .accept(frame(
+                2,
+                Packet::Publication {
+                    generation: 0,
+                    bytes: crate::network::publication::MAX_BYTES,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        for _ in 0..(REQUEST_LIMIT.as_secs() / WORKING_INTERVAL.as_secs() - 1) {
+            tokio::time::advance(WORKING_INTERVAL).await;
+            channels
+                .accept(frame(2, Packet::Working { generation: 0 }))
+                .unwrap();
+        }
+        tokio::time::advance(WORKING_INTERVAL).await;
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        let slot = &channels.handle.state.lock().unwrap().slots[&(true, 2)];
+        assert_eq!(slot.total, 0);
+        assert!(slot.bytes.is_empty());
+    }
     pub(super) fn channels() -> Channels {
         let credentials = CredentialChain(vec![]);
         let (send, outgoing) = mpsc::channel(QUEUE);

@@ -248,6 +248,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             assert!(*a.worker_running.borrow());
             assert_eq!(rows(&peers[0]).await?, ["1"]);
             assert_eq!(rows(&peers[1]).await?, ["1"]);
+            hub.wait_dials("d", 1).await;
             tokio::time::advance(Duration::from_secs(15)).await;
             until(|| {
                 a.retries

@@ -38,6 +38,10 @@ pub struct SignedVoid {
     signature: Signature,
 }
 impl SignedVoid {
+    pub(crate) fn header_bytes(&self) -> impl Iterator<Item = &[u8]> {
+        self.headers.iter().map(|header| header.as_ref())
+    }
+
     pub(crate) fn sign(key: &PrivateKey, headers: Vec<Vec<u8>>) -> Result<Self, Error> {
         let headers: Vec<_> = headers
             .into_iter()

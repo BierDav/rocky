@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 27;
+pub(super) const HANDSHAKE_VERSION: u32 = 28;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -28,16 +28,11 @@ pub enum Message {
     Changed {
         scopes: Vec<ResourceScope>,
         token: [u8; 32],
+        control: bool,
     },
     Reconcile {
         generation: u64,
         started: bool,
-    },
-    Push {
-        scope: ResourceScope,
-        frames: Vec<EncryptedFrame>,
-        /// Void records consuming the positions before the frames.
-        voids: Vec<SignedVoid>,
     },
     Ready {
         persistent: bool,
@@ -64,7 +59,7 @@ impl Frame {
         Self {
             through: Vec::new(),
             channel: match message {
-                Message::Changed { .. } | Message::Push { .. } | Message::Reconcile { .. } => 1,
+                Message::Changed { .. } | Message::Reconcile { .. } => 1,
                 _ => 0,
             },
             direction,
@@ -86,7 +81,7 @@ impl Frame {
                 }
                 self.channel
             }
-            Message::Changed { .. } | Message::Push { .. } | Message::Reconcile { .. } => 1,
+            Message::Changed { .. } | Message::Reconcile { .. } => 1,
             _ => 0,
         };
         if self.channel >= CHANNELS || self.channel != channel {
@@ -107,12 +102,6 @@ impl Frame {
             && (bytes.is_empty() || bytes.len() > HEALTH_BYTES)
         {
             return Err(denied("link health quota"));
-        }
-        if let Message::Push { frames, voids, .. } = &self.message
-            && ((frames.is_empty() && voids.is_empty())
-                || frames.len() + voids.len() > rows::MAX_SECURE_PAGE)
-        {
-            return Err(denied("link push frame quota"));
         }
         Ok(())
     }
@@ -757,7 +746,8 @@ mod tests {
                 false,
                 Message::Changed {
                     scopes: vec![],
-                    token: [0; 32]
+                    token: [0; 32],
+                    control: false,
                 }
             )
             .validate()
@@ -790,6 +780,7 @@ mod tests {
             Message::Changed {
                 scopes: scopes.clone(),
                 token: [255; 32],
+                control: false,
             },
         );
         frame.validate().unwrap();
@@ -805,7 +796,8 @@ mod tests {
                 false,
                 Message::Changed {
                     scopes: vec![scope; 2],
-                    token: [0; 32]
+                    token: [0; 32],
+                    control: false,
                 }
             )
             .validate()
@@ -821,7 +813,8 @@ mod tests {
                 false,
                 Message::Changed {
                     scopes: too_many,
-                    token: [0; 32]
+                    token: [0; 32],
+                    control: false,
                 }
             )
             .validate()
@@ -839,7 +832,7 @@ mod tests {
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/4"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v27");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v28");
     }
 }
 

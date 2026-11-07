@@ -612,10 +612,50 @@ impl<A: RowApplication> EncryptedReplica<A> {
         limit: usize,
     ) -> Result<Vec<Vec<ResourceScope>>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let groups = inner.frontier_groups(scopes)?;
+        let mut batches = Vec::new();
+        let mut batch = Vec::new();
+        for group in groups.into_values() {
+            if group.len() > limit {
+                return Err(denied("partition group exceeds frontier batch limit"));
+            }
+            if batch.len() + group.len() > limit {
+                batches.push(std::mem::take(&mut batch));
+            }
+            batch.extend(group);
+        }
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+        Ok(batches)
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Selected repair includes the other eligible holdings in its partition groups.
+    pub async fn expand_repair_scopes(
+        &self,
+        requested: &[ResourceScope],
+        eligible: &[ResourceScope],
+    ) -> Result<Vec<ResourceScope>, Error> {
+        let inner = self.inner.lock(Class::Background).await;
+        Ok(inner
+            .frontier_groups(eligible)?
+            .into_values()
+            .filter(|group| group.iter().any(|scope| requested.contains(scope)))
+            .flatten()
+            .collect())
+    }
+}
+impl<A: RowApplication> Inner<A> {
+    fn frontier_groups(
+        &self,
+        scopes: &[ResourceScope],
+    ) -> Result<BTreeMap<(rocky_core::Scope, Commitment), Vec<ResourceScope>>, Error> {
         let mut groups = BTreeMap::<(rocky_core::Scope, Commitment), Vec<ResourceScope>>::new();
         for scope in scopes {
             let address = if let (Some(typed), Some(tuple)) =
-                (&inner.workspace.typed, inner.partitions.get(scope))
+                (&self.workspace.typed, self.partitions.get(scope))
             {
                 let table = typed
                     .rows
@@ -652,21 +692,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .or_default()
                 .push(*scope);
         }
-        let mut batches = Vec::new();
-        let mut batch = Vec::new();
-        for group in groups.into_values() {
-            if group.len() > limit {
-                return Err(denied("partition group exceeds frontier batch limit"));
-            }
-            if batch.len() + group.len() > limit {
-                batches.push(std::mem::take(&mut batch));
-            }
-            batch.extend(group);
-        }
-        if !batch.is_empty() {
-            batches.push(batch);
-        }
-        Ok(batches)
+        Ok(groups)
     }
 }
 

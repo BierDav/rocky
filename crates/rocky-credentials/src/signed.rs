@@ -343,6 +343,9 @@ impl Endorsement {
     pub fn signer_of(chain: &CredentialChain) -> Option<PublicKey> {
         chain.0.last().map(|last| last.capability.subject)
     }
+    pub fn attestation(&self) -> &Attestation {
+        &self.attestation
+    }
     /// The signing identity, as the endorsement names it, unverified.
     pub fn signer(&self, publisher: PublicKey) -> PublicKey {
         self.chain

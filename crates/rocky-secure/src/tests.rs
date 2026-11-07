@@ -1,3 +1,4 @@
+pub(crate) mod live_publication;
 use super::*;
 /// The naming secret test partitions share; scopes still key over the tuple.
 pub(crate) const PARTITION_NAME: rocky_core::PartitionName = [0x5a; 32];
@@ -9,12 +10,12 @@ use rocky_core::{
 use rocky_platform::fs::Scratch;
 use std::collections::BTreeSet;
 
-struct Fixture {
-    publisher: PrivateKey,
+pub(crate) struct Fixture {
+    pub(crate) publisher: PrivateKey,
     manifest: SignedManifest,
     policy: RevocationSet,
-    public: ResourceScope,
-    private: ResourceScope,
+    pub(crate) public: ResourceScope,
+    pub(crate) private: ResourceScope,
 }
 
 /// Warms the committed cache, checks a hit, then compares independent replay.
@@ -350,7 +351,7 @@ fn grant(scope: ResourceScope, rights: &[Right], fields: &[Commitment]) -> Resou
     }
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_publisher(PrivateKey::new())
     }
     fn with_publisher(publisher: PrivateKey) -> Self {
@@ -364,10 +365,14 @@ impl Fixture {
             publisher,
         }
     }
-    fn app(&self) -> Employees {
+    pub(crate) fn app(&self) -> Employees {
         Employees::new(*self.publisher.public_key().as_bytes())
     }
-    fn credentials(&self, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
+    pub(crate) fn credentials(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+    ) -> CredentialChain {
         self.chain(node, grants, &self.publisher, lifetime())
     }
     /// A node chain whose root `root` signs, valid from `not_before` to `expires`.
@@ -435,7 +440,7 @@ impl Fixture {
                 .unwrap(),
         ])
     }
-    fn config(
+    pub(crate) fn config(
         &self,
         node: &PrivateKey,
         grants: Vec<ResourceGrant>,
@@ -463,7 +468,7 @@ impl Fixture {
                 .collect(),
         }
     }
-    fn full(&self) -> Vec<ResourceGrant> {
+    pub(crate) fn full(&self) -> Vec<ResourceGrant> {
         let fields = [
             self.app().field("display_name"),
             self.app().field("salary"),
@@ -487,7 +492,7 @@ impl Fixture {
             .collect()
     }
 }
-fn change(
+pub(crate) fn change(
     scope: ResourceScope,
     row: u8,
     before: Option<RowFields>,
@@ -1644,7 +1649,7 @@ mod placements;
 mod recovery;
 #[cfg(unix)]
 mod replayed_constraints;
-mod revocations;
+pub(crate) mod revocations;
 mod roles;
 mod rotation;
 mod sql;

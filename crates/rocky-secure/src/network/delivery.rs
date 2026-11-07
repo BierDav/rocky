@@ -180,6 +180,9 @@ impl NativeSession {
         deliveries: &dyn Deliveries,
         handler: Option<&dyn ContactHandler>,
     ) -> Result<(), Error> {
+        if self.is_publication() {
+            return self.receive_publication(replica).await.map(|_| ());
+        }
         loop {
             let message = match self.answered_request().await {
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {

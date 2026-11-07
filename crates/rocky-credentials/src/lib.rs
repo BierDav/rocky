@@ -48,7 +48,7 @@ pub use enroll::{
     Admission, Exchange, IdentityAnswer, IdentityRequest, Invitation, PairRequest, RenewRequest,
     Renewal, open_enrollment, seal_enrollment,
 };
-pub use escrow::{MAX_ESCROW_PAYLOAD, RootEscrow, VouchedEscrow, escrow_tag};
+pub use escrow::{CarriedEscrow, MAX_ESCROW_PAYLOAD, RootEscrow, VouchedEscrow, escrow_tag};
 pub use existence_base::{
     EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
     ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,

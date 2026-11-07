@@ -1,9 +1,15 @@
 # 7. Bounded live publication
 
-Status: proposed (2026-11-07); investigation complete, runtime changes not
-implemented. Independent of features_14 phase 6; integrate against the database-bound
-membership and admission behavior of [features_14 phase 3](../features_14/03-membership.md)
-and [phase 5a](../features_14/05-admission-and-discovery.md). Source findings and
+Status: implemented and native/wasm correctness checks passed (2026-11-08);
+consumer performance unqualified. The final full check also passed browser/native
+relay synchronization. Tiny and 32-scope native fixtures pass with one channel,
+one receipt and no discovery, control, row-transfer or repair traffic per edit.
+Real consumer/relay/browser performance qualification remains open because the
+Paperless probe is unavailable on Linz; no end-to-end speedup is claimed.
+
+The completed features_14 authority implementation is integrated in base
+`5b937088`, including phase 3 revision `0d031c15`. Its retired roadmap is
+not recreated. Source findings and
 external measurements are in [the investigation evidence](07-live-publication-evidence.md).
 
 ## Problem and decision
@@ -95,6 +101,102 @@ overhead matters, an inline form of the same publication representation can
 be an optimization after the common admission and completion logic is proven.
 Keep bulk publication from monopolizing control or all request lanes.
 
+### Engineering decisions (2026-11-07)
+
+The implementation base is fetched `origin/main` `5b937088`, authenticated
+wire version 27. Replace the direct link push and bump the wire version to 28.
+
+- A publication uses one request channel, declared by a distinct publication
+  open packet before any body is retained. The authenticated link binding,
+  direction, channel and channel generation identify it; no global ID/cache
+  is needed. One incoming and one outgoing publication may exist per link.
+  Start declares ordered scope upper frontiers, part/item counts and a digest
+  over the ordered metadata/pages. Existing Chains and Escrow carries precede
+  their referring pages. Escrow carries reference the same chain table and
+  reconstruct the original signed vouch before verified storage; persisted
+  vouches and their signatures are unchanged. Charge referenced-chain clones
+  before reconstruction as well as the carried metadata. Carry each migration
+  descriptor once by its publication ID, with its endorsement chain referenced
+  through the same table. Remove inline descriptors from pages, reconstruct the
+  original signed descriptor before verified admission, and keep inclusion
+  proofs on their frames. Persisted migration descriptors remain unchanged.
+  Pages may mix proved scopes and never solicit acknowledgments. Plan atomic
+  bundle units in dependency order (signed backlinks/heads), then pack complete
+  units into 32-item, 128 KiB pages. Split an over-page bundle on otherwise
+  separate pages; keep its signed outcome records after its input unit. Scope
+  order alone can deliver an outcome before another scope's input and expose
+  a transient incomplete read at a committed transaction notification.
+  Finish repeats the counts/digest. The receiver answers once, then ends the
+  channel. Duplicate starts, conflicting/repeated parts, data after finish,
+  wrong sequence, truncated counts and digest mismatches fail the publication.
+  Retrying on a fresh channel can resend already durable operation identities.
+- The open declares at most 256 KiB of forward signed native bytes. Charge
+  fragments against it in the channel router before extending reassembly or
+  queueing; charge each complete SignedMessage, including Start, all metadata,
+  pages and Finish. Non-final publication fragments must be the full 8 KiB,
+  which bounds outer signed framing independently. Keep the 64 KiB outer
+  signed-message limit. Bound the single reverse receipt to 32 KiB and include
+  its worst-case signed encoding in preflight: every exported log may become
+  applied, and up to 64 dependency repair scopes may lie outside the exported
+  set. Reserve maximum-width scope encodings for that repair vector. Outer framing and the receipt
+  are measured separately from the forward logical budget. Limit forward data
+  fragments to 290, reverse receipt fragments to 5, and Working packets to 31
+  per direction, under the same deadline. Validate a 256-byte maximum signed
+  outer-envelope overhead against the actual encoder at maximum sequence and
+  generation widths. This bounds accepted outer traffic independently of tiny
+  fragments or progress floods, including malformed logical messages. The
+  receiver sends bounded progress while intake and settlement run.
+- Before typed decoding, scan the bounded CBOR structure with fixed depth
+  and cumulative node/allocation charges (8 MiB, 128 bytes per node plus
+  encoded byte lengths; nesting at most 32). Reject declared lengths exceeding
+  the available input and reject excessive nesting/metadata before collection
+  allocation. Do this for both the signed wrapper and embedded message. The
+  publication receive loop handles Chains/Escrow explicitly after charging;
+  it never uses answered_with_idle's automatic metadata retention. Scan opened
+  bodies before decoding them, then their witness and ordinal metadata before
+  expansion, including nested origins, signed headers and author bindings.
+  Keyless bodies stay opaque. Dictionaries die with the channel; frame chain
+  references share ownership, while escrow's credential clones are charged
+  before reconstruction. Missing chain references cannot acknowledge frames.
+- Capture the selected upper frontiers together under the replica guard;
+  enforce each author's exclusive upper position in range selection, including
+  void positions. Assemble all pages before releasing export ownership, flush
+  their commit outside the guard, then perform network work. A bundle's
+  required authorized siblings must be covered by selected scopes/cursors;
+  reject incomplete closure rather than sending a partial selected bundle.
+  Prove contiguous coverage through the captured upper frontier. Unavailable
+  retained history, an overfull item or any total/receipt cap rejects the whole
+  plan before opening its data channel. Later commits cannot enter the plan.
+  Recheck that captured frames still exist and are not rejected under the same
+  guard that marks them offered. Compaction or retirement between preflight
+  and offer rejects the stale plan before any data is sent.
+- At Finish, await ordered durable intake, settle ready dependencies, and
+  inspect every received operation's final status and captured-log coverage.
+  Also inspect unresolved records below the declared positions, beyond the
+  applied prefix: earlier held receipts may have moved cursors past them.
+  Inspect at most 64 such records; overflow widens repair to All. Custody-only
+  holdings do not require application or keys. An empty data publication cannot
+  erase an earlier missing-key or dependency result.
+  Durable custody/held differs from applied; pending siblings, missing keys,
+  missing history and rejection are not successful application. Expand known
+  dependency scopes using bundle/group rules and authorized holdings. Unknown
+  requirements widen repair to All. Receipt frontiers are clamped to exported
+  upper positions; only those durable acknowledgments advance cursors. Observer
+  notification follows local commit and never waits for the receipt round trip.
+- Capture one absolute 120-second deadline at channel reservation/open. It
+  covers input, intake, settlement, response and close; the receiver starts
+  measuring before dispatch to a database handler. Working messages and full
+  fragments may renew progress deadlines, never this deadline. Cancellation,
+  EOF, handler overflow or timeout retires the channel, releases its metadata
+  and preserves retry work. Receive ownership lasts through completion, and
+  cursor updates require the same link generation. Capture a local scope token
+  before its comparison frontier when admitting a link or reflecting received
+  positions. A commit between those reads must leave its newer token dirty;
+  an older frontier must never clear a newer token.
+
+These are implementation decisions, not measured optimum limits. The evidence
+records the passing correctness cases; consumer qualification below remains open.
+
 ### Initial bounds and recovery
 
 Start conservatively with one active publication per peer, at most 64 proved
@@ -135,9 +237,16 @@ grouping rules, restricted to authorized holdings. Unknown requirements,
 set overflow, reconnect, explicit full sync and control-plane changes can
 widen work to `All`. Metadata changes can affect scopes beyond the hint.
 
-Take a work generation at the start of a pass. A completion clears only that
+Take the covered work generation after authenticated link admission, before
+control exchange and row planning. Admission itself queues reconnect repair,
+which that pass performs; capturing before opening a short link would leave
+its own admission work pending forever. A completion clears only that
 generation's work, never a newer hint, a different publication's recovery or
-an independent full sync. Keep failed scopes and use the existing backoff.
+an independent full sync. Keep the retry-reset generation separate: a new hint
+must not discard an in-flight dial's failure/backoff, while authenticated resets
+must still invalidate old attempts. Keep failed scopes and use existing backoff.
+For peers holding more than one planning batch, select the affected cursors for
+publication; overflowing coalesced hints widen repair to All.
 
 For a reconciliation pass:
 

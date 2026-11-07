@@ -65,7 +65,7 @@ impl Node {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&key)
                 .map(|retry| RetryStatus {
-                    pending: retry.pending,
+                    pending: retry.pending.pending(),
                     reconciliation_retry_at_epoch_millis: retry.retry.deadline_epoch_millis(),
                     link_retry_at_epoch_millis: retry.link_retry.deadline_epoch_millis(),
                 });

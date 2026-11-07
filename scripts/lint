@@ -30,6 +30,7 @@ modules=${*:-$(all_modules)}
 # Runs one module's step in a subshell, so modules cannot affect each other.
 run() { # module
     (
+        set -e
         tools='' jj_fix_command='' jj_fix_patterns=''
         # shellcheck source=/dev/null
         . "$modules_dir/$1"
@@ -61,7 +62,12 @@ for module in $modules; do
         echo "lint: no module $module in $modules_dir" >&2
         exit 2
     }
-    run "$module" || failed="$failed $module"
+    # A conditional call disables errexit throughout the module's functions.
+    set +e
+    run "$module"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ] || failed="$failed $module"
 done
 
 [ -z "$failed" ] || {

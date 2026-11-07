@@ -633,3 +633,93 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
     );
     target.audit(l.scope("items")).await.unwrap();
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn live_publication_shares_migration_descriptors_and_keeps_verified_provenance() {
+    use crate::network::{PublicationOutcome, link};
+    let (l, dir, _, source, signed) = candidate_tables(3, true).await;
+    release(&source, &signed).await;
+    let key = PrivateKey::new();
+    let target = l
+        .open(&dir.path().join("live.db"), &key, 2, None)
+        .await
+        .unwrap();
+    l.follow(
+        &target,
+        l.config(3, &key),
+        3,
+        &all_tip_statements(&source).await,
+    )
+    .await
+    .unwrap();
+    let scopes = [l.scope("items"), l.scope("tags")];
+    let cursors = vec![
+        target.frontier(scopes[0]).await.unwrap(),
+        target.frontier(scopes[1]).await.unwrap(),
+    ];
+    let mut unique = std::collections::BTreeMap::new();
+    for frame in frames(&source).await {
+        let chain = frame.chain().unwrap();
+        unique.insert(chain.digest(), encode(chain).unwrap().len());
+    }
+    let endorsement = crate::wire::Chain::new(signed.endorsement.chain.clone()).unwrap();
+    unique.insert(endorsement.digest(), encode(&endorsement).unwrap().len());
+    let (source_key, source_credentials) = {
+        let inner = source.inner.lock(crate::replica::Class::Background).await;
+        (inner.config.node.clone(), inner.config.credentials.clone())
+    };
+    let credentials = target
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
+    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (near, far) = link::testing::links(
+        near,
+        far,
+        (&target, key, credentials),
+        (&source, source_key, source_credentials),
+    )
+    .await;
+    let (near, far) = (near.unwrap(), far.unwrap());
+    let handle = far.channels.handle.clone();
+    let (send, mut incoming) = tokio::sync::mpsc::channel(4);
+    let left = rocky_platform::task::spawn(far.drive(tokio::sync::mpsc::channel(1).0));
+    let right = rocky_platform::task::spawn(near.drive(send));
+    tokio::join!(
+        async {
+            let outcome = handle.publish_committed(&source, &cursors).await.unwrap();
+            let PublicationOutcome::Published(receipt) = outcome else {
+                panic!("publication required repair");
+            };
+            assert!(receipt.repair.is_empty());
+        },
+        async {
+            let mut session = incoming.recv().await.unwrap();
+            let receipt = session.receive_publication(&target).await.unwrap();
+            assert!(receipt.repair.is_empty());
+            assert_eq!(
+                session.carried_chain_bytes(),
+                unique.values().sum::<usize>()
+            );
+            session.close().await.unwrap();
+        }
+    );
+    assert_eq!(
+        target
+            .migration_publication(signed.statement.publication)
+            .await
+            .unwrap(),
+        Some(signed.clone())
+    );
+    assert_eq!(
+        target.migration_storage().await.unwrap().frames,
+        signed.statement.frames
+    );
+    target.audit(scopes[0]).await.unwrap();
+    target.audit(scopes[1]).await.unwrap();
+    left.abort();
+    right.abort();
+}

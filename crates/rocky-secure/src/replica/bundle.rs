@@ -808,6 +808,29 @@ impl<A: RowApplication> Inner<A> {
         required.sort_by_key(|(index, opening)| (opening.scope, opening.sequence, *index));
         Ok(required)
     }
+    pub(super) async fn publication_members(
+        &self,
+        frame: &EncryptedFrame,
+    ) -> Result<Vec<(ResourceScope, PublicKey, u64)>, Error> {
+        let payload = self.row_payload(frame)?;
+        let Some(membership) = payload.membership() else {
+            return Ok(Vec::new());
+        };
+        let author = frame.operation_ref()?.header.public_key;
+        Ok(self
+            .required_members(membership, frame.scope()?, now()?)
+            .await?
+            .into_iter()
+            .map(|(_, opening)| {
+                (
+                    opening.scope,
+                    opening.author.unwrap_or(author),
+                    opening.sequence,
+                )
+            })
+            .collect())
+    }
+
     /// Whether a member of `frame`'s transaction writes a table the
     /// installed schema removed: the transaction no longer compiles, though
     /// no replica holds that member to replay it.

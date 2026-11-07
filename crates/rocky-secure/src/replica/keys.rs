@@ -689,26 +689,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         slots: &BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
     ) -> Result<Vec<VouchedEscrow>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let mut found = Vec::new();
-        for slot in slots {
-            let [scope, generation] = slot_values(&Some(*slot))?;
-            let records = collect_rows(
-                inner
-                    .conn
-                    .query(
-                        "SELECT scope,generation,record FROM secure_escrow WHERE scope=? AND generation=?",
-                        bindings(vec![scope, generation]),
-                    )
-                    .await?,
-            )
-            .await?;
-            for row in records {
-                if let (_, Stored::Vouched(vouched)) = escrow_row(&row)? {
-                    found.push(*vouched);
-                }
-            }
-        }
-        Ok(found)
+        inner.escrow_of(slots, None).await
     }
     /// Reads a closed file, a backup's copy: its root escrow records and
     /// the key epochs of the ciphertext it holds, which they must cover.
@@ -752,5 +733,46 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect();
         epochs.sort_unstable();
         epochs
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    pub(super) async fn escrow_of(
+        &self,
+        slots: &BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
+        byte_quota: Option<usize>,
+    ) -> Result<Vec<VouchedEscrow>, Error> {
+        let mut found = Vec::new();
+        let mut used = 0usize;
+        for slot in slots {
+            let [scope, generation] = slot_values(&Some(*slot))?;
+            if let Some(quota) = byte_quota {
+                let mut total = self.conn.query(
+                    "SELECT COALESCE(SUM(LENGTH(record)),0) FROM secure_escrow WHERE scope=? AND generation=?",
+                    bindings(vec![scope.clone(), generation.clone()]),
+                ).await?;
+                let size = total
+                    .next()
+                    .await?
+                    .ok_or_else(|| Error::Corrupt("escrow size".into()))?
+                    .get::<i64>(0)?;
+                let size =
+                    usize::try_from(size).map_err(|_| denied("publication escrow byte quota"))?;
+                used = used
+                    .checked_add(size)
+                    .filter(|n| *n <= quota)
+                    .ok_or_else(|| denied("publication escrow byte quota"))?;
+            }
+            let records = collect_rows(self.conn.query(
+                "SELECT scope,generation,record FROM secure_escrow WHERE scope=? AND generation=?",
+                bindings(vec![scope, generation]),
+            ).await?).await?;
+            for row in records {
+                if let (_, Stored::Vouched(vouched)) = escrow_row(&row)? {
+                    found.push(*vouched);
+                }
+            }
+        }
+        Ok(found)
     }
 }

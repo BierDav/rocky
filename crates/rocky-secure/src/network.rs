@@ -29,8 +29,11 @@ mod held;
 use held::HeldMessage;
 pub(crate) mod holdings;
 mod placements;
+pub(crate) mod publication;
 mod revocations;
 mod rows;
+use publication::PublicationMessage;
+pub use publication::{PublicationOutcome, PublicationReceipt, PublicationRepairReason};
 mod tips;
 pub(crate) mod trace;
 use chains::{ChainMessage, ChainTable};
@@ -189,6 +192,7 @@ enum Message {
     HeldChanges(HeldMessage),
     Tips(TipMessage),
     Placements(PlacementMessage),
+    Publication(PublicationMessage),
 }
 impl Message {
     /// The family's name in diagnostics.
@@ -209,6 +213,7 @@ impl Message {
             Self::HeldChanges(_) => "held changes",
             Self::Tips(_) => "tips",
             Self::Placements(_) => "placements",
+            Self::Publication(_) => "publication",
         }
     }
 }
@@ -602,6 +607,15 @@ impl NativeSession {
             )));
         }
         let length = frame.len();
+        if let SessionIo::Channel(io) = &self.stream
+            && io.publication.is_some()
+        {
+            let part = match &message {
+                Message::Publication(message) => message.part_name(),
+                _ => family,
+            };
+            tracing::debug!(parent: &self.span, family, part, signed_native_bytes = length, sequence = self.sent, "publication_message");
+        }
         self.spend(length)?;
         if !self.serving {
             let channel = self.channel();
@@ -628,6 +642,18 @@ impl NativeSession {
                 }
                 return Err(link::timed_out("request lifetime timeout"));
             }
+        }
+        #[cfg(any(test, feature = "qualification"))]
+        if let SessionIo::Channel(io) = &self.stream {
+            let part = io.publication.map(|_| match &message {
+                Message::Publication(message) => message.part_name(),
+                _ => family,
+            });
+            let receipt = match &message {
+                Message::Publication(PublicationMessage::Receipt(receipt)) => Some(receipt),
+                _ => None,
+            };
+            io.record_sent(family, part, length, receipt);
         }
         self.sent = self
             .sent
@@ -663,6 +689,11 @@ impl NativeSession {
             request.received(bytes.len());
         }
         self.spend(bytes.len())?;
+        if let SessionIo::Channel(io) = &mut self.stream
+            && io.publication.is_some()
+        {
+            publication::charge(&bytes, &mut io.decoded)?;
+        }
         let message: SignedMessage = decode(&bytes)?;
         if message.sequence != self.received
             || !self.peer.verify(
@@ -676,7 +707,19 @@ impl NativeSession {
             .received
             .checked_add(1)
             .ok_or_else(|| denied("session sequence exhausted"))?;
-        decode(&message.bytes)
+        if let SessionIo::Channel(io) = &mut self.stream
+            && io.publication.is_some()
+        {
+            publication::charge(&message.bytes, &mut io.decoded)?;
+        }
+        let message = decode(&message.bytes)?;
+        if let SessionIo::Channel(io) = &mut self.stream
+            && io.publication.is_some()
+        {
+            publication::charge_metadata(&message, &mut io.decoded)?;
+            publication::charge_references(&message, &self.chains, &mut io.decoded)?;
+        }
+        Ok(message)
     }
     /// The peer's answer; the chains it carries first join the table.
     async fn answered(&mut self) -> Result<Message, Error> {
@@ -705,7 +748,7 @@ impl NativeSession {
         loop {
             match self.receive_with_idle(idle).await? {
                 Message::Chains(message) => self.learn_chains(message),
-                Message::Escrow(message) => self.learn_escrow(message),
+                Message::Escrow(message) => self.learn_escrow(message)?,
                 Message::Refused { reason } => {
                     if let Some(request) = self.request.take() {
                         request.finish("refused");
@@ -750,6 +793,9 @@ impl NativeSession {
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
+        if self.is_publication() {
+            return self.receive_publication(replica).await.map(|_| ());
+        }
         loop {
             match self.serve_once(replica).await {
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {

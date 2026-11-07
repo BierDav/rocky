@@ -7,6 +7,17 @@ mod liveness;
 
 pub(super) const BUDGET: usize = 32;
 
+#[cfg(test)]
+pub(super) struct ReceiptGate {
+    pub entered: Semaphore,
+    pub resume: Semaphore,
+}
+
+#[derive(Clone)]
+struct ChangeHint {
+    scopes: Vec<ResourceScope>,
+    control: bool,
+}
 struct Entry {
     opened_at: u64,
     /// The transport's live path measurements, when it reports them.
@@ -18,10 +29,12 @@ struct Entry {
     shorts: usize,
     /// Delay publication back to an origin until its durable intake updates our cursor.
     receiving: usize,
+    cursor_generation: u64,
+    control_generation: Option<u64>,
     handle: link::channels::Handle,
     authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
-    changed: watch::Sender<Option<Vec<ResourceScope>>>,
+    changed: watch::Sender<Option<ChangeHint>>,
     frontiers: BTreeMap<ResourceScope, [u8; 32]>,
     cursors: BTreeMap<ResourceScope, rocky_secure::ScopeFrontier>,
 }
@@ -35,6 +48,8 @@ pub(super) struct Registry {
     pub closing: AtomicU64,
     #[cfg(test)]
     pub(super) push_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
+    #[cfg(test)]
+    pub(super) receipt_gate: std::sync::Mutex<Option<Arc<ReceiptGate>>>,
     #[cfg(test)]
     pub(super) dropped_pushes: AtomicU64,
 }
@@ -50,6 +65,8 @@ impl Default for Registry {
             closing: AtomicU64::new(0),
             #[cfg(test)]
             push_gate: Default::default(),
+            #[cfg(test)]
+            receipt_gate: Default::default(),
             #[cfg(test)]
             dropped_pushes: AtomicU64::new(0),
         }
@@ -112,6 +129,28 @@ impl Drop for Receiving<'_> {
     }
 }
 impl Registry {
+    #[cfg(test)]
+    pub(super) fn traffic(&self) -> Vec<link::channels::Traffic> {
+        let handles: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|entry| entry.handle.clone())
+            .collect();
+        handles.into_iter().map(|handle| handle.traffic()).collect()
+    }
+    #[cfg(test)]
+    pub(super) fn publishing_or_receiving(&self) -> bool {
+        self.publishing.try_lock().is_err()
+            || self
+                .entries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .any(|entry| entry.receiving != 0)
+    }
+
     fn receiving(&self, peer: PublicKey) -> Receiving<'_> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let id = entries.get_mut(&peer).map(|entry| {
@@ -122,6 +161,27 @@ impl Registry {
             registry: self,
             peer,
             id,
+        }
+    }
+    pub(super) fn begin_control(
+        &self,
+        peer: PublicKey,
+        generation: u64,
+        scoped: bool,
+    ) -> (Option<u64>, bool) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        match entries.get_mut(&peer) {
+            Some(entry) => {
+                let previous = entry.control_generation.take();
+                (Some(entry.id), !scoped || previous != Some(generation))
+            }
+            None => (None, true),
+        }
+    }
+    pub(super) fn finish_control(&self, peer: PublicKey, id: Option<u64>, generation: u64) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries.get_mut(&peer).filter(|entry| Some(entry.id) == id) {
+            entry.control_generation = Some(generation);
         }
     }
     pub fn nodes(&self) -> Vec<PublicKey> {
@@ -550,11 +610,11 @@ impl Node {
         let mut frontiers = BTreeMap::new();
         let mut cursors = BTreeMap::new();
         for scope in &opened.held {
-            cursors.insert(*scope, self.replica.frontier(*scope).await?);
             let token = match opened.local_states.get(scope) {
                 Some(token) => *token,
                 None => self.link_scope_state(*scope).await?,
             };
+            cursors.insert(*scope, self.replica.frontier(*scope).await?);
             frontiers.insert(*scope, token);
         }
         let initial: Vec<_> = frontiers
@@ -564,7 +624,11 @@ impl Node {
             .take(link::SIGNAL_SCOPES)
             .collect();
         if !initial.is_empty() {
-            changed.send_replace(Some(initial));
+            changed.send_replace(Some(ChangeHint {
+                scopes: initial,
+                // A transfer can resolve the handshake snapshot before this hint arrives.
+                control: false,
+            }));
         }
         let accepted = {
             self.replica.flush().await?;
@@ -598,6 +662,8 @@ impl Node {
                         persistent,
                         shorts: 0,
                         receiving: 0,
+                        cursor_generation: 0,
+                        control_generation: None,
                         handle: opened.channels.handle.clone(),
                         authority: authority.clone(),
                         close: close.clone(),
@@ -647,8 +713,10 @@ impl Node {
             state.short = !persistent;
             state.link_retry.wake();
             state.retry.wake();
-            state.pending |= persistent || dialed;
-            if state.pending && (persistent || dialed) {
+            if persistent || dialed {
+                state.repair_all();
+            }
+            if state.pending.pending() && (persistent || dialed) {
                 self.link_events.send_replace(());
             }
         }
@@ -716,7 +784,7 @@ impl Node {
                     if persistent {
                         state.link_retry.failed();
                     } else {
-                        state.pending = true;
+                        state.repair_all();
                         state.retry.failed();
                     }
                     drop(retries);
@@ -739,6 +807,7 @@ impl Node {
                 (
                     *peer,
                     entry.id,
+                    entry.cursor_generation,
                     entry.handle.clone(),
                     entry.frontiers.clone(),
                     entry.cursors.clone(),
@@ -746,56 +815,92 @@ impl Node {
             })
             .collect();
         let attempts = stream::iter(holdings)
-            .map(|(peer, id, handle, old, cursors)| async move {
-                let mut frontiers = old.clone();
-                let mut next = cursors.clone();
-                let mut scopes = BTreeSet::new();
-                for (scope, cursor) in &cursors {
-                    let token = self.link_scope_state(*scope).await?;
-                    if old.get(scope) == Some(&token) {
-                        continue;
-                    }
-                    // Capture the cursor before export; a later commit must remain pending.
-                    let frontier = self.replica.frontier(*scope).await?;
-                    let rows_changed = frontier != *cursor;
-                    let pushed =
-                        rows_changed && handle.push_committed(&self.replica, cursor).await?;
-                    if !pushed {
-                        scopes.insert(*scope);
-                    }
-                    frontiers.insert(*scope, token);
-                    next.insert(*scope, frontier);
-                }
-                self.replica.flush().await?;
-                let mut entries = service
-                    .live
-                    .entries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                let Some(entry) = entries
-                    .get_mut(&peer)
-                    .filter(|entry| entry.id == id && entry.receiving == 0)
-                else {
-                    return Ok::<_, Failure>(());
-                };
-                entry.frontiers = frontiers;
-                entry.cursors = next;
-                if !scopes.is_empty() {
-                    if let Some(pending) = entry.changed.borrow().as_ref() {
-                        scopes.extend(pending);
-                    }
-                    // Unsent scopes keep their old token so the next publication can send them.
-                    for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
-                        if let Some(token) = old.get(scope) {
-                            entry.frontiers.insert(*scope, *token);
+            .map(
+                |(peer, id, cursor_generation, handle, old, cursors)| async move {
+                    let mut frontiers = old.clone();
+                    let mut next = cursors.clone();
+                    let mut scopes = BTreeSet::new();
+                    let mut control = false;
+                    let mut changed = Vec::new();
+                    for scope in cursors.keys() {
+                        let token = self.link_scope_state(*scope).await?;
+                        if old.get(scope) != Some(&token) {
+                            changed.push(*scope);
+                            frontiers.insert(*scope, token);
                         }
                     }
-                    entry
-                        .changed
-                        .send_replace(Some(scopes.into_iter().take(link::SIGNAL_SCOPES).collect()));
-                }
-                Ok::<_, Failure>(())
-            })
+                    if !changed.is_empty() {
+                        let selected: Vec<_> = cursors.values()
+                            .filter(|cursor| cursors.len() <= link::SIGNAL_SCOPES || changed.contains(&cursor.scope))
+                            .cloned().collect();
+                        let outcome = match handle.publish_committed(&self.replica, &selected).await {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                self.link_pending_scopes(peer, &changed);
+                                return Err(error.into());
+                            }
+                        };
+                        match outcome {
+                            rocky_secure::network::PublicationOutcome::Published(receipt) => {
+                                for frontier in receipt.frontiers {
+                                    next.insert(frontier.scope, frontier);
+                                }
+                                if receipt.repair_all {
+                                    control = true;
+                                    self.link_pending(peer);
+                                }
+                                tracing::debug!(?peer, reasons = ?receipt.reasons, repair_all = receipt.repair_all, "publication receipt");
+                                scopes.extend(receipt.repair);
+                                // Metadata-only changes still need a scoped control pass.
+                                for scope in changed {
+                                    if next.get(&scope) == cursors.get(&scope) {
+                                        control = true;
+                                        scopes.insert(scope);
+                                    }
+                                }
+                            }
+                            rocky_secure::network::PublicationOutcome::Repair { scopes: failed, reason } => {
+                                tracing::debug!(?peer, %reason, "publication preflight requires repair");
+                                scopes.extend(failed.into_iter().filter(|scope| changed.contains(scope)));
+                            }
+                        }
+                    }
+                    self.replica.flush().await?;
+                    let mut entries = service
+                        .live
+                        .entries
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let Some(entry) = entries.get_mut(&peer).filter(|entry| {
+                        entry.id == id
+                            && entry.receiving == 0
+                            && entry.cursor_generation == cursor_generation
+                    }) else {
+                        return Ok::<_, Failure>(());
+                    };
+                    entry.frontiers = frontiers;
+                    entry.cursors = next;
+                    entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
+                    if !scopes.is_empty() {
+                        if let Some(pending) = entry.changed.borrow().as_ref() {
+                            scopes.extend(&pending.scopes);
+                            control |= pending.control;
+                        }
+                        control |= scopes.len() > link::SIGNAL_SCOPES;
+                        // Unsent scopes keep their old token so the next publication can send them.
+                        for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
+                            if let Some(token) = old.get(scope) {
+                                entry.frontiers.insert(*scope, *token);
+                            }
+                        }
+                        entry.changed.send_replace(Some(ChangeHint {
+                            scopes: scopes.into_iter().take(link::SIGNAL_SCOPES).collect(),
+                            control,
+                        }));
+                    }
+                    Ok::<_, Failure>(())
+                },
+            )
             .buffer_unordered(4);
         tokio::pin!(attempts);
         let mut first = None;
@@ -809,42 +914,54 @@ impl Node {
         }
         Ok(())
     }
-    async fn received_push(
+    async fn received_publication(
         &self,
         service: &Link,
         peer: PublicKey,
-        scope: ResourceScope,
-        received: Vec<(PublicKey, u64)>,
+        id: Option<u64>,
+        receipt: &rocky_secure::network::PublicationReceipt,
     ) -> Result<(), Failure> {
-        let frontier = self.replica.frontier(scope).await?;
-        let token = self.link_scope_state(scope).await?;
-        let mut entries = service
-            .live
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let Some(entry) = entries.get_mut(&peer) else {
-            return Ok(());
-        };
-        let Some(cursor) = entry.cursors.get_mut(&scope) else {
-            return Ok(());
-        };
-        for (author, sequence) in received {
-            if let Some(log) = frontier.log(author) {
-                let mut shared = *log;
-                shared.held = shared.held.min(sequence);
-                shared.applied = shared.applied.min(sequence);
-                if let Some(held) = cursor.logs.iter_mut().find(|held| held.author == author) {
-                    held.held = held.held.max(shared.held);
-                    held.applied = held.applied.max(shared.applied);
+        for shared in &receipt.frontiers {
+            let scope = shared.scope;
+            // Capture the token first: a commit between these reads must stay dirty.
+            let token = self.link_scope_state(scope).await?;
+            #[cfg(test)]
+            let gate = service
+                .live
+                .receipt_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.entered.add_permits(1);
+                gate.resume.acquire().await?.forget();
+            }
+            let frontier = self.replica.frontier(scope).await?;
+            let mut entries = service
+                .live
+                .entries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(entry) = entries.get_mut(&peer).filter(|e| Some(e.id) == id) else {
+                return Ok(());
+            };
+            let Some(cursor) = entry.cursors.get_mut(&scope) else {
+                continue;
+            };
+            for log in &shared.logs {
+                if let Some(held) = cursor.logs.iter_mut().find(|h| h.author == log.author) {
+                    held.held = held.held.max(log.held);
+                    held.applied = held.applied.max(log.applied);
                 } else {
-                    cursor.logs.push(shared);
+                    cursor.logs.push(*log);
                 }
             }
-        }
-        cursor.logs.sort_by_key(|log| log.author);
-        if *cursor == frontier {
-            entry.frontiers.insert(scope, token);
+            cursor.logs.sort_by_key(|l| l.author);
+            entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
+            if *cursor == frontier {
+                entry.frontiers.insert(scope, token);
+            }
         }
         Ok(())
     }
@@ -872,12 +989,21 @@ impl Node {
             .link = true;
         self.link_events.send_replace(());
     }
+    fn link_pending_scopes(&self, peer: PublicKey, scopes: &[ResourceScope]) {
+        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        retries
+            .entry(peer)
+            .or_insert_with(|| self.peer_retry(peer))
+            .repair_scopes(scopes);
+        drop(retries);
+        self.link_events.send_replace(());
+    }
     fn link_pending(&self, peer: PublicKey) {
         let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
         retries
             .entry(peer)
             .or_insert_with(|| self.peer_retry(peer))
-            .pending = true;
+            .repair_all();
         drop(retries);
         self.link_events.send_replace(());
     }

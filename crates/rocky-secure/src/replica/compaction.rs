@@ -967,6 +967,9 @@ impl<A: RowApplication> Inner<A> {
             .map(|change| (change.scope, change.id))
             .collect();
         self.take_seal_rows(seal_id, depth, &taken).await?;
+        for (_, id) in &taken {
+            self.release_seal_rows(domain, *id, depth).await?;
+        }
         for (_, id, rows) in drops {
             for (row, fields) in rows {
                 self.conn
@@ -1386,14 +1389,28 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .map(|(seal, _)| seal)
             .collect();
+        let finalized = self.finalized(domain).await?;
+        // Replayed scopes released the rows of older seals they keep no
+        // mark for: a base cannot move there.
+        let mut replayed = false;
+        for (scope, _) in self.domain_scopes(domain).await? {
+            replayed |= self.replayed_scope(scope);
+        }
+        let released = match finalized.last() {
+            Some(newest) if replayed => newest.depth - replay::SEAL_SNAPSHOTS,
+            _ => i64::MIN,
+        };
         let mut target = None;
-        for known in self.finalized(domain).await? {
+        for known in finalized {
             if known.compacted {
                 // The replay base never passes a kept seal: this node can
                 // rebuild and serve every seal it keeps.
                 if kept.contains(&known.seal) {
                     break;
                 }
+                continue;
+            }
+            if known.depth <= released && !kept.contains(&known.seal) {
                 continue;
             }
             let Some(index) = path
@@ -2369,6 +2386,15 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// The followed path's seals, walked afresh.
+    pub(crate) async fn walk_path_seals(&self, domain: Scope) -> Vec<SignedSeal> {
+        let inner = self.inner.lock(Class::Background).await;
+        tip_path_seals(inner.graph_for(domain).unwrap(), inner.workspace.tip).unwrap()
+    }
+}
+
 /// The seals `tip`'s state passes through, oldest first, as `path_seals`.
 pub(super) fn tip_path_seals(
     graph: &rocky_credentials::TipGraph,
@@ -2378,32 +2404,39 @@ pub(super) fn tip_path_seals(
     if let Some(own) = graph.seal(tip).map_err(credential)? {
         seals.push(own.clone());
     }
+    // Each statement is hashed a fixed number of times, not once per step.
+    let mut by_id = HashMap::new();
+    let mut continued = HashMap::new();
+    for seal in graph
+        .seals
+        .iter()
+        .filter(|seal| seal.statement.scope == graph.scope)
+    {
+        by_id.entry(seal.id().map_err(credential)?).or_insert(seal);
+    }
+    for seal in &graph.seals {
+        if let Some(next) = seal.successor().map_err(credential)? {
+            continued.entry(next).or_insert(seal);
+        }
+    }
+    let mut opened = HashMap::new();
+    for opening in &graph.openings {
+        opened
+            .entry(opening.tip().map_err(credential)?)
+            .or_insert(opening.statement.seal);
+    }
+    #[cfg(test)]
+    crate::replica::hashed(2 * graph.seals.len() + graph.openings.len());
     let mut cursor = tip;
     let mut visited = BTreeSet::new();
     while visited.insert(cursor) {
-        let mut parent = None;
-        for seal in &graph.seals {
-            if seal.successor().map_err(credential)? == Some(cursor) {
-                parent = Some(seal.clone());
-                break;
-            }
-        }
-        if parent.is_none() {
-            for opening in &graph.openings {
-                if opening.tip().map_err(credential)? == cursor {
-                    parent = Some(
-                        graph
-                            .seal_by_id(opening.statement.seal)
-                            .map_err(credential)?
-                            .clone(),
-                    );
-                    break;
-                }
-            }
-        }
-        let Some(seal) = parent else { break };
-        cursor = seal.statement.tip;
-        seals.push(seal);
+        let parent = match (continued.get(&cursor), opened.get(&cursor)) {
+            (Some(seal), _) => *seal,
+            (None, Some(seal)) => *by_id.get(seal).ok_or_else(|| denied("unknown seal"))?,
+            (None, None) => break,
+        };
+        cursor = parent.statement.tip;
+        seals.push(parent.clone());
     }
     seals.reverse();
     Ok(seals)

@@ -637,6 +637,10 @@ struct Places {
     refs: BTreeMap<Commitment, Vec<Commitment>>,
     /// The reverse of `refs`.
     referrers: BTreeMap<Commitment, BTreeSet<Commitment>>,
+    /// Each seal's first position in the seal list, by ID.
+    seals: BTreeMap<Commitment, usize>,
+    /// The finality records naming each seal, by seal.
+    finals: BTreeMap<Commitment, BTreeSet<Commitment>>,
 }
 impl Places {
     fn refer(&mut self, id: Commitment, refs: Vec<Commitment>) {
@@ -644,6 +648,24 @@ impl Places {
             self.referrers.entry(*target).or_default().insert(id);
         }
         self.refs.entry(id).or_default().extend(refs);
+    }
+    /// What a statement refers to and, when chained, its place in its lane.
+    fn chain(
+        &mut self,
+        id: Commitment,
+        mut refs: Vec<Commitment>,
+        link: Option<ChainLink>,
+        endorsement: &Endorsement,
+    ) {
+        refs.extend(link.and_then(|link| link.previous));
+        self.refer(id, refs);
+        if let (Some(link), Some(signer)) = (link, Endorsement::signer_of(&endorsement.chain)) {
+            self.links.insert(id, (signer, link));
+            self.lanes
+                .entry((signer, link.lane))
+                .or_default()
+                .insert(id);
+        }
     }
 }
 impl Clone for ChainIndex {
@@ -667,31 +689,34 @@ impl ChainIndex {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
-/// What a graph list's item, with ID `id`, adds to the chain index.
+/// What a graph list's item, with ID `id` at `position`, adds to the chain index.
 trait Indexed {
-    fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error>;
+    fn index(&self, id: Commitment, position: usize, places: &mut Places) -> Result<(), Error>;
 }
 macro_rules! indexed_statement {
     ($($signed:ty => |$s:ident| $refs:expr),* $(,)?) => {$(
         impl Indexed for $signed {
-            fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error> {
+            fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
                 let $s = self;
-                let mut refs: Vec<Commitment> = $refs;
-                refs.extend(self.link.and_then(|link| link.previous));
-                places.refer(id, refs);
-                if let (Some(link), Some(signer)) =
-                    (self.link, Endorsement::signer_of(&self.endorsement().chain))
-                {
-                    places.links.insert(id, (signer, link));
-                    places.lanes.entry((signer, link.lane)).or_default().insert(id);
-                }
+                places.chain(id, $refs, self.link, self.endorsement());
                 Ok(())
             }
         }
     )*};
 }
+impl Indexed for SignedSeal {
+    fn index(&self, id: Commitment, position: usize, places: &mut Places) -> Result<(), Error> {
+        places.seals.entry(id).or_insert(position);
+        places.chain(
+            id,
+            vec![self.statement.tip.0],
+            self.link,
+            self.endorsement(),
+        );
+        Ok(())
+    }
+}
 indexed_statement!(
-    SignedSeal => |s| vec![s.statement.tip.0],
     SignedTipOpening => |s| vec![s.statement.seal],
     SignedBookmarkMove => |s| [s.statement.from, s.statement.to]
         .into_iter()
@@ -702,8 +727,9 @@ indexed_statement!(
     SignedCheckpointRecord => |s| vec![s.statement.seal],
 );
 impl Indexed for SealFinality {
-    fn index(&self, id: Commitment, places: &mut Places) -> Result<(), Error> {
+    fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
         places.refer(id, vec![self.seal]);
+        places.finals.entry(self.seal).or_default().insert(id);
         for ack in &self.acknowledgments {
             if let Some(identity) = ack.identity() {
                 places.acks.insert(ack.id()?, (identity, ack.link));
@@ -857,9 +883,9 @@ impl TipGraph {
                 }
                 $(
                     let from = index.built[$n].0;
-                    for signed in self.$list.iter().skip(from) {
+                    for (position, signed) in self.$list.iter().enumerate().skip(from) {
                         let id = signed.id()?;
-                        signed.index(id, &mut index)?;
+                        signed.index(id, position, &mut index)?;
                         index.built[$n] = (from.max(index.built[$n].0) + 1, Some(id));
                     }
                 )*
@@ -1372,12 +1398,11 @@ impl TipGraph {
     /// Whether a finality record that revocation left whole names `seal`.
     /// Admission verified the record against its line's minimum.
     pub fn is_final(&self, seal: Commitment) -> Result<bool, Error> {
-        for record in &self.finalities {
-            if record.seal == seal && !self.revoked.contains(&record.id()?) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self
+            .indexed()?
+            .finals
+            .get(&seal)
+            .is_some_and(|records| records.iter().any(|id| !self.revoked.contains(id))))
     }
     /// The checkpoints listed at `seal` that no revocation ended.
     pub fn checkpoints_at(&self, seal: Commitment) -> Result<Vec<&SignedCheckpointRecord>, Error> {
@@ -1523,12 +1548,11 @@ impl TipGraph {
         TipAuthority::of(endorsement, self.scope)
     }
     pub fn seal_by_id(&self, id: Commitment) -> Result<&SignedSeal, Error> {
-        for seal in &self.seals {
-            if seal.statement.scope == self.scope && seal.id()? == id {
-                return Ok(seal);
-            }
-        }
-        Err(denied("unknown seal"))
+        let position = self.indexed()?.seals.get(&id).copied();
+        position
+            .and_then(|position| self.seals.get(position))
+            .filter(|seal| seal.statement.scope == self.scope)
+            .ok_or_else(|| denied("unknown seal"))
     }
     /// Each tip commits its schema. Losing seals
     /// remain inspectable, but their continuations never become active.

@@ -20,16 +20,7 @@ static IN_PLACE_SWITCH_CHANGES: std::sync::atomic::AtomicI64 =
 pub fn last_in_place_switch_changes() -> i64 {
     IN_PLACE_SWITCH_CHANGES.load(std::sync::atomic::Ordering::SeqCst)
 }
-async fn total_changes(conn: &ScopedConnection) -> Result<i64, Error> {
-    match rows(conn, "SELECT total_changes()")
-        .await?
-        .first()
-        .map(Vec::as_slice)
-    {
-        Some([SqlValue::Integer(changes)]) => Ok(*changes),
-        _ => Err(Error::Corrupt("total changes".into())),
-    }
-}
+
 /// A durable intent to switch the live workspace after obtaining its schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingSchema {
@@ -413,34 +404,28 @@ impl<A: RowApplication> Inner<A> {
             required: BTreeSet::new(),
         }))
     }
-    /// The schemas the followed path, kept seals and, when `historical`,
-    /// held frames need. One unpaged scan, for transitions that act on it
-    /// in the same transaction; `EncryptedReplica::schema_requirements`
-    /// pages it.
-    pub(super) async fn schema_requirements(
-        &self,
-        historical: bool,
-    ) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
+    /// The schemas the followed path, kept seals and held frames need.
+    /// One unpaged scan, for transitions that act on it in the same
+    /// transaction; `EncryptedReplica::schema_requirements` pages it.
+    pub(super) async fn schema_requirements(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
         let Some(mut requirements) = self.requirement_start()? else {
             return Ok(BTreeSet::new());
         };
         let domain = requirements.domain;
         requirements.visit(HeaderSource::Retained, self.domain_headers(domain).await?)?;
-        if historical {
-            let mut frames = Vec::new();
-            for row in rows(&self.conn, "SELECT frame FROM secure_held_frames").await? {
-                let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                    return Err(Error::Corrupt("held schema reference".into()));
-                };
-                let frame: EncryptedFrame = decode(bytes)?;
-                let header = &frame.operation_ref()?.header.extensions;
-                if header.scope.domain == domain {
-                    frames.push(header.clone());
-                }
+        let mut frames = Vec::new();
+        for row in rows(&self.conn, "SELECT frame FROM secure_held_frames").await? {
+            let [SqlValue::Blob(bytes)] = row.as_slice() else {
+                return Err(Error::Corrupt("held schema reference".into()));
+            };
+            let frame: EncryptedFrame = decode(bytes)?;
+            let header = &frame.operation_ref()?.header.extensions;
+            if header.scope.domain == domain {
+                frames.push(header.clone());
             }
-            requirements.visit(HeaderSource::HeldFrame, frames)?;
         }
-        self.finish_requirements(requirements, historical).await
+        requirements.visit(HeaderSource::HeldFrame, frames)?;
+        self.finish_requirements(requirements, true).await
     }
     async fn finish_requirements(
         &self,
@@ -497,10 +482,24 @@ impl<A: RowApplication> Inner<A> {
         Ok(required)
     }
     pub(super) async fn required_schemas(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
-        self.schema_requirements(true).await
+        self.schema_requirements().await
     }
     pub(super) async fn missing_live_schemas(&self) -> Result<BTreeSet<Commitment>, Error> {
-        Ok(self.missing_of(self.schema_requirements(false).await?))
+        let Some(mut requirements) = self.requirement_start()? else {
+            return Ok(BTreeSet::new());
+        };
+        // Headers only decide how much of the path is required: with every
+        // path schema installed none is missing, and none is read.
+        if requirements.path.iter().any(|tip| {
+            requirements
+                .graph
+                .schema_any(*tip)
+                .map_or(true, |manifest| !self.catalog.contains_key(&manifest))
+        }) {
+            let headers = self.domain_headers(requirements.domain).await?;
+            requirements.visit(HeaderSource::Retained, headers)?;
+        }
+        Ok(self.missing_of(self.finish_requirements(requirements, false).await?))
     }
     fn missing_of(&self, required: BTreeSet<(TipId, Commitment)>) -> BTreeSet<Commitment> {
         required
@@ -818,7 +817,7 @@ impl<A: RowApplication> Inner<A> {
         let old_typed = inner.workspace.typed.clone();
         definition.swap(inner);
         inner.invalidate_context();
-        let changes_before = total_changes(&inner.conn).await?;
+        let changes_before = inner.conn.connection().total_changes()?;
         let staged = transaction!(inner, |inner| {
             if let Some(stage) = withdraw {
                 inner.discard_schema_stage(stage).await?;
@@ -883,8 +882,15 @@ impl<A: RowApplication> Inner<A> {
             }
         };
         if in_place {
-            let changes = total_changes(&inner.conn).await? - changes_before;
-            IN_PLACE_SWITCH_CHANGES.store(changes, std::sync::atomic::Ordering::SeqCst);
+            let changes = inner
+                .conn
+                .connection()
+                .total_changes()?
+                .saturating_sub(changes_before);
+            IN_PLACE_SWITCH_CHANGES.store(
+                i64::try_from(changes).unwrap_or(i64::MAX),
+                std::sync::atomic::Ordering::SeqCst,
+            );
         }
         // Once staged, the switch is durable: an interrupted plan resumes
         // under the new definition at the next open or run.
@@ -1339,6 +1345,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect::<Result<_, _>>()?;
         inner.invalidate_context();
         if let Some(graph) = inner.graphs.get_mut(&stage.scope) {
+            let graph = Arc::make_mut(graph);
             graph
                 .seals
                 .retain(|seal| seal.id().is_ok_and(|id| !ids.contains(&id)));

@@ -826,6 +826,69 @@ async fn a_remote_read_states_its_source_and_is_never_local_state() {
     server.await.unwrap();
 }
 
+/// A peer's range position past what the logs can store is refused.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn range_positions_past_the_stored_range_are_refused() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let scope = department(&f, 0);
+    let full = open_node(
+        &f,
+        &dir.path().join("full.db"),
+        &PrivateKey::new(),
+        &[scope],
+        &[scope],
+    )
+    .await;
+    let device = open_node(
+        &f,
+        &dir.path().join("device.db"),
+        &PrivateKey::new(),
+        &[scope],
+        &[scope],
+    )
+    .await;
+    insert(&f, &full, scope, 0..2, 1).await;
+    let (session, server) = connect(&device, &full).await;
+    let author = full.replica.frontier(scope).await.unwrap().logs[0].author;
+    let page = |logs: Vec<FrontierLog>, after| {
+        let (full, device) = (&full, &device);
+        async move {
+            full.replica
+                .range_page(
+                    device.key.public_key(),
+                    &device.credentials,
+                    &ScopeFrontier { scope, logs },
+                    after,
+                    QUOTA,
+                )
+                .await
+        }
+    };
+    assert_eq!(page(vec![], None).await.unwrap().frames.len(), 2);
+    for after in [u64::MAX, i64::MAX as u64] {
+        assert!(matches!(
+            page(vec![], Some((author, after))).await,
+            Err(Error::Rejected(_))
+        ));
+    }
+    let held = u64::MAX;
+    assert!(matches!(
+        page(
+            vec![FrontierLog {
+                author,
+                held,
+                applied: 0
+            }],
+            None
+        )
+        .await,
+        Err(Error::Rejected(_))
+    ));
+    drop(session);
+    server.await.unwrap();
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     let f = Fixture::new();

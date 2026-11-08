@@ -279,3 +279,100 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
         })
         .await
 }
+
+#[tokio::test]
+async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> Result<(), Failure>
+{
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let names: Vec<String> = (0..6).map(|n| format!("table_{n}")).collect();
+            let mut schema: Value = serde_json::from_str(SCHEMA)?;
+            let table = schema["tables"][0].clone();
+            schema["tables"] = Value::Array(
+                names
+                    .iter()
+                    .map(|name| {
+                        let mut table = table.clone();
+                        table["name"] = json!(name);
+                        table
+                    })
+                    .collect(),
+            );
+            let schema = Schema::parse(&schema.to_string())?;
+            let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
+            let b = enrolled_schema(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: names.iter().cloned().collect(),
+                    },
+                )),
+                &schema,
+            )
+            .await?;
+            let client = a.client(1)?;
+            for (index, name) in names.iter().enumerate() {
+                a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
+                    .await?;
+                let id = a
+                    .dispatch(&client, &json!({"type":"next_id","table":name}))
+                    .await?["id"]
+                    .clone();
+                a.dispatch(&client, &json!({"type":"sql","sql":format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)"),
+                    "values":[{"type":"integer","value":id}]})).await?;
+                a.dispatch(
+                    &client,
+                    &json!({"type":"sql","sql":"COMMIT","handle":vec![index as u8 + 1; 32]}),
+                )
+                .await?;
+            }
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let contact = b
+                .settings
+                .lock()
+                .await
+                .targets()
+                .into_iter()
+                .find(|(node, _)| *node == peer)
+                .ok_or("owner contact")?
+                .1;
+            let service = b.current().ok_or("service")?;
+            let upstream = Upstream {
+                link: b.request_link(&*service.transport, peer, &contact).await?,
+                observations: &b.observations,
+                peer,
+                contacts: None,
+                refresh_control: true,
+                control_started: Default::default(),
+                renew_from: None,
+                keep: None,
+            };
+            let scopes = b.app_scopes();
+            assert_eq!(scopes.len(), names.len());
+            let (_, transfer) = sync::reconcile(&b.replica, &upstream, &scopes, |_| {}, None).await?;
+            assert!(transfer.failed.is_empty(), "{:?}", transfer.failed);
+            for scope in &scopes {
+                assert!(
+                    transfer
+                        .scopes
+                        .iter()
+                        .any(|(known, moved)| known == scope && moved.pulled == 1)
+                );
+            }
+            // Planning closes before row transfers fan out; one request slot stays free.
+            assert!(
+                upstream.link.traffic().peak_channels
+                    <= usize::from(rocky_secure::network::link::CHANNELS) - 3
+            );
+            for node in [&a, &b] {
+                node.detach(None).await;
+            }
+            Ok(())
+        })
+        .await
+}

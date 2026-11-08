@@ -1,5 +1,9 @@
 use super::*;
 
+/// Settled operations noted before an incremental pass must fall back to a
+/// full one.
+const NOTED: usize = 4096;
+
 #[derive(Default)]
 enum PendingPhase {
     #[default]
@@ -9,6 +13,10 @@ enum PendingPhase {
     NewRound,
     Clean,
     Finish,
+    /// The last pass completed; only noted changes may ready a frame.
+    Settled,
+    /// An incremental round resolves its candidates into heads.
+    Retry,
 }
 #[derive(Default)]
 pub(super) struct PendingPass {
@@ -22,19 +30,98 @@ pub(super) struct PendingPass {
     skipped: BTreeSet<Hash>,
     context: i64,
     advanced: bool,
+    /// Revisits only what settled since the pass completed.
+    incremental: bool,
+    /// Received frames committed since: retry every unindexed wait.
+    received: bool,
+    retry: BTreeSet<Hash>,
+}
+impl PendingPass {
+    /// Whether received frames may keep the pass: it completed, or revisits
+    /// only noted changes.
+    fn tracks(&self) -> bool {
+        self.incremental || matches!(self.phase, PendingPhase::Settled)
+    }
+    fn restart(&mut self) {
+        self.phase = PendingPhase::Reset;
+        self.incremental = false;
+    }
+}
+
+/// Waiting frames by what may end their wait: one dependency settling, or
+/// anything else (`any`), which every incremental pass retries.
+#[derive(Default)]
+pub(super) struct Blocked {
+    dependents: BTreeMap<Hash, BTreeSet<Hash>>,
+    dependency: BTreeMap<Hash, Hash>,
+    any: BTreeSet<Hash>,
+}
+impl Blocked {
+    fn insert(&mut self, id: Hash, dependency: Option<Hash>) {
+        self.remove(id);
+        match dependency {
+            Some(dependency) => {
+                self.dependents.entry(dependency).or_default().insert(id);
+                self.dependency.insert(id, dependency);
+            }
+            None => {
+                self.any.insert(id);
+            }
+        }
+    }
+    fn remove(&mut self, id: Hash) {
+        self.any.remove(&id);
+        if let Some(dependency) = self.dependency.remove(&id)
+            && let Some(dependents) = self.dependents.get_mut(&dependency)
+        {
+            dependents.remove(&id);
+            if dependents.is_empty() {
+                self.dependents.remove(&dependency);
+            }
+        }
+    }
+    /// Takes the frames waiting for `settled`.
+    fn unblocked(&mut self, settled: Hash) -> BTreeSet<Hash> {
+        let ids = self.dependents.remove(&settled).unwrap_or_default();
+        for id in &ids {
+            self.dependency.remove(id);
+        }
+        ids
+    }
+}
+
+/// What a frame's dependencies leave it waiting for.
+pub(super) enum Readiness {
+    Ready,
+    /// Only this dependency settling can ready it.
+    Dependency(Hash),
+    /// Other state can ready it too, such as a void or a retired creation.
+    Other,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
     pub(crate) async fn pending_step_for_test(&self) -> Result<bool, Error> {
         let mut inner = self.inner.lock(Class::Background).await;
-        inner.apply_step(now()?).await
+        inner.apply_step(now()?, false).await
+    }
+    #[cfg(test)]
+    pub(crate) async fn pending_attempts(&self) -> u64 {
+        self.inner.lock(Class::Background).await.pending_attempts
     }
     /// Applies pending frames one bounded transaction at a time, publishing
     /// after each commit. The replica is released between transactions, so
     /// a writer that asked for it meanwhile goes first. Applications before
     /// a failing one stay committed.
     pub(crate) async fn settle(&self) -> Result<(), Error> {
+        self.settle_pass(false).await
+    }
+    /// [`Self::settle`] after received frames: a completed pass revisits
+    /// only the frames what they settled may ready.
+    pub(super) async fn settle_received(&self) -> Result<(), Error> {
+        self.settle_pass(true).await
+    }
+    async fn settle_pass(&self, incremental: bool) -> Result<(), Error> {
         loop {
             rocky_platform::task::yield_now().await;
             let mut inner = self.inner.lock(Class::Background).await;
@@ -44,7 +131,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.rows_written.load(Ordering::Relaxed),
                 inner.applied_frames,
             );
-            let result = inner.apply_step(now()?).await;
+            let result = inner.apply_step(now()?, incremental).await;
             #[cfg(feature = "qualification")]
             {
                 let frames = inner.frames_written.load(Ordering::Relaxed) - work.0;
@@ -112,8 +199,9 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// One bounded transaction of `EncryptedReplica::settle`; true when
-    /// more frames may be ready.
-    pub(super) async fn apply_step(&mut self, time: u64) -> Result<bool, Error> {
+    /// more frames may be ready. Unless `incremental`, a completed or
+    /// incremental pass restarts in full.
+    pub(super) async fn apply_step(&mut self, time: u64, incremental: bool) -> Result<bool, Error> {
         let span = tracing::debug_span!(
             "apply",
             frames = tracing::field::Empty,
@@ -130,8 +218,9 @@ impl<A: RowApplication> Inner<A> {
             async {
                 if self.pending_pass.commit != self.commit
                     || self.pending_pass.epoch != self.context_epoch.load(Ordering::Relaxed)
+                    || !incremental && self.pending_pass.tracks()
                 {
-                    self.pending_pass.phase = PendingPhase::Reset;
+                    self.pending_pass.restart();
                 }
                 let finishing = matches!(self.pending_pass.phase, PendingPhase::Finish)
                     && self.pending_pass.examined.is_empty()
@@ -208,13 +297,22 @@ impl<A: RowApplication> Inner<A> {
         self.pending_pass.commit = self.commit;
         self.pending_pass.epoch = self.context_epoch.load(Ordering::Relaxed);
     }
+    /// Keeps a completed or incremental pass that was current before a
+    /// committed receive group in an unchanged context: application noted
+    /// what settled, and the next round also retries every unindexed wait.
+    pub(super) fn keep_received_pass(&mut self) {
+        if self.pending_pass.tracks() {
+            self.pending_pass.received = true;
+            self.keep_pending_pass();
+        }
+    }
     /// One pending discovery, application or cleanup step. Progress is
     /// recomputed after another transaction changes its source state.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {
         let mut pass = std::mem::take(&mut self.pending_pass);
         let epoch = self.context_epoch.load(Ordering::Relaxed);
         if pass.commit != self.commit || pass.epoch != epoch {
-            pass.phase = PendingPhase::Reset;
+            pass.restart();
         }
         let result = async {
             for _ in 0..limit {
@@ -226,7 +324,7 @@ impl<A: RowApplication> Inner<A> {
         }
         .await;
         if result.is_err() {
-            pass.phase = PendingPhase::Reset;
+            pass.restart();
         }
         pass.commit = self.commit;
         pass.epoch = self.context_epoch.load(Ordering::Relaxed);
@@ -239,13 +337,17 @@ impl<A: RowApplication> Inner<A> {
                 if pass.heads.pop_first().is_some()
                     || pass.examined.pop_first().is_some()
                     || pass.skipped.pop_first().is_some()
+                    || pass.retry.pop_first().is_some()
                 {
                     return Ok(true);
                 }
                 pass.context = self.quarantine_context();
                 pass.cursor = None;
                 pass.advanced = false;
+                pass.received = false;
                 pass.phase = PendingPhase::Discover;
+                // A full round examines every log head.
+                self.take_settled();
             }
             PendingPhase::NewRound => {
                 if pass.examined.pop_first().is_some() {
@@ -254,11 +356,41 @@ impl<A: RowApplication> Inner<A> {
                 pass.cursor = None;
                 pass.advanced = false;
                 pass.phase = PendingPhase::Discover;
+                self.take_settled();
             }
             PendingPhase::Discover => {}
+            PendingPhase::Settled => {
+                pass.context = self.quarantine_context();
+                pass.incremental = true;
+                pass.received = true;
+                self.retry_round(pass);
+                return Ok(true);
+            }
+            PendingPhase::Retry => {
+                let Some(id) = pass.retry.pop_first() else {
+                    pass.phase = PendingPhase::Apply;
+                    return Ok(true);
+                };
+                // The frame while pending, else its log's next pending frame.
+                let records = collect_rows(self.conn.query(
+                    "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations s JOIN secure_operations o ON o.scope=s.scope AND o.author=s.author AND o.sequence>=s.sequence WHERE s.hash=? AND o.status='pending' ORDER BY o.sequence LIMIT 1",
+                    [id.as_bytes().to_vec()],
+                ).await?).await?;
+                let item = records.into_iter().next().map(head).transpose()?;
+                if item.as_ref().is_none_or(|item| item.1 != id.as_bytes()) {
+                    self.unwait(id);
+                    self.hold_ahead(id, None);
+                }
+                pass.heads.extend(item);
+                return Ok(true);
+            }
             PendingPhase::Apply => {
                 if let Some(item) = pass.heads.pop_first() {
                     return self.pending_head(pass, item, time).await.map(|()| true);
+                }
+                if pass.incremental {
+                    self.retry_round(pass);
+                    return Ok(true);
                 }
                 pass.phase = if pass.advanced {
                     PendingPhase::NewRound
@@ -281,7 +413,7 @@ impl<A: RowApplication> Inner<A> {
                 if let Some(hash) = next {
                     pass.clean = Some(hash);
                     if !pass.examined.contains(&hash) {
-                        self.waits.remove(&hash);
+                        self.unwait(hash);
                         self.hold_ahead(hash, None);
                     }
                     return Ok(true);
@@ -296,7 +428,8 @@ impl<A: RowApplication> Inner<A> {
                 if Box::pin(self.follow_moves(time)).await? {
                     return Ok(true);
                 }
-                pass.phase = PendingPhase::Reset;
+                pass.phase = PendingPhase::Settled;
+                pass.incremental = false;
                 return Ok(false);
             }
         }
@@ -317,6 +450,35 @@ impl<A: RowApplication> Inner<A> {
             pass.phase = PendingPhase::Apply;
         }
         Ok(true)
+    }
+    /// Starts an incremental round: what settled since the last one, the
+    /// frames waiting for it and, after progress or received frames, every
+    /// unindexed wait. Too many noted changes fall back to a full pass.
+    fn retry_round(&mut self, pass: &mut PendingPass) {
+        let Some(settled) = self.take_settled() else {
+            pass.restart();
+            return;
+        };
+        for hash in settled {
+            pass.retry.extend(self.blocked.unblocked(hash));
+            pass.retry.insert(hash);
+        }
+        if std::mem::take(&mut pass.advanced) | std::mem::take(&mut pass.received) {
+            pass.retry.extend(self.blocked.any.iter().copied());
+        }
+        pass.phase = if pass.retry.is_empty() {
+            PendingPhase::Finish
+        } else {
+            PendingPhase::Retry
+        };
+    }
+    fn wait(&mut self, id: Hash, reason: WaitReason, dependency: Option<Hash>) {
+        self.waits.insert(id, reason);
+        self.blocked.insert(id, dependency);
+    }
+    fn unwait(&mut self, id: Hash) {
+        self.waits.remove(&id);
+        self.blocked.remove(id);
     }
     async fn pending_head(
         &mut self,
@@ -368,9 +530,13 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
     ) -> Result<bool, Error> {
         let id = frame.operation_ref()?.hash;
+        #[cfg(test)]
+        {
+            self.pending_attempts += 1;
+        }
         let held = self.quarantined_frame(id).await?;
         if pass.skipped.contains(&id) || held.is_some_and(|held| !held.due(time, pass.context)) {
-            self.waits.insert(id, WaitReason::Quarantined);
+            self.wait(id, WaitReason::Quarantined, None);
             self.hold_ahead(id, None);
             return Ok(false);
         }
@@ -392,7 +558,7 @@ impl<A: RowApplication> Inner<A> {
             self.invalidate_context();
             self.quarantine(id, reason, time, pass.context).await?;
             pass.skipped.insert(id);
-            self.waits.insert(id, WaitReason::Quarantined);
+            self.wait(id, WaitReason::Quarantined, None);
             return Ok(false);
         }
         self.conn.execute("RELEASE quarantine", ()).await?;
@@ -401,19 +567,21 @@ impl<A: RowApplication> Inner<A> {
         }
         match outcome {
             Ok(Outcome::Waiting(reason)) => {
-                self.waits.insert(id, reason);
+                self.wait(id, reason, None);
+                return Ok(false);
+            }
+            Ok(Outcome::Blocked(dependency)) => {
+                self.wait(id, WaitReason::Dependencies, Some(dependency));
                 return Ok(false);
             }
             Ok(Outcome::Ahead(_)) => {
-                self.waits.insert(id, WaitReason::ClockAhead);
+                self.wait(id, WaitReason::ClockAhead, None);
                 return Ok(false);
             }
-            Ok(_) => {
-                self.waits.remove(&id);
-            }
+            Ok(_) => self.unwait(id),
             Err(error) => {
                 if !retryable(&error) {
-                    self.waits.insert(id, WaitReason::Failed);
+                    self.wait(id, WaitReason::Failed, None);
                 }
                 return Err(error);
             }
@@ -481,7 +649,7 @@ impl<A: RowApplication> Inner<A> {
             if let Some(stamp) = self.clock_ahead(&operation.header)? {
                 return Ok(Outcome::Ahead(stamp));
             }
-            return self.hold_closed_frame(frame, time).await;
+            return self.hold_closed_one(frame, time).await;
         }
         // Every frame of a revoked author is refused, also one whose
         // dependencies, its author's earlier frames, never apply.
@@ -525,11 +693,12 @@ impl<A: RowApplication> Inner<A> {
             );
         }
         match self
-            .dependencies_ready(frame, &BTreeSet::new(), payload.as_ref().ok())
+            .dependency_wait(frame, &BTreeSet::new(), payload.as_ref().ok())
             .await
         {
-            Ok(true) => {}
-            Ok(false) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
+            Ok(Readiness::Ready) => {}
+            Ok(Readiness::Dependency(id)) => return Ok(Outcome::Blocked(id)),
+            Ok(Readiness::Other) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
             Err(error) => {
                 self.reject(operation.hash).await?;
                 {
@@ -576,6 +745,7 @@ impl<A: RowApplication> Inner<A> {
                     self.record_key(key).await?;
                     self.write_materialized(frame, rows, admission, payload.as_ref().ok())
                         .await?;
+                    self.note_settled(operation.hash);
                     Ok(Outcome::Applied)
                 }
                 .await;
@@ -672,6 +842,7 @@ impl<A: RowApplication> Inner<A> {
                 [hash.as_bytes().to_vec()],
             )
             .await?;
+        self.note_settled(hash);
         Ok(())
     }
     /// Whether every dependency is applied or a member of `bundle`, which
@@ -683,6 +854,18 @@ impl<A: RowApplication> Inner<A> {
         bundle: &BTreeSet<Hash>,
         opened: Option<&RowPayload>,
     ) -> Result<bool, Error> {
+        Ok(matches!(
+            self.dependency_wait(frame, bundle, opened).await?,
+            Readiness::Ready
+        ))
+    }
+    /// [`Self::dependencies_ready`], naming what a waiting frame waits for.
+    async fn dependency_wait(
+        &self,
+        frame: &EncryptedFrame,
+        bundle: &BTreeSet<Hash>,
+        opened: Option<&RowPayload>,
+    ) -> Result<Readiness, Error> {
         let operation = frame.operation_ref()?;
 
         let decoded;
@@ -694,6 +877,8 @@ impl<A: RowApplication> Inner<A> {
             }
         };
         let mut retired_creations = BTreeSet::new();
+        // Creations that retire once their row goes.
+        let mut retirable = BTreeSet::new();
         // Behind a finalized base, a creation whose row is gone is retired.
         // A frame of another line stays as it was applied there.
         if self.on_workspace_path(
@@ -737,6 +922,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(denied("creation witness does not name a signed write"));
                 };
                 let hash = checkpoint::hash_of(creation)?;
+                retirable.insert(hash);
                 if write.change.before.is_none()
                     || !operation.header.previous.contains(&hash)
                         && operation.header.backlink != Some(hash)
@@ -795,7 +981,10 @@ impl<A: RowApplication> Inner<A> {
                             covered_heads -= 1;
                             continue;
                         }
-                        Some(false) | None => return Ok(false),
+                        // Consumed once its log's earlier frames settle.
+                        Some(false) => return Ok(Readiness::Other),
+                        None if retirable.contains(id) => return Ok(Readiness::Other),
+                        None => return Ok(Readiness::Dependency(*id)),
                     },
                 }
             };
@@ -818,11 +1007,11 @@ impl<A: RowApplication> Inner<A> {
                     ReceiveStatus::Rejected
                         if operation.header.backlink != Some(*id)
                             && self.revoked_chain(dependency.chain()?)? => {}
-                    _ => return Ok(false),
+                    _ => return Ok(Readiness::Dependency(*id)),
                 }
             }
         }
-        Ok(true)
+        Ok(Readiness::Ready)
     }
     /// How many of an intent's base heads the seal of its scope's installed
     /// base covers.
@@ -907,10 +1096,36 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+impl<A> Inner<A> {
+    /// Notes that `hash` settled or got a stub: frames waiting for it may
+    /// be ready.
+    pub(super) fn note_settled(&self, hash: Hash) {
+        let mut settled = self
+            .settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match settled.as_mut() {
+            Some(hashes) if hashes.len() < NOTED => {
+                hashes.insert(hash);
+            }
+            _ => *settled = None,
+        }
+    }
+    /// What settled since the last call; None when too much to track.
+    fn take_settled(&self) -> Option<BTreeSet<Hash>> {
+        self.settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(BTreeSet::new())
+    }
+}
+
 pub(super) enum Outcome {
     Applied,
     Rejected(String),
     Waiting(WaitReason),
+    /// Waits only for this dependency to settle.
+    Blocked(Hash),
     /// Waits for this clock to come within `MAX_CLOCK_AHEAD` of the stamp.
     Ahead(u64),
 }

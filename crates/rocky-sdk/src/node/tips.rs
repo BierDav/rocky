@@ -162,6 +162,16 @@ impl Node {
     pub(super) async fn tips(&self, request: &Value) -> Result<Value, Failure> {
         self.tips_with(request, &super::Root::default()).await
     }
+    /// Creates `name` on the followed tip and follows it, as a created
+    /// domain's device does before it is handed out.
+    pub(crate) async fn follow_new_bookmark(&self, name: &str) -> Result<(), Failure> {
+        let root = super::Root::default();
+        for action in ["create", "follow"] {
+            self.tips_with(&json!({"action": action, "name": name}), &root)
+                .await?;
+        }
+        Ok(())
+    }
     pub(super) async fn tips_with(
         &self,
         request: &Value,

@@ -87,9 +87,9 @@ pub(super) const STEP_OPERATIONS: usize = 64;
 pub(super) const STEP_ROWS: usize = 256;
 // Small steps let tests cross every step boundary with little data.
 #[cfg(test)]
-pub(super) const STEP_OPERATIONS: usize = 8;
+pub(crate) const STEP_OPERATIONS: usize = 8;
 #[cfg(test)]
-pub(super) const STEP_ROWS: usize = 16;
+pub(crate) const STEP_ROWS: usize = 16;
 /// Logs of one scope a checkpoint frontier may name.
 pub const MAX_CHECKPOINT_LOGS: usize = 256;
 
@@ -1133,6 +1133,7 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        self.note_settled(hash);
         Ok(())
     }
     /// Records an applied operation: its position and its log's new tip.

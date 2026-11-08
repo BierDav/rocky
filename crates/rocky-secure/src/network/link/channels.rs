@@ -23,6 +23,8 @@ pub struct Traffic {
     pub repair_scopes: usize,
     pub repair_all: usize,
     pub repair_reasons: BTreeMap<crate::network::PublicationRepairReason, usize>,
+    /// Most open request channels this side held at once.
+    pub peak_channels: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +90,29 @@ struct Slot {
     ended: bool,
     finished: bool,
     progress: u64,
+    /// Our End waits for the writer; the slot stays until it is written.
+    deferred: bool,
+}
+impl Slot {
+    fn new(
+        generation: u64,
+        publication: Option<(usize, rocky_platform::time::Instant)>,
+        receive: mpsc::Sender<Vec<u8>>,
+    ) -> Self {
+        Self {
+            generation,
+            publication,
+            receive: Some(receive),
+            bytes: Vec::new(),
+            total: 0,
+            fragments: 0,
+            closed: false,
+            ended: false,
+            finished: false,
+            progress: 0,
+            deferred: false,
+        }
+    }
 }
 #[derive(Default)]
 struct State {
@@ -102,6 +127,23 @@ struct State {
     remote_reconcile: u64,
     flushed_reconcile: Option<u64>,
     slots: BTreeMap<(bool, u16), Slot>,
+    /// Ends and reconcile finishes a full queue refused, in order. Bounded by
+    /// slots and reconcile leases; the writer sends them once the queue drains.
+    deferred: Vec<Frame>,
+}
+impl State {
+    /// A slot leaves once both sides ended it and our End was written.
+    fn release(&mut self, key: (bool, u16)) -> bool {
+        if self
+            .slots
+            .get(&key)
+            .is_some_and(|slot| slot.closed && slot.ended && !slot.deferred)
+        {
+            self.slots.remove(&key);
+            return true;
+        }
+        false
+    }
 }
 #[derive(Clone)]
 pub struct Handle {
@@ -221,21 +263,9 @@ impl Channels {
                     .ok_or_else(|| denied("link channel generation exhausted"))?,
             );
             let (send, receive) = mpsc::channel(QUEUE);
-            state.slots.insert(
-                key,
-                Slot {
-                    generation,
-                    publication,
-                    receive: Some(send),
-                    bytes: Vec::new(),
-                    total: 0,
-                    fragments: 0,
-                    closed: false,
-                    ended: false,
-                    finished: false,
-                    progress: 0,
-                },
-            );
+            state
+                .slots
+                .insert(key, Slot::new(generation, publication, send));
             #[cfg(any(test, feature = "qualification"))]
             {
                 state.traffic.sessions = state.traffic.sessions.saturating_add(1);
@@ -259,7 +289,8 @@ impl Channels {
         }
         if slot.closed {
             if matches!(packet, Packet::End { .. }) {
-                state.slots.remove(&key);
+                slot.ended = true;
+                state.release(key);
                 self.handle.events.send_replace(());
             } else {
                 state.retired_frames = state.retired_frames.saturating_add(1);
@@ -338,9 +369,8 @@ impl Channels {
                 self.handle.events.send_replace(());
             }
             Packet::End { .. } => {
-                if !slot.bytes.is_empty() {
-                    return Err(denied("unfinished link channel message"));
-                }
+                // A cancelled sender may end mid-message: only its channel fails.
+                slot.bytes.clear();
                 slot.ended = true;
                 slot.receive.take();
             }
@@ -415,14 +445,19 @@ impl Reconcile {
 impl Drop for Reconcile {
     fn drop(&mut self) {
         if !self.closed {
-            let _ = self.handle.send.try_send(Frame::new(
+            let finish = Frame::new(
                 self.handle.direction,
                 Message::Reconcile {
                     generation: self.generation,
                     started: false,
                 },
-            ));
-            self.mark_closed();
+            );
+            if self.handle.queue(finish) {
+                self.mark_closed();
+            } else {
+                // The lease lasts until the writer sends its finish.
+                self.closed = true;
+            }
         }
     }
 }
@@ -434,6 +469,87 @@ impl Handle {
             .unwrap_or_else(PoisonError::into_inner)
             .traffic
             .clone()
+    }
+    /// Queues `frame` without waiting; a full queue defers it to the writer.
+    fn queue(&self, frame: Frame) -> bool {
+        // The writer checks for deferrals under this lock, so none is stranded.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let Err(mpsc::error::TrySendError::Full(frame)) = self.send.try_send(frame) else {
+            return true;
+        };
+        if let Message::Channel(Packet::End { generation }) = frame.message
+            && let Some(slot) = state
+                .slots
+                .get_mut(&(frame.direction, frame.channel))
+                .filter(|slot| slot.generation == generation)
+        {
+            slot.deferred = true;
+        }
+        state.deferred.push(frame);
+        false
+    }
+    /// Writes a frame taken from the outgoing queue, then deferred frames
+    /// once every frame queued before them was written.
+    pub async fn write(
+        &self,
+        writer: &mut Writer,
+        frame: Frame,
+        outgoing: &mpsc::Receiver<Frame>,
+    ) -> Result<(), Error> {
+        self.write_one(writer, frame).await?;
+        for frame in self.take_deferred(outgoing) {
+            self.write_one(writer, frame).await?;
+        }
+        Ok(())
+    }
+    async fn write_one(&self, writer: &mut Writer, frame: Frame) -> Result<(), Error> {
+        let finished = match frame.message {
+            Message::Reconcile {
+                generation,
+                started: false,
+            } => Some(generation),
+            _ => None,
+        };
+        writer.send(frame).await?;
+        if let Some(generation) = finished {
+            self.flushed_reconcile(generation);
+        }
+        Ok(())
+    }
+    /// Deferred frames leave in order once the writer emptied the queue; their
+    /// slots and leases end with them.
+    fn take_deferred(&self, outgoing: &mpsc::Receiver<Frame>) -> Vec<Frame> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !outgoing.is_empty() {
+            return Vec::new();
+        }
+        let frames = std::mem::take(&mut state.deferred);
+        for frame in &frames {
+            match frame.message {
+                Message::Channel(Packet::End { generation }) => {
+                    let key = (frame.direction, frame.channel);
+                    if let Some(slot) = state
+                        .slots
+                        .get_mut(&key)
+                        .filter(|slot| slot.generation == generation)
+                    {
+                        slot.deferred = false;
+                        state.release(key);
+                    }
+                }
+                Message::Reconcile {
+                    generation,
+                    started: false,
+                } if state.reconciling.get(&frame.direction) == Some(&generation) => {
+                    state.reconciling.remove(&frame.direction);
+                }
+                _ => {}
+            }
+        }
+        if !frames.is_empty() {
+            self.events.send_replace(());
+        }
+        frames
     }
     pub fn retired_frames(&self) -> u64 {
         self.state
@@ -568,24 +684,18 @@ impl Handle {
                             .ok_or_else(|| denied("link channel generation exhausted"))?;
                         let key = (self.direction, channel);
                         let (send, receive) = mpsc::channel(QUEUE);
-                        state.slots.insert(
-                            key,
-                            Slot {
-                                generation,
-                                publication: incoming,
-                                receive: Some(send),
-                                bytes: Vec::new(),
-                                total: 0,
-                                fragments: 0,
-                                closed: false,
-                                ended: false,
-                                finished: false,
-                                progress: 0,
-                            },
-                        );
+                        state
+                            .slots
+                            .insert(key, Slot::new(generation, incoming, send));
                         #[cfg(any(test, feature = "qualification"))]
                         {
                             state.traffic.sessions = state.traffic.sessions.saturating_add(1);
+                            let open = state
+                                .slots
+                                .iter()
+                                .filter(|(key, slot)| key.0 == self.direction && !slot.closed)
+                                .count();
+                            state.traffic.peak_channels = state.traffic.peak_channels.max(open);
                         }
                         Some((key, generation, receive))
                     } else {
@@ -772,7 +882,7 @@ impl Io {
     }
     pub(crate) fn retire(&mut self) {
         if !self.closed {
-            let _ = self.handle.send.try_send(Frame {
+            self.handle.queue(Frame {
                 channel: self.key.1,
                 through: Vec::new(),
                 direction: self.key.0,
@@ -905,8 +1015,7 @@ impl Io {
             slot.closed = true;
             slot.receive.take();
             slot.bytes.clear();
-            if slot.ended {
-                state.slots.remove(&self.key);
+            if state.release(self.key) {
                 self.handle.events.send_replace(());
             }
         }
@@ -925,7 +1034,7 @@ impl Drop for Channels {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn publication_limits_apply_before_reassembly_and_retention() {
@@ -1165,7 +1274,141 @@ mod tests {
         assert_eq!(slot.total, 0);
         assert!(slot.bytes.is_empty());
     }
-    pub(super) fn channels() -> Channels {
+    /// What the link writer sends: the queue in order, then deferred frames.
+    fn drain(channels: &mut Channels) -> Vec<Frame> {
+        let mut written = Vec::new();
+        while let Ok(frame) = channels.outgoing.try_recv() {
+            written.push(frame);
+        }
+        written.extend(channels.handle.take_deferred(&channels.outgoing));
+        written
+    }
+    fn ends(frames: &[Frame]) -> Vec<(bool, u16, u64)> {
+        frames
+            .iter()
+            .filter_map(|frame| match frame.message {
+                Message::Channel(Packet::End { generation }) => {
+                    Some((frame.direction, frame.channel, generation))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    fn fill(channels: &Channels) {
+        while channels
+            .handle
+            .send
+            .try_send(frame(5, Packet::Working { generation: 9 }))
+            .is_ok()
+        {}
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn an_end_a_full_queue_refused_follows_the_queued_frames_and_frees_the_slot() {
+        let mut channels = channels();
+        let session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        fill(&channels);
+        drop(session);
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].deferred);
+        // It never overtakes frames queued before it.
+        assert!(channels.handle.take_deferred(&channels.outgoing).is_empty());
+        let written = drain(&mut channels);
+        assert_eq!(written.len(), QUEUE + 1);
+        assert_eq!(ends(&written[QUEUE..]), [(true, 2, 0)]);
+        assert!(channels.handle.state.lock().unwrap().slots.is_empty());
+        channels
+            .accept(frame(2, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+
+        // An opener's publication slot frees once its End is written and the peer's arrives.
+        let publication = channels.handle.open_publication(8).await.unwrap();
+        drain(&mut channels);
+        fill(&channels);
+        drop(publication);
+        let ours = |packet| Frame {
+            channel: 2,
+            through: Vec::new(),
+            direction: false,
+            message: Message::Channel(packet),
+        };
+        channels
+            .accept(ours(Packet::End { generation: 0 }))
+            .unwrap();
+        assert!(channels.handle.open_publication(8).await.is_err());
+        assert_eq!(ends(&drain(&mut channels)), [(false, 2, 0)]);
+        assert!(channels.handle.open_publication(8).await.is_ok());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_dropped_reconcile_finish_waits_for_the_queue_instead_of_vanishing() {
+        let mut channels = channels();
+        let reconcile = channels.handle.begin_reconcile().await.unwrap();
+        drain(&mut channels);
+        fill(&channels);
+        drop(reconcile);
+        assert!(channels.handle.begin_reconcile().await.is_err());
+        let written = drain(&mut channels);
+        assert!(matches!(
+            written.last().unwrap().message,
+            Message::Reconcile {
+                generation: 0,
+                started: false
+            }
+        ));
+        assert!(channels.handle.state.lock().unwrap().reconciling.is_empty());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn an_end_inside_a_message_aborts_only_its_channel() {
+        let channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let mut other = channels
+            .accept(frame(3, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![1],
+                    last: false,
+                },
+            ))
+            .unwrap();
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        channels
+            .accept(frame(
+                3,
+                Packet::Data {
+                    generation: 1,
+                    bytes: vec![2],
+                    last: true,
+                },
+            ))
+            .unwrap();
+        let (SessionIo::Channel(aborted), SessionIo::Channel(open)) =
+            (&mut session.stream, &mut other.stream)
+        else {
+            panic!("channels");
+        };
+        assert!(aborted.receive().await.is_err());
+        assert_eq!(open.receive().await.unwrap(), [2]);
+    }
+
+    pub(crate) fn channels() -> Channels {
         let credentials = CredentialChain(vec![]);
         let (send, outgoing) = mpsc::channel(QUEUE);
         Channels {

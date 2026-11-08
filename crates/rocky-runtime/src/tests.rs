@@ -135,6 +135,23 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
     reopened.close().await.unwrap();
 }
 
+/// The mutation commits whatever its follow-ups do, and its caller learns
+/// so; the failed pass is counted and the next one derives them again.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_failed_follow_up_pass_still_reports_the_committed_mutation() {
+    let dir = Scratch::new().await;
+    let replica = open(&dir).await;
+    fault(&replica, worker::Fault::FailFollowing).await;
+    assert_eq!(create(&replica, "followed").await.id.sequence.get(), 1);
+    assert_eq!(replica.query().await.unwrap().rows.len(), 1);
+    assert_eq!(replica.writer_stats().deferred_follows, 1);
+    replica.close().await.unwrap();
+    assert_eq!(
+        disk(&dir, "SELECT count(*) FROM rocky_operations").await,
+        vec![vec![SqlValue::Integer(1)]]
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rollback_is_whole_and_never_notifies() {
     let dir = Scratch::new().await;

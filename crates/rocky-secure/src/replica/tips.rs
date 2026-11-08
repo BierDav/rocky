@@ -171,6 +171,7 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) fn graph_for(&self, scope: Scope) -> Result<&TipGraph, Error> {
         self.graphs
             .get(&scope)
+            .map(Arc::as_ref)
             .ok_or_else(|| denied("unknown tip graph"))
     }
     pub(crate) fn manifest_of_tip(&self, tip: TipId) -> Result<Commitment, Error> {
@@ -202,7 +203,8 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(in crate::replica) fn scope_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
+    /// The domain's graph, shared: a caller that changes it copies it.
+    pub(in crate::replica) fn scope_graph(&self, scope: Scope) -> Result<Arc<TipGraph>, Error> {
         if scope.app != self.definition.app || !self.domains.contains(&scope.domain) {
             return Err(denied("tip graph belongs to another domain"));
         }
@@ -461,13 +463,51 @@ impl<A: RowApplication> Inner<A> {
         graph: &TipGraph,
         source: TipId,
         target: TipId,
+        bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
+        canonical: bool,
+    ) -> Result<FramePath, Error> {
+        Self::walk_back(graph, target, bounds, canonical, |cursor, _| {
+            cursor == source
+        })
+    }
+    /// What visibility gives a domain's replay ledgers at workspace `tip`,
+    /// `followed` or not: equal views admit the same frames.
+    pub(super) fn ledger_view(
+        graph: &TipGraph,
+        tip: TipId,
+        followed: bool,
+    ) -> Result<LedgerView, Error> {
+        let mut bounds = Vec::new();
+        if let Some(seal) = graph.seal(tip).map_err(credential)? {
+            bounds.push(seal.statement.frontier.clone());
+        }
+        let mut tips = Vec::new();
+        let walk = Self::walk_back(graph, tip, bounds, true, |cursor, bounds| {
+            tips.push((cursor, bounds.len()));
+            false
+        })?;
+        Ok(LedgerView {
+            tips,
+            walk,
+            seals: match followed {
+                true => super::compaction::tip_path_seals(graph, tip)?,
+                false => Vec::new(),
+            },
+        })
+    }
+    /// The walk back from `target` until `reached` names a tip, with the
+    /// frontiers bounding that tip's frames.
+    fn walk_back(
+        graph: &TipGraph,
+        target: TipId,
         mut bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
         canonical: bool,
+        mut reached: impl FnMut(TipId, &[Vec<rocky_credentials::AuthorMark>]) -> bool,
     ) -> Result<FramePath, Error> {
         let mut cursor = target;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
-            if cursor == source {
+            if reached(cursor, &bounds) {
                 return Ok(FramePath {
                     bounds,
                     end: PathEnd::Visible,
@@ -715,7 +755,10 @@ impl<A: RowApplication> Inner<A> {
                 .exclude_revoked(&self.config.revocations)
                 .map_err(credential)?;
         }
-        self.graphs = graphs;
+        self.graphs = graphs
+            .into_iter()
+            .map(|(scope, graph)| (scope, Arc::new(graph)))
+            .collect();
         self.invalidate_context();
         self.workspace.followed = None;
         let root = self
@@ -781,7 +824,9 @@ impl<A: RowApplication> Inner<A> {
         self.invalidate_context();
         let mut changed = false;
         for graph in self.graphs.values_mut() {
-            changed |= graph.exclude_revoked(revocations).map_err(credential)?;
+            changed |= Arc::make_mut(graph)
+                .exclude_revoked(revocations)
+                .map_err(credential)?;
         }
         changed |= self.prune_past_cut(revocations).await?;
         // A revoked signer's pulled states leave before any follow can
@@ -841,6 +886,7 @@ impl<A: RowApplication> Inner<A> {
             let Some(graph) = self.graphs.get_mut(&scope) else {
                 continue;
             };
+            let graph = Arc::make_mut(graph);
             if !prunable.is_empty() {
                 graph.remove_statements(&prunable).map_err(credential)?;
             }
@@ -869,7 +915,9 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             }
             if let Some(graph) = self.graphs.get_mut(&scope) {
-                graph.exclude_revoked(revocations).map_err(credential)?;
+                Arc::make_mut(graph)
+                    .exclude_revoked(revocations)
+                    .map_err(credential)?;
             }
             changed = true;
         }
@@ -1507,10 +1555,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .clone()
     }
     pub async fn tip_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
-        self.inner
+        let graph = self
+            .inner
             .lock(crate::replica::Class::Background)
             .await
-            .scope_graph(scope)
+            .scope_graph(scope)?;
+        Ok(Arc::unwrap_or_clone(graph))
     }
     /// Verified union; no row scan is needed for seals or forward bookmark
     /// moves. On a trusted node a seal or move whose terminal log entry
@@ -1531,11 +1581,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         self.check_statements(statements).await?;
         let batch = self.journal_tips(statements, false).await?;
-        let coordinated = self
+        let admitted = match self
             .coordinate_tip_statements(statements, false, false)
-            .await?;
-        self.admit_pending_tips(&coordinated.kept, Some(batch), &coordinated.deferred)
             .await
+        {
+            Ok(coordinated) => {
+                self.admit_pending_tips(&coordinated.kept, Some(batch), &coordinated.deferred)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        // A refused batch leaves the received journal's quota at once.
+        if let Err(Error::Rejected(_)) = &admitted {
+            self.forget_refused(batch, false).await?;
+        }
+        admitted
     }
     /// Leaves out of a received batch the statements a cut this replica
     /// holds refuses for good, and strips such acknowledgments from its
@@ -1567,7 +1627,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     inner.record_past_cut_ack(record.scope, ack).await?;
                 }
                 let graph = batch.entry(record.scope).or_insert_with(|| {
-                    let mut graph = graph.clone();
+                    let mut graph = TipGraph::clone(graph);
                     for statement in statements {
                         if !matches!(statement, TipStatement::Finality(_))
                             && statement.scope() == record.scope
@@ -1688,11 +1748,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if !exists.is_empty() || new.iter().any(|(known, _)| *known == id) {
                 continue;
             }
-            statement.append(
+            // Only a graph the batch changes is copied.
+            statement.append(Arc::make_mut(
                 graphs
                     .get_mut(&scope)
                     .ok_or_else(|| denied("unknown graph"))?,
-            );
+            ));
             new.push((id, statement));
         }
         if new.is_empty() {
@@ -1706,10 +1767,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(0);
         }
         // A finality record or a raised genesis minimum resolves again.
-        for graph in graphs.values_mut() {
-            graph
-                .exclude_revoked(&inner.config.revocations)
-                .map_err(credential)?;
+        let changed: BTreeSet<Scope> = new.iter().map(|(_, statement)| statement.scope()).collect();
+        for scope in &changed {
+            if let Some(graph) = graphs.get_mut(scope) {
+                Arc::make_mut(graph)
+                    .exclude_revoked(&inner.config.revocations)
+                    .map_err(credential)?;
+            }
         }
         for (_, statement) in &new {
             statement.verify(
@@ -1739,6 +1803,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let old_followed = inner.workspace.followed.clone();
         let result = transaction!(inner, |inner| {
             inner.invalidate_context();
+            // The ledgers stored now are seeded under the graphs found.
+            inner.track_seeded_ledgers(
+                &old_graphs,
+                old_tip,
+                old_followed.as_ref().map(|(scope, _)| *scope),
+            );
             inner.graphs = graphs.clone();
             inner.workspace.tip = old_tip;
             inner.node_author = old_author.clone();
@@ -1766,8 +1836,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .await?;
             }
-            if let Some(stage) = stage {
-                inner.record_schema_stage(stage).await?;
+            match stage {
+                Some(stage) => inner.record_schema_stage(stage).await?,
+                // A close published final needs no private relay any more.
+                None => {
+                    for (_, statement) in &new {
+                        if let TipStatement::Finality(record) = statement
+                            && coordinated::public_finality(
+                                inner.graph_for(record.scope)?,
+                                record.seal,
+                            )?
+                            .is_some()
+                        {
+                            inner.forget_relay(record.seal).await?;
+                        }
+                    }
+                }
             }
             // A head that arrived settles which earlier statements its cut leaves out.
             let revocations = inner.config.revocations.clone();
@@ -1802,6 +1886,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             inner.publication_fault(3)
         });
+        inner.untrack_seeded_ledgers();
         if let Err(error) = result {
             inner.invalidate_context();
             inner.graphs = old_graphs;
@@ -2210,15 +2295,26 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
+#[derive(PartialEq)]
 pub(super) enum PathEnd {
     Visible,
     Hidden,
     Cyclic,
 }
 /// See `Inner::frame_path`.
+#[derive(PartialEq)]
 pub(super) struct FramePath {
     bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
     end: PathEnd,
+}
+/// See `Inner::ledger_view`: each tip the walk passes, with how many of
+/// its frontiers bound that tip's frames, then the whole walk, and the
+/// followed path's seals.
+#[derive(PartialEq)]
+pub(super) struct LedgerView {
+    tips: Vec<(TipId, usize)>,
+    walk: FramePath,
+    seals: Vec<rocky_credentials::SignedSeal>,
 }
 impl FramePath {
     pub(super) fn admits(&self, author: u32, sequence: u64) -> Result<bool, Error> {

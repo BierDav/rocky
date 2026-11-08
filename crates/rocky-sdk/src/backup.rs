@@ -59,7 +59,7 @@ pub(crate) enum Recovery {
 
 // Archives are files a user moves elsewhere: natively streamed from disk; in
 // a browser, whole files in Rocky's storage (`rocky_platform::fs`).
-pub(crate) use archive::{open, write};
+pub(crate) use archive::{open, place, write};
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};
@@ -283,6 +283,35 @@ mod archive {
             identity,
             files,
         })
+    }
+
+    /// Puts the archive's files in `directory`, the identity record aside.
+    /// An earlier open of the database leaves its WAL and index, which must
+    /// never apply to the archive's file: the previous file and both go
+    /// first, durably. Until it is placed there is no database, and the
+    /// directory opens only by restoring or recovering again.
+    pub(crate) fn place(opened: &Opened, directory: &Path) -> Result<(), Failure> {
+        for (name, staged) in &opened.files {
+            if name == IDENTITY {
+                continue;
+            }
+            let target = directory.join(name);
+            if name == DATABASE {
+                for suffix in ["", "-wal", "-shm"] {
+                    let mut stale = target.clone().into_os_string();
+                    stale.push(suffix);
+                    match rocky_platform::fs::remove_file(PathBuf::from(stale)) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(error.into());
+                        }
+                        _ => {}
+                    }
+                }
+                rocky_platform::fs::sync_dir(directory)?;
+            }
+            rocky_platform::fs::rename(staged, target)?;
+        }
+        Ok(())
     }
 }
 

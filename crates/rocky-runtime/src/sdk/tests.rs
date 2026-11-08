@@ -260,3 +260,56 @@ async fn noisy_session_quota_and_close_preserve_other_sessions() {
     new.close().unwrap();
     replica.close().await.unwrap();
 }
+/// An update too large for a frame once encoded ends its subscription
+/// rather than being skipped while the subscription waits on: the next
+/// `next` answers closed, and subscribing again reads current rows.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_update_larger_than_a_frame_ends_its_subscription() {
+    let dir = Scratch::new().await;
+    let replica = open(&dir).await;
+    let session = Session::new(replica.clone());
+    let subscribe = |sql| Request::Subscribe { query: query(sql) };
+    let id = ok(call(&session, subscribe("SELECT note FROM drafts")).await)["subscription"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let next = || Request::Next {
+        subscription: id.clone(),
+    };
+    let mutate = |index: u16, payload: Vec<u8>| {
+        let mut handle = [0; 32];
+        handle[..2].copy_from_slice(&index.to_le_bytes());
+        Request::Mutate {
+            handle,
+            entity: None,
+            payload,
+            baseline: None,
+        }
+    };
+    // Within the read's byte budget, but JSON spells each byte in six.
+    for index in 0..200 {
+        ok(call(&session, mutate(index, vec![1; 1000])).await);
+    }
+    let oversized = call(&session, next()).await;
+    assert!(
+        matches!(&oversized, Reply::Error { error, .. } if error.code == "quota"),
+        "{oversized:?}"
+    );
+    ok(call(&session, mutate(200, b"small".to_vec())).await);
+    let ended = call(&session, next()).await;
+    assert!(
+        matches!(&ended, Reply::Error { error, .. } if error.code == "closed"),
+        "{ended:?}"
+    );
+    let id = ok(call(
+        &session,
+        subscribe("SELECT note FROM drafts WHERE length(note)<100"),
+    )
+    .await)["subscription"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let current = ok(call(&session, Request::Next { subscription: id }).await);
+    assert_eq!(current["rows"][0][0]["value"], "small");
+    replica.close().await.unwrap();
+}

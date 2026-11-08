@@ -13,17 +13,54 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_row_origins(id INTEGER PRIMARY KEY AUTOINCREMENT,origin BLOB NOT NULL UNIQUE)",
 ];
 
+/// Entries an interned cache keeps; a full one starts over from the file,
+/// so long intake holds a bounded dictionary.
+pub(crate) const INTERNED: usize = if cfg!(test) { 16 } else { 4096 };
+
+/// File-local ids of one interned kind and their values, both ways.
+pub(super) struct Interned<K, V> {
+    ids: HashMap<K, i64>,
+    values: HashMap<i64, V>,
+}
+impl<K, V> Default for Interned<K, V> {
+    fn default() -> Self {
+        Self {
+            ids: HashMap::new(),
+            values: HashMap::new(),
+        }
+    }
+}
+impl<K: std::hash::Hash + Eq, V> Interned<K, V> {
+    pub(super) fn id(&self, key: &K) -> Option<i64> {
+        self.ids.get(key).copied()
+    }
+    pub(super) fn value(&self, id: i64) -> Option<&V> {
+        self.values.get(&id)
+    }
+    pub(super) fn insert(&mut self, key: K, id: i64, value: V) {
+        if self.ids.len().max(self.values.len()) >= INTERNED {
+            self.ids.clear();
+            self.values.clear();
+        }
+        self.ids.insert(key, id);
+        self.values.insert(id, value);
+    }
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.ids.len().max(self.values.len())
+    }
+}
+
+/// Field ids follow the installed schemas; the other kinds grow with the
+/// stored rows and are bounded.
 #[derive(Default)]
 pub(super) struct Dictionary {
     fields: HashMap<Commitment, i64>,
     names: HashMap<i64, Commitment>,
     texts: HashMap<Commitment, String>,
-    creation_ids: HashMap<Hash, i64>,
-    creations: HashMap<i64, Hash>,
-    origins: HashMap<i64, moves::Origin>,
-    origin_ids: HashMap<Vec<u8>, i64>,
-    shape_ids: BTreeMap<Vec<Commitment>, i64>,
-    shapes: HashMap<i64, Vec<Commitment>>,
+    creations: Interned<Hash, Hash>,
+    origins: Interned<Vec<u8>, moves::Origin>,
+    shapes: Interned<Vec<Commitment>, Vec<Commitment>>,
     /// Interned scope ids by encoded scope; ids are never reassigned.
     scope_ids: HashMap<Vec<u8>, i64>,
 }
@@ -69,7 +106,29 @@ impl<A> Inner<A> {
         self.dictionary().scope_ids.get(scope).copied()
     }
     pub(super) fn cache_scope_id(&self, scope: Vec<u8>, id: i64) {
-        self.dictionary().scope_ids.insert(scope, id);
+        let mut dictionary = self.dictionary();
+        if dictionary.scope_ids.len() >= INTERNED {
+            dictionary.scope_ids.clear();
+        }
+        dictionary.scope_ids.insert(scope, id);
+    }
+    /// The entries of the largest bounded kind, author sets included.
+    #[cfg(test)]
+    pub(crate) fn interned_entries(&self) -> usize {
+        let dictionary = self.dictionary();
+        [
+            dictionary.creations.len(),
+            dictionary.origins.len(),
+            dictionary.shapes.len(),
+            dictionary.scope_ids.len(),
+            self.author_sets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or_default()
     }
 }
 
@@ -192,7 +251,7 @@ impl<A: RowApplication> Inner<A> {
 
     async fn origin_number(&self, origin: moves::Origin, allocate: bool) -> Result<i64, Error> {
         let bytes = encode(&origin)?;
-        if let Some(id) = self.dictionary().origin_ids.get(&bytes).copied() {
+        if let Some(id) = self.dictionary().origins.id(&bytes) {
             return Ok(id);
         }
         let mut rows = self
@@ -230,14 +289,12 @@ impl<A: RowApplication> Inner<A> {
             }
             None => return Err(Error::Corrupt("stored creation origin is missing".into())),
         };
-        let mut dictionary = self.dictionary();
-        dictionary.origins.insert(id, origin);
-        dictionary.origin_ids.insert(bytes, id);
+        self.dictionary().origins.insert(bytes, id, origin);
         Ok(id)
     }
 
     async fn origin(&self, id: i64) -> Result<moves::Origin, Error> {
-        if let Some(origin) = self.dictionary().origins.get(&id).cloned() {
+        if let Some(origin) = self.dictionary().origins.value(id).cloned() {
             return Ok(origin);
         }
         let mut rows = self
@@ -250,9 +307,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("unknown stored creation origin".into()))?
             .get(0)?;
         let origin = decode::<moves::Origin>(&bytes)?;
-        let mut dictionary = self.dictionary();
-        dictionary.origins.insert(id, origin.clone());
-        dictionary.origin_ids.insert(bytes, id);
+        self.dictionary().origins.insert(bytes, id, origin.clone());
         Ok(origin)
     }
 

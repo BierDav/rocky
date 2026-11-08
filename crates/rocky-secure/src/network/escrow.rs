@@ -12,6 +12,9 @@ use rocky_credentials::{CarriedEscrow, VouchedEscrow};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Slot = (ResourceScope, KeyEpoch);
+/// Credential bytes one session may copy into reconstructed vouches: each
+/// carried record clones its whole referenced chain.
+const RECONSTRUCTED_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum EscrowMessage {
@@ -24,6 +27,11 @@ pub(super) enum EscrowMessage {
 pub(super) struct EscrowTable {
     sent: BTreeSet<Slot>,
     received: BTreeMap<Slot, Vec<VouchedEscrow>>,
+    /// Carried records seen, by digest: a repeat is neither stored nor charged.
+    seen: BTreeSet<Commitment>,
+    /// Encoded length of each referenced chain, measured once.
+    chain_bytes: BTreeMap<Commitment, usize>,
+    reconstructed: usize,
     /// Records sent ahead of the genuine ones, as a forging peer would.
     #[cfg(test)]
     forged: Vec<VouchedEscrow>,
@@ -73,15 +81,36 @@ impl NativeSession {
         Ok(())
     }
     /// Holds carried records until frames of their epoch arrive; the
-    /// session's byte budget bounds them, and none is judged first-come.
+    /// session's byte budget and the reconstruction quota bound them, and
+    /// none is judged first-come.
     pub(super) fn learn_escrow(&mut self, message: EscrowMessage) -> Result<(), Error> {
         let EscrowMessage::Carry { records } = message;
         for record in records {
+            if !self.escrow.seen.insert(rocky_core::commitment(
+                "rocky.carried-escrow.v1",
+                &encode(&record)?,
+            )) {
+                continue;
+            }
             let chain = self
                 .chains
                 .received
                 .get(&record.chain_digest())
                 .ok_or_else(|| denied("incomplete escrow chain"))?;
+            let bytes = match self.escrow.chain_bytes.get(&chain.digest()) {
+                Some(bytes) => *bytes,
+                None => {
+                    let bytes = encode(chain)?.len();
+                    self.escrow.chain_bytes.insert(chain.digest(), bytes);
+                    bytes
+                }
+            };
+            self.escrow.reconstructed = self
+                .escrow
+                .reconstructed
+                .checked_add(bytes)
+                .filter(|total| *total <= RECONSTRUCTED_BYTES)
+                .ok_or_else(|| denied("escrow reconstruction quota"))?;
             let record = record
                 .complete(chain.credentials().clone())
                 .map_err(credential)?;
@@ -109,5 +138,65 @@ impl NativeSession {
     #[cfg(test)]
     pub(crate) fn forge_escrow(&mut self, records: Vec<VouchedEscrow>) {
         self.escrow.forged = records;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocky_credentials::RootEscrow;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn records_sharing_one_chain_are_charged_per_reconstruction() {
+        let f = crate::tests::Fixture::new();
+        let node = PrivateKey::new();
+        let chain = crate::wire::Chain::new(f.credentials(&node, f.full())).unwrap();
+        let bytes = encode(&chain).unwrap().len();
+        let channels = link::channels::tests::channels();
+        let mut session = channels
+            .accept(link::Frame {
+                channel: 2,
+                through: Vec::new(),
+                direction: true,
+                message: link::Message::Channel(link::channels::Packet::Open { generation: 0 }),
+            })
+            .unwrap()
+            .unwrap();
+        session.learn_chains(ChainMessage::Carry {
+            chains: vec![chain.clone()],
+        });
+        let record = RootEscrow::seal(PrivateKey::new().public_key(), [9; 32], &[7; 32]).unwrap();
+        let slot = (f.public, KeyEpoch::new(1, &[7; 32]));
+        let carry = |signed_at| {
+            VouchedEscrow::sign(
+                &node,
+                chain.credentials().clone(),
+                slot,
+                record.clone(),
+                signed_at,
+            )
+            .unwrap()
+            .carried()
+            .unwrap()
+        };
+        let carried = |records| EscrowMessage::Carry { records };
+        // A repeated record is neither kept nor charged again.
+        session
+            .learn_escrow(carried(vec![carry(0), carry(0)]))
+            .unwrap();
+        assert_eq!(session.escrow.reconstructed, bytes);
+        assert_eq!(session.escrow.received[&slot].len(), 1);
+        let fit = (RECONSTRUCTED_BYTES / bytes) as u64;
+        session
+            .learn_escrow(carried((1..fit).map(carry).collect()))
+            .unwrap();
+        assert_eq!(session.escrow.reconstructed as u64, fit * bytes as u64);
+        assert!(
+            session
+                .learn_escrow(carried(vec![carry(fit)]))
+                .unwrap_err()
+                .to_string()
+                .contains("escrow reconstruction quota")
+        );
     }
 }

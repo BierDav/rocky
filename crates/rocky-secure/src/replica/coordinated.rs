@@ -8,6 +8,7 @@ use rocky_core::{DomainLog, Scope, TipLog, coordinated_chain};
 mod finality;
 pub(super) mod relay;
 pub use relay::StagedCloseStatus;
+pub(in crate::replica) use relay::public_finality;
 pub(super) mod statements;
 mod terminal;
 pub use statements::Refusal;

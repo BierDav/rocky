@@ -628,12 +628,11 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Pins journal changes to the revision that this transaction commits.
     pub(crate) async fn finish_admission_revision(&self) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "UPDATE secure_read_epoch SET epoch=epoch+1 WHERE id=1 AND total_changes()>?",
-                [self.changes],
-            )
-            .await?;
+        if self.conn.connection().total_changes()? > self.changes {
+            self.conn
+                .execute("UPDATE secure_read_epoch SET epoch=epoch+1 WHERE id=1", ())
+                .await?;
+        }
         let (context, mut head) = self.admission_context().await?;
         let revision = self.stored_revision().await?;
         if head.revision != revision {

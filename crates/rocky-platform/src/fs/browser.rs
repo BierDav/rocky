@@ -228,6 +228,11 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+/// Every change is durable when it returns; there is no directory to sync.
+pub fn sync_dir(directory: impl AsRef<Path>) -> io::Result<()> {
+    key(directory.as_ref()).map(drop)
+}
+
 /// Directories are prefixes; there is nothing to create.
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     key(path.as_ref()).map(drop)

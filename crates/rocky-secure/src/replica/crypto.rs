@@ -188,7 +188,7 @@ impl Cache {
         let key = (
             digest,
             publisher,
-            rocky_core::commitment("rocky.verified-chain-revocations.v1", &encode(revocations)?),
+            revocations.fingerprint().map_err(credential)?,
             families.digest(),
         );
         let mut cache = self

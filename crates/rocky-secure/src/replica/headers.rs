@@ -82,7 +82,7 @@ impl HeaderScan {
             tables,
             authority: inner.authority,
             tip: inner.workspace.tip,
-            graph: graph_shape(inner.graphs.get(&domain)),
+            graph: graph_shape(inner.graphs.get(&domain).map(Arc::as_ref)),
             table: 0,
             after: Vec::new(),
         })
@@ -91,7 +91,7 @@ impl HeaderScan {
     pub(super) fn check<A: RowApplication>(&self, inner: &Inner<A>) -> Result<(), Error> {
         if self.authority != inner.authority
             || self.tip != inner.workspace.tip
-            || self.graph != graph_shape(inner.graphs.get(&self.domain))
+            || self.graph != graph_shape(inner.graphs.get(&self.domain).map(Arc::as_ref))
             || self
                 .tables
                 .iter()

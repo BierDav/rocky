@@ -159,7 +159,7 @@ impl<A: RowApplication> Inner<A> {
             self.require_migration_endorsement(stage.publication)
                 .await?;
         }
-        let mut graph = self.scope_graph(stage.scope)?;
+        let mut graph = Arc::unwrap_or_clone(self.scope_graph(stage.scope)?);
         if let Some(proof) = proof {
             graph
                 .verify_finality(

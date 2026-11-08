@@ -54,6 +54,10 @@ pub const CACHED: usize = 64;
 /// Inbound streams one connection has in flight; further streams wait in
 /// QUIC, so no single peer fills the shared queue.
 pub const STREAMS_PER_CONNECTION: usize = 4;
+/// An inbound connection with no stream in flight this long is closed, so
+/// idle cached connections cannot keep holding `CONNECTIONS`. A dialer reuses
+/// a connection only within half of it since its last stream opened.
+pub const IDLE: Duration = Duration::from_secs(30);
 /// Close codes of connections Rocky refuses.
 const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
@@ -65,7 +69,34 @@ struct QuicStream {
     _connection: Connection,
     io: Join<RecvStream, SendStream>,
     /// An inbound stream's share of its connection.
-    _slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    _slot: Option<Slot>,
+}
+/// Releases its connection's stream slot and marks it idle when the last ends.
+struct Slot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    active: Arc<watch::Sender<usize>>,
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.active
+            .send_modify(|active| *active = active.saturating_sub(1));
+    }
+}
+/// Completes once no stream has been in flight for `limit`.
+async fn idle(activity: &mut watch::Receiver<usize>, limit: Duration) {
+    loop {
+        if activity.wait_for(|active| *active == 0).await.is_err() {
+            return std::future::pending().await;
+        }
+        tokio::select! {
+            () = rocky_platform::time::sleep(limit) => return,
+            changed = activity.changed() => {
+                if changed.is_err() {
+                    return std::future::pending().await;
+                }
+            }
+        }
+    }
 }
 impl AsyncRead for QuicStream {
     fn poll_read(
@@ -252,7 +283,9 @@ struct Shared {
     restart: Mutex<Option<(Options, [u8; 32])>>,
     sender: mpsc::Sender<(Protocol, Stream)>,
     incoming: Mutex<mpsc::Receiver<(Protocol, Stream)>>,
-    connections: Mutex<HashMap<(EndpointId, Protocol), Connection>>,
+    /// Dialed connections and when each last opened a stream.
+    connections:
+        Mutex<HashMap<(EndpointId, Protocol), (Connection, rocky_platform::time::Instant)>>,
     link_connections: std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
     inbound: Semaphore,
     inbound_links: Semaphore,
@@ -475,6 +508,8 @@ impl ProtocolHandler for Handler {
         }
         // Duplicate link handshakes must reach the service's tie-break/busy reply.
         let slots = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
+        let (active, mut activity) = watch::channel(0);
+        let active = Arc::new(active);
         loop {
             let accepted = tokio::select! {
                 accepted = async {
@@ -485,6 +520,10 @@ impl ProtocolHandler for Handler {
                     connection.close(CLOSED.into(), b"closed");
                     break;
                 }
+                () = idle(&mut activity, IDLE) => {
+                    connection.close(CLOSED.into(), b"idle");
+                    break;
+                }
             };
             let (Ok(slot), Ok((send, recv))) = accepted else {
                 break;
@@ -493,11 +532,15 @@ impl ProtocolHandler for Handler {
                 attachment.refuse(&connection, CLOSED, b"no service");
                 break;
             }
+            active.send_modify(|active| *active += 1);
             let inbound = Stream::with_paths(
                 QuicStream {
                     _connection: connection.clone(),
                     io: tokio::io::join(recv, send),
-                    _slot: Some(slot),
+                    _slot: Some(Slot {
+                        _permit: slot,
+                        active: active.clone(),
+                    }),
                 },
                 Arc::new(Paths(connection.clone())),
             );
@@ -601,12 +644,18 @@ impl Transport for Attachment {
                     let address: EndpointAddr = serde_json::from_str(address)?;
                     let key = (address.id, protocol);
                     let cached = self.0.connections.lock().await.get(&key).cloned();
+                    // The acceptor closes a connection idle for `IDLE`; never race it.
                     if protocol != Protocol::Link
-                        && let Some(connection) = cached
+                        && let Some((connection, used)) = cached
+                        && used.elapsed() < IDLE / 2
                         && connection.close_reason().is_none()
                         && let Ok(Ok(pair)) =
                             rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await
                     {
+                        self.0.connections.lock().await.insert(
+                            key,
+                            (connection.clone(), rocky_platform::time::Instant::now()),
+                        );
                         return Ok(stream(connection, pair));
                     }
                     let dial = |address: EndpointAddr| {
@@ -638,11 +687,16 @@ impl Transport for Attachment {
                     let pair =
                         rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await??;
                     let mut connections = self.0.connections.lock().await;
-                    connections.retain(|_, connection| connection.close_reason().is_none());
+                    connections.retain(|_, (connection, used)| {
+                        connection.close_reason().is_none() && used.elapsed() < IDLE / 2
+                    });
                     if connections.len() >= CACHED {
                         connections.clear();
                     }
-                    connections.insert(key, connection.clone());
+                    connections.insert(
+                        key,
+                        (connection.clone(), rocky_platform::time::Instant::now()),
+                    );
                     Ok(stream(connection, pair))
                 },
                 span.clone(),
@@ -653,7 +707,20 @@ impl Transport for Attachment {
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
-        Box::pin(async { self.0.incoming.lock().await.recv().await })
+        Box::pin(async {
+            // `close` takes this lock after marking the attachment closed.
+            let mut closed = self.0.closed.subscribe();
+            let mut incoming = tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => return None,
+                incoming = self.0.incoming.lock() => incoming,
+            };
+            tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => None,
+                accepted = incoming.recv() => accepted,
+            }
+        })
     }
     fn listen(&self, listening: bool) {
         self.0.listening.store(listening, Ordering::SeqCst);
@@ -676,7 +743,7 @@ impl Transport for Attachment {
             }
         }
         if let Ok(mut connections) = self.0.connections.try_lock() {
-            connections.retain(|(id, _), connection| {
+            connections.retain(|(id, _), (connection, _)| {
                 let keep = *id != address.id;
                 if !keep {
                     connection.close(CLOSED.into(), b"forgotten");
@@ -717,7 +784,7 @@ impl Transport for Attachment {
                 finder.close();
             }
             self.0.incoming.lock().await.close();
-            for (_, connection) in self.0.connections.lock().await.drain() {
+            for (_, (connection, _)) in self.0.connections.lock().await.drain() {
                 connection.close(CLOSED.into(), b"closed");
             }
             for link in self
@@ -906,5 +973,42 @@ impl Connector for Options {
         secret: [u8; 32],
     ) -> BoxFuture<'_, Result<Arc<dyn Transport>, Failure>> {
         Box::pin(async move { Ok(Options::start(self, secret).await?.transport()) })
+    }
+}
+
+// Needs tokio's paused clock.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_idles_only_after_its_last_stream_ends() {
+        let (active, mut activity) = watch::channel(0);
+        let active = Arc::new(active);
+        let slots = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
+        let open = || {
+            let slots = slots.clone();
+            let active = active.clone();
+            async move {
+                active.send_modify(|active| *active += 1);
+                Slot {
+                    _permit: slots.acquire_owned().await.unwrap(),
+                    active,
+                }
+            }
+        };
+        let start = rocky_platform::time::Instant::now();
+        let first = open().await;
+        let streams = async {
+            // A long stream keeps its connection; one opened while idle restarts the wait.
+            rocky_platform::time::sleep(IDLE * 3).await;
+            drop(first);
+            rocky_platform::time::sleep(IDLE / 2).await;
+            let second = open().await;
+            rocky_platform::time::sleep(IDLE / 2).await;
+            drop(second);
+        };
+        tokio::join!(idle(&mut activity, IDLE), streams);
+        assert_eq!(start.elapsed(), IDLE * 5);
     }
 }

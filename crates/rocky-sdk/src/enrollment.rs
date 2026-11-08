@@ -3228,8 +3228,9 @@ impl Settings {
                 settings.issuers.push(node);
             }
         }
+        // The intent stays until the database opens: a failed install is
+        // retried with the same device keys.
         settings.save(path)?;
-        rocky_platform::fs::remove_file(intent_path)?;
         Ok(settings)
     }
     /// Stores a reader key and lists its epoch. A held epoch keeps its key.

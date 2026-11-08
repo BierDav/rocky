@@ -2509,22 +2509,31 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         }
         if replayed {
-            let rows = self
-                .stored_images("secure_replayed_staged", id, None)
-                .await?;
-            self.check_base_identities(scope, statement.tip, &rows, &statement.identities)
-                .map_err(|_| Error::Corrupt("a staged row exceeds its permanent mark".into()))?;
+            // A page at a time: the scope's rows need not fit in memory.
+            let ordinals = self.stored_field_ordinals().await?;
+            let mut after = None;
+            loop {
+                let rows = self
+                    .stored_page("secure_replayed_staged", id, after, &ordinals)
+                    .await?;
+                let Some((last, _)) = rows.last() else {
+                    break;
+                };
+                after = Some(*last);
+                self.check_base_identities(scope, statement.tip, &rows, &statement.identities)
+                    .map_err(|_| {
+                        Error::Corrupt("a staged row exceeds its permanent mark".into())
+                    })?;
+            }
         }
         let reapply = self.supersede(scope, &statement, &mut report).await?;
         if replayed {
             // The scope starts over from the base's rows; operations it
             // applied replay again on top.
-            let rows = self
-                .stored_images("secure_replayed_staged", id, None)
-                .await?;
-            self.replace_replayed(scope, statement.tip, &rows).await?;
+            self.clear_replayed(scope).await?;
+            self.restore_staged(scope, statement.tip, id).await?;
             self.cover_kept(scope, id, &statement).await?;
-            self.store_base(id, &rows, None).await?;
+            self.store_staged_base(id).await?;
         }
         let blob = encode(&scope)?;
         if rewrite {
@@ -2714,9 +2723,9 @@ impl<A: RowApplication> Inner<A> {
                     None => report.reapplied.push(hash),
                 },
                 incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
-                incoming::Outcome::Waiting(_) | incoming::Outcome::Ahead(_) => {
-                    report.pending.push(hash)
-                }
+                incoming::Outcome::Waiting(_)
+                | incoming::Outcome::Blocked(_)
+                | incoming::Outcome::Ahead(_) => report.pending.push(hash),
             }
         }
         self.reseed_ledger(scope, id).await?;

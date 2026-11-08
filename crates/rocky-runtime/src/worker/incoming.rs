@@ -834,6 +834,8 @@ where
                 | Fault::SnapshotAtFlush(_)
                 | Fault::CheckpointFrames(_) => {}
                 Fault::FailBeforeCommit => return Err(Error::InjectedFailure),
+                // Taken by the follow-up pass after the write.
+                Fault::FailFollowing => self.fault = Some(Fault::FailFollowing),
                 Fault::RetryBeforeCommit(n) if n > 0 => {
                     self.fault = Some(Fault::RetryBeforeCommit(n - 1));
                     return Err(Error::from(crate::sqlite::Error::Busy("injected".into())));

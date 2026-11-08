@@ -109,11 +109,7 @@ pub(crate) async fn recover(
     fault::check(directory, fault::Stage::Saved)?;
     // Until placed, the files were never opened: they are put in place again.
     if stage == Some(Recovery::Placing) {
-        for (name, staged) in &opened.files {
-            if name != "identity.json" {
-                rocky_platform::fs::rename(staged, directory.join(name))?;
-            }
-        }
+        crate::backup::place(&opened, directory)?;
         fault::check(directory, fault::Stage::Moved)?;
         mark(
             directory,
@@ -131,7 +127,7 @@ pub(crate) async fn recover(
 
 /// Deterministic interruptions of a recovery or a restore, for their crash
 /// sweeps. A restore stops at `Enrolled` and at the stages from `Rebound`
-/// to `Attached`, which both open.
+/// to `Attached`, which both open; any installation at `Started`.
 pub(crate) mod fault {
     use crate::Failure;
     use std::path::Path;
@@ -159,6 +155,8 @@ pub(crate) mod fault {
         /// The root revoked the lost identities the store names, not yet
         /// those granted before the recovery that it does not.
         Named,
+        /// The node started; the database is not handed out yet.
+        Started,
     }
     /// The directories and stages at which a recovery stops once.
     /// Process-wide, since each database runs on a thread of its own;

@@ -5,11 +5,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_row_authors(id INTEGER PRIMARY KEY AUTOINCREMENT,authors BLOB NOT NULL UNIQUE)",
 ];
 
-#[derive(Default)]
-pub(super) struct Cache {
-    ids: HashMap<Vec<u8>, i64>,
-    sets: HashMap<i64, stamp_authors::Authors>,
-}
+pub(super) type Cache = records::Interned<Vec<u8>, stamp_authors::Authors>;
 
 impl Materialized {
     pub(super) fn trim_authors(&mut self) -> Result<(), Error> {
@@ -39,7 +35,7 @@ impl<A: RowApplication> Inner<A> {
         allocate: bool,
     ) -> Result<i64, Error> {
         let bytes = encode(authors)?;
-        if let Some(id) = self.author_sets().ids.get(&bytes).copied() {
+        if let Some(id) = self.author_sets().id(&bytes) {
             return Ok(id);
         }
         let mut rows = self
@@ -77,13 +73,11 @@ impl<A: RowApplication> Inner<A> {
             }
             None => return Err(Error::Corrupt("stored row signer set missing".into())),
         };
-        let mut cache = self.author_sets();
-        cache.ids.insert(bytes, id);
-        cache.sets.insert(id, authors.clone());
+        self.author_sets().insert(bytes, id, authors.clone());
         Ok(id)
     }
     pub(super) async fn stored_author_set(&self, id: i64) -> Result<stamp_authors::Authors, Error> {
-        if let Some(authors) = self.author_sets().sets.get(&id).cloned() {
+        if let Some(authors) = self.author_sets().value(id).cloned() {
             return Ok(authors);
         }
         let mut rows = self
@@ -96,9 +90,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("unknown row signer set".into()))?
             .get(0)?;
         let authors: stamp_authors::Authors = decode(&bytes)?;
-        let mut cache = self.author_sets();
-        cache.ids.insert(bytes, id);
-        cache.sets.insert(id, authors.clone());
+        self.author_sets().insert(bytes, id, authors.clone());
         Ok(authors)
     }
 }

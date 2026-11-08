@@ -4,18 +4,47 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub use std::fs::{
-    copy, create_dir_all, read, read_to_string, remove_dir_all, remove_file, rename, write,
-};
+pub use std::fs::{copy, create_dir_all, read, read_to_string, remove_dir_all, remove_file, write};
 
-/// Creates `path` and its parents, owner-only where the platform has modes.
+/// The directory holding `path`; `.` for a bare file name.
+fn parent(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Makes the entries of `directory` durable: a file created, renamed or
+/// removed in it survives a crash. Windows has no directory to sync.
+pub fn sync_dir(directory: impl AsRef<Path>) -> io::Result<()> {
+    let directory = directory.as_ref();
+    #[cfg(test)]
+    tests::SYNCED.with(|synced| synced.borrow_mut().push(directory.to_path_buf()));
+    #[cfg(unix)]
+    File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
+}
+
+/// Creates `path` and its parents, owner-only where the platform has modes,
+/// durable on return.
 pub fn create_private_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(());
+    }
+    create_private_dir_all(parent(path))?;
     let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
+    match builder.create(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        created => {
+            created?;
+            sync_dir(parent(path))
+        }
+    }
 }
 
 /// Replaces `path` atomically with owner-only `bytes`, durable on return.
@@ -30,12 +59,17 @@ pub fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(tmp, path)?;
-    #[cfg(unix)]
-    File::open(
-        path.parent()
-            .ok_or_else(|| io::Error::other("missing parent"))?,
-    )?
-    .sync_all()?;
+    sync_dir(parent(path))
+}
+
+/// Renames `from` to `to`, replacing it, durable on return.
+pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    std::fs::rename(from, to)?;
+    sync_dir(parent(to))?;
+    if parent(from) != parent(to) {
+        sync_dir(parent(from))?;
+    }
     Ok(())
 }
 
@@ -63,24 +97,25 @@ pub fn exists(path: impl AsRef<Path>) -> bool {
 /// with `AlreadyExists`, so the first of several writers wins.
 pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        create_private_dir_all(parent)?;
-    }
+    create_private_dir_all(parent(path))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    sync_dir(parent(path))
 }
 
 /// Replaces the database file at `path` with `bytes`, durable on return,
 /// where SQLite opens it.
 pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+    let path = path.as_ref();
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    sync_dir(parent(path))
 }
 
 /// The length of the file at `path`.
@@ -156,5 +191,39 @@ impl Scratch {
     }
     pub fn path(&self) -> &Path {
         self.0.path()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// The directories this thread synced, in order.
+        pub(super) static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+    fn synced() -> Vec<PathBuf> {
+        SYNCED.with(RefCell::take)
+    }
+
+    #[tokio::test]
+    async fn new_and_renamed_files_sync_their_directories() -> io::Result<()> {
+        let scratch = Scratch::new().await;
+        let root = scratch.path();
+        create_new(root.join("a/b/new"), b"new")?;
+        // The new directories' entries too, outermost first.
+        assert_eq!(
+            synced(),
+            [root.to_path_buf(), root.join("a"), root.join("a/b")]
+        );
+        write_database(root.join("db"), b"db")?;
+        assert_eq!(synced(), [root.to_path_buf()]);
+        rename(root.join("a/b/new"), root.join("a/moved"))?;
+        assert_eq!(synced(), [root.join("a"), root.join("a/b")]);
+        write_private(root.join("private"), b"private")?;
+        assert_eq!(synced(), [root.to_path_buf()]);
+        assert_eq!(read(root.join("a/moved"))?, b"new");
+        Ok(())
     }
 }

@@ -185,3 +185,46 @@ async fn a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_id
     }
     lost.owner.close().await
 }
+
+/// A crash during the open that rebinds a restored file leaves its WAL
+/// behind. Restoring again replaces the file and never applies that WAL.
+// Needs a native file system and a raw connection to it.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn a_restore_resumed_after_a_crashed_open_drops_its_stale_wal() -> Result<(), Failure> {
+    let root = Scratch::new().await;
+    let hub = Arc::new(Hub::default());
+    let lost = lose_a_member(&hub, root.path()).await?;
+    let directory = root.path().join("crashed");
+    STOPS
+        .lock()
+        .map_err(|_| "poisoned")?
+        .push((directory.clone(), Stage::Rebound));
+    let config = Configuration::new(&directory, &schema()?)?
+        .network(Network::Owned(hub.connector("crashed")));
+    let invitation = invite(&lost.owner).await?;
+    let stopped = config.restore_archive(&lost.archive, &invitation).await;
+    assert!(stopped.is_err(), "restored past the stop");
+    // The rebound file and a WAL of its own, as a crash would leave them.
+    let database = directory.join("rocky.sqlite");
+    let wal = directory.join("rocky.sqlite-wal");
+    let crashed = {
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        connection.execute_batch("CREATE TABLE stale(x); INSERT INTO stale VALUES(1);")?;
+        std::fs::read(&wal)?
+    };
+    std::fs::write(&wal, crashed)?;
+
+    let opened = config.restore_archive(&lost.archive, &invitation).await?;
+    restored_works(&lost.owner, &opened.database, "resumed").await?;
+    opened.database.close().await?;
+    let connection = rusqlite::Connection::open(&database)?;
+    let stale: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name='stale'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(stale, 0, "the stale WAL applied to the restored file");
+    lost.owner.close().await
+}

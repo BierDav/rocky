@@ -5,7 +5,7 @@ const MAX_QUERIES: usize = 1024;
 const MAX_BYTES: usize = 1024 * 1024;
 
 pub(in crate::replica) struct RefreshGraphContext<'a> {
-    graphs: &'a BTreeMap<Scope, TipGraph>,
+    graphs: &'a BTreeMap<Scope, Arc<TipGraph>>,
     target: TipId,
     active: BTreeMap<(Scope, TipId), bool>,
     structural: BTreeMap<(Scope, TipId), bool>,
@@ -22,7 +22,10 @@ pub(in crate::replica) struct RefreshGraphContext<'a> {
     abandoned_queries: usize,
 }
 impl<'a> RefreshGraphContext<'a> {
-    pub(in crate::replica) fn new(graphs: &'a BTreeMap<Scope, TipGraph>, target: TipId) -> Self {
+    pub(in crate::replica) fn new(
+        graphs: &'a BTreeMap<Scope, Arc<TipGraph>>,
+        target: TipId,
+    ) -> Self {
         Self {
             graphs,
             target,
@@ -44,6 +47,7 @@ impl<'a> RefreshGraphContext<'a> {
     fn graph(&self, scope: Scope) -> Result<&'a TipGraph, Error> {
         self.graphs
             .get(&scope)
+            .map(Arc::as_ref)
             .ok_or_else(|| denied("unknown tip graph"))
     }
     // Include estimated B-tree overhead as well as owned frontier capacities.

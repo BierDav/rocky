@@ -59,12 +59,13 @@ pub(super) async fn singles(
     }
     reports
 }
-/// Every authoritative SQL table; scratch and SQLite allocation counters are not evidence.
+/// Every authoritative SQL table; scratch, SQLite allocation counters and
+/// the read epoch, which any committed change advances, are not evidence.
 pub(in crate::tests) async fn snapshot<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
-    let tables = rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name<>'secure_checkpoint_scratch' AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap();
+    let tables = rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT IN ('secure_checkpoint_scratch','secure_read_epoch') AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap();
     let mut state = Vec::new();
     for table in tables {
         let SqlValue::Text(name) = &table[0] else {

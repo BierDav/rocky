@@ -136,9 +136,14 @@ fn range_write(log: bool, remove: bool) -> String {
         .collect::<Vec<_>>()
         .join(" AND ");
     let x = format!("{r}.{x}");
+    // Ranges are disjoint and never adjacent: none before the last one
+    // starting at or before x reaches x, so each statement seeks from it.
+    let from = format!(
+        "start>=coalesce((SELECT max(start) FROM {table} WHERE {bucket} AND start<=({x})),({x}))"
+    );
     if !remove {
         return format!(
-            "INSERT OR REPLACE INTO {table}({columns},start,end) SELECT {values},min(coalesce(min(start),{x}),{x}),max(coalesce(max(end),{x}),{x}) FROM {table} WHERE {bucket} AND end>=({x})-1 AND start<=({x})+1; DELETE FROM {table} WHERE {bucket} AND start>({x}) AND start<=({x})+1;"
+            "INSERT OR REPLACE INTO {table}({columns},start,end) SELECT {values},min(coalesce(min(start),{x}),{x}),max(coalesce(max(end),{x}),{x}) FROM {table} WHERE {bucket} AND {from} AND end>=({x})-1 AND start<=({x})+1; DELETE FROM {table} WHERE {bucket} AND start>({x}) AND start<=({x})+1;"
         );
     }
     let duplicate = if log {
@@ -150,7 +155,7 @@ fn range_write(log: bool, remove: bool) -> String {
         "NOT EXISTS(SELECT 1 FROM secure_position_sources WHERE {duplicate} AND NOT(hash=OLD.hash AND kind=OLD.kind))"
     );
     format!(
-        "INSERT INTO {table}({columns},start,end) SELECT {values},({x})+1,end FROM {table} WHERE {bucket} AND start<=({x}) AND end>({x}) AND {guard}; UPDATE {table} SET end=({x})-1 WHERE {bucket} AND start<({x}) AND end>=({x}) AND {guard}; DELETE FROM {table} WHERE {bucket} AND start=({x}) AND {guard};"
+        "INSERT INTO {table}({columns},start,end) SELECT {values},({x})+1,end FROM {table} WHERE {bucket} AND {from} AND start<=({x}) AND end>({x}) AND {guard}; UPDATE {table} SET end=({x})-1 WHERE {bucket} AND {from} AND start<({x}) AND end>=({x}) AND {guard}; DELETE FROM {table} WHERE {bucket} AND start=({x}) AND {guard};"
     )
 }
 

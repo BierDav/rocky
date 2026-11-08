@@ -93,9 +93,7 @@ impl Io {
                             frame = outgoing.recv() => {
                                 let Some(frame) = frame else { return Ok(()) };
                                 if expires <= now()? { return Err("link credentials expired".into()); }
-                                let finished = if let Message::Reconcile { generation, started: false } = frame.message { Some(generation) } else { None };
-                                writer.send(frame).await?;
-                                if let Some(generation) = finished { handle.flushed_reconcile(generation); }
+                                handle.write(&mut writer, frame, &outgoing).await?;
                             }
                         }
                     }

@@ -10,6 +10,9 @@ mod lanes;
 pub use lanes::{Reader, Writer};
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
+/// The whole handshake and admission: per-chunk read deadlines alone let a
+/// trickling peer hold an admission slot for hours.
+const ADMISSION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Bytes of one health message; its owner encodes and bounds it.
 pub const HEALTH_BYTES: usize = 8 * 1024;
 
@@ -267,7 +270,14 @@ impl Link {
             outcome = tracing::field::Empty
         );
         let result = tracing::Instrument::instrument(
-            Self::admit(stream, replica, local, expected, version),
+            async {
+                timeout(
+                    ADMISSION_LIMIT,
+                    Self::admit(stream, replica, local, expected, version),
+                )
+                .await
+                .map_err(|_| timed_out("link admission timeout"))?
+            },
             span.clone(),
         )
         .await;
@@ -430,19 +440,10 @@ impl Link {
                 }
             }
         };
+        let handle = channels.handle.clone();
         let send = async {
             while let Some(frame) = outgoing.recv().await {
-                let finished = match frame.message {
-                    Message::Reconcile {
-                        generation,
-                        started: false,
-                    } => Some(generation),
-                    _ => None,
-                };
-                writer.send(frame).await?;
-                if let Some(generation) = finished {
-                    channels.handle.flushed_reconcile(generation);
-                }
+                handle.write(&mut writer, frame, &outgoing).await?;
             }
             writer.finish().await
         };
@@ -885,6 +886,39 @@ mod integration_tests {
             matches!(received.unwrap().message, Message::Channel(channels::Packet::Data { bytes, last: true, .. }) if bytes == vec![1; IO_CHUNK])
         );
         assert_eq!(reader.sequence, 1);
+    }
+    // Needs tokio's paused clock.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(start_paused = true)]
+    async fn a_trickled_hello_cannot_hold_admission_past_its_limit() {
+        let f = crate::tests::Fixture::new();
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let node = PrivateKey::new();
+        let replica = crate::tests::revocations::open(&f, &dir, "b.db", &node).await;
+        let chain = f.credentials(&node, f.full());
+        let (near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
+        // Every chunk beats its own read deadline; the whole hello would take minutes.
+        let trickle = async {
+            far.write_u32(MAX_SECURE_FRAME as u32).await.unwrap();
+            loop {
+                rocky_platform::time::sleep(TIMEOUT * 9 / 10).await;
+                if far.write_all(&[0; IO_CHUNK]).await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::pin!(trickle);
+        let admitted = tokio::select! {
+            admitted = Link::accept_or_resolve(near, &replica, node.clone(), chain) => admitted,
+            () = &mut trickle => unreachable!(),
+        };
+        let Err(error) = admitted else {
+            panic!("a trickled hello was admitted");
+        };
+        assert!(
+            error.to_string().contains("link admission timeout"),
+            "{error}"
+        );
     }
     // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]

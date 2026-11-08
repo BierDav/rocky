@@ -28,6 +28,8 @@ pub(super) const SCHEMA: &[&str] = &[
     // `births` the identities an applied member created, for checkpoints.
     "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
+    // Unsealed transactions, counted at every routine seal check.
+    "CREATE INDEX IF NOT EXISTS secure_replayed_unsealed ON secure_replayed(txn) WHERE sealed=0",
     // The newest replayed clock, which a new intent passes.
     "CREATE INDEX IF NOT EXISTS secure_replayed_clock ON secure_replayed(clock)",
     // Outcomes of members this node authored whose record a scope reset
@@ -218,6 +220,11 @@ fn reason_name(reason: DropReason) -> &'static str {
 /// does not cap a rewind: it covers every unsealed transaction its closure
 /// reaches, more while no owner seals.
 pub const ROUTINE_SEAL_TRANSACTIONS: u64 = 128;
+
+/// Newest finalized seals whose rows a replayed scope keeps until it
+/// compacts: the next replay base, and where a rebuild starts when that
+/// seal loses. Compaction never targets an older seal, unless it is kept.
+pub(crate) const SEAL_SNAPSHOTS: i64 = 2;
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Replayed transactions no seal covers yet: what an early arrival may
@@ -1813,13 +1820,18 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok::<_, Error>(None)
         })();
+        // `None` when the capture refused what the statements did, such as
+        // more rows than its budget or a changed id: the author's session
+        // refuses that, and nothing of it is admitted here.
         let touched = {
             let mut sink = capture.lock().map_err(|_| poisoned())?;
             let touched = match (&ran, sink.failure()) {
                 (Ok(None), None) => sink
                     .freeze()
+                    .map(Some)
                     .map_err(|_| Error::Corrupt("replay capture".into())),
-                _ => Ok(Vec::new()),
+                (Ok(None), Some(_)) => Ok(None),
+                _ => Ok(Some(Vec::new())),
             };
             sink.disarm();
             touched
@@ -1827,9 +1839,12 @@ impl<A: RowApplication> Inner<A> {
         if let Some(reason) = ran? {
             return Ok(Err(reason));
         }
+        let Some(touched) = touched? else {
+            return Ok(Err(DropReason::Engine.into()));
+        };
         // Admission runs on the rows this replay produced.
         let (mut undo, mut births, mut written) = (Vec::new(), Vec::new(), Vec::new());
-        for touched in touched? {
+        for touched in touched {
             let captured = &plan.tables[touched.table];
             let own = captured.name.eq_ignore_ascii_case(&logical.sql_name);
             let Some(changed) = schema

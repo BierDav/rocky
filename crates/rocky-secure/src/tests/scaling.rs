@@ -415,6 +415,7 @@ async fn read_and_replay_queries_use_indexes() {
         "SELECT hash,header FROM secure_operations WHERE scope=x'00' AND status='applied' AND hash>x'' ORDER BY hash LIMIT 32",
         "SELECT row,fields FROM secure_row_records WHERE scope=x'00' AND row>x'' ORDER BY row LIMIT 256",
         "SELECT fields FROM secure_checkpoint_overlay WHERE scope=1 AND row=x'00'",
+        "SELECT peer,applied>0 FROM secure_peer_frontiers WHERE scope=x'00' AND author=x'00' AND held>0",
     ] {
         let plan = format!(
             "{:?}",
@@ -425,6 +426,17 @@ async fn read_and_replay_queries_use_indexes() {
         assert!(plan.contains("SEARCH") && !plan.contains("SCAN"), "{plan}");
         assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
+    // Only unsealed members are counted, never every replayed one.
+    let plan = format!(
+        "{:?}",
+        rows(
+            &inner.conn,
+            "EXPLAIN QUERY PLAN SELECT COUNT(DISTINCT txn) FROM secure_replayed WHERE sealed=0",
+        )
+        .await
+        .unwrap()
+    );
+    assert!(plan.contains("secure_replayed_unsealed"), "{plan}");
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1000,6 +1012,53 @@ async fn author_transaction_and_bundle_acquisitions_are_interactive() {
                 .keys()
                 .any(|(_, class)| class == "Background"),
             "post-flush maintenance: {snapshot:?}"
+        );
+    }
+}
+
+/// Interned record ids grow with every row; the caches of them stay
+/// bounded through authoring and intake, and reads still find every row.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn interned_record_caches_stay_bounded_during_intake() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (a, b) = (PrivateKey::new(), PrivateKey::new());
+    let source = EncryptedReplica::open(
+        dir.path().join("a.db"),
+        f.app(),
+        f.config(&a, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let target = EncryptedReplica::open(
+        dir.path().join("b.db"),
+        f.app(),
+        f.config(&b, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let rows = 3 * crate::replica::INTERNED as u8;
+    for row in 1..=rows {
+        let frame = source
+            .author(
+                [row; 32],
+                vec![change(f.public, row, None, Some(f.app().name("n")))],
+                vec![],
+            )
+            .await
+            .unwrap();
+        target.receive(frame).await.unwrap();
+    }
+    for replica in [&source, &target] {
+        let entries = replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .interned_entries();
+        assert!(entries <= crate::replica::INTERNED, "{entries}");
+        assert_eq!(
+            replica.snapshot(f.public).await.unwrap().rows.len(),
+            usize::from(rows)
         );
     }
 }

@@ -72,6 +72,10 @@ impl<A: RowApplication> Inner<A> {
         )
         .await?
         {
+            #[cfg(any(test, feature = "qualification"))]
+            self.flusher
+                .measurements
+                .work(lock::WorkUnit::DomainHeader, 1);
             let [SqlValue::Blob(bytes)] = row.as_slice() else {
                 return Err(Error::Corrupt("tip observation header".into()));
             };
@@ -327,7 +331,7 @@ impl<A: RowApplication> Inner<A> {
 }
 
 struct EpochScan {
-    graph: TipGraph,
+    graph: Arc<TipGraph>,
     sealed: Vec<AuthorMark>,
     /// The frontier of the seal each served base sits at.
     bases: BTreeMap<ResourceScope, Option<Vec<AuthorMark>>>,

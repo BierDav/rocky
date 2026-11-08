@@ -46,9 +46,10 @@ pub(super) async fn restore(inner: &Inner<TypedRows>) {
         .await
         .unwrap();
 }
+/// Stored state; the read epoch advances at any committed change.
 pub(super) async fn snapshot(inner: &Inner<TypedRows>) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     let mut state = Vec::new();
-    for table in rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name<>'secure_checkpoint_scratch' AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap() {
+    for table in rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT IN ('secure_checkpoint_scratch','secure_read_epoch') AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap() {
         let SqlValue::Text(name) = &table[0] else { panic!("table name") };
         let columns = rows(&inner.conn, &format!("PRAGMA table_info(\"{name}\")")).await.unwrap().len();
         let order = (1..=columns).map(|n| n.to_string()).collect::<Vec<_>>().join(",");

@@ -6,6 +6,7 @@ use crate::{
 use rocky_core::{AppId, Commitment};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// Longest a credential link may be valid. A statement outlives every
@@ -402,6 +403,25 @@ pub struct RevocationSet {
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
     /// The latest recovery: it ends every trusted grant an earlier one does.
     recovery: Option<RootRecovery>,
+    derived: Derived,
+}
+/// What the whole set determines, computed once until it changes. Never
+/// compared or serialized.
+#[derive(Clone, Default)]
+struct Derived {
+    fork_ended: OnceLock<BTreeSet<(PublicKey, crate::PeerId)>>,
+    fingerprint: OnceLock<Commitment>,
+}
+impl PartialEq for Derived {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Derived {}
+impl std::fmt::Debug for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Derived")
+    }
 }
 /// Every head root statements keep of one node's two chains.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -452,7 +472,10 @@ impl TryFrom<ReplicatedAuthority> for RevocationSet {
             if !named.insert(certificate.id()?) {
                 return Err(denied("duplicate membership certificate"));
             }
-            set.link(certificate)?;
+            set.add_link(certificate)?;
+        }
+        if !set.certificates.is_empty() {
+            set.check_size()?;
         }
         Ok(set)
     }
@@ -470,6 +493,9 @@ impl TryFrom<Vec<SignedRevocation>> for RevocationSet {
             if !set.insert(signed)? {
                 return Err(denied("duplicate revocation"));
             }
+        }
+        if !set.certificates.is_empty() {
+            set.check_size()?;
         }
         Ok(set)
     }
@@ -527,6 +553,7 @@ impl RevocationSet {
     }
     fn bind(&mut self, database: Option<crate::DatabaseContext>) -> Result<(), Error> {
         if let Some(database) = database {
+            self.derived = Derived::default();
             if self
                 .database
                 .as_deref()
@@ -540,6 +567,21 @@ impl RevocationSet {
     }
     /// Records identity-signed membership evidence; it grants no permissions.
     pub fn link(&mut self, certificate: SignedCapability) -> Result<bool, Error> {
+        let database = self.database.clone();
+        let Some(id) = self.add_link(certificate)? else {
+            return Ok(false);
+        };
+        if let Err(error) = self.check_size() {
+            self.certificates.remove(&id);
+            self.database = database;
+            self.derived = Derived::default();
+            return Err(error);
+        }
+        Ok(true)
+    }
+    /// [`Self::link`] without the size check, which a batch makes once.
+    /// Changes nothing on error; returns the ID of a new certificate.
+    fn add_link(&mut self, certificate: SignedCapability) -> Result<Option<Commitment>, Error> {
         certificate.certifies(
             certificate.capability.subject,
             certificate.capability.not_before,
@@ -547,19 +589,17 @@ impl RevocationSet {
         crate::MembershipLink::from_certificate(&certificate)?;
         let id = certificate.id()?;
         if self.certificates.contains_key(&id) {
-            return Ok(false);
+            return Ok(None);
         }
-        let mut next = self.clone();
         let database = certificate
             .capability
             .extended()?
             .database
             .ok_or_else(|| denied("membership certificate has no database"))?;
-        next.bind(Some(database))?;
-        next.certificates.insert(id, certificate);
-        next.check_size()?;
-        *self = next;
-        Ok(true)
+        self.bind(Some(database))?;
+        self.derived = Derived::default();
+        self.certificates.insert(id, certificate);
+        Ok(Some(id))
     }
     pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
         self.certificates.values()
@@ -572,32 +612,44 @@ impl RevocationSet {
         Ok(membership)
     }
     fn fork_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
-        self.membership().is_ok_and(|membership| {
-            let void = membership.void_certificates();
-            let mut counts = BTreeMap::<PublicKey, BTreeSet<crate::PeerId>>::new();
-            let mut valid = BTreeSet::new();
-            let mut links: Vec<_> = self
-                .certificates
-                .values()
-                .filter_map(|certificate| crate::MembershipLink::from_certificate(certificate).ok())
-                .collect();
-            links.sort_by_key(|link| (link.identity, link.sequence, link.certificate));
-            for link in &links {
-                if void.contains(&link.certificate)
-                    || self.identity_unlinks(link.identity, link.node)
-                {
-                    continue;
-                }
-                let nodes = counts.entry(link.identity).or_default();
-                if nodes.contains(&link.node) || nodes.len() < crate::MAX_MEMBERSHIP_NODES {
-                    nodes.insert(link.node);
-                    valid.insert(link.certificate);
-                }
+        self.fork_ended().contains(&(identity, node))
+    }
+    /// Every identity and node a fork of the identity's links ends.
+    fn fork_ended(&self) -> &BTreeSet<(PublicKey, crate::PeerId)> {
+        self.derived
+            .fork_ended
+            .get_or_init(|| self.compute_fork_ended())
+    }
+    fn compute_fork_ended(&self) -> BTreeSet<(PublicKey, crate::PeerId)> {
+        #[cfg(test)]
+        tests::count_derivation();
+        let Ok(membership) = self.membership() else {
+            return BTreeSet::new();
+        };
+        let void = membership.void_certificates();
+        let mut counts = BTreeMap::<PublicKey, BTreeSet<crate::PeerId>>::new();
+        let mut valid = BTreeSet::new();
+        let mut links: Vec<_> = self
+            .certificates
+            .values()
+            .filter_map(|certificate| crate::MembershipLink::from_certificate(certificate).ok())
+            .collect();
+        links.sort_by_key(|link| (link.identity, link.sequence, link.certificate));
+        for link in &links {
+            if void.contains(&link.certificate) || self.identity_unlinks(link.identity, link.node) {
+                continue;
             }
-            links.iter().any(|link| {
-                link.identity == identity && link.node == node && !valid.contains(&link.certificate)
-            })
-        })
+            let nodes = counts.entry(link.identity).or_default();
+            if nodes.contains(&link.node) || nodes.len() < crate::MAX_MEMBERSHIP_NODES {
+                nodes.insert(link.node);
+                valid.insert(link.certificate);
+            }
+        }
+        links
+            .iter()
+            .filter(|link| !valid.contains(&link.certificate))
+            .map(|link| (link.identity, link.node))
+            .collect()
     }
     fn insert(&mut self, signed: SignedRevocation) -> Result<bool, Error> {
         self.bind(signed.database)?;
@@ -605,10 +657,12 @@ impl RevocationSet {
         if self.statements.contains_key(&id) {
             return Ok(false);
         }
+        self.derived = Derived::default();
         self.subjects.extend(signed.statement.subjects().copied());
+        // Callers check the size of what they insert.
         if signed.identity_unlink() {
             if let Some(certificate) = signed.chain.certificate() {
-                self.link(certificate.clone())?;
+                self.add_link(certificate.clone())?;
             }
         } else {
             self.references
@@ -725,7 +779,7 @@ impl RevocationSet {
             }
         }
         for certificate in other.certificates.values() {
-            next.link(certificate.clone())?;
+            next.add_link(certificate.clone())?;
         }
         next = next.pruned(time);
         next.check_size()?;
@@ -762,13 +816,16 @@ impl RevocationSet {
     }
     /// Whether evidence can end a chain; valid links alone do not.
     pub fn has_revocations(&self) -> bool {
-        !self.statements.is_empty()
-            || self.certificates.values().any(|certificate| {
-                self.fork_ends(
-                    certificate.issuer,
-                    crate::PeerId::of(certificate.capability.subject),
-                )
-            })
+        if !self.statements.is_empty() {
+            return true;
+        }
+        let forked = self.fork_ended();
+        self.certificates.values().any(|certificate| {
+            forked.contains(&(
+                certificate.issuer,
+                crate::PeerId::of(certificate.capability.subject),
+            ))
+        })
     }
     /// The statements still live at `time`.
     pub fn live(&self, time: u64) -> usize {
@@ -786,6 +843,7 @@ impl RevocationSet {
             .filter(|(_, signed)| signed.live(time))
             .map(|(id, _)| id)
             .collect();
+        let forked = self.fork_ended();
         Ok(rocky_core::commitment(
             "rocky.revocation-set.v1",
             &encode(&(
@@ -793,10 +851,10 @@ impl RevocationSet {
                 self.certificates
                     .values()
                     .filter(|certificate| {
-                        self.fork_ends(
+                        forked.contains(&(
                             certificate.issuer,
                             crate::PeerId::of(certificate.capability.subject),
-                        )
+                        ))
                     })
                     .map(SignedCapability::id)
                     .collect::<Result<Vec<_>, _>>()?,
@@ -812,6 +870,18 @@ impl RevocationSet {
                 self.certificates.keys().collect::<Vec<_>>(),
             ))?,
         ))
+    }
+    /// Identifies the whole held set, expired statements and links
+    /// included, for caches of what was judged against it. Computed once
+    /// until the set changes.
+    pub fn fingerprint(&self) -> Result<Commitment, Error> {
+        if let Some(fingerprint) = self.derived.fingerprint.get() {
+            return Ok(*fingerprint);
+        }
+        #[cfg(test)]
+        tests::count_derivation();
+        let fingerprint = rocky_core::commitment("rocky.revocation-set.held.v1", &encode(self)?);
+        Ok(*self.derived.fingerprint.get_or_init(|| fingerprint))
     }
     /// The heads root statements keep of what `identity` signed through
     /// `lane`, when one cuts that chain.

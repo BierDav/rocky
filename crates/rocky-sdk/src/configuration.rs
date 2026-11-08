@@ -80,7 +80,8 @@ impl Configuration {
         Ok(opened)
     }
     /// Creates an installation; refuses an existing one. Startup runs off the
-    /// caller's async executor: natively on the database's own thread.
+    /// caller's async executor: natively on the database's own thread. A
+    /// create that fails leaves nothing behind, and can be retried.
     ///
     /// `root`, the domain's offline root, signs the genesis and a trusted
     /// grant to this device's own identity, and is dropped: the device never
@@ -93,24 +94,7 @@ impl Configuration {
         &self,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        let opened = Database::launch_create(self.options(), None, root).await?;
-        let session = opened.database.session();
-        let followed = async {
-            session.create_bookmark(Self::BOOKMARK, None).await?;
-            session.follow(Self::BOOKMARK).await
-        }
-        .await;
-        if let Err(error) = followed {
-            // Never hand out a trusted node that silently never seals.
-            opened.database.close().await?;
-            return Err(format!(
-                "created, but could not follow the `{}` bookmark: {error}; open the \
-                 installation and create and follow a bookmark",
-                Self::BOOKMARK
-            )
-            .into());
-        }
-        Ok(opened)
+        Database::launch_create(self.options(), None, root, Self::BOOKMARK).await
     }
     /// The root recovers the domain from `archive`, a backup of one of its
     /// trusted nodes, with every trusted node and device lost: a fresh

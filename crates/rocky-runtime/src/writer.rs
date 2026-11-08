@@ -94,6 +94,9 @@ pub struct WriterStats {
     /// WAL frames after the latest commit, and the most seen.
     pub wal_frames: u64,
     pub wal_frames_max: u64,
+    /// Follow-up passes that failed after their mutation committed; the
+    /// next pass derives the follow-ups again.
+    pub deferred_follows: u64,
 }
 /// The kind of request a writer step ran, for `WriterStats` attribution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +134,7 @@ pub(crate) struct Metrics {
     truncate_micros: AtomicU64,
     wal_frames: AtomicU64,
     wal_frames_max: AtomicU64,
+    deferred_follows: AtomicU64,
     /// Bounded record of the most recent checkpoint intervals, plus how many
     /// intervals were dropped once the bound filled.
     checkpoint_log: std::sync::Mutex<CheckpointLog>,
@@ -158,6 +162,9 @@ impl Metrics {
     }
     pub(crate) fn add_sql(&self, nanos: u64) {
         self.sql_nanos.fetch_add(nanos, Relaxed);
+    }
+    pub(crate) fn deferred_follow(&self) {
+        self.deferred_follows.fetch_add(1, Relaxed);
     }
     /// Attribute one writer step to the kind of request it ran.
     pub(crate) fn add_step(&self, kind: StepKind, micros: u64) {
@@ -199,6 +206,7 @@ impl Metrics {
             truncate_micros: self.truncate_micros.load(Relaxed),
             wal_frames: self.wal_frames.load(Relaxed),
             wal_frames_max: self.wal_frames_max.load(Relaxed),
+            deferred_follows: self.deferred_follows.load(Relaxed),
         }
     }
     /// Records one completed checkpoint interval, dropping the oldest when the

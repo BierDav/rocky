@@ -421,6 +421,8 @@ pub struct Observed {
 }
 /// Session state of a write connection: its authorizer and what the SQL
 /// functions `changes`, `total_changes` and `last_insert_rowid` return.
+/// Once installed they shadow the engine's counts for every statement on
+/// the connection; runtime code reads those through [`Connection::total_changes`].
 #[derive(Clone)]
 pub struct Session {
     pub gate: std::sync::Arc<Mutex<crate::capture::Gate>>,

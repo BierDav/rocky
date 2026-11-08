@@ -600,7 +600,7 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
     let original = &inner.graphs[&f.public.domain];
     let graph = TipGraph::new(other, original.genesis_schema);
     assert_eq!(graph.genesis(), original.genesis());
-    inner.graphs.insert(other, graph);
+    inner.graphs.insert(other, std::sync::Arc::new(graph));
     let op = frames[0].operation_ref().unwrap();
     let inputs = [
         (
@@ -635,7 +635,7 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
         .lock(crate::replica::Class::Background)
         .await
         .graphs
-        .insert(other, malformed);
+        .insert(other, std::sync::Arc::new(malformed));
     assert!(
         page(&empty, f.public).await.unwrap().is_empty(),
         "unqueried malformed graph is not eagerly validated"

@@ -327,3 +327,24 @@ async fn closing_a_borrowed_attachment_ends_its_link_lanes_and_keeps_the_endpoin
     router.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn closing_ends_a_pending_accept() -> Result<(), Failure> {
+    let served = local().start([51; 32]).await?.transport();
+    served.listen(true);
+    let accept = served.accept();
+    tokio::pin!(accept);
+    tokio::select! {
+        biased;
+        _ = &mut accept => return Err("nothing was dialed".into()),
+        () = tokio::task::yield_now() => {}
+    }
+    // The timeout only stops a hang: close used to wait for the accept's queue lock.
+    let (_, accepted) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(served.close(), &mut accept)
+    })
+    .await
+    .map_err(|_| "close waited for a pending accept")?;
+    assert!(accepted.is_none());
+    Ok(())
+}

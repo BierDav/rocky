@@ -12,6 +12,9 @@ use rocky_secure::{
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 /// Request channels one sync may open when each exhausts its byte budget.
 const SESSIONS: usize = 16;
+/// Request channels one sync holds at once: a link has `CHANNELS - 2` per
+/// direction, and one stays free for live publication.
+const PARALLEL: usize = rocky_secure::network::link::CHANNELS as usize - 3;
 
 /// One device's view of a peer: the link that proved the `peer` key.
 pub(crate) struct Upstream<'a> {
@@ -370,7 +373,7 @@ pub(crate) async fn bootstrap(
             (scope, checkpoint, moved, imported)
         }
     }))
-    .buffer_unordered(4);
+    .buffer_unordered(PARALLEL);
     while let Some((scope, checkpoint, moved, imported)) = imports.next().await {
         transfer.extend(moved);
         match imported {
@@ -491,6 +494,13 @@ async fn rows(
             transfer.held.push(*scope);
         }
     }
+    // Row transfers take the planning channel's slot; placements reopen one.
+    let mut planning = if exchange.changed.is_empty() {
+        Some(planning)
+    } else {
+        planning.close().await?;
+        None
+    };
     let mut pending = stream::iter(exchange.changed.iter().copied().map(|scope| {
         let progress = &progress;
         async move {
@@ -499,7 +509,7 @@ async fn rows(
             (scope, moved, result)
         }
     }))
-    .buffer_unordered(4);
+    .buffer_unordered(PARALLEL);
     while let Some((scope, moved, result)) = pending.next().await {
         transfer.extend(moved);
         match result {
@@ -514,9 +524,15 @@ async fn rows(
         }
     }
     if upstream.refresh_control {
-        planning.pull_placements(replica).await?;
+        let mut placements = match planning.take() {
+            Some(session) => session,
+            None => session(replica, upstream).await?,
+        };
+        placements.pull_placements(replica).await?;
+        placements.close().await?;
+    } else if let Some(planning) = planning {
+        planning.close().await?;
     }
-    planning.close().await?;
     Ok(())
 }
 async fn rows_scope(

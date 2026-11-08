@@ -986,6 +986,63 @@ async fn staged_heads(
     target
 }
 
+/// A received frame revisits only the pending frames waiting for what it
+/// settled, never every waiting log head.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn received_frames_revisit_only_the_frames_they_may_ready() {
+    const LOGS: u8 = 6;
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let target = open(&f, &dir.path().join("target.db"), &PrivateKey::new()).await;
+    let mut firsts = Vec::new();
+    for log in 1..=LOGS {
+        let source = open(
+            &f,
+            &dir.path().join(format!("{log}.db")),
+            &PrivateKey::new(),
+        )
+        .await;
+        firsts.push(
+            source
+                .author([log; 32], insert(&f, log), vec![])
+                .await
+                .unwrap(),
+        );
+        let second = source
+            .author([log + 100; 32], insert(&f, log + 100), vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            target.receive(second).await.unwrap(),
+            ReceiveStatus::PendingDependencies
+        );
+    }
+    // The first frame of an author learns its certificate, a full pass.
+    let source = open(&f, &dir.path().join("other.db"), &PrivateKey::new()).await;
+    let known = source
+        .author([50; 32], insert(&f, 50), vec![])
+        .await
+        .unwrap();
+    assert_eq!(target.receive(known).await.unwrap(), ReceiveStatus::Applied);
+    let other = source
+        .author([51; 32], insert(&f, 51), vec![])
+        .await
+        .unwrap();
+    let before = target.pending_attempts().await;
+    assert_eq!(target.receive(other).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(target.pending_attempts().await - before, 1);
+    for first in firsts {
+        let before = target.pending_attempts().await;
+        assert_eq!(target.receive(first).await.unwrap(), ReceiveStatus::Applied);
+        // The frame itself and the one frame that waited for it.
+        assert_eq!(target.pending_attempts().await - before, 2);
+    }
+    assert_eq!(
+        target.snapshot(f.public).await.unwrap().rows.len(),
+        usize::from(2 * LOGS + 2)
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn stored_work_invalidates_pending_discovery_before_application() {
     let f = Fixture::new();

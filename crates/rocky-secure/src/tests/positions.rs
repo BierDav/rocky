@@ -165,6 +165,102 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     inner.audit_positions_for_test().await.unwrap();
 }
 
+/// Sparse sequences each start a range; filling the gaps merges them and
+/// removals split them again, in both range indexes.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn sparse_position_ranges_merge_and_split_like_their_sequences() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        dir.path().join("sparse.db"),
+        f.app(),
+        f.config(&node, f.full(), &[f.public]),
+    )
+    .await
+    .unwrap();
+    let frame = replica
+        .author(
+            [1; 32],
+            vec![change(f.public, 1, None, Some(f.app().name("one")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    inner.conn.execute("SAVEPOINT sparse", ()).await.unwrap();
+    let mut header = frame.operation().unwrap().header;
+    let start = header.extensions.author_sequence;
+    let log = header.seq_num;
+    let mut held = BTreeSet::from([0u64]);
+    // Held offsets from `start` as maximal inclusive runs.
+    let runs = |held: &BTreeSet<u64>, base: u64| {
+        let mut runs: Vec<Vec<SqlValue>> = Vec::new();
+        for offset in held {
+            let value = (base + offset) as i64;
+            match runs.last_mut() {
+                Some(last) if last[1] == SqlValue::Integer(value - 1) => {
+                    last[1] = SqlValue::Integer(value)
+                }
+                _ => runs.push(vec![SqlValue::Integer(value), SqlValue::Integer(value)]),
+            }
+        }
+        runs
+    };
+    let check = |held: BTreeSet<u64>| {
+        let inner = &inner;
+        async move {
+            assert_eq!(
+                rows(
+                    &inner.conn,
+                    "SELECT start,end FROM secure_position_ranges WHERE kind=0 ORDER BY start",
+                )
+                .await
+                .unwrap(),
+                runs(&held, start)
+            );
+            assert_eq!(
+                rows(
+                    &inner.conn,
+                    "SELECT start,end FROM secure_log_ranges ORDER BY start",
+                )
+                .await
+                .unwrap(),
+                runs(&held, log)
+            );
+        }
+    };
+    let gaps = (1..=32u64).map(|n| 2 * n - 1);
+    for offset in (1..=32u64).map(|n| 2 * n).chain(gaps.rev()) {
+        header.seq_num = log + offset;
+        header.extensions.author_sequence = start + offset;
+        header.sign(&node);
+        crate::replica::positions::insert(&inner.conn, &header, 0, false, true)
+            .await
+            .unwrap();
+        held.insert(offset);
+        if offset == 64 || offset == 33 {
+            check(held.clone()).await;
+        }
+    }
+    check(held.clone()).await;
+    for offset in (3..64u64).step_by(5) {
+        inner
+            .conn
+            .execute(
+                "DELETE FROM secure_position_sources WHERE kind=0 AND log_sequence=?",
+                [(log + offset) as i64],
+            )
+            .await
+            .unwrap();
+        held.remove(&offset);
+    }
+    check(held).await;
+    inner.conn.execute("ROLLBACK TO sparse", ()).await.unwrap();
+    inner.conn.execute("RELEASE sparse", ()).await.unwrap();
+    inner.audit_positions_for_test().await.unwrap();
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn waiting_seal_and_invalidated_frontier_match_the_log() {
     let f = Fixture::new();

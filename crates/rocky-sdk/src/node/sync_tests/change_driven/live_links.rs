@@ -2103,3 +2103,128 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
         }))
         .await
 }
+
+async fn count(node: &Node) -> Result<Value, Failure> {
+    let page = node
+        .dispatch(
+            &*node.client(1)?,
+            &json!({"type":"read", "query":{"sql":"SELECT count(*) FROM items", "max_rows":1}}),
+        )
+        .await?;
+    Ok(page["rows"][0][0]["value"].clone())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service_a = a.current().ok_or("service")?;
+            let service_b = b.current().ok_or("service")?;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            // B never publishes back, so only A's own outcomes move its cursor.
+            let quiet = service_b.live.publishing.lock().await;
+            let idle = || !service_a.live.publishing_or_receiving();
+            // One capture over the 256 KiB publication budget fails preflight.
+            let title = "x".repeat(16 * 1024);
+            let client = a.client(1)?;
+            let publish = service_a.live.publishing.lock().await;
+            for key in 0..24u8 {
+                a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
+                    .await?;
+                let id = a
+                    .dispatch(&client, &json!({"type":"next_id","table":"items"}))
+                    .await?["id"]
+                    .clone();
+                a.dispatch(&client, &json!({"type":"sql","sql":"INSERT INTO items(key,title,id) VALUES(?,?,?)",
+                    "values":[{"type":"text","value":format!("burst_{key}")},{"type":"text","value":title},{"type":"integer","value":id}]})).await?;
+                a.dispatch(
+                    &client,
+                    &json!({"type":"sql","sql":"COMMIT","handle":vec![100 + key; 32]}),
+                )
+                .await?;
+            }
+            drop(publish);
+            while count(&b).await? != "24" {
+                tokio::task::yield_now().await;
+            }
+            settled(&a).await;
+            settled(&b).await;
+            until(idle).await;
+            let activity = b.activity.after(0)["token"]
+                .as_str()
+                .ok_or("activity")?
+                .parse()?;
+            // The repaired range is not exported again with the next edit.
+            add(&a, 1).await?;
+            while count(&b).await? != "25" {
+                tokio::task::yield_now().await;
+            }
+            settled(&a).await;
+            settled(&b).await;
+            until(idle).await;
+            let events = b.activity.after(activity)["events"].clone();
+            assert!(
+                events.as_array().ok_or("events")?.iter().all(|event| ![
+                    "peer_reconciliation_completed",
+                    "rows_synced",
+                    "synced"
+                ]
+                .contains(&event["kind"].as_str().unwrap_or_default())),
+                "{events}"
+            );
+            drop(quiet);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_control_hint_matching_local_state_schedules_no_repair() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let work = |peer: PublicKey| {
+                a.retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&peer)
+                    .filter(|retry| retry.pending.pending())
+                    .map(|retry| retry.pending.selected().cloned())
+            };
+            let scopes = a.app_scopes();
+            let token = a.signal_token(&scopes).await?;
+            let peer = PrivateKey::new().public_key();
+            a.changed_signal(peer, &scopes, token, true).await?;
+            assert_eq!(work(peer), None);
+            a.changed_signal(peer, &scopes, [0; 32], false).await?;
+            assert_eq!(work(peer), Some(Some(scopes.iter().copied().collect())));
+            a.changed_signal(peer, &scopes, [0; 32], true).await?;
+            assert_eq!(work(peer), Some(None));
+            // A full control batch may have been truncated: it widens even when equal.
+            let full: Vec<_> = (0..link::SIGNAL_SCOPES)
+                .map(|index| {
+                    let mut scope = scopes[0];
+                    scope.table[0] = index as u8;
+                    scope
+                })
+                .collect();
+            let token = a.signal_token(&full).await?;
+            let peer = PrivateKey::new().public_key();
+            a.changed_signal(peer, &full, token, true).await?;
+            assert_eq!(work(peer), Some(None));
+            a.detach(None).await;
+            Ok(())
+        }))
+        .await
+}

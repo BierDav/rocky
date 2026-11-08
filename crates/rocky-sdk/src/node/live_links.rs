@@ -842,8 +842,14 @@ impl Node {
                         };
                         match outcome {
                             rocky_secure::network::PublicationOutcome::Published(receipt) => {
-                                for frontier in receipt.frontiers {
-                                    next.insert(frontier.scope, frontier);
+                                // A held prefix below the cursor is the receiver's repair, not a resend.
+                                for frontier in &receipt.frontiers {
+                                    match next.get_mut(&frontier.scope) {
+                                        Some(cursor) => acknowledge(cursor, frontier),
+                                        None => {
+                                            next.insert(frontier.scope, frontier.clone());
+                                        }
+                                    }
                                 }
                                 if receipt.repair_all {
                                     control = true;
@@ -861,7 +867,18 @@ impl Node {
                             }
                             rocky_secure::network::PublicationOutcome::Repair { scopes: failed, reason } => {
                                 tracing::debug!(?peer, %reason, "publication preflight requires repair");
-                                scopes.extend(failed.into_iter().filter(|scope| changed.contains(scope)));
+                                // The hinted peer repairs the rejected range; later edits publish from here.
+                                // The token follows the frontier, so commits between them stay in the repair.
+                                for scope in failed {
+                                    let frontier = self.replica.frontier(scope).await?;
+                                    if next.get(&scope) != Some(&frontier) {
+                                        frontiers.insert(scope, self.link_scope_state(scope).await?);
+                                        next.insert(scope, frontier);
+                                        scopes.insert(scope);
+                                    } else if changed.contains(&scope) {
+                                        scopes.insert(scope);
+                                    }
+                                }
                             }
                         }
                     }
@@ -949,15 +966,7 @@ impl Node {
             let Some(cursor) = entry.cursors.get_mut(&scope) else {
                 continue;
             };
-            for log in &shared.logs {
-                if let Some(held) = cursor.logs.iter_mut().find(|h| h.author == log.author) {
-                    held.held = held.held.max(log.held);
-                    held.applied = held.applied.max(log.applied);
-                } else {
-                    cursor.logs.push(*log);
-                }
-            }
-            cursor.logs.sort_by_key(|l| l.author);
+            acknowledge(cursor, shared);
             entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
             if *cursor == frontier {
                 entry.frontiers.insert(scope, token);
@@ -968,7 +977,10 @@ impl Node {
     async fn link_scope_state(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {
         Ok(link::scope_token(&self.replica, scope).await?)
     }
-    async fn signal_token(&self, scopes: &[ResourceScope]) -> Result<[u8; 32], Failure> {
+    pub(in crate::node) async fn signal_token(
+        &self,
+        scopes: &[ResourceScope],
+    ) -> Result<[u8; 32], Failure> {
         let mut state = Vec::new();
         for scope in scopes {
             state.push((*scope, self.link_scope_state(*scope).await?));
@@ -1007,6 +1019,22 @@ impl Node {
         drop(retries);
         self.link_events.send_replace(());
     }
+}
+
+/// Raises `cursor` to the acknowledged positions; it never moves back.
+fn acknowledge(
+    cursor: &mut rocky_secure::ScopeFrontier,
+    acknowledged: &rocky_secure::ScopeFrontier,
+) {
+    for log in &acknowledged.logs {
+        if let Some(held) = cursor.logs.iter_mut().find(|h| h.author == log.author) {
+            held.held = held.held.max(log.held);
+            held.applied = held.applied.max(log.applied);
+        } else {
+            cursor.logs.push(*log);
+        }
+    }
+    cursor.logs.sort_by_key(|l| l.author);
 }
 
 /// One measured path in link status; integers are decimal strings.

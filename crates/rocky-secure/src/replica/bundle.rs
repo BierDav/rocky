@@ -646,6 +646,7 @@ impl<A: RowApplication> Inner<A> {
                 self.record_key(key).await?;
                 self.write_materialized(frame, rows, admission, Some(payload))
                     .await?;
+                self.note_settled(frame.id()?);
             }
             // The candidate of every held partition together.
             self.app
@@ -708,6 +709,7 @@ impl<A: RowApplication> Inner<A> {
             self.record_key(key).await?;
             self.write_materialized(frame, Vec::new(), Default::default(), Some(payload))
                 .await?;
+            self.note_settled(frame.id()?);
         }
         Ok(())
     }
@@ -716,6 +718,7 @@ impl<A: RowApplication> Inner<A> {
         trigger: &EncryptedFrame,
         membership: &Membership,
         time: u64,
+        reseeds: &mut BTreeSet<ResourceScope>,
     ) -> Result<Outcome, Error> {
         let operation = trigger.operation_ref()?;
         let required = self
@@ -752,7 +755,7 @@ impl<A: RowApplication> Inner<A> {
             let payload = self.membership_of(&frame, index, membership)?;
             members.push((frame, payload));
         }
-        self.hold_members(&members, time).await?;
+        self.hold_members(&members, time, reseeds).await?;
         Ok(Outcome::Applied)
     }
     /// Member entries this replica opens with a readable key of a held scope,

@@ -588,6 +588,68 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     assert_eq!(outcomes(&alice).await, vec![None, Some("admission".into())]);
 }
 
+/// A replay installs the session's SQL change counters on the write
+/// connection; every later commit still counts toward the durable watermark.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn commits_after_a_replay_still_reach_the_flusher() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let open = |name: &'static str| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
+                .await
+        }
+    };
+    let (alice, bob) = (open("a.db").await, open("b.db").await);
+    let created = create(&bob, &both, 10).await;
+    let raised = raise(&sql(&bob, &both).await, 1).await;
+    for frame in [created, raised] {
+        let (before, _, flushes) = alice.watermark().await;
+        assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+        let (commit, _, _) = alice.watermark().await;
+        assert!(commit > before, "a replayed commit was not counted");
+        assert!(alice.flush().await.unwrap() >= commit);
+        assert!(alice.watermark().await.2 > flushes);
+    }
+}
+
+/// A replay whose capture refuses what it did, here a changed id the
+/// author never saw, drops instead of committing unadmitted effects.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_replay_its_capture_refuses_drops() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let open = |name: &'static str| {
+        let (t, dir) = (&t, &dir);
+        async move {
+            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
+                .await
+        }
+    };
+    let (alice, bob) = (open("a.db").await, open("b.db").await);
+    let created = create(&alice, &both, 10).await;
+    let ids = "SELECT key,id FROM salaries ORDER BY key";
+    let before = select(&sql(&alice, &both).await, ids).await;
+    // Bob holds no `ann`: his statement changes nothing where he runs it.
+    let [moved] = sql(&bob, &both)
+        .await
+        .run("UPDATE salaries SET id=id+1000 WHERE key='ann'", vec![])
+        .await
+        .unwrap()
+        .committed
+        .unwrap()
+        .frames
+        .try_into()
+        .unwrap();
+    assert!(replay_stamp(&created) < replay_stamp(&moved));
+    assert_eq!(alice.receive(moved).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(select(&sql(&alice, &both).await, ids).await, before);
+    assert_eq!(outcomes(&alice).await, vec![None, Some("engine".into())]);
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_single_row_intent_receives_within_its_statement_budget() {
     let t = Typed::new();

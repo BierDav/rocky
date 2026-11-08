@@ -78,7 +78,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if seal.statement.recovery.is_some() {
                 let graph = {
                     let inner = self.inner.lock(crate::replica::Class::Background).await;
-                    let mut graph = inner.scope_graph(seal.statement.scope)?;
+                    let mut graph = Arc::unwrap_or_clone(inner.scope_graph(seal.statement.scope)?);
                     for statement in statements
                         .iter()
                         .filter(|s| s.scope() == seal.statement.scope)
@@ -379,10 +379,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
             {
                 Ok(coordinated) => coordinated,
-                // A revoked or permanently invalid candidate cannot block later batches.
+                // A revoked or permanently invalid candidate cannot block later
+                // batches. An own batch keeps its exact submission bytes even if
+                // another statement was revoked after external commitment; a
+                // received one leaves the quota, and its peer resends it.
                 Err(Error::Rejected(_)) => {
-                    // Keep exact submission bytes even if another statement
-                    // in the batch was revoked after external commitment.
+                    self.forget_refused(batch, own).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -392,9 +394,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
             {
                 Ok(count) => count,
-                // A statement the graph refuses leaves its batch journaled
-                // without blocking later ones.
-                Err(Error::Rejected(_)) => continue,
+                // A statement the graph refuses does not block later batches.
+                Err(Error::Rejected(_)) => {
+                    self.forget_refused(batch, own).await?;
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             // An own statement dropped as lost takes the own statements
@@ -464,6 +468,29 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
+    /// Forgets a received journaled batch admission refused; own batches stay.
+    pub(in crate::replica) async fn forget_refused(
+        &self,
+        batch: Commitment,
+        own: bool,
+    ) -> Result<(), Error> {
+        if own {
+            return Ok(());
+        }
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "DELETE FROM secure_pending_tips WHERE batch=? AND own=0",
+                    [batch.to_vec()],
+                )
+                .await?;
+            Ok(())
+        })?;
+        drop(flush_guard(inner, &self.inner).await?);
+        Ok(())
+    }
     /// Forgets an own journaled batch the coordinator refused for good.
     pub(in crate::replica) async fn forget_own_batch(
         &self,
@@ -485,7 +512,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         lane: rocky_credentials::PublicKey,
     ) -> Result<(rocky_credentials::ChainLink, Vec<TipStatement>), Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let mut graph = inner.scope_graph(scope)?;
+        let mut graph = Arc::unwrap_or_clone(inner.scope_graph(scope)?);
         for (_, statements) in inner.pending_tips(Some(true)).await? {
             for statement in statements.iter().filter(|s| s.scope() == scope) {
                 statement.append(&mut graph);
@@ -645,7 +672,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 entry.insert(inner.scope_graph(scope)?);
             }
             if let Some(graph) = graphs.get_mut(&scope) {
-                statement.append(graph);
+                statement.append(Arc::make_mut(graph));
             }
         }
         for statement in statements {

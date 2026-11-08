@@ -136,6 +136,7 @@ impl Member {
             Install::Create {
                 ttl: DEFAULT_TTL,
                 root: std::sync::Mutex::new(Some(root)),
+                bookmark: None,
             },
         )
         .await

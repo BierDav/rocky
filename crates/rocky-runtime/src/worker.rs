@@ -46,6 +46,8 @@ pub(crate) enum Fault {
     SnapshotAtFlush(std::path::PathBuf),
     /// Test hook: the passive checkpoint threshold; resets happen at twice it.
     CheckpointFrames(i64),
+    /// Fail the follow-up pass after the next committed mutation.
+    FailFollowing,
 }
 /// Per committed group: each step's domain index and queue weight.
 #[cfg(test)]
@@ -1016,13 +1018,25 @@ where
                 self.unpublished
                     .changed(changed, crate::observe::Cause::Local);
                 self.notify(true);
-                self.process_following().await?;
+                // The mutation is written whatever its follow-ups do: the next
+                // pass derives them from stored rows again. Only a step that
+                // could not roll back fails the group, and the mutation in it.
+                match self.process_following().await {
+                    Err(error @ Error::Rollback { .. }) => return Err(error),
+                    Err(_) => self.metrics.deferred_follow(),
+                    Ok(_) => {}
+                }
                 Ok(op)
             }
             Err(committed) => Ok(committed),
         }
     }
     pub(super) async fn process_following(&mut self) -> Result<bool, Error> {
+        #[cfg(test)]
+        if matches!(self.fault, Some(Fault::FailFollowing)) {
+            self.fault = None;
+            return Err(Error::InjectedFailure);
+        }
         let mut loaded = Vec::new();
         for query in self.app.following_queries(self.identity.node) {
             loaded.extend(

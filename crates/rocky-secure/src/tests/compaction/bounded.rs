@@ -379,3 +379,153 @@ async fn an_old_cleanup_depth_preserves_current_uncompacted_snapshots() {
     assert_eq!(checkpoint.statement.rows.count, 2);
     replica.audit(lineage.scope("items")).await.unwrap();
 }
+
+/// Switching to an imported replayed base reads its staged rows a page at
+/// a time, never the whole scope at once.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_imported_replayed_base_switches_a_page_of_rows_at_a_time() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let count = 3 * crate::replica::checkpoint::STEP_ROWS;
+    populate(&a, count).await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    list_checkpoints(&lineage, &a).await;
+    sync(&lineage, &a, &b, &keys[1]).await;
+    let items = lineage.scope("items");
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = a
+        .checkpoint_offer(keys[1].public_key(), &credentials, items)
+        .await
+        .unwrap()
+        .unwrap();
+    let checkpoint = offered.id().unwrap();
+    b.begin_rebootstrap(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = a
+            .checkpoint_page(
+                keys[1].public_key(),
+                &credentials,
+                items,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        b.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    crate::replica::take_held_at_once();
+    assert_eq!(
+        b.finish_rebootstrap(items).await.unwrap().checkpoint,
+        checkpoint
+    );
+    let largest = crate::replica::take_held_at_once();
+    assert!(
+        largest > 0 && largest <= crate::replica::checkpoint::STEP_ROWS,
+        "{largest}"
+    );
+    assert_eq!(titles(&b).await.len(), count);
+    assert_eq!(
+        scalar(&b, "SELECT count(*) FROM secure_replayed_base_rows").await,
+        count as i64
+    );
+    b.audit(items).await.unwrap();
+}
+
+/// Without compaction a replayed scope keeps the rows of its newest
+/// finalized seals only, however many it finalizes; those still compact.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn uncompacted_seals_keep_a_bounded_number_of_row_snapshots() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "snapshots", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    populate(&replica, 3).await;
+    let mut seals = Vec::new();
+    for round in 0..5 {
+        insert(&replica, &format!("r{round}"), "sealed").await;
+        seals.push(seal(&lineage, &replica).await.id().unwrap());
+        replica.finalize_path(lineage.domain).await.unwrap();
+    }
+    assert_eq!(
+        scalar(
+            &replica,
+            "SELECT count(DISTINCT seal) FROM secure_replayed_seals"
+        )
+        .await,
+        crate::replica::replay::SEAL_SNAPSHOTS
+    );
+    // The newest two seals' rows: 3+4 and 3+5.
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_replayed_seal_rows").await,
+        15
+    );
+    // A base never moves to a seal whose rows were released.
+    let report = replica.compact(lineage.domain, 2).await.unwrap();
+    assert_eq!(report.compacted, None);
+    let report = replica.compact(lineage.domain, 1).await.unwrap();
+    assert_eq!(report.compacted, Some(seals[3]));
+    replica.audit(lineage.scope("items")).await.unwrap();
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(seals[4]));
+    replica.audit(lineage.scope("items")).await.unwrap();
+    assert_eq!(titles(&replica).await.len(), 8);
+}
+
+/// Finalizing a seal takes the table's rows and the open members' undo a
+/// page at a time, and the rows taken are those at the seal.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn finalizing_takes_rows_and_open_undo_a_page_at_a_time() {
+    use crate::replica::checkpoint::{STEP_OPERATIONS, STEP_ROWS};
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "pages", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    let count = 3 * STEP_ROWS;
+    populate(&replica, count).await;
+    let sealed = seal(&lineage, &replica).await.id().unwrap();
+    // Open members after the seal: each one's row is taken as the seal saw it.
+    for index in 0..2 * STEP_OPERATIONS {
+        update(&replica, &format!("k{index:04}"), "after seal").await;
+    }
+    update(&replica, "k0000", "twice after seal").await;
+    delete(&replica, &format!("k{:04}", count - 1)).await;
+    insert(&replica, "late", "after seal").await;
+    crate::replica::take_held_at_once();
+    replica.finalize_path(lineage.domain).await.unwrap();
+    let largest = crate::replica::take_held_at_once();
+    assert!(
+        largest > 0 && largest <= STEP_ROWS.max(STEP_OPERATIONS),
+        "{largest}"
+    );
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_seal_undone").await,
+        0
+    );
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_replayed_seal_rows").await,
+        count as i64
+    );
+    // The rows taken become the base: replaying the open members over it
+    // reaches the live rows, which the audit checks.
+    let report = replica.compact(lineage.domain, 0).await.unwrap();
+    assert_eq!(report.compacted, Some(sealed));
+    let checkpoint = replica.checkpoint(lineage.scope("items")).await.unwrap();
+    assert_eq!(checkpoint.statement.rows.count, count as u64);
+    replica.audit(lineage.scope("items")).await.unwrap();
+}

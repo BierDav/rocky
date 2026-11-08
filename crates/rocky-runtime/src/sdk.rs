@@ -71,6 +71,7 @@ where
         }
     }
     pub async fn dispatch_json(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut next = None;
         let reply = if bytes.len() > MAX_FRAME_BYTES {
             Reply::Error {
                 version: VERSION,
@@ -81,8 +82,13 @@ where
                 .into(),
             }
         } else {
-            match serde_json::from_slice(bytes) {
-                Ok(call) => self.dispatch(call).await,
+            match serde_json::from_slice::<Call>(bytes) {
+                Ok(call) => {
+                    if let Request::Next { subscription } = &call.request {
+                        next = Some(subscription.clone());
+                    }
+                    self.dispatch(call).await
+                }
                 Err(_) => Reply::Error {
                     version: VERSION,
                     error: Error::Rejected("invalid SDK call".into()).into(),
@@ -90,10 +96,33 @@ where
             }
         };
         // Every variant contains only JSON-representable values.
-        match serde_json::to_vec(&reply) {
-            Ok(bytes) if bytes.len() <= MAX_FRAME_BYTES => bytes,
+        if let Ok(bytes) = serde_json::to_vec(&reply)
+            && bytes.len() <= MAX_FRAME_BYTES
+        {
+            return bytes;
+        }
+        // The observer is past the update it cannot send: the subscription
+        // ends, so the consumer learns it and subscribes again to resync.
+        match next.map(|subscription| self.end(&subscription)) {
+            Some(Ok(())) => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK subscription update exceeds frame budget; the subscription ended: subscribe again with a smaller page"}}"#.to_vec(),
             _ => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK response exceeds frame budget"}}"#.to_vec(),
         }
+    }
+    /// Ends a subscription; its waiting `next` answers closed.
+    fn end(&self, subscription: &str) -> Result<(), Error> {
+        let id = subscription
+            .parse::<u64>()
+            .map_err(|_| Error::Rejected("invalid subscription".into()))?;
+        if let Some(entry) = self
+            .subscriptions
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .entries
+            .remove(&id)
+        {
+            entry.cancelled.send_replace(true);
+        }
+        Ok(())
     }
     async fn execute(&self, call: Call) -> Result<Value, Error> {
         if self.subscriptions.lock().map_err(|_| Error::Closed)?.closed {
@@ -159,18 +188,7 @@ where
                 }
             }
             Request::Unsubscribe { subscription } => {
-                let id = subscription
-                    .parse::<u64>()
-                    .map_err(|_| Error::Rejected("invalid subscription".into()))?;
-                if let Some(entry) = self
-                    .subscriptions
-                    .lock()
-                    .map_err(|_| Error::Closed)?
-                    .entries
-                    .remove(&id)
-                {
-                    entry.cancelled.send_replace(true);
-                }
+                self.end(&subscription)?;
                 Ok(json!({"released":true}))
             }
             Request::Mutate {

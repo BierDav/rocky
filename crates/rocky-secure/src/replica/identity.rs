@@ -6,6 +6,24 @@ pub(super) mod receipts;
 /// A re-admission that needs a waiting scope's replay ledger.
 pub(super) const LEDGER_WAITS: &str = "the scope waits for its base before this frame reapplies";
 
+/// Stored state a replay ledger reads besides visibility, and whether an
+/// update to it counts.
+const LEDGER_SOURCES: [(&str, bool); 8] = [
+    ("secure_applied", true),
+    ("secure_operations", true),
+    ("secure_checkpoints", true),
+    ("secure_replayed", true),
+    ("secure_logs", true),
+    ("secure_subscriptions", true),
+    ("secure_rebuild_scopes", false),
+    ("secure_scope_state", false),
+];
+/// What a domain's replay ledgers were seeded under: its visibility, none
+/// without a graph, and the version of their other stored sources.
+type LedgerBasis = (Option<tips::LedgerView>, u64);
+/// The basis per domain during one tip statement admission.
+pub(super) type SeededLedgers = BTreeMap<rocky_core::Scope, LedgerBasis>;
+
 pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[0],
     receipts::SCHEMA[1],
@@ -686,10 +704,31 @@ impl<A: RowApplication> Inner<A> {
         .is_empty())
     }
     /// Includes removed-table and off-custody scopes that readiness omits.
+    /// During an admission, a domain whose basis is unchanged since its
+    /// ledgers were seeded keeps them.
     pub(super) async fn reseed_domain_ledgers(
         &self,
         domain: rocky_core::Scope,
     ) -> Result<(), Error> {
+        let tracked = self.seeded_ledgers().is_some();
+        let basis = match tracked {
+            true => self.ledger_basis(
+                &self.graphs,
+                self.workspace.tip,
+                self.workspace.followed.as_ref().map(|(scope, _)| *scope),
+                domain,
+            ),
+            false => None,
+        };
+        if basis.is_some()
+            && self
+                .seeded_ledgers()
+                .as_ref()
+                .and_then(|seeded| seeded.get(&domain))
+                == basis.as_ref()
+        {
+            return Ok(());
+        }
         for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
             let [SqlValue::Integer(id), SqlValue::Blob(scope)] = record.as_slice() else {
                 return Err(Error::Corrupt("identity ledger scope".into()));
@@ -699,7 +738,68 @@ impl<A: RowApplication> Inner<A> {
                 self.reseed_ledger(scope, *id).await?;
             }
         }
+        if let Some((view, _)) = basis
+            && let Ok(version) = self.ledger_sources()
+            && let Some(seeded) = self.seeded_ledgers().as_mut()
+        {
+            seeded.insert(domain, (view, version));
+        }
         Ok(())
+    }
+    fn seeded_ledgers(&self) -> std::sync::MutexGuard<'_, Option<SeededLedgers>> {
+        self.seeded_ledgers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    /// Tracks ledger bases for one admission: each domain's ledgers are
+    /// seeded under `graphs` at `tip`, following `followed`, and the
+    /// stored state as it is now. Nothing is tracked when that is unknown.
+    pub(super) fn track_seeded_ledgers(
+        &self,
+        graphs: &BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
+        tip: TipId,
+        followed: Option<rocky_core::Scope>,
+    ) {
+        let seeded = graphs
+            .keys()
+            .filter_map(|domain| {
+                self.ledger_basis(graphs, tip, followed, *domain)
+                    .map(|basis| (*domain, basis))
+            })
+            .collect();
+        *self.seeded_ledgers() = Some(seeded);
+    }
+    pub(super) fn untrack_seeded_ledgers(&self) {
+        *self.seeded_ledgers() = None;
+    }
+    /// `domain`'s ledger basis, or none when it cannot be read: such a
+    /// domain is always reseeded.
+    fn ledger_basis(
+        &self,
+        graphs: &BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
+        tip: TipId,
+        followed: Option<rocky_core::Scope>,
+        domain: rocky_core::Scope,
+    ) -> Option<LedgerBasis> {
+        let view = match graphs.get(&domain) {
+            Some(graph) => Some(Self::ledger_view(graph, tip, followed == Some(domain)).ok()?),
+            None => None,
+        };
+        Some((view, self.ledger_sources().ok()?))
+    }
+    /// The version of `LEDGER_SOURCES`; it grows with every write to them.
+    fn ledger_sources(&self) -> Result<u64, Error> {
+        let names = self.conn.names();
+        let tables: Vec<(String, bool)> = LEDGER_SOURCES
+            .iter()
+            .map(|(table, updates)| (names.physical(table).unwrap_or(table).to_owned(), *updates))
+            .collect();
+        let writes = self.conn.connection().watch_writes(tables.clone())?;
+        Ok(writes.selected_count(
+            tables
+                .iter()
+                .map(|(table, updates)| (table.as_str(), *updates)),
+        ))
     }
     pub(super) async fn verify_identity_ledgers(&self) -> Result<(), Error> {
         if !rows(&self.conn, "SELECT 1 FROM secure_identity_own o LEFT JOIN secure_identity_marks p ON p.scope=o.scope AND p.author=o.author WHERE p.author IS NULL OR o.sequence<0 OR o.sequence>p.sequence OR EXISTS(SELECT 1 FROM secure_identity_tables t JOIN secure_identity_partitions b ON b.allocation=t.id WHERE t.scope=o.scope AND b.scope<>o.scope) LIMIT 1").await?.is_empty() {

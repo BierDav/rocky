@@ -17,7 +17,7 @@ impl<A: RowApplication> Inner<A> {
         fields: Vec<Commitment>,
         allocate: bool,
     ) -> Result<i64, Error> {
-        if let Some(id) = self.dictionary().shape_ids.get(&fields).copied() {
+        if let Some(id) = self.dictionary().shapes.id(&fields) {
             return Ok(id);
         }
         let bytes = encode(&fields)?;
@@ -65,9 +65,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        let mut dictionary = self.dictionary();
-        dictionary.shapes.insert(id, fields.clone());
-        dictionary.shape_ids.insert(fields, id);
+        self.dictionary().shapes.insert(fields.clone(), id, fields);
         Ok(id)
     }
 
@@ -79,7 +77,7 @@ impl<A: RowApplication> Inner<A> {
         if id <= 0 || encode(&id)? != bytes {
             return Err(Error::Corrupt("stored row shape id".into()));
         }
-        if let Some(fields) = self.dictionary().shapes.get(&id).cloned() {
+        if let Some(fields) = self.dictionary().shapes.value(id).cloned() {
             return Ok(fields);
         }
         let found = collect_rows(
@@ -113,9 +111,9 @@ impl<A: RowApplication> Inner<A> {
                 "row shape members differ from legend".into(),
             ));
         }
-        let mut dictionary = self.dictionary();
-        dictionary.shapes.insert(id, fields.clone());
-        dictionary.shape_ids.insert(fields.clone(), id);
+        self.dictionary()
+            .shapes
+            .insert(fields.clone(), id, fields.clone());
         Ok(fields)
     }
 }

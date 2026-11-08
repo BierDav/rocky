@@ -203,6 +203,8 @@ impl SealFinality {
         Ok(nodes.len())
     }
     pub fn id(&self) -> Result<Commitment, Error> {
+        #[cfg(test)]
+        crate::tips::tests::count_id();
         Ok(rocky_core::commitment(
             "rocky.seal-finality.id.v2",
             &self.to_bytes()?,

@@ -5,6 +5,17 @@ use rocky_core::AppId;
 const APP: AppId = AppId([7; 16]);
 const NOW: u64 = 2_000_000_000;
 
+thread_local! {
+    static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Counts a value derived from a whole set on this thread.
+pub(super) fn count_derivation() {
+    DERIVATIONS.with(|count| count.set(count.get() + 1));
+}
+fn derivations() -> usize {
+    DERIVATIONS.with(std::cell::Cell::get)
+}
+
 /// An issuer identity of `publisher`: its key and issuer chain, valid for
 /// the statement times these tests use.
 fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
@@ -386,4 +397,105 @@ fn a_root_statement_is_permanent() {
         1
     );
     assert_eq!(set.pruned(u64::MAX - 1).len(), 1);
+}
+
+/// An identity's membership certificates of five nodes, then a sixth that
+/// forks its links at sequence 1, with the root that trusts the identity.
+fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
+    let root = PrivateKey::new();
+    let identity = PrivateKey::new();
+    let scope = rocky_core::Scope {
+        mesh: rocky_core::MeshId([1; 16]),
+        app: APP,
+        domain: rocky_core::DomainId([3; 16]),
+    };
+    let grant = CredentialChain(vec![
+        Authority::owner(&root)
+            .issue_trusted(identity.public_key(), scope, crate::AuthorRange::ALL, NOW)
+            .unwrap(),
+    ]);
+    let certify = |sequence: u32, previous: Option<Commitment>| {
+        grant
+            .clone()
+            .certify_member(
+                &identity,
+                PrivateKey::new().public_key(),
+                crate::AuthorRange::ALL.first + sequence,
+                u64::from(sequence),
+                previous,
+            )
+            .unwrap()
+            .certificate()
+            .unwrap()
+            .clone()
+    };
+    let mut certificates = vec![certify(0, None)];
+    for sequence in 1..5 {
+        let previous = certificates.last().unwrap().id().unwrap();
+        certificates.push(certify(sequence, Some(previous)));
+    }
+    // A second certificate at sequence 1 forks the identity's links.
+    certificates.push(certify(1, Some(certificates[0].id().unwrap())));
+    (root, certificates)
+}
+
+/// Certificates linked one by one, merged as one batch or decoded hold the
+/// same evidence; a fork among them ends nodes in each.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn batched_links_hold_what_single_links_hold() {
+    let (root, certificates) = forked_links();
+    let mut single = RevocationSet::new();
+    for certificate in &certificates {
+        assert!(single.link(certificate.clone()).unwrap());
+    }
+    assert!(!single.link(certificates[0].clone()).unwrap());
+    assert!(single.has_revocations());
+    let mut merged = RevocationSet::new();
+    merged.merge(&single, root.public_key(), APP, NOW).unwrap();
+    let decoded = RevocationSet::from_bytes(&single.to_bytes().unwrap()).unwrap();
+    for set in [&merged, &decoded] {
+        assert_eq!(set, &single);
+        assert!(set.has_revocations());
+        assert_eq!(set.digest(NOW).unwrap(), single.digest(NOW).unwrap());
+    }
+    assert_ne!(
+        single.digest(NOW).unwrap(),
+        RevocationSet::new().digest(NOW).unwrap()
+    );
+}
+
+/// Judging every certificate's node, or keying a cache by the set, derives
+/// the fork and the fingerprint once; a change derives them again.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn whole_set_derivations_are_computed_once_per_change() {
+    let (_, certificates) = forked_links();
+    let mut set = RevocationSet::new();
+    for certificate in &certificates[..5] {
+        set.link(certificate.clone()).unwrap();
+    }
+    let judge = |set: &RevocationSet| {
+        certificates
+            .iter()
+            .filter(|certificate| {
+                set.ends_node_of(certificate.issuer, certificate.capability.subject, false)
+                    || set.ends_at(certificate, false).unwrap()
+                    || set.revokes(&certificate.capability.subject)
+            })
+            .count()
+    };
+    let before = derivations();
+    assert_eq!(judge(&set), 0);
+    let fingerprint = set.fingerprint().unwrap();
+    for _ in 0..10 {
+        assert_eq!(set.fingerprint().unwrap(), fingerprint);
+    }
+    assert_eq!(set.clone().fingerprint().unwrap(), fingerprint);
+    assert_eq!(derivations() - before, 2);
+
+    set.link(certificates[5].clone()).unwrap();
+    let before = derivations();
+    // The fork ends the nodes linked past its place.
+    assert!(judge(&set) > 0);
+    assert_ne!(set.fingerprint().unwrap(), fingerprint);
+    assert_eq!(derivations() - before, 2);
 }

@@ -10,6 +10,8 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_subscriptions(scope BLOB PRIMARY KEY,state TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_evicted_logs(scope BLOB PRIMARY KEY,sequence INTEGER NOT NULL,hash BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_peer_frontiers(peer BLOB NOT NULL,scope BLOB NOT NULL,author BLOB NOT NULL,held INTEGER NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(peer,scope,author)) WITHOUT ROWID",
+    // The peers covering one log's operation, asked per prune candidate.
+    "CREATE INDEX IF NOT EXISTS secure_peer_frontiers_log ON secure_peer_frontiers(scope,author,held)",
     "CREATE INDEX IF NOT EXISTS secure_operations_scope ON secure_operations(scope,author,sequence)",
 ];
 
@@ -106,7 +108,10 @@ impl ScopeFrontier {
                 .logs
                 .windows(2)
                 .any(|pair| pair[0].author >= pair[1].author)
-            || self.logs.iter().any(|log| log.applied > log.held)
+            || self
+                .logs
+                .iter()
+                .any(|log| log.applied > log.held || log.held > i64::MAX as u64)
         {
             return Err(denied("invalid scope frontier"));
         }
@@ -758,7 +763,11 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 if log.author == author {
-                    start = start.max(sequence + 1);
+                    let next = sequence
+                        .checked_add(1)
+                        .filter(|next| *next <= i64::MAX as u64)
+                        .ok_or_else(|| denied("range position"))?;
+                    start = start.max(next);
                 }
             }
             let records = collect_rows(

@@ -12,7 +12,7 @@ use rocky_core::{Commitment, LocalRevision, ReadView, Scope, SqlValue};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, PoisonError, Weak},
 };
 use tokio::sync::watch;
 
@@ -495,7 +495,7 @@ struct Pooled {
 /// Read-only connections of one file. The file's writer attaches the path
 /// once the file is installed and closes the pool before releasing the file.
 pub(crate) struct ReadPool {
-    permits: tokio::sync::Semaphore,
+    permits: Arc<tokio::sync::Semaphore>,
     state: Mutex<Pooled>,
     /// Some connection is out with a running read.
     out: rocky_platform::task::Held,
@@ -503,7 +503,7 @@ pub(crate) struct ReadPool {
 impl ReadPool {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            permits: tokio::sync::Semaphore::new(POOL_CONNECTIONS),
+            permits: Arc::new(tokio::sync::Semaphore::new(POOL_CONNECTIONS)),
             state: Mutex::new(Pooled {
                 path: None,
                 idle: Vec::new(),
@@ -522,14 +522,16 @@ impl ReadPool {
     /// A running read is bounded by `READ_TRANSACTION_BOUND`.
     pub(crate) fn close(&self) {
         self.permits.close();
-        match self.state.lock() {
-            Ok(mut state) => state.closed = true,
-            Err(_) => return,
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .closed = true;
         self.out.wait_released(storage::READ_TRANSACTION_BOUND);
-        if let Ok(mut state) = self.state.lock() {
-            state.idle.clear();
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .idle
+            .clear();
     }
     fn checkout(&self) -> Result<sqlite::Connection, Error> {
         let mut state = self.state.lock().map_err(|_| Error::Closed)?;
@@ -549,30 +551,53 @@ impl ReadPool {
         self.out.set(true);
         Ok(connection)
     }
-    fn checkin(&self, connection: sqlite::Connection) {
-        if let Ok(mut state) = self.state.lock() {
-            state.out -= 1;
-            if !state.closed {
-                state.idle.push(connection);
-            }
-            self.out.set(state.out > 0);
+    /// Returns a connection; one a read panicked on is closed, not reused.
+    fn checkin(&self, connection: sqlite::Connection, reuse: bool) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.out -= 1;
+        if reuse && !state.closed {
+            state.idle.push(connection);
         }
+        self.out.set(state.out > 0);
     }
-    /// Runs `read` on a blocking thread with one pooled connection.
+    /// Runs `read` on a blocking thread with one pooled connection. The
+    /// connection keeps its permit: a cancelled caller frees neither before
+    /// the read returns, so the pool never outgrows its bound.
     async fn run<T: Send + 'static>(
         self: &Arc<Self>,
         read: impl FnOnce(&sqlite::Connection) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
-        let _permit = self.permits.acquire().await.map_err(|_| Error::Closed)?;
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Closed)?;
         let pool = self.clone();
         rocky_platform::task::spawn_blocking(move || {
-            let connection = pool.checkout()?;
-            let result = read(&connection);
-            pool.checkin(connection);
-            result
+            let out = Out {
+                connection: Some(pool.checkout()?),
+                pool,
+                _permit: permit,
+            };
+            read(out.connection.as_ref().ok_or(Error::Closed)?)
         })
         .await
         .map_err(|_| Error::Closed)?
+    }
+}
+/// A pooled connection out with a running read. Dropped, also when the read
+/// panics, it goes back to the pool before its permit does.
+struct Out {
+    pool: Arc<ReadPool>,
+    connection: Option<sqlite::Connection>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl Drop for Out {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            self.pool.checkin(connection, !std::thread::panicking());
+        }
     }
 }
 
@@ -882,11 +907,17 @@ impl Reads {
                         .ok()
                         .filter(|key| !key.contains(&SqlValue::Null))
                 });
-                let next = page.more.then_some(ReadCursor {
-                    binding: prepared.binding,
-                    offset: prepared.offset + rows.len() as u64,
-                    key,
-                });
+                let next = if page.more {
+                    Some(ReadCursor {
+                        binding: prepared.binding,
+                        offset: prepared.offset.checked_add(rows.len() as u64).ok_or_else(
+                            || Error::Rejected("read cursor offset overflows".into()),
+                        )?,
+                        key,
+                    })
+                } else {
+                    None
+                };
                 Ok(ReadSnapshot {
                     rows: rows.into_iter().map(sql_values).collect::<Result<_, _>>()?,
                     scope: self.scope,
@@ -1233,10 +1264,9 @@ mod tests {
             assert!(ReadPlan::compile(&names(), vec![invalid]).is_err());
         }
     }
-    /// NULL sorts first ascending: those rows page by offset, then by key.
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn pages_through_null_ordering_values_cover_the_result_once() {
-        let dir = rocky_platform::fs::Scratch::new().await;
+    /// Reads of the view `notes` keyed by `id` over a file in `dir`: ids
+    /// 1..=9, every third body NULL and the others two repeated values.
+    fn notes(dir: &rocky_platform::fs::Scratch) -> (Arc<ReadPool>, Arc<Reads>, Scope) {
         let path = dir.path().join("reads.db");
         let conn = sqlite::Connection::open(&path).unwrap();
         for sql in [
@@ -1289,6 +1319,13 @@ mod tests {
                 tables: Vec::new(),
             },
         ));
+        (pool, reads, scope)
+    }
+    /// NULL sorts first ascending: those rows page by offset, then by key.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn pages_through_null_ordering_values_cover_the_result_once() {
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let (pool, reads, scope) = notes(&dir);
         let query = BoundQuery {
             sql: "SELECT id FROM notes WHERE id<? ORDER BY body".into(),
             values: vec![SqlValue::Integer(100)],
@@ -1312,6 +1349,81 @@ mod tests {
         );
         use crate::CursorKind::{Keyset, Offset};
         assert_eq!(kinds, [Offset, Keyset, Keyset, Keyset]);
+        pool.close();
+    }
+    /// A cursor's offset is the caller's: the next one is refused rather
+    /// than wrapped or panicking past `u64::MAX`.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_cursor_offset_past_the_largest_is_refused() {
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let (pool, reads, scope) = notes(&dir);
+        let query = BoundQuery {
+            sql: "SELECT id FROM notes ORDER BY id".into(),
+            values: Vec::new(),
+        };
+        let options = ReadOptions::new(scope, 2);
+        let page = reads.read(query.clone(), options.clone()).await.unwrap();
+        let mut cursor = page.next.unwrap();
+        assert_eq!(cursor.kind(), crate::CursorKind::Keyset);
+        cursor.offset = u64::MAX;
+        let refused = reads.read(query, options.after(cursor)).await;
+        assert!(matches!(refused, Err(Error::Rejected(_))), "{refused:?}");
+        pool.close();
+    }
+    /// The read's thread keeps the connection after its caller went away;
+    /// the slot stays taken until the connection is back.
+    // Needs blocking threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_read_keeps_its_slot_until_its_connection_is_back() {
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let (pool, _, _) = notes(&dir);
+        let (entered, mut running) = tokio::sync::mpsc::unbounded_channel();
+        let mut releases = Vec::new();
+        let mut callers = Vec::new();
+        for _ in 0..POOL_CONNECTIONS {
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            let (pool, entered) = (pool.clone(), entered.clone());
+            callers.push(tokio::spawn(async move {
+                pool.run(move |_| {
+                    let _ = entered.send(());
+                    let _ = held.recv();
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        for _ in 0..POOL_CONNECTIONS {
+            running.recv().await.unwrap();
+        }
+        for caller in callers {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        }
+        assert_eq!(pool.permits.available_permits(), 0);
+        assert_eq!(pool.state.lock().unwrap().out, POOL_CONNECTIONS);
+        drop(releases);
+        // Close waits for the reads, which return every connection and permit.
+        pool.close();
+        assert_eq!(pool.state.lock().unwrap().out, 0);
+    }
+    /// A read that panics still returns its connection, closed, and its
+    /// slot: closing the pool does not wait for it forever.
+    // Needs blocking threads, which a browser Worker lacks.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_read_returns_its_slot_and_close_finishes() {
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let (pool, _, _) = notes(&dir);
+        let panicked = pool
+            .run(|_| -> Result<(), Error> { panic!("an injected read panic") })
+            .await;
+        assert!(matches!(panicked, Err(Error::Closed)), "{panicked:?}");
+        let state = pool.state.lock().unwrap();
+        assert_eq!((state.out, state.idle.len()), (0, 0));
+        drop(state);
+        assert_eq!(pool.permits.available_permits(), POOL_CONNECTIONS);
         pool.close();
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

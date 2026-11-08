@@ -56,6 +56,8 @@ mod partition;
 mod placements;
 pub(super) mod positions;
 mod records;
+#[cfg(test)]
+pub(crate) use records::INTERNED;
 mod stamp_authors;
 pub(crate) use partition::PartitionOffer;
 pub use partition::created_name;
@@ -84,6 +86,33 @@ pub(crate) mod tips;
 pub use tips::{LineNode, TipStatement};
 mod typed;
 mod workspace;
+
+#[cfg(test)]
+thread_local! {
+    static HELD_AT_ONCE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Notes that a bounded read holds `records` stored records in memory
+/// together, for tests of the largest such batch.
+#[cfg(test)]
+pub(crate) fn held_at_once(records: usize) {
+    HELD_AT_ONCE.with(|held| held.set(held.get().max(records)));
+}
+/// The largest batch noted on this thread since the last call.
+#[cfg(test)]
+pub(crate) fn take_held_at_once() -> usize {
+    HELD_AT_ONCE.with(|held| held.replace(0))
+}
+/// Notes `statements` tip statements hashed, for tests of graph walks.
+#[cfg(test)]
+pub(crate) fn hashed(statements: usize) {
+    HASHED.with(|hashed| hashed.set(hashed.get() + statements));
+}
+/// The statements hashed on this thread since the last call.
+#[cfg(test)]
+pub(crate) fn take_hashed() -> usize {
+    HASHED.with(|hashed| hashed.replace(0))
+}
 use super::store::{SCHEMA, TransactionStore};
 use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
 use super::*;
@@ -362,6 +391,9 @@ pub(super) struct Inner<A> {
     stamp_authors: stamp_authors::Cache,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
+    /// During a tip statement admission, what each domain's replay ledgers
+    /// were last seeded under.
+    seeded_ledgers: std::sync::Mutex<Option<identity::SeededLedgers>>,
     /// Parsed headers for the scan oracle.
     #[cfg(test)]
     frontier_headers: std::sync::Mutex<tips::StoredHeaders>,
@@ -387,7 +419,9 @@ pub(super) struct Inner<A> {
     /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
-    pub(super) graphs: BTreeMap<rocky_core::Scope, rocky_credentials::TipGraph>,
+    /// Shared: readers and rollback snapshots take a reference; only a
+    /// changed graph is copied.
+    pub(super) graphs: BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
     catalog: BTreeMap<Commitment, rocky_core::ApplicationManifest>,
     path_fields: std::sync::Mutex<BTreeMap<(TipId, TipId), schemas::PathFields>>,
     graph_cache: std::sync::Mutex<tips::GraphCache>,
@@ -434,6 +468,13 @@ pub(super) struct Inner<A> {
     importing: BTreeSet<ResourceScope>,
     /// Why each pending log head waited when an apply pass last examined it.
     waits: BTreeMap<Hash, WaitReason>,
+    /// Waiting frames by what may end their wait, for incremental passes.
+    blocked: incoming::Blocked,
+    /// Operations that settled or got a stub since a pass last looked;
+    /// None once too many to track.
+    settled: std::sync::Mutex<Option<BTreeSet<Hash>>>,
+    #[cfg(test)]
+    pending_attempts: u64,
     /// Pending log heads waiting for this clock: their author and stamp.
     ahead: BTreeMap<Hash, (PublicKey, u64)>,
     /// A frame of an earlier key epoch than its scope's current one applied
@@ -466,8 +507,10 @@ pub(super) struct Inner<A> {
     /// flusher's durable watermark covers it.
     pub(super) commit: u64,
     pub(super) flusher: Arc<Flusher>,
-    /// `total_changes()` at the last commit, to skip commits that changed nothing.
-    changes: i64,
+    /// The connection's total changes at the last commit, to skip commits
+    /// that changed nothing. Read through the C API: session statements
+    /// shadow the SQL function on this connection.
+    changes: u64,
     /// Passive and truncating checkpoint sizes.
     wal_limits: (u64, u64),
     pub(super) passive: Arc<wal::Passive>,
@@ -1097,6 +1140,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             metadata,
             held_refresh: Default::default(),
             record_dictionary: Default::default(),
+            seeded_ledgers: Default::default(),
             stamp_authors: Default::default(),
             author_sets: Default::default(),
             #[cfg(test)]
@@ -1147,6 +1191,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             deferred_maintenance: BTreeSet::new(),
             importing: BTreeSet::new(),
             waits: BTreeMap::new(),
+            blocked: Default::default(),
+            settled: std::sync::Mutex::new(Some(BTreeSet::new())),
+            #[cfg(test)]
+            pending_attempts: 0,
             ahead: BTreeMap::new(),
             earlier_epoch: AtomicBool::new(false),
             epochs_scanned: None,
@@ -2423,15 +2471,13 @@ impl<A: RowApplication> Inner<A> {
     /// Counts a committed write transaction for the durable watermark. An
     /// unreadable counter is treated as a change.
     pub(super) async fn note_commit(&mut self) {
-        match rows(&self.conn, "SELECT total_changes()").await.as_deref() {
-            Ok([row]) if row.as_slice() == [SqlValue::Integer(self.changes)] => {}
-            Ok([row]) => {
-                if let [SqlValue::Integer(total)] = row.as_slice() {
-                    self.changes = *total;
-                }
+        match self.conn.connection().total_changes() {
+            Ok(total) if total == self.changes => {}
+            Ok(total) => {
+                self.changes = total;
                 self.commit += 1;
             }
-            _ => self.commit += 1,
+            Err(_) => self.commit += 1,
         }
         self.readiness.invalidate();
         self.refresh_readers().await;

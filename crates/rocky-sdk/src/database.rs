@@ -69,6 +69,9 @@ pub(crate) enum Install {
         ttl: u64,
         /// Taken once, when the domain is written.
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
+        /// The bookmark the creating device makes and follows before the
+        /// database is handed out.
+        bookmark: Option<&'static str>,
     },
     Join {
         invitation: String,
@@ -276,7 +279,10 @@ impl Database {
     pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
         let root = crate::RootKey::generate();
         let created = crate::RootKey::from_secret(root.secret());
-        let mut opened = Self::start(open, Self::create_install(credential_ttl, Arc::new(root))?)?;
+        let mut opened = Self::start(
+            open,
+            Self::create_install(credential_ttl, Arc::new(root), None)?,
+        )?;
         opened.root = Some(created);
         Ok(opened)
     }
@@ -291,11 +297,12 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::start(open, Self::create_install(credential_ttl, root)?)
+        Self::start(open, Self::create_install(credential_ttl, root, None)?)
     }
     fn create_install(
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
+        bookmark: Option<&'static str>,
     ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
@@ -304,6 +311,7 @@ impl Database {
         Ok(Install::Create {
             ttl,
             root: std::sync::Mutex::new(Some(root)),
+            bookmark,
         })
     }
     // Blocks the caller until the database is open, which a browser cannot.
@@ -531,8 +539,10 @@ impl Database {
         open: Open<'_>,
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
+        bookmark: &'static str,
     ) -> Result<Opened, Failure> {
-        Self::launch(open, Self::create_install(credential_ttl, root)?, None).await
+        let install = Self::create_install(credential_ttl, root, Some(bookmark))?;
+        Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_join(
         open: Open<'_>,
@@ -1411,7 +1421,7 @@ async fn identity(
         );
     }
     match install {
-        Install::Create { ttl, root } => {
+        Install::Create { ttl, root, .. } => {
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
@@ -1782,11 +1792,7 @@ async fn restore(
             return Err("the enrolled domain differs from the backup's".into());
         }
         crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Enrolled)?;
-        for (name, staged) in &opened.files {
-            if name != "identity.json" {
-                rocky_platform::fs::rename(staged, directory.join(name))?;
-            }
-        }
+        crate::backup::place(&opened, directory)?;
         rocky_platform::fs::remove_dir_all(&staging)?;
         Ok(())
     })();
@@ -1899,7 +1905,15 @@ async fn run_inner(
             .await?;
         }
     }
-    let (mut settings, link) = identity(&path, &setup, network).await?;
+    // A create or a supplied install that fails before it is handed out
+    // takes back what it wrote; see `unwind`.
+    let fresh = matches!(setup.install, Install::Create { .. } | Install::Supplied(_))
+        && !rocky_platform::fs::exists(&path);
+    let (mut settings, link) = match identity(&path, &setup, network).await {
+        Ok(installed) => installed,
+        Err(error) if fresh => return Err(unwind(&directory, None, error)),
+        Err(error) => return Err(error),
+    };
     // Envelopes shared after enrollment wait at the inviter: the intent
     // stays until one exchange with it.
     if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
@@ -2080,8 +2094,10 @@ async fn run_inner(
             if let Some((transport, true)) = &link {
                 transport.close().await;
             }
-            if matches!(setup.install, Install::Create { .. }) {
-                let _ = vault.forget(settings.roles());
+            if fresh {
+                let created = matches!(setup.install, Install::Create { .. })
+                    .then(|| (&vault, settings.roles()));
+                return Err(unwind(&directory, created, error));
             }
             return Err(error);
         }
@@ -2097,29 +2113,48 @@ async fn run_inner(
         let _ = expose.send(Arc::downgrade(&node));
     }
     node.coordinate(log);
-    if let Err(error) = crate::identities::supplying(startup_identity, async {
-        node.restore_line_signers().await?;
-        node.complete_revocation().await?;
-        node.refresh_importing().await?;
-        node.try_ensure_tip_node().await;
-        if matches!(setup.install, Install::Installed) {
-            node.publish_schema_at_open(setup.confirmation.as_deref())
-                .await?;
+    let started = async {
+        crate::identities::supplying(startup_identity, async {
+            node.restore_line_signers().await?;
+            node.complete_revocation().await?;
+            node.refresh_importing().await?;
+            node.try_ensure_tip_node().await;
+            if matches!(setup.install, Install::Installed) {
+                node.publish_schema_at_open(setup.confirmation.as_deref())
+                    .await?;
+            }
+            Ok::<_, Failure>(())
+        })
+        .await?;
+        if let Install::Create {
+            bookmark: Some(name),
+            ..
+        } = &setup.install
+        {
+            node.follow_new_bookmark(name).await?;
+        }
+        // Migration commits precede the revision subscription. Drain their work
+        // before enrollment or the first reconciliation can trigger it instead.
+        replica.flush().await?;
+        replica.maintain().await;
+        replica.finalize_path(node.domain().scope).await?;
+        crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Started)?;
+        if matches!(setup.install, Install::Supplied(_)) {
+            rocky_platform::fs::remove_file(crate::enrollment::Intent::path(&path, true))?;
         }
         Ok::<_, Failure>(())
-    })
-    .await
-    {
+    }
+    .await;
+    if let Err(error) = started {
         if let Some((transport, true)) = &link {
             transport.close().await;
         }
-        return Err(error);
+        return Err(if fresh {
+            discard(node, replica, &directory, &setup.install, error).await
+        } else {
+            error
+        });
     }
-    // Migration commits precede the revision subscription. Drain their work
-    // before enrollment or the first reconciliation can trigger it instead.
-    replica.flush().await?;
-    replica.maintain().await;
-    replica.finalize_path(node.domain().scope).await?;
     let network = match link {
         Some((transport, owned)) => Some(node.link(transport, owned).await),
         None => None,
@@ -2155,9 +2190,17 @@ async fn run_inner(
         }
         _ => Vec::new(),
     };
-    hello
-        .send(Ok((scope, network, revoked)))
-        .map_err(|_| "database opener abandoned")?;
+    if hello.send(Ok((scope, network, revoked))).is_err() {
+        let abandoned: Failure = "database opener abandoned".into();
+        // Nobody received the created domain's root: the domain goes too.
+        return Err(
+            if fresh && matches!(setup.install, Install::Create { .. }) {
+                discard(node, replica, &directory, &setup.install, abandoned).await
+            } else {
+                abandoned
+            },
+        );
+    }
     if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();
         crate::reactor::spawn_local("bootstrap", async move {
@@ -2444,22 +2487,69 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
         }
     }
 }
+/// Removes the installation's files and secrets; a later join in
+/// `directory` starts clean.
 fn purge_directory(directory: &Path) -> Result<(), Failure> {
+    remove_installation(directory)?;
+    match rocky_platform::fs::remove_dir_all(directory.join("secrets")) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+/// Removes the installation's files, the identity first: what a crash
+/// leaves is no domain, which a later create or install replaces.
+fn remove_installation(directory: &Path) -> Result<(), Failure> {
     for name in [
         "identity.json",
         "rocky.sqlite",
         "rocky.sqlite-wal",
         "rocky.sqlite-shm",
+        "revoked.json",
+        "bootstrap.json",
+        "mailbox.json",
     ] {
         match rocky_platform::fs::remove_file(directory.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
     }
-    match rocky_platform::fs::remove_dir_all(directory.join("secrets")) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
+    Ok(())
+}
+/// Takes back a create or a supplied install that failed before it was
+/// handed out, so the directory takes a retry: its files go, and a created
+/// domain's secrets, whose root was never handed out either. A supplied
+/// install keeps the prepared device keys it is retried with.
+fn unwind(
+    directory: &Path,
+    created: Option<(&crate::secrets::Vault, Vec<String>)>,
+    error: Failure,
+) -> Failure {
+    if let Some((vault, roles)) = created {
+        let _ = vault.forget(roles);
     }
+    match remove_installation(directory) {
+        Ok(()) => error,
+        Err(removal) => {
+            format!("{error}; the failed installation could not be removed: {removal}").into()
+        }
+    }
+}
+/// As `unwind`, once the node started: it lets go of its network and file
+/// first.
+async fn discard(
+    node: Arc<Node>,
+    replica: EncryptedReplica<rocky_core::TypedRows>,
+    directory: &Path,
+    install: &Install,
+    error: Failure,
+) -> Failure {
+    node.detach(None).await;
+    let vault = node.vault.clone();
+    let roles = node.settings.lock().await.roles();
+    drop(node);
+    drop(replica);
+    let created = matches!(install, Install::Create { .. }).then_some((&vault, roles));
+    unwind(directory, created, error)
 }
 type CallProviders = (
     Option<Arc<dyn crate::IdentityProvider>>,
@@ -2602,6 +2692,116 @@ mod tests {
             Command::Disconnect { connection: 7, .. }
         ));
         Ok(())
+    }
+
+    // Needs a native file system.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn purge_leaves_no_installation_state_for_a_later_join() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        for name in [
+            "identity.json",
+            "rocky.sqlite",
+            "rocky.sqlite-wal",
+            "rocky.sqlite-shm",
+            "revoked.json",
+            "bootstrap.json",
+            "mailbox.json",
+        ] {
+            std::fs::write(directory.path().join(name), b"{}")?;
+        }
+        std::fs::create_dir(directory.path().join("secrets"))?;
+        purge_directory(directory.path())?;
+        // A stale revocation notice fails every status of the next installation here.
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
+    }
+
+    fn installed_files(directory: &Path) -> Vec<&'static str> {
+        ["identity.json", "rocky.sqlite"]
+            .into_iter()
+            .filter(|name| rocky_platform::fs::exists(directory.join(name)))
+            .collect()
+    }
+    fn stop_once_started(directory: &Path) -> Result<(), Failure> {
+        crate::recovery::fault::STOPS
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push((
+                directory.to_path_buf(),
+                crate::recovery::fault::Stage::Started,
+            ));
+        Ok(())
+    }
+    fn notes() -> Result<crate::Schema, Failure> {
+        crate::Schema::builder("unwound", 1)
+            .table(
+                crate::Table::replayed("notes")
+                    .column(crate::Column::new("body", crate::Affinity::Text)),
+            )
+            .build()
+    }
+
+    /// The root of a create that fails is never handed out: the domain it
+    /// signed goes with it, and creating again succeeds.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_create_failing_before_it_is_handed_out_leaves_the_directory_for_a_retry()
+    -> Result<(), Failure> {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let config = crate::Configuration::new(directory.path(), &notes()?)?;
+        stop_once_started(directory.path())?;
+        let stopped = config.create().await.err().ok_or("created past the stop")?;
+        assert!(stopped.to_string().contains("injected stop"), "{stopped}");
+        assert_eq!(installed_files(directory.path()), Vec::<&str>::new());
+        let created = config.create().await?;
+        assert!(created.root.is_some());
+        created.database.close().await
+    }
+
+    /// A supplied install that fails keeps the prepared device keys, so the
+    /// same credentials install on a retry.
+    // `Database::install` blocks its caller.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_supplied_install_failing_before_it_is_handed_out_installs_on_a_retry()
+    -> Result<(), Failure> {
+        let root = rocky_platform::fs::Scratch::new().await;
+        let schema = notes()?;
+        let issuer = crate::Configuration::new(root.path().join("issuer"), &schema)?
+            .create()
+            .await?
+            .database;
+        let directory = root.path().join("device");
+        let identity: Arc<dyn crate::IdentityProvider> = Arc::new(crate::IdentityKey::generate());
+        let device = Database::node_keys_of(&directory, None, Some(identity.clone()))?;
+        let session = issuer.session();
+        let call = json!({"version": 1,
+            "scope": serde_json::from_str::<Value>(&issuer.scope())?,
+            "request": {"type": "grant", "device": device,
+                "profile": {"kind": "reader", "scopes": ["notes"]}}});
+        let reply: Value = serde_json::from_str(&session.call(call.to_string()).await?)?;
+        session.close().await;
+        let supplied = reply["value"]["supplied"].clone();
+        let schema = serde_json::to_string(&schema)?;
+        let install = || {
+            Database::install(
+                Open {
+                    directory: &directory,
+                    schema: &schema,
+                    secrets: None,
+                    identity: Some(identity.clone()),
+                    network: None,
+                    coordination: None,
+                },
+                serde_json::from_value(supplied.clone())?,
+            )
+        };
+        stop_once_started(&directory)?;
+        let stopped = install().err().ok_or("installed past the stop")?;
+        assert!(stopped.to_string().contains("injected stop"), "{stopped}");
+        assert_eq!(installed_files(&directory), Vec::<&str>::new());
+        install()?.database.close().await?;
+        issuer.close().await
     }
 
     // Needs threads, which a browser Worker lacks.

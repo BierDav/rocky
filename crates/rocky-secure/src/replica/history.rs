@@ -1026,7 +1026,7 @@ pub(super) struct HistorySnapshot {
     typed: Option<Arc<Typed>>,
     marks: Vec<(Commitment, i64)>,
     kept: BTreeMap<Commitment, Vec<KeptTable>>,
-    graph: Option<rocky_credentials::TipGraph>,
+    graph: Option<Arc<rocky_credentials::TipGraph>>,
 }
 impl HistorySnapshot {
     pub(super) fn named_history<A: RowApplication>(

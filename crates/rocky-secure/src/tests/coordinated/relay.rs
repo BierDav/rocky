@@ -70,6 +70,105 @@ async fn a_relay_certifies_only_the_exact_private_close() {
     );
 }
 
+/// Relays settled with their proof leave the journal's quota to new ones.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn settled_relays_never_exhaust_the_relay_quota() {
+    let fixture = Fixture::new(1).await;
+    seals::follow_main(&fixture).await;
+    let relay = trusted(&fixture, "settled").await;
+    let close = close(&fixture).await;
+    let bytes = close.to_bytes().unwrap();
+    let journal = |proof: bool| {
+        let relay = &relay.1;
+        async move {
+            let inner = relay.inner.lock(crate::replica::Class::Background).await;
+            for n in 0..64u8 {
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_close_relays VALUES(?,x'00',1,?)",
+                        crate::storage::bindings(vec![
+                            SqlValue::Blob(vec![n; 32]),
+                            if proof {
+                                SqlValue::Blob(vec![n])
+                            } else {
+                                SqlValue::Null
+                            },
+                        ]),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    journal(false).await;
+    assert!(matches!(
+        relay.1.relay_staged_close(&bytes).await,
+        Err(Error::Quota { .. })
+    ));
+    relay
+        .1
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .conn
+        .execute("DELETE FROM secure_close_relays", ())
+        .await
+        .unwrap();
+    journal(true).await;
+    assert!(matches!(
+        relay.1.relay_staged_close(&bytes).await.unwrap(),
+        StagedCloseStatus::Finality(_)
+    ));
+}
+
+/// A close published with its finality leaves the relay journal; a retry
+/// still answers with a verified proof.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_published_final_close_leaves_the_relay_journal() {
+    let fixture = Fixture::new(1).await;
+    seals::follow_main(&fixture).await;
+    let relay = trusted(&fixture, "published").await;
+    let close = close(&fixture).await;
+    let bytes = close.to_bytes().unwrap();
+    let proof = match relay.1.relay_staged_close(&bytes).await.unwrap() {
+        StagedCloseStatus::Finality(proof) => proof,
+        other => panic!("{other:?}"),
+    };
+    let journaled = || async {
+        crate::storage::rows(
+            &relay
+                .1
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            "SELECT count(*) FROM secure_close_relays",
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(journaled().await, vec![vec![SqlValue::Integer(1)]]);
+    relay
+        .1
+        .receive_tip_statements(&[
+            crate::TipStatement::Seal(close.clone()),
+            crate::TipStatement::Finality(proof),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(journaled().await, vec![vec![SqlValue::Integer(0)]]);
+    for retried in [
+        relay.1.staged_close_finality(&bytes).await.unwrap(),
+        relay.1.relay_staged_close(&bytes).await.unwrap(),
+    ] {
+        assert!(
+            matches!(retried, StagedCloseStatus::Finality(proof) if proof.seal == close.id().unwrap())
+        );
+    }
+    assert_eq!(journaled().await, vec![vec![SqlValue::Integer(0)]]);
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_unknown_rival_terminal_never_certifies_the_private_candidate() {
     let fixture = Fixture::new(1).await;

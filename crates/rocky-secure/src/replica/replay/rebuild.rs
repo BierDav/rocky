@@ -165,18 +165,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// `clear_replayed`, then `rows`, a base at a seal of tip
-    /// `source`, become the scope's rows. The caller rederives once the
-    /// operations after the base apply again.
-    pub(in crate::replica) async fn replace_replayed(
-        &mut self,
-        scope: ResourceScope,
-        source: TipId,
-        rows: &[(Commitment, Vec<u8>)],
-    ) -> Result<(), Error> {
-        self.clear_replayed(scope).await?;
-        self.restore_images(scope, source, rows).await
-    }
     /// The scope's replayed table and the condition selecting its rows;
     /// none for a partition whose tuple this replica never learned.
     fn scope_rows(

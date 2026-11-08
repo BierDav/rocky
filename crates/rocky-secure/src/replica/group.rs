@@ -233,7 +233,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     && cohort
                         .front()
                         .is_some_and(|r| !matches!(r.work, Work::Receive(_)))
-                    && let Err(error) = self.settle().await
+                    && let Err(error) = self.settle_received().await
                 {
                     settle_failure.get_or_insert(error);
                 }
@@ -246,7 +246,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let mut last_commit = inner.commit;
             drop(inner);
             if !pending_replies.is_empty() {
-                if let Err(error) = self.settle().await {
+                if let Err(error) = self.settle_received().await {
                     settle_failure.get_or_insert(error);
                 }
                 while !pending_replies.is_empty() {
@@ -450,8 +450,9 @@ impl<A: RowApplication> Inner<A> {
             works.push(request.work);
             replies.push((request.reply, request.exposed));
         }
-        let kept = self.pending_pass_current(self.commit)
-            && !works.iter().any(|work| matches!(work, Work::Receive(_)));
+        let kept = self.pending_pass_current(self.commit);
+        let receiving = works.iter().any(|work| matches!(work, Work::Receive(_)));
+        let epoch = self.context_epoch.load(Ordering::Relaxed);
         let outcome = match now() {
             Ok(time) => transaction!(@commit self, |inner| inner.run_group(&works, time).await)
                 .map(|outcome| (outcome, time)),
@@ -466,8 +467,13 @@ impl<A: RowApplication> Inner<A> {
                 return (None, BTreeSet::new(), Vec::new());
             }
         };
-        if kept {
+        if kept && !receiving {
             self.keep_pending_pass();
+        } else if kept
+            && outcome.pass.is_none()
+            && epoch == self.context_epoch.load(Ordering::Relaxed)
+        {
+            self.keep_received_pass();
         }
         #[cfg(any(test, feature = "qualification"))]
         if let Err(error) = self.crash_at(|point| point == super::CrashPoint::GroupAfterCommit) {

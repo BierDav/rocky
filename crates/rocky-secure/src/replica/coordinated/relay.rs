@@ -7,6 +7,19 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
 ];
 const MAX_INCOMING_RELAYS: usize = 64;
 
+/// The finality record `graph` holds for `seal`, which no revocation ended.
+pub(in crate::replica) fn public_finality(
+    graph: &TipGraph,
+    seal: Commitment,
+) -> Result<Option<SealFinality>, Error> {
+    for record in graph.finalities.iter().filter(|record| record.seal == seal) {
+        if !graph.revoked.contains(&record.id().map_err(credential)?) {
+            return Ok(Some(record.clone()));
+        }
+    }
+    Ok(None)
+}
+
 /// Only verified finality establishes the outcome of a private candidate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StagedCloseStatus {
@@ -41,6 +54,17 @@ impl<A: RowApplication> Inner<A> {
             .exclude_revoked(&self.config.revocations)
             .map_err(credential)?;
         Ok(graph)
+    }
+    /// Inside the caller's transaction, drops the relay of a close whose
+    /// finality the public graph holds.
+    pub(in crate::replica) async fn forget_relay(&self, seal: Commitment) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "DELETE FROM secure_close_relays WHERE seal=?",
+                [seal.to_vec()],
+            )
+            .await?;
+        Ok(())
     }
     async fn relay_graph(&self, seal: &SignedSeal) -> Result<TipGraph, Error> {
         if seal.statement.action != SealAction::Close || seal.statement.recovery.is_some() {
@@ -123,7 +147,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             transaction!(inner, |inner| {
-                let records = rows(&inner.conn, "SELECT seal FROM secure_close_relays").await?;
+                // A relay with its proof is settled: only unproven ones count.
+                let records = rows(
+                    &inner.conn,
+                    "SELECT seal FROM secure_close_relays WHERE proof IS NULL",
+                )
+                .await?;
                 if records.len() >= MAX_INCOMING_RELAYS
                     && !records
                         .iter()
@@ -233,6 +262,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
             (graph, stored)
         };
         if let Some(proof) = stored {
+            return Ok(StagedCloseStatus::Finality(proof));
+        }
+        // Published with its finality, the close is settled for good: the
+        // public record answers, and the relay's journal row goes.
+        if let Some(proof) = public_finality(&graph, id)? {
+            let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+            graph
+                .verify_finality(
+                    &proof,
+                    inner.config.publisher,
+                    Some((&inner.config.revocations, now()?)),
+                )
+                .map_err(credential)?;
+            transaction!(inner, |inner| inner.forget_relay(id).await)?;
+            drop(flush_guard(inner, &self.inner).await?);
             return Ok(StagedCloseStatus::Finality(proof));
         }
         let Some(coordinator) = self.domain_log() else {

@@ -48,7 +48,7 @@ wasm-bindgen-test = "0.3"
 # A local relay and loopback endpoints, which bind sockets.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 rocky-iroh = { path = ".", features = ["test-utils"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints]
 workspace = true

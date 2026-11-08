@@ -140,6 +140,193 @@ async fn late_frames_on_a_previously_continued_abandoned_line_are_held() {
     assert_eq!(a.held_changes().await.unwrap().len(), 1);
 }
 
+/// A moved bookmark holds the writes it leaves behind a page of stored
+/// frames at a time, however large the backlog.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_moved_bookmark_holds_its_abandoned_writes_a_page_at_a_time() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let replica = open(&f, &dir.path().join("held-pages.db"), &PrivateKey::new()).await;
+    main(&f, &replica).await;
+    let genesis = replica.followed_tip().await;
+    advance(&f, &replica).await;
+    let written = 3 * crate::replica::checkpoint::STEP_OPERATIONS;
+    for row in 1..=written {
+        insert(&f, &replica, row as u8, "Abandoned").await;
+    }
+    let from = replica.followed_tip().await;
+    let signed = seal(&f, &replica).await;
+    crate::replica::take_held_at_once();
+    replica
+        .receive_tip_statements(&[
+            TipStatement::Seal(signed),
+            bookmark(&f, "main", Some(from), Some(genesis)),
+        ])
+        .await
+        .unwrap();
+    let largest = crate::replica::take_held_at_once();
+    assert!(largest > 0 && largest <= crate::replica::checkpoint::STEP_OPERATIONS);
+    assert_eq!(replica.held_changes().await.unwrap().len(), written);
+    assert!(replica.snapshot(f.public).await.unwrap().rows.is_empty());
+}
+
+/// Holding a batch reseeds each scope's replay ledger once, and only for
+/// frames it had applied: a moved bookmark rereads the ledger's history a
+/// bounded number of times, and held intake not at all.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn holding_a_batch_reseeds_each_ledger_once() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let source = open(&f, &dir.path().join("reseed-source.db"), &PrivateKey::new()).await;
+    let target = open(&f, &dir.path().join("reseed-target.db"), &PrivateKey::new()).await;
+    main(&f, &source).await;
+    main(&f, &target).await;
+    let genesis = source.followed_tip().await;
+    for row in 1..=4 {
+        let frame = insert(&f, &source, row, "Common").await;
+        target.receive(frame).await.unwrap();
+    }
+    advance(&f, &source).await;
+    let mut held = Vec::new();
+    for row in 5..=10 {
+        held.push(insert(&f, &source, row, "Abandoned").await);
+    }
+    let from = source.followed_tip().await;
+    let signed = seal(&f, &source).await;
+    let ledger = |replica: &Replica| {
+        replica.lock_measurements().work_snapshot()
+            [crate::replica::lock::WorkUnit::TransitionLedgerRecord as usize]
+    };
+    let before = ledger(&source);
+    source
+        .receive_tip_statements(&[
+            TipStatement::Seal(signed),
+            bookmark(&f, "main", Some(from), Some(genesis)),
+        ])
+        .await
+        .unwrap();
+    let moved = ledger(&source) - before;
+    assert_eq!(source.held_changes().await.unwrap().len(), held.len());
+    // Ten applied frames, reread for the held batch and for the move,
+    // however many are held.
+    assert!(moved <= 2 * 10, "{moved}");
+
+    target
+        .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    let before = ledger(&target);
+    target.receive_held_frames(held).await.unwrap();
+    assert_eq!(ledger(&target) - before, 0);
+    assert_eq!(target.held_changes().await.unwrap().len(), 6);
+    assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
+}
+
+/// A tip statement batch reads no stored header while the followed path's
+/// schemas are installed, and reseeds replay ledgers once, only where it
+/// changed what the workspace sees.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn tip_statement_batches_rescan_only_what_they_change() {
+    use crate::replica::lock::WorkUnit;
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let replica = open(&f, &dir.path().join("batches.db"), &PrivateKey::new()).await;
+    main(&f, &replica).await;
+    let genesis = replica.followed_tip().await;
+    for row in 1..=8 {
+        insert(&f, &replica, row, "Row").await;
+    }
+    let measurements = replica.lock_measurements();
+    let work = || {
+        let units = measurements.work_snapshot();
+        (
+            units[WorkUnit::DomainHeader as usize],
+            units[WorkUnit::TransitionLedgerRecord as usize],
+        )
+    };
+    // Another bookmark leaves what the workspace sees as it was.
+    let before = work();
+    replica
+        .receive_tip_statements(&[bookmark(&f, "other", None, Some(genesis))])
+        .await
+        .unwrap();
+    let after = work();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 0));
+    // A seal and the move past it change it: its eight frames are reread once.
+    let before = work();
+    advance(&f, &replica).await;
+    let after = work();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 8));
+    assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
+}
+
+/// Walking the followed path hashes each statement a bounded number of
+/// times, not once per seal walked.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn walking_the_followed_path_hashes_each_seal_a_bounded_number_of_times() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let replica = open(&f, &dir.path().join("path.db"), &PrivateKey::new()).await;
+    main(&f, &replica).await;
+    let mut seals = Vec::new();
+    for _ in 0..16 {
+        let TipStatement::Seal(seal) = advance(&f, &replica).await.remove(0) else {
+            panic!("a seal first");
+        };
+        seals.push(seal);
+    }
+    crate::replica::take_hashed();
+    assert_eq!(replica.walk_path_seals(f.public.domain).await, seals);
+    assert!(crate::replica::take_hashed() <= 2 * seals.len());
+}
+
+/// A failed admission leaves the very graph it found, uncopied; readers
+/// share it too.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_failed_admission_restores_the_shared_graph_uncopied() {
+    use std::borrow::Borrow;
+    fn address(graph: &impl Borrow<rocky_credentials::TipGraph>) -> usize {
+        std::ptr::from_ref(graph.borrow()) as usize
+    }
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let replica = open(&f, &dir.path().join("shared.db"), &PrivateKey::new()).await;
+    main(&f, &replica).await;
+    let held = async || {
+        address(
+            &replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .graphs[&f.public.domain],
+        )
+    };
+    let before = held().await;
+    replica.tip_observation(f.public.domain).await.unwrap();
+    replica.seal_frontier(f.public.domain, false).await.unwrap();
+    let signed = seal(&f, &replica).await;
+    let records = [
+        TipStatement::Seal(signed.clone()),
+        bookmark(
+            &f,
+            "main",
+            Some(signed.statement.tip),
+            signed.successor().unwrap(),
+        ),
+    ];
+    replica.fail_publication_after(3).await;
+    assert!(matches!(
+        replica.receive_tip_statements(&records).await,
+        Err(Error::InjectedFailure)
+    ));
+    assert_eq!(held().await, before);
+    replica.receive_tip_statements(&records).await.unwrap();
+    assert_eq!(
+        replica.followed_tip().await,
+        signed.successor().unwrap().unwrap()
+    );
+}
+
 async fn open(f: &Fixture, path: &Path, node: &PrivateKey) -> Replica {
     EncryptedReplica::open(path, f.app(), f.config(node, f.full(), &[f.public]))
         .await

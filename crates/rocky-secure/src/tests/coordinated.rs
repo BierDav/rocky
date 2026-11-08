@@ -132,3 +132,54 @@ async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
     ));
     assert_eq!(fixture.mesh.log.head(log).unwrap().terminal, Some(terminal));
 }
+
+/// Received batches that settling refuses leave the journal, so refused
+/// batches never hold the received quota.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn refused_received_batches_leave_the_journal() {
+    use rocky_credentials::{AuthorMark, MAX_AUTHOR, SignedSeal};
+    let fixture = Fixture::new(1).await;
+    seals::follow_main(&fixture).await;
+    let alice = &fixture.alice.1;
+    let statement = seals::seal(&fixture.lineage, alice, tip_log(&fixture.lineage).tip)
+        .await
+        .statement;
+    // Journaled as received, then refused: no trusted node signed them.
+    let stranger = PrivateKey::new();
+    let pending = || async {
+        crate::storage::rows(
+            &alice
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .conn,
+            "SELECT count(*) FROM secure_pending_tips WHERE own=0",
+        )
+        .await
+        .unwrap()
+    };
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        for n in 0..32u8 {
+            let mut statement = statement.clone();
+            statement.frontier.push(AuthorMark {
+                author: MAX_AUTHOR,
+                sequence: u64::from(n) + 1,
+            });
+            let batch = vec![crate::TipStatement::Seal(
+                SignedSeal::sign(statement, &stranger).unwrap(),
+            )];
+            inner
+                .conn
+                .execute(
+                    "INSERT INTO secure_pending_tips VALUES(?,0,?)",
+                    [vec![n; 32], crate::encode(&batch).unwrap()],
+                )
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(pending().await, vec![vec![SqlValue::Integer(32)]]);
+    alice.settle_tip_statements().await.unwrap();
+    assert_eq!(pending().await, vec![vec![SqlValue::Integer(0)]]);
+}

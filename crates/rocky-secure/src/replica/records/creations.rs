@@ -2,7 +2,7 @@ use super::*;
 
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn creation_number(&self, hash: Hash, allocate: bool) -> Result<i64, Error> {
-        if let Some(id) = self.dictionary().creation_ids.get(&hash).copied() {
+        if let Some(id) = self.dictionary().creations.id(&hash) {
             return Ok(id);
         }
         let mut rows = self
@@ -44,13 +44,11 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
         };
-        let mut dictionary = self.dictionary();
-        dictionary.creation_ids.insert(hash, id);
-        dictionary.creations.insert(id, hash);
+        self.dictionary().creations.insert(hash, id, hash);
         Ok(id)
     }
     pub(super) async fn creation_hash(&self, id: i64) -> Result<Hash, Error> {
-        if let Some(hash) = self.dictionary().creations.get(&id).copied() {
+        if let Some(hash) = self.dictionary().creations.value(id).copied() {
             return Ok(hash);
         }
         let mut rows = self
@@ -63,9 +61,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("unknown creation frame reference".into()))?
             .get(0)?;
         let hash = checkpoint::hash_of(&bytes)?;
-        let mut dictionary = self.dictionary();
-        dictionary.creation_ids.insert(hash, id);
-        dictionary.creations.insert(id, hash);
+        self.dictionary().creations.insert(hash, id, hash);
         Ok(hash)
     }
 }

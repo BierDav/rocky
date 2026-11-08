@@ -137,12 +137,7 @@ impl Node {
                                 // Handlers may hold the replica while awaiting storage. Poll
                                 // signal work beside them instead of blocking their progress.
                                 requests.push(Box::pin(async move {
-                                    if control {
-                                        self.link_pending(peer);
-                                    } else if self.signal_token(&scopes).await? != token {
-                                        self.link_pending_scopes(peer, &scopes);
-                                    }
-                                    Ok(())
+                                    self.changed_signal(peer, &scopes, token, control).await
                                 }));
                             }
                         }
@@ -229,6 +224,30 @@ impl Node {
                 Ok(close_reason(reason))
             }
         }
+    }
+}
+
+impl Node {
+    /// Repairs what a peer's change hint shows differs. A control hint widens
+    /// to All unless this side already holds the same state; a full batch may
+    /// have been truncated, so it always widens.
+    pub(in crate::node) async fn changed_signal(
+        &self,
+        peer: PublicKey,
+        scopes: &[ResourceScope],
+        token: [u8; 32],
+        control: bool,
+    ) -> Result<(), Failure> {
+        if control && scopes.len() >= link::SIGNAL_SCOPES {
+            self.link_pending(peer);
+        } else if self.signal_token(scopes).await? != token {
+            if control {
+                self.link_pending(peer);
+            } else {
+                self.link_pending_scopes(peer, scopes);
+            }
+        }
+        Ok(())
     }
 }
 

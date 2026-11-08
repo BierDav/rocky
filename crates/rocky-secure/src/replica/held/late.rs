@@ -52,11 +52,14 @@ impl TokenSource {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// Stores already authenticated held members in the caller's transaction.
+    /// Stores already authenticated held members in the caller's
+    /// transaction. Adds to `reseeds` the scopes whose replay ledger an
+    /// applied member leaves; the caller reseeds them once per batch.
     pub(in crate::replica) async fn hold_members(
         &self,
         frames: &[(EncryptedFrame, RowPayload)],
         time: u64,
+        reseeds: &mut BTreeSet<ResourceScope>,
     ) -> Result<(), Error> {
         let Some((first, payload)) = frames.first() else {
             return Err(denied("empty held bundle"));
@@ -186,9 +189,20 @@ impl<A: RowApplication> Inner<A> {
             stored.time = stored.time.min(operation.header.timestamp);
         }
         let mut migration = false;
-        let mut ledger_scopes = BTreeSet::new();
         for (frame, _) in frames {
-            ledger_scopes.insert(frame.operation_ref()?.header.extensions.scope);
+            // The ledger replays applied frames only: a pending one's hold
+            // leaves it as it is.
+            let key = frame.id()?.as_bytes().to_vec();
+            if !collect_rows(
+                self.conn
+                    .query("SELECT 1 FROM secure_applied WHERE hash=?", [key])
+                    .await?,
+            )
+            .await?
+            .is_empty()
+            {
+                reseeds.insert(frame.operation_ref()?.header.extensions.scope);
+            }
             migration |= !collect_rows(
                 self.conn
                     .query(
@@ -252,17 +266,13 @@ impl<A: RowApplication> Inner<A> {
                     [operation.hash.as_bytes().to_vec()],
                 )
                 .await?;
+            self.note_settled(operation.hash);
             self.conn
                 .execute(
                     "DELETE FROM secure_outbox WHERE hash=?",
                     [operation.hash.as_bytes().to_vec()],
                 )
                 .await?;
-        }
-        for scope in ledger_scopes {
-            if let Some(id) = self.find_scope_id(scope).await? {
-                self.reseed_ledger(scope, id).await?;
-            }
         }
         self.conn
             .execute(
@@ -281,13 +291,37 @@ impl<A: RowApplication> Inner<A> {
         &self,
         frame: &EncryptedFrame,
         time: u64,
+        reseeds: &mut BTreeSet<ResourceScope>,
     ) -> Result<Outcome, Error> {
         let payload = self.row_payload(frame)?;
         if let Some(membership) = payload.membership() {
-            return self.hold_closed_bundle(frame, membership, time).await;
+            return self
+                .hold_closed_bundle(frame, membership, time, reseeds)
+                .await;
         }
-        self.hold_members(&[(frame.clone(), payload)], time).await?;
+        self.hold_members(&[(frame.clone(), payload)], time, reseeds)
+            .await?;
         Ok(Outcome::Applied)
+    }
+    /// [`Self::hold_closed_frame`] alone, reseeding what it changed.
+    pub(in crate::replica) async fn hold_closed_one(
+        &self,
+        frame: &EncryptedFrame,
+        time: u64,
+    ) -> Result<Outcome, Error> {
+        let mut reseeds = BTreeSet::new();
+        let outcome = self.hold_closed_frame(frame, time, &mut reseeds).await?;
+        self.reseed_held(reseeds).await?;
+        Ok(outcome)
+    }
+    /// Reseeds the replay ledgers of the scopes holds changed.
+    async fn reseed_held(&self, scopes: BTreeSet<ResourceScope>) -> Result<(), Error> {
+        for scope in scopes {
+            if let Some(id) = self.find_scope_id(scope).await? {
+                self.reseed_ledger(scope, id).await?;
+            }
+        }
+        Ok(())
     }
 
     fn closed_held_generation(
@@ -500,7 +534,7 @@ impl<A: RowApplication> Inner<A> {
                     .opening_key(extension.scope, extension.generation)
                     .is_some()
             {
-                self.hold_closed_frame(&frame, time).await?;
+                self.hold_closed_one(&frame, time).await?;
             }
 
             return Ok(true);
@@ -524,43 +558,70 @@ impl<A: RowApplication> Inner<A> {
                 None => break,
             }
         }
-        let records = rows(&self.conn,
-            "SELECT header,body FROM secure_operations WHERE status IN ('applied','pending') ORDER BY scope,author,sequence",
-        ).await?;
         let mut paths = BTreeMap::new();
         let mut held = 0;
-        for record in records {
-            let [SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else {
+        let mut reseeds = BTreeSet::new();
+        // A page of frames at a time: the backlog can exceed memory.
+        let mut after = (Vec::new(), Vec::new(), -1);
+        loop {
+            let records = collect_rows(self.conn.query(
+                "SELECT scope,author,sequence,header,body FROM secure_operations WHERE status IN ('applied','pending') AND (scope,author,sequence)>(?,?,?) ORDER BY scope,author,sequence LIMIT ?",
+                bindings(vec![
+                    SqlValue::Blob(after.0.clone()),
+                    SqlValue::Blob(after.1.clone()),
+                    SqlValue::Integer(after.2),
+                    SqlValue::Integer(checkpoint::STEP_OPERATIONS as i64),
+                ]),
+            ).await?).await?;
+            #[cfg(test)]
+            crate::replica::held_at_once(records.len());
+            let Some(last) = records.last() else {
+                self.reseed_held(reseeds).await?;
+                return Ok(held);
+            };
+            let [
+                SqlValue::Blob(log_scope),
+                SqlValue::Blob(log_author),
+                SqlValue::Integer(sequence),
+                ..,
+            ] = last.as_slice()
+            else {
                 return Err(Error::Corrupt("held line frame".into()));
             };
-            let frame = self.stored_frame(header.clone(), body.clone()).await?;
-            let operation = frame.operation_ref()?;
-            let extension = &operation.header.extensions;
-            if extension.scope.domain != scope || !line.contains(&extension.tip) {
-                continue;
-            }
-            let author = extension
-                .author
-                .ok_or_else(|| denied("node author number missing"))?;
-            let path = match paths.entry(extension.tip) {
-                std::collections::btree_map::Entry::Occupied(path) => path.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(Self::frame_path(graph, extension.tip, target)?)
+            after = (log_scope.clone(), log_author.clone(), *sequence);
+            for record in records {
+                let [_, _, _, SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice()
+                else {
+                    return Err(Error::Corrupt("held line frame".into()));
+                };
+                let frame = self.stored_frame(header.clone(), body.clone()).await?;
+                let operation = frame.operation_ref()?;
+                let extension = &operation.header.extensions;
+                if extension.scope.domain != scope || !line.contains(&extension.tip) {
+                    continue;
                 }
-            };
-            if !path.admits(author, extension.author_sequence)?
-                && self.stored_status(operation.hash).await?.as_deref() != Some("held")
-            {
-                match self.hold_closed_frame(&frame, now()?).await? {
-                    Outcome::Applied => held += 1,
-                    Outcome::Waiting(_) | Outcome::Ahead(_) => {
-                        return Err(denied("cannot leave an incomplete held bundle"));
+                let author = extension
+                    .author
+                    .ok_or_else(|| denied("node author number missing"))?;
+                let path = match paths.entry(extension.tip) {
+                    std::collections::btree_map::Entry::Occupied(path) => path.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Self::frame_path(graph, extension.tip, target)?)
                     }
-                    Outcome::Rejected(reason) => return Err(denied(&reason)),
+                };
+                if !path.admits(author, extension.author_sequence)?
+                    && self.stored_status(operation.hash).await?.as_deref() != Some("held")
+                {
+                    match self.hold_closed_frame(&frame, now()?, &mut reseeds).await? {
+                        Outcome::Applied => held += 1,
+                        Outcome::Waiting(_) | Outcome::Blocked(_) | Outcome::Ahead(_) => {
+                            return Err(denied("cannot leave an incomplete held bundle"));
+                        }
+                        Outcome::Rejected(reason) => return Err(denied(&reason)),
+                    }
                 }
             }
         }
-        Ok(held)
     }
 
     pub(in crate::replica) async fn record_held_resolution(

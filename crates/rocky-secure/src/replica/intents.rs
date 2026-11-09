@@ -159,26 +159,25 @@ impl<A: RowApplication> Inner<A> {
         match &partition {
             Some(tuple) => signer
                 .credentials
-                .verify_partition_author(
+                .verified_with_families(
                     self.config.publisher,
-                    signing_key.public_key(),
-                    signer.number,
-                    scope,
-                    tuple,
                     &self.config.revocations,
                     time,
+                    self.grant_families(),
                 )
+                .map_err(credential)?
+                .partition_author(signing_key.public_key(), signer.number, scope, tuple, time)
                 .map_err(credential)?,
             None => signer
                 .credentials
-                .verify_author(
+                .verified_with_families(
                     self.config.publisher,
-                    signing_key.public_key(),
-                    signer.number,
-                    scope.table,
                     &self.config.revocations,
                     time,
+                    self.grant_families(),
                 )
+                .map_err(credential)?
+                .author(signing_key.public_key(), signer.number, scope.table, time)
                 .map_err(credential)?,
         };
         let key = self

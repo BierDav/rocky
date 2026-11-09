@@ -146,7 +146,14 @@ impl<A: RowApplication> Inner<A> {
             )
             .map_err(credential)?;
         let (grants, selectors) = credentials
-            .verify_selectors(self.config.publisher, peer, &self.config.revocations, time)
+            .verified_with_families(
+                self.config.publisher,
+                &self.config.revocations,
+                time,
+                self.grant_families(),
+            )
+            .map_err(credential)?
+            .selectors(peer, time)
             .map_err(credential)?;
         if !grants.iter().any(|grant| grant.scope.domain == domain)
             && !selectors.iter().any(|grant| grant.domain == domain)

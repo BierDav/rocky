@@ -766,7 +766,13 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
-        check_config(&config.security, &manifest)?;
+        let families = match &config.tables {
+            Some((schema, domain, readers)) => {
+                typed::Typed::new(schema.clone(), *domain, readers)?.families
+            }
+            None => config_families(&config.security, &manifest)?,
+        };
+        check_config_with_families(&config.security, &manifest, &families)?;
         let source = inner.workspace.tip;
         let mut security = config.security;
         let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
@@ -799,6 +805,7 @@ impl<A: RowApplication> Inner<A> {
             permission_fields,
             chain: Chain::new(security.credentials.clone())?,
             node_author: inner.node_author.clone(),
+            families,
             config: security,
             history,
             manifest: manifest.hash(),

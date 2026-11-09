@@ -69,6 +69,9 @@ impl Schema {
         Ok(schema)
     }
     fn validate(&self) -> Result<(), Failure> {
+        if serde_json::to_vec(self)?.len() > rocky_core::MAX_DEFINITION_BYTES {
+            return Err("schema quota".into());
+        }
         if !identifier(&self.application) || self.version == 0 {
             return Err("invalid application schema".into());
         }
@@ -78,7 +81,6 @@ impl Schema {
         {
             let tables = &self.tables;
             if tables.is_empty()
-                || tables.len() > 64
                 || tables
                     .iter()
                     .any(|table| table.columns.is_empty() || table.columns.len() > 128)

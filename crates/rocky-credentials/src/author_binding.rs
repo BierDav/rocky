@@ -113,6 +113,23 @@ impl AuthorBinding {
         author: u32,
         signer: PublicKey,
     ) -> Result<(), Error> {
+        Self::verify_chain_with_families(
+            chain,
+            publisher,
+            table,
+            author,
+            signer,
+            &crate::GrantFamilies::default(),
+        )
+    }
+    pub fn verify_chain_with_families(
+        chain: &[Self],
+        publisher: PublicKey,
+        table: Commitment,
+        author: u32,
+        signer: PublicKey,
+        families: &crate::GrantFamilies,
+    ) -> Result<(), Error> {
         if chain.is_empty() || chain.len() > crate::MAX_CREDENTIAL_DEPTH {
             return Err(denied("author binding chain quota"));
         }
@@ -129,7 +146,11 @@ impl AuthorBinding {
                 || binding.issuer != issuer
                 || !range.includes(&assigned)
                 || (binding.kind != PrincipalKind::Node
-                    && !(binding.issues || binding.tables.contains(&table)))
+                    && !(binding.issues
+                        || binding
+                            .tables
+                            .iter()
+                            .any(|granted| families.covers_table(*granted, table))))
                 || (binding.issues && (binding.kind != PrincipalKind::User || !authority))
                 || binding
                     .attestation

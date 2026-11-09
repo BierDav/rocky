@@ -1581,7 +1581,7 @@ pub(crate) async fn attach(
                     .await?;
             }
             // Newest first: earlier epochs then join its history.
-            if settings.reads_partition(member) {
+            if settings.reads_partition(domain, member) {
                 for epoch in partition.record.epochs.iter().rev() {
                     replica
                         .install_key_epoch(partition.key(vault, member, *epoch)?)
@@ -1599,7 +1599,9 @@ pub(crate) async fn attach(
             for member in &partition.members {
                 match replica.subscription(member.scope).await? {
                     Some(rocky_secure::Holding::Held) => held = true,
-                    None if settings.reads_partition(member) => unrecorded.push(member.scope),
+                    None if settings.reads_partition(domain, member) => {
+                        unrecorded.push(member.scope)
+                    }
                     _ => {}
                 }
             }
@@ -1986,7 +1988,7 @@ async fn run_inner(
             let replica = EncryptedReplica::open_restored(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
-                config,
+                config.with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
                 restored.predecessor,
             )
             .await?;
@@ -1997,7 +1999,9 @@ async fn run_inner(
             EncryptedReplica::open_following(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
-                settings.config(&vault, &domain)?,
+                settings
+                    .config(&vault, &domain)?
+                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
                 bootstrap.graph.clone(),
                 bootstrap.followed.clone(),
             )
@@ -2006,7 +2010,9 @@ async fn run_inner(
             EncryptedReplica::open(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
-                settings.config(&vault, &domain)?,
+                settings
+                    .config(&vault, &domain)?
+                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
             )
             .await?
         };

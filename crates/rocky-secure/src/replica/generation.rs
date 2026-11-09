@@ -36,6 +36,7 @@ pub(super) struct Definition<A> {
     pub(super) manifest: Commitment,
     pub(super) tip: TipId,
     pub(super) definition: ApplicationManifest,
+    pub(super) families: rocky_credentials::GrantFamilies,
     pub(super) tables: HashSet<Commitment>,
     pub(super) fields: HashSet<Commitment>,
     pub(super) domains: HashSet<rocky_core::DomainId>,
@@ -52,6 +53,7 @@ impl<A> Definition<A> {
         std::mem::swap(&mut self.manifest, &mut inner.manifest);
         std::mem::swap(&mut self.tip, &mut inner.workspace.tip);
         std::mem::swap(&mut self.definition, &mut inner.definition);
+        std::mem::swap(&mut self.families, &mut inner.families);
         std::mem::swap(&mut self.tables, &mut inner.tables);
         std::mem::swap(&mut self.fields, &mut inner.fields);
         std::mem::swap(&mut self.domains, &mut inner.domains);

@@ -101,27 +101,32 @@ impl<A: RowApplication> Inner<A> {
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
         let grants = match signer {
             Some(author) if partition.is_some() => credentials
-                .verify_partition_author(
+                .verified_with_families(
                     self.config.publisher,
+                    &self.config.revocations,
+                    time,
+                    self.grant_families(),
+                )
+                .map_err(credential)?
+                .partition_author(
                     signing_key.public_key(),
                     author.number,
                     scope,
                     partition
                         .as_ref()
                         .ok_or_else(|| denied("missing partition tuple"))?,
-                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,
             Some(author) => credentials
-                .verify_author(
+                .verified_with_families(
                     self.config.publisher,
-                    signing_key.public_key(),
-                    author.number,
-                    scope.table,
                     &self.config.revocations,
                     time,
+                    self.grant_families(),
                 )
+                .map_err(credential)?
+                .author(signing_key.public_key(), author.number, scope.table, time)
                 .map_err(credential)?,
             None => self.local_grants(time)?.to_vec(),
         };

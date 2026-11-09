@@ -4391,6 +4391,9 @@ mod error_tests {
 // native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod delivery_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod wide_schema_tests;
 // Multi-node protocol suites: native transports, threads, paused clocks and
 // native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]

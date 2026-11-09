@@ -111,10 +111,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .config
             .credentials
-            .verify_node_alias(
+            .provenance_with_families(
                 inner.config.publisher,
-                rocky_credentials::PeerId::of(inner.config.node.public_key()),
                 key.public_key(),
+                inner.grant_families(),
             )
             .map_err(credential)?;
         inner.credential_signer = Some(key);

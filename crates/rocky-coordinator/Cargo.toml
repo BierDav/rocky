@@ -12,6 +12,8 @@ license-file.workspace = true
 default = ["iroh"]
 # The voter's iroh client lane and the setup commands that certify it.
 iroh = ["dep:rocky-iroh"]
+# Packaged relay process, deployed behind an HTTPS reverse proxy.
+relay-server = ["iroh", "dep:iroh-relay"]
 
 # The protocol, the state machine and the client, on every target.
 [dependencies]
@@ -30,6 +32,7 @@ tokio = { version = "1", features = ["io-util", "sync"] }
 openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 fs2 = "0.4"
+iroh-relay = { version = "=1.3.0", optional = true, features = ["server"] }
 
 [dev-dependencies]
 # Each pure test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).

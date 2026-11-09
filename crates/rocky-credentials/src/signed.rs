@@ -566,24 +566,66 @@ pub struct VerifiedChain {
     pub(crate) leaf: Capability,
     /// The identity link the leaf's node certificate names: what it holds.
     pub(crate) held: Capability,
+    families: crate::GrantFamilies,
     not_before: u64,
     expires: u64,
 }
 impl VerifiedChain {
+    pub fn partition(
+        &self,
+        subject: PublicKey,
+        scope: rocky_core::ResourceScope,
+        tuple: &rocky_core::PartitionTuple,
+        time: u64,
+    ) -> Result<Vec<ResourceGrant>, Error> {
+        self.valid_node(subject, time)?;
+        let (mut grants, partitions) = self.grants_for(scope.table)?;
+        grants.retain(|grant| grant.scope == scope);
+        for selector in partitions {
+            if let Some(grant) = selector.resolve(scope, tuple)? {
+                grants.push(grant);
+            }
+        }
+        if grants.is_empty() {
+            return Err(denied("no grant for this partition"));
+        }
+        Ok(grants)
+    }
     pub fn selectors(
         &self,
         subject: PublicKey,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
-        let leaf = &self.leaf;
+        self.valid_node(subject, time)?;
+        Ok((
+            self.families.resources(&self.held.grants),
+            self.families.partitions(&self.held.extended()?.partitions),
+        ))
+    }
+    pub(crate) fn valid_node(&self, subject: PublicKey, time: u64) -> Result<(), Error> {
         if time < self.not_before
             || time >= self.expires
-            || leaf.kind != PrincipalKind::Node
-            || leaf.subject != subject
+            || self.leaf.kind != PrincipalKind::Node
+            || self.leaf.subject != subject
         {
             return Err(denied("invalid or expired node credential"));
         }
-        Ok((self.held.grants.clone(), self.held.extended()?.partitions))
+        Ok(())
+    }
+    pub(crate) fn grants_for(
+        &self,
+        table: Commitment,
+    ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
+        let database = self
+            .leaf
+            .extended()?
+            .database
+            .ok_or_else(|| denied("node requires a database context"))?;
+        Ok((
+            self.families.resources_for_table(&self.held.grants, table),
+            self.families
+                .partitions_for(&self.held.extended()?.partitions, database.scope, table),
+        ))
     }
     pub fn author(
         &self,
@@ -592,7 +634,8 @@ impl VerifiedChain {
         table: Commitment,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let (grants, partitions) = self.selectors(subject, time)?;
+        self.valid_node(subject, time)?;
+        let (grants, partitions) = self.grants_for(table)?;
         if self.leaf.authors()?.and_then(|range| range.single()) != Some(author)
             || partitions.iter().any(|grant| grant.table == table)
         {
@@ -617,10 +660,28 @@ impl CredentialChain {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<VerifiedChain, Error> {
-        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
+        self.verified_with_families(
+            publisher,
+            revocations,
+            time,
+            &crate::GrantFamilies::default(),
+        )
+    }
+    /// Verifies against the authenticated schema's grant families. The returned
+    /// authority is resolved; signed capabilities and their IDs stay unchanged.
+    pub fn verified_with_families(
+        &self,
+        publisher: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+        families: &crate::GrantFamilies,
+    ) -> Result<VerifiedChain, Error> {
+        let (leaf, held) =
+            self.node_with_families(publisher, Some((revocations, time)), families)?;
         Ok(VerifiedChain {
             leaf: leaf.clone(),
             held: held.clone(),
+            families: families.clone(),
             not_before: self
                 .0
                 .iter()
@@ -670,6 +731,20 @@ impl CredentialChain {
         subject: PublicKey,
     ) -> Result<&Capability, Error> {
         self.check(publisher, subject, None)?;
+        self.identity_index()
+            .map(|index| &self.0[index].capability)
+            .ok_or_else(|| denied("credential depth"))
+    }
+    pub fn provenance_with_families(
+        &self,
+        publisher: PublicKey,
+        subject: PublicKey,
+        families: &crate::GrantFamilies,
+    ) -> Result<&Capability, Error> {
+        let (leaf, _) = self.node_with_families(publisher, None, families)?;
+        if leaf.subject != subject {
+            return Err(denied("operation/session requires a node credential"));
+        }
         self.identity_index()
             .map(|index| &self.0[index].capability)
             .ok_or_else(|| denied("credential depth"))
@@ -752,7 +827,15 @@ impl CredentialChain {
         publisher: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<(&Capability, &Capability), Error> {
-        let leaf = self.links(publisher, current)?;
+        self.node_with_families(publisher, current, &crate::GrantFamilies::default())
+    }
+    fn node_with_families(
+        &self,
+        publisher: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+        families: &crate::GrantFamilies,
+    ) -> Result<(&Capability, &Capability), Error> {
+        let leaf = self.links_with_families(publisher, current, families)?;
         if leaf.kind != PrincipalKind::Node {
             return Err(denied("operation/session requires a node credential"));
         }
@@ -815,6 +898,14 @@ impl CredentialChain {
         &self,
         publisher: PublicKey,
         current: Option<(&RevocationSet, u64)>,
+    ) -> Result<&Capability, Error> {
+        self.links_with_families(publisher, current, &crate::GrantFamilies::default())
+    }
+    pub(crate) fn links_with_families(
+        &self,
+        publisher: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+        families: &crate::GrantFamilies,
     ) -> Result<&Capability, Error> {
         if self.0.is_empty() || self.0.len() > MAX_CREDENTIAL_DEPTH {
             return Err(denied("credential depth"));
@@ -888,7 +979,7 @@ impl CredentialChain {
                     && !extended.issues
                     && extended.trusted.is_none()
                     && extended.claims.is_none())
-                || held > 64
+                || held > crate::MAX_GRANTS
                 || (extended.claims.is_some()
                     && (held != 0
                         || extended.authors.is_some()
@@ -907,6 +998,10 @@ impl CredentialChain {
             if let Some((parent, parent_extended)) = &parent {
                 // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;
+                let allowed = families.resources(&parent.grants);
+                let allowed_partitions = families.partitions(&parent_extended.partitions);
+                let requested = families.resources(&capability.grants);
+                let requested_partitions = families.partitions(&extended.partitions);
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
@@ -918,13 +1013,12 @@ impl CredentialChain {
                     || extended.trusted.is_some()
                     || (extended.issues && !authority)
                     || (!authority
-                        && capability.grants.iter().any(|grant| {
-                            !parent.grants.iter().any(|allowed| allowed.includes(grant))
+                        && requested.iter().any(|grant| {
+                            !allowed.iter().any(|allowed| allowed.includes(grant))
                         }))
                     || (!authority
-                        && extended.partitions.iter().any(|grant| {
-                            !parent_extended
-                                .partitions
+                        && requested_partitions.iter().any(|grant| {
+                            !allowed_partitions
                                 .iter()
                                 .any(|allowed| allowed.includes(grant))
                         }))

@@ -114,17 +114,16 @@ impl Node {
     fn reads_group(&self, settings: &Settings, partition: &GroupPartition) -> Result<(), Failure> {
         let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let time = now()?;
+        let domain = self.domain();
+        let verified = domain.verified(
+            &settings.credentials,
+            settings.publisher,
+            &settings.revocations,
+            time,
+        )?;
         for member in &partition.members {
-            let grants = settings
-                .credentials
-                .verify_partition(
-                    settings.publisher,
-                    node,
-                    member.scope,
-                    &member.tuple,
-                    &settings.revocations,
-                    time,
-                )
+            let grants = verified
+                .partition(node, member.scope, &member.tuple, time)
                 .unwrap_or_default();
             if !grants.iter().any(|grant| {
                 grant.rows == rocky_core::RowSelection::All
@@ -145,8 +144,9 @@ impl Node {
         settings: &Settings,
         partition: &GroupPartition,
     ) -> Result<(), Failure> {
+        let domain = self.domain();
         for member in &partition.members {
-            if !settings.reads_partition(member) {
+            if !settings.reads_partition(&domain, member) {
                 continue;
             }
             self.replica
@@ -159,7 +159,7 @@ impl Node {
             }
             crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
         }
-        crate::escrow::keep(&self.replica, settings, &self.vault, &self.domain()).await
+        crate::escrow::keep(&self.replica, settings, &self.vault, &domain).await
     }
     /// Records the group partition, without a key unless it holds one.
     async fn know(&self, partition: &GroupPartition) -> Result<(), Failure> {
@@ -181,6 +181,7 @@ impl Node {
         let settings = self.settings.lock().await.clone();
         let delegations: u8 = request["delegations"].as_u64().unwrap_or(1).try_into()?;
         let validity = (now()?, settings.ttl, 300);
+        let grants = self.domain().families.compact_partitions(&grants);
         if settings.revoked_node(&device, &registry) {
             return Err(refused("the device was revoked"));
         }
@@ -196,7 +197,7 @@ impl Node {
                 let terms = (delegations, Some(authors));
                 let node = Settings::node_key(&self.vault)?;
                 if kind == "partition_delegate" && !settings.issuer() {
-                    Ok(settings.credentials.delegable().delegate_partitions(
+                    Ok(settings.credentials.delegable().delegate_with_families(
                         rocky_credentials::Signer::node(&node, &settings.credentials)?,
                         device.identity,
                         rocky_core::PrincipalKind::User,
@@ -204,6 +205,7 @@ impl Node {
                         grants.clone(),
                         terms,
                         validity,
+                        &self.domain().families,
                     )?)
                 } else {
                     // An issuer grants and delegates through its authority.
@@ -304,15 +306,15 @@ impl Node {
             None => settings.publisher,
             Some(chain) => {
                 let signer = envelope.issuer();
+                let time = now()?;
+                let verified = self.domain().verified(
+                    chain,
+                    settings.publisher,
+                    &settings.revocations,
+                    time,
+                )?;
                 for member in &partition.members {
-                    let grants = chain.verify_partition(
-                        settings.publisher,
-                        signer,
-                        member.scope,
-                        &member.tuple,
-                        &settings.revocations,
-                        now()?,
-                    )?;
+                    let grants = verified.partition(signer, member.scope, &member.tuple, time)?;
                     if !grants.iter().any(|grant| {
                         grant.rows == rocky_core::RowSelection::All
                             && grant.rights.contains(&rocky_core::Right::Read)
@@ -801,11 +803,12 @@ impl Node {
         &self,
         covered: &[&crate::groups::Member],
     ) -> Result<Value, Failure> {
+        let domain = self.domain();
         let added: Vec<ResourceScope> = {
             let settings = self.settings.lock().await;
             covered
                 .iter()
-                .filter(|member| settings.reads_partition(member))
+                .filter(|member| settings.reads_partition(&domain, member))
                 .map(|member| member.scope)
                 .collect()
         };

@@ -80,8 +80,8 @@ impl Grant {
         grants: &[Grant],
         resources: &[Resource],
     ) -> Result<Vec<ResourceGrant>, Error> {
-        if grants.is_empty() || grants.len() > MAX_GRANTS {
-            return Err(denied("a credential holds 1 to 64 grants"));
+        if grants.is_empty() {
+            return Err(denied("a profile holds at least one grant"));
         }
         grants
             .iter()
@@ -690,14 +690,6 @@ impl<'a> Authority<'a> {
     }
 }
 
-/// The authority fields of a link that may assign authors.
-fn ranged(authors: Option<AuthorRange>) -> Result<Extension, Error> {
-    Extension::new(Extended {
-        authors,
-        ..Extended::default()
-    })
-}
-
 /// A node's chain under its identity capability: the identity certifies
 /// its node key.
 pub fn device_chain(
@@ -830,6 +822,31 @@ impl CredentialChain {
         authors: Option<AuthorRange>,
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<Self, Error> {
+        self.delegate_with_families(
+            holder,
+            subject,
+            kind,
+            grants,
+            Vec::new(),
+            (delegations, authors),
+            (time, ttl, skew),
+            &crate::GrantFamilies::default(),
+        )
+    }
+    /// Delegates resolved authority, including selector grants, under an
+    /// authenticated schema. Both issuance and receipt check attenuation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn delegate_with_families<'s>(
+        &self,
+        holder: impl Into<Signer<'s>>,
+        subject: PublicKey,
+        kind: PrincipalKind,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        (delegations, authors): (u8, Option<AuthorRange>),
+        (time, ttl, skew): (u64, u64, u64),
+        families: &crate::GrantFamilies,
+    ) -> Result<Self, Error> {
         let holder = holder.into();
         let parent = self.holder_key(holder.principal()?)?;
         let held = parent.extended()?;
@@ -844,10 +861,19 @@ impl CredentialChain {
             || delegations >= parent.delegations
             || self.0.len() + usize::from(delegations) >= crate::MAX_CREDENTIAL_DEPTH
             || (parent.kind == PrincipalKind::Deployment && kind == PrincipalKind::User)
-            || grants.is_empty()
-            || grants
-                .iter()
-                .any(|grant| !parent.grants.iter().any(|held| held.includes(grant)))
+            || (grants.is_empty() && partitions.is_empty())
+            || families.resources(&grants).iter().any(|grant| {
+                !families
+                    .resources(&parent.grants)
+                    .iter()
+                    .any(|held| held.includes(grant))
+            })
+            || families.partitions(&partitions).iter().any(|grant| {
+                !families
+                    .partitions(&held.partitions)
+                    .iter()
+                    .any(|held| held.includes(grant))
+            })
         {
             return Err(denied("delegation expands authority"));
         }
@@ -858,13 +884,19 @@ impl CredentialChain {
             not_before: time.saturating_sub(skew).max(parent.not_before),
             expires: time.saturating_add(ttl).min(parent.expires),
             delegations,
-            extension: ranged(authors)?,
+            extension: Extension::new(Extended {
+                authors,
+                partitions,
+                origin: held.origin,
+                ..Extended::default()
+            })?,
         };
         if link.not_before >= link.expires {
             return Err(denied("delegation outlives its parent"));
         }
         let mut chain = self.clone();
         chain.0.push(SignedCapability::sign(link, holder)?);
+        chain.links_with_families(chain.0[0].issuer, None, families)?;
         Ok(chain)
     }
     /// The author range of the last link: what its holder assigns.

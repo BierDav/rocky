@@ -38,7 +38,14 @@ impl<A: RowApplication> Inner<A> {
             )
             .map_err(credential)?;
         let (grants, selectors) = chain
-            .verify_selectors(self.config.publisher, node, &RevocationSet::new(), time)
+            .verified_with_families(
+                self.config.publisher,
+                &RevocationSet::new(),
+                time,
+                self.grant_families(),
+            )
+            .map_err(credential)?
+            .selectors(node, time)
             .map_err(credential)?;
         let app = self.definition.app;
         if grants.iter().any(|grant| grant.scope.domain.app != app)

@@ -302,6 +302,8 @@ impl<A: RowApplication> Inner<A> {
                             identity,
                             &ceiling,
                             Some(&mut bindings),
+                            self.families_at(self.manifest_of_tip(extension.tip)?)?
+                                .as_ref(),
                         )
                         .and_then(|()| match proof.stamp() == &ceiling {
                             true => Ok(()),

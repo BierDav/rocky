@@ -37,17 +37,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn open_restored(
         path: impl AsRef<Path>,
         app: A,
-        config: SecureConfig,
+        config: impl Into<OpenConfig>,
         predecessor: PublicKey,
     ) -> Result<Self, Error> {
-        check_config(&config, &app.manifest())?;
-        let node = config.node.public_key();
+        let config = config.into();
+        check_config_with_families(
+            &config.security,
+            &app.manifest(),
+            &config.families(&app.manifest())?,
+        )?;
+        let node = config.security.node.public_key();
         if node == predecessor {
             return Err(denied(
                 "a restored file needs a fresh signing identity, not its predecessor's",
             ));
         }
-        rebind(path.as_ref(), predecessor, &config.node, config.publisher).await?;
+        rebind(
+            path.as_ref(),
+            predecessor,
+            &config.security.node,
+            config.security.publisher,
+        )
+        .await?;
         Self::open(path, app, config).await
     }
     /// The signing identities this file was restored from, oldest first.

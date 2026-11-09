@@ -57,7 +57,7 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .map(|link| link.author_binding.clone())
                 .collect();
-            rocky_credentials::AuthorBinding::verify_chain(
+            rocky_credentials::AuthorBinding::verify_chain_with_families(
                 &bindings,
                 self.config.publisher,
                 scope.table,
@@ -66,6 +66,8 @@ impl<A: RowApplication> Inner<A> {
                     .author
                     .ok_or_else(|| Error::Corrupt("restoration author number".into()))?,
                 node,
+                self.families_at(self.manifest_of_tip(header.extensions.tip)?)?
+                    .as_ref(),
             )
             .map_err(credential)?;
             match (status.as_str(), applied) {

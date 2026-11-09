@@ -43,7 +43,7 @@ impl OpenedPayloads {
     }
 }
 type VerifiedChains =
-    BTreeMap<(Commitment, PublicKey, Commitment), rocky_credentials::VerifiedChain>;
+    BTreeMap<(Commitment, PublicKey, Commitment, Commitment), rocky_credentials::VerifiedChain>;
 #[derive(Default)]
 pub(super) struct Cache {
     opened: std::sync::Mutex<OpenedPayloads>,
@@ -53,6 +53,7 @@ pub(super) struct Cache {
     #[cfg(test)]
     pub(super) opens: AtomicU64,
     chains: std::sync::Mutex<VerifiedChains>,
+    families: std::sync::Mutex<BTreeMap<Commitment, Arc<rocky_credentials::GrantFamilies>>>,
     #[cfg(test)]
     pub(super) verifications: AtomicU64,
 }
@@ -77,6 +78,35 @@ struct CreationHeaders {
     bytes: usize,
 }
 impl<A: RowApplication> Inner<A> {
+    pub(super) fn families_at(
+        &self,
+        manifest: Commitment,
+    ) -> Result<Arc<rocky_credentials::GrantFamilies>, Error> {
+        let mut cache = self
+            .crypto
+            .families
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(families) = cache.get(&manifest) {
+            return Ok(families.clone());
+        }
+        let definition = self
+            .definition_at(&manifest)
+            .ok_or_else(|| denied("grant family schema unavailable"))?;
+        let families =
+            Arc::new(rocky_credentials::GrantFamilies::new(definition, &[]).map_err(credential)?);
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(manifest, families.clone());
+        Ok(families)
+    }
+    pub(crate) fn grant_families(&self) -> &rocky_credentials::GrantFamilies {
+        self.workspace
+            .typed
+            .as_ref()
+            .map_or(&self.families, |typed| &typed.families)
+    }
     pub(super) fn verified_chain(
         &self,
         chain: &CredentialChain,
@@ -91,8 +121,13 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
-        self.crypto
-            .verify(chain, self.config.publisher, revocations, time)
+        self.crypto.verify(
+            chain,
+            self.config.publisher,
+            revocations,
+            time,
+            Some(self.grant_families()),
+        )
     }
 }
 
@@ -134,12 +169,16 @@ impl Cache {
         publisher: PublicKey,
         revocations: &RevocationSet,
         time: u64,
+        families: Option<&rocky_credentials::GrantFamilies>,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
+        let default_families = rocky_credentials::GrantFamilies::default();
+        let families = families.unwrap_or(&default_families);
         let digest = rocky_core::commitment("rocky.credential-chain.v1", &encode(chain)?);
         let key = (
             digest,
             publisher,
             rocky_core::commitment("rocky.verified-chain-revocations.v1", &encode(revocations)?),
+            families.digest(),
         );
         let mut cache = self
             .chains
@@ -149,7 +188,7 @@ impl Cache {
             return Ok(verified.clone());
         }
         let verified = chain
-            .verified(publisher, revocations, time)
+            .verified_with_families(publisher, revocations, time, families)
             .map_err(credential)?;
         #[cfg(test)]
         self.verifications.fetch_add(1, Ordering::Relaxed);
@@ -251,7 +290,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     let _ = crypto.open(frame, key);
                 }
                 if let (Ok(chain), Ok(time)) = (frame.chain(), now()) {
-                    let _ = crypto.verify(chain.credentials(), publisher, &revocations, time);
+                    let _ = crypto.verify(chain.credentials(), publisher, &revocations, time, None);
                 }
             }
             frames

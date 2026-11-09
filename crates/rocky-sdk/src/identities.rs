@@ -172,26 +172,29 @@ impl Settings {
             .map(|link| link.capability.extended())
             .transpose()?
             .is_some_and(|extended| extended.issues);
-        let chain =
-            if issues {
-                let grants =
-                    crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
-                let partitions = crate::enrollment::whole_partitions(domain, &grants);
-                let held = Authority::issuer(key, &links.with_certificate(certificate.clone()))?
-                    .hold(grants, partitions, self.validity()?)?;
-                let mut chain = links;
-                chain.0.push(held);
-                chain.0.push(certificate);
-                chain
-            } else {
-                links.with_certificate(certificate)
-            };
-        chain.verify_selectors(
-            self.publisher,
-            key.public_key(),
-            &self.revocations,
-            crate::enrollment::now()?,
-        )?;
+        let chain = if issues {
+            let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
+            let partitions = crate::enrollment::whole_partitions(domain, &grants);
+            let held = Authority::issuer(key, &links.with_certificate(certificate.clone()))?.hold(
+                domain.families.compact_resources(&grants),
+                domain.families.compact_partitions(&partitions),
+                self.validity()?,
+            )?;
+            let mut chain = links;
+            chain.0.push(held);
+            chain.0.push(certificate);
+            chain
+        } else {
+            links.with_certificate(certificate)
+        };
+        domain
+            .verified(
+                &chain,
+                self.publisher,
+                &self.revocations,
+                crate::enrollment::now()?,
+            )?
+            .selectors(key.public_key(), crate::enrollment::now()?)?;
         Ok(chain)
     }
 }

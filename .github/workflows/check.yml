@@ -380,6 +380,13 @@ jobs:
             ./scripts/check --no-clippy
           fi
 
+      - name: Check the packaged coordinator relay
+        if: steps.reuse.outputs.passed != 'true'
+        working-directory: source
+        run: |
+          cargo clippy --locked -p rocky-coordinator --features relay-server --bin rocky-voter --tests -- -D warnings
+          cargo test --locked -p rocky-coordinator --features relay-server --bin rocky-voter
+
       - uses: ./source/.github/actions/record-pass
         if: steps.reuse.outputs.passed != 'true'
         with:

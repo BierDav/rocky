@@ -251,13 +251,12 @@ impl crate::VerifiedChain {
         tuple: &PartitionTuple,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        self.selectors(subject, time)?;
         if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
             return Err(denied(
                 "the partition author number does not belong to the signing key",
             ));
         }
-        resolve_leaf(&self.held, scope, tuple)
+        self.partition(subject, scope, tuple, time)
     }
     /// Whether a node may write some partition of `scope`'s table, for a
     /// verifier that cannot see which: a covered position's signed header
@@ -269,7 +268,8 @@ impl crate::VerifiedChain {
         scope: ResourceScope,
         time: u64,
     ) -> Result<(), Error> {
-        let (grants, partitions) = self.selectors(subject, time)?;
+        self.valid_node(subject, time)?;
+        let (grants, partitions) = self.grants_for(scope.table)?;
         if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
             return Err(denied(
                 "the partition author number does not belong to the signing key",

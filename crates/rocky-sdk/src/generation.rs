@@ -48,7 +48,7 @@ impl Settings {
                     && partition
                         .members
                         .iter()
-                        .all(|member| self.owns_partition(member))
+                        .all(|member| self.owns_partition(domain, member))
             }))
     }
     pub(crate) fn prepare_schema(&mut self, vault: &Vault, domain: &Domain) -> Result<(), Failure> {

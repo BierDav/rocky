@@ -6034,6 +6034,7 @@ dependencies = [
  "directory-app",
  "fs2",
  "inventory-app",
+ "iroh-relay",
  "openraft",
  "p2panda-core",
  "rocky-core",

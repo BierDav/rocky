@@ -42,6 +42,8 @@ const USAGE: &str = "usage:
   rocky-voter keys OUT_DIR [CLIENT_SOCKET_ADDRESS]
   rocky-voter certify PLAN.json ROOT_KEY_FILE OUT_DIR
   rocky-voter local OUT_DIR [BASE_PORT]
+  rocky-voter relay HTTP_BIND_ADDRESS
+  rocky-voter check BUNDLE.json RELAY_URL TENANT_KEY_FILE
   rocky-voter backup CONFIG.json OUT_DIR
   rocky-voter restore BACKUP_DIR CONFIG.json
   rocky-voter admin ADMIN.json initialize
@@ -54,6 +56,8 @@ pub(super) async fn main() -> Result<(), Failure> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
+        ["relay", address] => relay(address).await,
+        ["check", bundle, relay, key] => check(Path::new(bundle), relay, Path::new(key)).await,
         ["key", out] => {
             let key = PrivateKey::new();
             write_private(Path::new(out), &key.to_hex())?;
@@ -98,6 +102,24 @@ pub(super) async fn main() -> Result<(), Failure> {
         [config, "--provision"] => run(Path::new(config), true).await,
         _ => Err(USAGE.into()),
     }
+}
+
+#[cfg(feature = "iroh")]
+async fn check(bundle: &Path, relay: &str, key: &Path) -> Result<(), Failure> {
+    super::public_check::run(bundle, relay, key).await
+}
+#[cfg(not(feature = "iroh"))]
+async fn check(_: &Path, _: &str, _: &Path) -> Result<(), Failure> {
+    Err("this voter was built without the iroh client lane".into())
+}
+
+#[cfg(feature = "relay-server")]
+async fn relay(address: &str) -> Result<(), Failure> {
+    super::relay::serve(address.parse()?).await
+}
+#[cfg(not(feature = "relay-server"))]
+async fn relay(_: &str) -> Result<(), Failure> {
+    Err("this voter was built without relay-server".into())
 }
 
 fn load(path: &Path) -> Result<(Configuration, CertifiedGenesis), Failure> {

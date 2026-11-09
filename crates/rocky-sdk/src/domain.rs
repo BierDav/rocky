@@ -1,8 +1,8 @@
 //! Format-2 typed secure tables of a consumer schema in one domain.
 use crate::{Failure, schema::Schema};
 use rocky_core::{
-    ApplicationManifest, Commitment, DomainId, FieldSelection, LogicalSchema, MeshId,
-    ResourceScope, RowApplication, Scope, TypedRows,
+    ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
+    RowApplication, Scope, TypedRows,
 };
 use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +17,7 @@ pub(crate) struct Domain {
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
     granted_like: BTreeMap<String, String>,
+    pub families: rocky_credentials::GrantFamilies,
 }
 impl Domain {
     pub fn new(
@@ -101,10 +102,16 @@ impl Domain {
                 )
             })
             .collect();
+        let app = TypedRows::new(logical, vec![domain])?
+            .at_generation(generation)?
+            .on_engine(engine);
+        let families = rocky_credentials::GrantFamilies::new(
+            &app.manifest(),
+            &tables.values().copied().collect::<Vec<_>>(),
+        )?;
         Ok(Self {
-            app: TypedRows::new(logical, vec![domain])?
-                .at_generation(generation)?
-                .on_engine(engine),
+            app,
+            families,
             scope,
             tables,
             granted_like: schema.granted_like(),
@@ -127,14 +134,6 @@ impl Domain {
         grants: &[rocky_credentials::PartitionGrant],
     ) -> Vec<rocky_credentials::PartitionGrant> {
         let logical = self.logical();
-        let slots = |table: &rocky_core::LogicalTable| -> Vec<Commitment> {
-            table
-                .partition_by
-                .iter()
-                .filter_map(|name| table.column(name))
-                .map(|column| logical.field_id(table, column))
-                .collect()
-        };
         // Grants on tables a later generation removed are dropped.
         let grants: Vec<_> = grants
             .iter()
@@ -146,45 +145,18 @@ impl Domain {
             })
             .cloned()
             .collect();
-        let mut all = grants.clone();
-        for (name, like) in &self.granted_like {
-            let (Some(table), Some(parent)) = (logical.table(name), logical.table(like)) else {
-                continue;
-            };
-            let (id, parent_id) = (logical.table_id(table), logical.table_id(parent));
-            let (own, parents) = (slots(table), slots(parent));
-            if own.len() != parents.len() || grants.iter().any(|grant| grant.table == id) {
-                continue;
-            }
-            for grant in grants.iter().filter(|grant| {
-                grant.table == parent_id
-                    && grant.rows == rocky_core::RowSelection::All
-                    && grant.fields == FieldSelection::All
-            }) {
-                let selector: BTreeMap<_, _> = grant
-                    .selector
-                    .0
-                    .iter()
-                    .filter_map(|(slot, selection)| {
-                        let index = parents.iter().position(|parent| parent == slot)?;
-                        Some((own[index], selection.clone()))
-                    })
-                    .collect();
-                if selector.len() != grant.selector.0.len() {
-                    continue;
-                }
-                all.push(rocky_credentials::PartitionGrant {
-                    domain: grant.domain,
-                    table: id,
-                    selector: rocky_core::PartitionSelector(selector),
-                    rows: rocky_core::RowSelection::All,
-                    rights: grant.rights.clone(),
-                    fields: FieldSelection::All,
-                });
-            }
-        }
-        all
+        self.families.partitions(&grants)
     }
+    pub fn verified(
+        &self,
+        chain: &rocky_credentials::CredentialChain,
+        publisher: rocky_credentials::PublicKey,
+        revocations: &rocky_credentials::RevocationSet,
+        time: u64,
+    ) -> Result<rocky_credentials::VerifiedChain, rocky_credentials::Error> {
+        chain.verified_with_families(publisher, revocations, time, &self.families)
+    }
+
     /// `profile` as this generation reads it: without the tables and
     /// columns a later generation removed, and with the schema's
     /// `granted_like` applied: a table granted like another receives the

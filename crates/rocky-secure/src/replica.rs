@@ -167,6 +167,41 @@ pub struct SecureConfig {
     pub credentials: CredentialChain,
     pub keys: Vec<KeyMaterial>,
 }
+/// Opening authority with the adapter's canonical table scopes. A partition's
+/// keyed scope must never be supplied as a table scope.
+pub struct OpenConfig {
+    security: SecureConfig,
+    table_scopes: Option<Vec<ResourceScope>>,
+}
+impl From<SecureConfig> for OpenConfig {
+    fn from(security: SecureConfig) -> Self {
+        Self {
+            security,
+            table_scopes: None,
+        }
+    }
+}
+impl SecureConfig {
+    pub fn with_table_scopes(self, scopes: Vec<ResourceScope>) -> OpenConfig {
+        OpenConfig {
+            security: self,
+            table_scopes: Some(scopes),
+        }
+    }
+}
+impl OpenConfig {
+    fn families(
+        &self,
+        manifest: &rocky_core::ApplicationManifest,
+    ) -> Result<rocky_credentials::GrantFamilies, Error> {
+        match &self.table_scopes {
+            Some(scopes) => {
+                rocky_credentials::GrantFamilies::new(manifest, scopes).map_err(credential)
+            }
+            None => config_families(&self.security, manifest),
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiveStatus {
     Custody,
@@ -313,6 +348,7 @@ pub(super) struct Inner<A> {
     /// Stored chains decoded recently, by digest.
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
     crypto: Arc<crypto::Cache>,
+    families: rocky_credentials::GrantFamilies,
     /// The last checkpoint statement decoded per scope number, newest or
     /// verified, with its bytes.
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
@@ -874,11 +910,44 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Checks a configuration against its verified manifest: the revocations,
-/// this node's credentials for that manifest, and keys it may read whole.
-pub(super) fn check_config(
+fn config_families(
     config: &SecureConfig,
     manifest: &rocky_core::ApplicationManifest,
+) -> Result<rocky_credentials::GrantFamilies, Error> {
+    let unpartitioned: BTreeSet<_> = manifest
+        .entities
+        .iter()
+        .filter(|entity| {
+            serde_json::from_str::<serde_json::Value>(&entity.shape)
+                .ok()
+                .is_some_and(|shape| shape["partition_by"].as_array().is_some_and(Vec::is_empty))
+        })
+        .map(|entity| entity.id)
+        .collect();
+    let scopes: BTreeSet<_> = config
+        .keys
+        .iter()
+        .filter(|key| unpartitioned.contains(&key.scope.table))
+        .map(|key| key.scope)
+        .chain(
+            config
+                .credentials
+                .0
+                .iter()
+                .flat_map(|link| link.capability.grants.iter())
+                .map(|grant| grant.scope)
+                .filter(|scope| unpartitioned.contains(&scope.table)),
+        )
+        .collect();
+    rocky_credentials::GrantFamilies::new(manifest, &scopes.into_iter().collect::<Vec<_>>())
+        .map_err(credential)
+}
+/// Checks a configuration against its verified manifest: the revocations,
+/// this node's credentials for that manifest, and keys it may read whole.
+fn check_config_with_families(
+    config: &SecureConfig,
+    manifest: &rocky_core::ApplicationManifest,
+    families: &rocky_credentials::GrantFamilies,
 ) -> Result<(), Error> {
     if config
         .credentials
@@ -901,12 +970,9 @@ pub(super) fn check_config(
         .map_err(credential)?;
     let (grants, selectors) = config
         .credentials
-        .verify_selectors(
-            config.publisher,
-            config.node.public_key(),
-            &config.revocations,
-            now()?,
-        )
+        .verified_with_families(config.publisher, &config.revocations, now()?, &families)
+        .map_err(credential)?
+        .selectors(config.node.public_key(), now()?)
         .map_err(credential)?;
     let mut seen_scopes = BTreeSet::new();
     let mut seen_keys = BTreeSet::new();
@@ -940,25 +1006,31 @@ pub(super) fn check_config(
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    pub async fn open(path: impl AsRef<Path>, app: A, config: SecureConfig) -> Result<Self, Error> {
-        Self::open_configured(path, app, config, None).await
+    pub async fn open(
+        path: impl AsRef<Path>,
+        app: A,
+        config: impl Into<OpenConfig>,
+    ) -> Result<Self, Error> {
+        Self::open_configured(path, app, config.into(), None).await
     }
     /// Installs an enrollment's authenticated graph and explicit bookmark.
     pub async fn open_following(
         path: impl AsRef<Path>,
         app: A,
-        config: SecureConfig,
+        config: impl Into<OpenConfig>,
         graph: rocky_credentials::TipGraph,
         bookmark: Option<String>,
     ) -> Result<Self, Error> {
-        Self::open_configured(path, app, config, Some((graph, bookmark))).await
+        Self::open_configured(path, app, config.into(), Some((graph, bookmark))).await
     }
     async fn open_configured(
         path: impl AsRef<Path>,
         app: A,
-        mut config: SecureConfig,
+        config: OpenConfig,
         bootstrap: Option<(rocky_credentials::TipGraph, Option<String>)>,
     ) -> Result<Self, Error> {
+        let families = config.families(&app.manifest())?;
+        let mut config = config.security;
         let genesis = config
             .manifest
             .verify(config.publisher)
@@ -976,7 +1048,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .link(certificate.clone())
                 .map_err(credential)?;
         }
-        check_config(&config, &manifest)?;
+        check_config_with_families(&config, &manifest, &families)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
         config.keys = current;
         check_replica_format(path.as_ref()).await?;
@@ -1043,6 +1115,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             finalization_time: Default::default(),
             node_author: Some(identity::NodeAuthor::new(&config)?),
+            families,
             config,
             credential_signer: None,
             partitions: BTreeMap::new(),
@@ -1204,12 +1277,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let (grants, selectors) = inner
                     .config
                     .credentials
-                    .verify_selectors(
+                    .verified_with_families(
                         inner.config.publisher,
-                        inner.config.node.public_key(),
                         &inner.config.revocations,
                         now()?,
+                        inner.grant_families(),
                     )
+                    .map_err(credential)?
+                    .selectors(inner.config.node.public_key(), now()?)
                     .map_err(credential)?;
                 let scopes: BTreeSet<_> = grants
                     .iter()
@@ -2052,12 +2127,14 @@ impl<A: RowApplication> Inner<A> {
         let (_, selectors) = self
             .config
             .credentials
-            .verify_selectors(
+            .verified_with_families(
                 self.config.publisher,
-                self.config.node.public_key(),
                 &self.config.revocations,
                 time,
+                self.grant_families(),
             )
+            .map_err(credential)?
+            .selectors(self.config.node.public_key(), time)
             .map_err(credential)?;
         let selectors = Arc::new(selectors);
         *local = Some((key, selectors.clone()));

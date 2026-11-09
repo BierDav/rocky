@@ -274,8 +274,9 @@ impl CreationProof {
         table: Commitment,
         id: rocky_core::RowIdentity,
         ceiling: &Stamp,
+        families: &rocky_credentials::GrantFamilies,
     ) -> Result<(), Error> {
-        self.verify_with_bindings(publisher, manifest, table, id, ceiling, None)
+        self.verify_with_bindings(publisher, manifest, table, id, ceiling, None, families)
     }
     pub(super) fn verify_with_bindings<'a>(
         &'a self,
@@ -285,6 +286,7 @@ impl CreationProof {
         id: rocky_core::RowIdentity,
         ceiling: &Stamp,
         mut memo: Option<&mut FrameBindings<'a>>,
+        families: &rocky_credentials::GrantFamilies,
     ) -> Result<(), Error> {
         if self.version != 2
             || self.manifest != manifest
@@ -309,12 +311,13 @@ impl CreationProof {
         {
             return Ok(());
         }
-        rocky_credentials::AuthorBinding::verify_chain(
+        rocky_credentials::AuthorBinding::verify_chain_with_families(
             &self.bindings,
             publisher,
             table,
             author,
             signer,
+            families,
         )
         .map_err(credential)?;
         if let Some(memo) = memo {
@@ -534,6 +537,7 @@ impl<A: RowApplication> Inner<A> {
             write.change.scope.table,
             id,
             ceiling,
+            self.families_at(carried.proof.manifest())?.as_ref(),
         )?;
         let fields = write
             .change
@@ -932,15 +936,16 @@ impl<A: RowApplication> Inner<A> {
             .partitions
             .get(&destination)
             .ok_or_else(|| denied("follow partition missing"))?;
-        let grants = author.credentials.verify_partition_author(
-            self.config.publisher,
-            signer,
-            author.number,
-            destination,
-            tuple,
-            &self.config.revocations,
-            time,
-        );
+        let grants = author
+            .credentials
+            .verified_with_families(
+                self.config.publisher,
+                &self.config.revocations,
+                time,
+                self.grant_families(),
+            )
+            .map_err(credential)?
+            .partition_author(signer, author.number, destination, tuple, time);
         let Ok(grants) = grants else {
             return Ok(());
         };

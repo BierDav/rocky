@@ -300,13 +300,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(|error| denied(&error.to_string()))?;
         let grants = author
             .credentials
-            .verify_partition_author(
+            .verified_with_families(
                 inner.config.publisher,
+                &inner.config.revocations,
+                now()?,
+                inner.grant_families(),
+            )
+            .map_err(credential)?
+            .partition_author(
                 author.key.public_key(),
                 author.number,
                 scope,
                 &tuple,
-                &inner.config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -424,14 +429,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .config
             .credentials
-            .verify_partition(
+            .verified_with_families(
                 inner.config.publisher,
-                inner.config.node.public_key(),
-                scope,
-                &tuple,
                 &inner.config.revocations,
                 now()?,
+                inner.grant_families(),
             )
+            .map_err(credential)?
+            .partition(inner.config.node.public_key(), scope, &tuple, now()?)
             .map_err(credential)?;
         if inner.partitions.get(&scope) == Some(&tuple) {
             return Ok(());
@@ -716,14 +721,14 @@ impl<A: RowApplication> Inner<A> {
         tuple: &PartitionTuple,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         chain
-            .verify_partition(
+            .verified_with_families(
                 self.config.publisher,
-                key,
-                scope,
-                tuple,
                 &self.config.revocations,
                 now()?,
+                self.grant_families(),
             )
+            .map_err(credential)?
+            .partition(key, scope, tuple, now()?)
             .map_err(credential)
     }
 }
@@ -741,12 +746,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         // One chain verification per batch. A peer without custody gets no
         // offer.
-        let Ok((_, selectors)) = credentials.verify_selectors(
-            inner.config.publisher,
-            peer,
-            &inner.config.revocations,
-            now()?,
-        ) else {
+        let Ok((_, selectors)) = credentials
+            .verified_with_families(
+                inner.config.publisher,
+                &inner.config.revocations,
+                now()?,
+                inner.grant_families(),
+            )
+            .map_err(credential)?
+            .selectors(peer, now()?)
+        else {
             return Ok(Vec::new());
         };
         if !selectors

@@ -25,8 +25,8 @@ pub(crate) const RECIPIENT_DEPOSITS: usize = 256;
 pub(crate) const MAILBOX_DEPOSITS: usize = 4096;
 /// A deposit is gone 30 days after it arrived.
 pub(crate) const DEPOSIT_LIFETIME: u64 = 30 * 24 * 60 * 60;
-/// The 4 KiB envelope plus partition metadata and sealed sender credentials.
-pub(crate) const MAX_DEPOSIT_PAYLOAD: usize = 4096 + 1024 + 32 * 1024;
+/// The credential layer and transport bound the entire sealed wrapper.
+pub(crate) const MAX_DEPOSIT_PAYLOAD: usize = rocky_credentials::MAX_DELIVERY_PAYLOAD;
 /// Envelopes one sender keeps, delivered ones included.
 pub(crate) const MAX_OUTBOX: usize = 16_384;
 /// The retryable refusal of a mailbox at either bound.

@@ -24,6 +24,7 @@ pub(super) struct Typed {
     /// Full signed declarations, including tables with no physical projection.
     pub(super) declarations: Vec<Projected>,
     pub(super) names: Names,
+    pub(super) families: rocky_credentials::GrantFamilies,
 }
 pub(super) fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -61,8 +62,14 @@ impl Typed {
         if readers.len() != typed.len() {
             return Err(incompatible("a reader scope names no typed table".into()));
         }
+        let families = rocky_credentials::GrantFamilies::new(
+            &rows.manifest(),
+            &tables.iter().map(|table| table.scope).collect::<Vec<_>>(),
+        )
+        .map_err(credential)?;
         let statements = statements(&schema);
         Ok(Self {
+            families,
             names: Names::new(None, &statements),
             rows,
             domain,
@@ -333,12 +340,14 @@ impl<A: RowApplication> Inner<A> {
         let (grants, selectors) = self
             .config
             .credentials
-            .verify_selectors(
+            .verified_with_families(
                 self.config.publisher,
-                self.config.node.public_key(),
                 &self.config.revocations,
                 now()?,
+                &typed.families,
             )
+            .map_err(credential)?
+            .selectors(self.config.node.public_key(), now()?)
             .map_err(credential)?;
         Ok(typed
             .tables

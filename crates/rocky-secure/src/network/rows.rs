@@ -431,12 +431,14 @@ impl NativeSession {
             RowMessage::MigrationQuery { publication } => {
                 let inner = replica.inner.lock(crate::replica::Class::Background).await;
                 self.credentials
-                    .verify_selectors(
+                    .verified_with_families(
                         inner.config.publisher,
-                        self.peer,
                         &inner.config.revocations,
                         now()?,
+                        inner.grant_families(),
                     )
+                    .map_err(credential)?
+                    .selectors(self.peer, now()?)
                     .map_err(credential)?;
                 drop(inner);
                 let descriptor = replica

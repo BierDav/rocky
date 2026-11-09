@@ -375,24 +375,28 @@ impl<A: RowApplication> SecureSql<A> {
         let grants = match &tuple {
             Some(tuple) => author
                 .credentials
-                .verify_partition_author(
+                .verified_with_families(
                     inner.config.publisher,
-                    author.key.public_key(),
-                    author.number,
-                    scope,
-                    tuple,
                     &inner.config.revocations,
                     now()?,
+                    inner.grant_families(),
                 )
+                .map_err(credential)?
+                .partition_author(author.key.public_key(), author.number, scope, tuple, now()?)
                 .map_err(credential)?,
             None => author
                 .credentials
-                .verify_author(
+                .verified_with_families(
                     inner.config.publisher,
+                    &inner.config.revocations,
+                    now()?,
+                    inner.grant_families(),
+                )
+                .map_err(credential)?
+                .author(
                     author.key.public_key(),
                     author.number,
                     table.scope.table,
-                    &inner.config.revocations,
                     now()?,
                 )
                 .map_err(credential)?,

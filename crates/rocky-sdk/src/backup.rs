@@ -272,9 +272,11 @@ mod archive {
         {
             return Err("the backup identity differs from its inventory".into());
         }
-        identity
-            .credentials
-            .provenance(inventory.publisher, inventory.node)?;
+        identity.credentials.provenance_with_families(
+            inventory.publisher,
+            inventory.node,
+            &identity.domain()?.families,
+        )?;
         Ok(Opened {
             id: HEXLOWER.encode(&rocky_core::commitment("rocky.backup.id.v1", &header)),
             inventory,

@@ -1,0 +1,11 @@
+FROM rust:1.99.0-bookworm AS build
+WORKDIR /src
+COPY . .
+ENV RUSTC_WRAPPER=""
+RUN cargo build --locked --release -p rocky-coordinator --features relay-server --bin rocky-voter
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/rocky-voter /usr/local/bin/rocky-voter
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/rocky-voter"]

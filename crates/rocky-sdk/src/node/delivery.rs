@@ -105,7 +105,13 @@ impl Node {
             return false;
         };
         chain
-            .verify_selectors(settings.publisher, node, &settings.revocations, time)
+            .verified_with_families(
+                settings.publisher,
+                &settings.revocations,
+                time,
+                &self.domain().families,
+            )
+            .and_then(|verified| verified.selectors(node, time))
             .is_ok_and(|(grants, partitions)| {
                 grants
                     .iter()

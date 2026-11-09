@@ -13,6 +13,7 @@ mod enroll;
 mod escrow;
 mod existence_base;
 mod extension;
+mod families;
 mod finality;
 mod group;
 mod identity;
@@ -57,6 +58,7 @@ pub use extension::{
     AuthorRange, DatabaseContext, Extended, Extension, MAX_AUTHOR, Origin, RECOVERY_FIRST,
     RECOVERY_SLOT, RECOVERY_SLOTS,
 };
+pub use families::GrantFamilies;
 pub use finality::{
     MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
     SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,

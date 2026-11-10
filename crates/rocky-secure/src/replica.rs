@@ -970,7 +970,7 @@ fn check_config_with_families(
         .map_err(credential)?;
     let (grants, selectors) = config
         .credentials
-        .verified_with_families(config.publisher, &config.revocations, now()?, &families)
+        .verified_with_families(config.publisher, &config.revocations, now()?, families)
         .map_err(credential)?
         .selectors(config.node.public_key(), now()?)
         .map_err(credential)?;
@@ -1029,13 +1029,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         config: OpenConfig,
         bootstrap: Option<(rocky_credentials::TipGraph, Option<String>)>,
     ) -> Result<Self, Error> {
-        let families = config.families(&app.manifest())?;
+        let manifest = app.manifest();
+        let families = config.families(&manifest)?;
         let mut config = config.security;
         let genesis = config
             .manifest
             .verify(config.publisher)
             .map_err(credential)?;
-        let manifest = app.manifest();
         if genesis.publisher != manifest.publisher
             || genesis.app != manifest.app
             || genesis.domains != manifest.domains

@@ -172,7 +172,18 @@ impl Cache {
         families: Option<&rocky_credentials::GrantFamilies>,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
         let default_families = rocky_credentials::GrantFamilies::default();
-        let families = families.unwrap_or(&default_families);
+        // Exact chains are independent of the schema, including before typed
+        // projections are installed. Marked ancestors still need their context.
+        let marked = chain.0.iter().any(|link| {
+            link.capability
+                .extended()
+                .is_ok_and(|extended| extended.families)
+        });
+        let families = if marked {
+            families.unwrap_or(&default_families)
+        } else {
+            &default_families
+        };
         let digest = rocky_core::commitment("rocky.credential-chain.v1", &encode(chain)?);
         let key = (
             digest,

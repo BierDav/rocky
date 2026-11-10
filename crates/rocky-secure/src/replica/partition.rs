@@ -610,19 +610,26 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Packs complete selected group partitions into bounded frontier exchanges.
+    /// Keeps small groups together and streams wide groups over bounded pages.
     pub(crate) async fn frontier_batches(
         &self,
         scopes: &[ResourceScope],
         limit: usize,
     ) -> Result<Vec<Vec<ResourceScope>>, Error> {
+        if limit == 0 {
+            return Err(denied("a frontier page must hold a scope"));
+        }
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let groups = inner.frontier_groups(scopes)?;
         let mut batches = Vec::new();
         let mut batch = Vec::new();
         for group in groups.into_values() {
             if group.len() > limit {
-                return Err(denied("partition group exceeds frontier batch limit"));
+                if !batch.is_empty() {
+                    batches.push(std::mem::take(&mut batch));
+                }
+                batches.extend(group.chunks(limit).map(<[ResourceScope]>::to_vec));
+                continue;
             }
             if batch.len() + group.len() > limit {
                 batches.push(std::mem::take(&mut batch));

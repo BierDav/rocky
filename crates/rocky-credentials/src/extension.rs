@@ -82,6 +82,8 @@ struct Body {
     authors: Option<AuthorRange>,
     node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    families: bool,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
     claims: Option<crate::ClaimRight>,
@@ -103,6 +105,9 @@ pub struct Extended {
     pub node: Option<crate::PeerId>,
     /// Selector grants (extension version 2).
     pub partitions: Vec<crate::PartitionGrant>,
+    /// Signed opt-in to the authenticated schema's `granted_like` families.
+    /// Absent in existing per-table credentials, whose authority stays exact.
+    pub families: bool,
     /// Issuer authority: the identity grants, renews, revokes and signs the
     /// domain's statements through this link.
     pub issues: bool,
@@ -148,6 +153,7 @@ impl Extension {
         let body = Body {
             version: EXTENSION_VERSION,
             partitions: extended.partitions,
+            families: extended.families,
             authors: extended.authors,
             node: extended.node,
             issues: extended.issues,
@@ -190,6 +196,7 @@ impl Extension {
         }
         Ok(Extended {
             partitions: body.partitions,
+            families: body.families,
             authors: body.authors,
             node: body.node,
             issues: body.issues,
@@ -220,6 +227,7 @@ mod tests {
                     version,
                     authors: None,
                     partitions: Vec::new(),
+                    families: false,
                     issues: false,
                     trusted: None,
                     claims: None,

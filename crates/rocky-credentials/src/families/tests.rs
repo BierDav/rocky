@@ -49,7 +49,7 @@ impl Fixture {
             })
             .collect();
         let schema = rocky_core::SchemaDefinition::parse(
-            &json!({"format":6,"publisher":publisher,"application":"families","tables":tables})
+            json!({"format":6,"publisher":publisher,"application":"families","tables":tables})
                 .to_string()
                 .as_bytes(),
         )
@@ -124,6 +124,21 @@ impl Fixture {
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
     ) -> CredentialChain {
+        self.chain_terms(grants, partitions, true)
+    }
+    fn old_chain(
+        &self,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+    ) -> CredentialChain {
+        self.chain_terms(grants, partitions, false)
+    }
+    fn chain_terms(
+        &self,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        families: bool,
+    ) -> CredentialChain {
         let authority = Authority::owner_in(
             &self.root,
             crate::DatabaseContext {
@@ -132,15 +147,20 @@ impl Fixture {
             },
         )
         .unwrap();
-        let capability = authority
-            .issue_partition_terms(
-                self.identity.public_key(),
-                grants,
-                partitions,
-                (3, Some(AuthorRange::new(1, 1000).unwrap())),
-                (TIME, 3600, 0),
-            )
-            .unwrap();
+        let issue = if families {
+            Authority::issue_family_terms
+        } else {
+            Authority::issue_partition_terms
+        };
+        let capability = issue(
+            &authority,
+            self.identity.public_key(),
+            grants,
+            partitions,
+            (3, Some(AuthorRange::new(1, 1000).unwrap())),
+            (TIME, 3600, 0),
+        )
+        .unwrap();
         crate::device_chain(capability, &self.identity, self.node.public_key(), 1).unwrap()
     }
     fn tuple(&self, table: usize, value: &str) -> (ResourceScope, PartitionTuple) {
@@ -168,9 +188,28 @@ fn compact_families_and_per_table_credentials_verify_without_changing_signed_byt
     assert_eq!(selectors, partitions[..1]);
     assert_eq!(f.families.resources(&compact), resources);
     assert_eq!(f.families.partitions(&selectors), partitions);
-    for chain in [f.chain(resources, partitions), f.chain(compact, selectors)] {
+    for chain in [
+        f.old_chain(resources, partitions),
+        f.chain(compact, selectors),
+    ] {
         let bytes = crate::encode(&chain).unwrap();
         let ids: Vec<_> = chain.0.iter().map(|link| link.id().unwrap()).collect();
+        let held = chain.held().unwrap();
+        let renewed = Authority::owner_in(
+            &f.root,
+            crate::DatabaseContext {
+                publisher: f.root.public_key(),
+                scope: f.resources[0].scope.domain,
+            },
+        )
+        .unwrap()
+        .renew(held, &RevocationSet::new(), (TIME, 3600, 0))
+        .unwrap();
+        assert_eq!(
+            renewed.capability.extended().unwrap().families,
+            held.extended().unwrap().families,
+            "renewal retains the signed choice between exact and family authority"
+        );
         let verified = chain
             .verified_with_families(
                 f.root.public_key(),
@@ -298,19 +337,18 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
             .is_err()
     );
     // A correctly signed chain crafted with the schema-free API must fail receipt too.
-    let forged = delegable
-        .delegate(
-            &f.identity,
-            identity.public_key(),
-            PrincipalKind::User,
-            vec![f.resources[0].clone()],
-            terms.0,
-            terms.1,
-            (TIME, 1000, 0),
-        )
-        .unwrap()
-        .certify(&identity, node.public_key(), 100)
-        .unwrap();
+    let mut forged = delegable.clone();
+    let mut capability = forged.0.last().unwrap().capability.clone();
+    capability.subject = identity.public_key();
+    capability.delegations = 1;
+    capability.grants = vec![f.resources[0].clone()];
+    let mut extended = capability.extended().unwrap();
+    extended.authors = terms.1;
+    capability.extension = crate::Extension::new(extended).unwrap();
+    forged
+        .0
+        .push(crate::SignedCapability::sign(capability, &f.identity).unwrap());
+    let forged = forged.certify(&identity, node.public_key(), 100).unwrap();
     assert!(
         forged
             .verified_with_families(
@@ -352,6 +390,128 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
     assert!(
         verified
             .author(node.public_key(), 100, f.resources[0].scope.table, TIME)
+            .is_err()
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn duplicate_follower_grants_cannot_hide_a_restriction_during_compaction() {
+    let f = Fixture::new();
+    let mut parent_read = f.resources[0].clone();
+    parent_read.rights = [Right::Read].into();
+    let mut child_read = f.resources[1].clone();
+    child_read.rights = [Right::Read].into();
+    let grants = vec![
+        parent_read,
+        f.resources[0].clone(),
+        child_read.clone(),
+        child_read,
+    ];
+    assert_eq!(f.families.compact_resources(&grants), grants);
+    let mut parent_read = f.partitions[0].clone();
+    parent_read.rights = [Right::Read].into();
+    let mut child_read = f.partitions[1].clone();
+    child_read.rights = [Right::Read].into();
+    let grants = vec![
+        parent_read,
+        f.partitions[0].clone(),
+        child_read.clone(),
+        child_read,
+    ];
+    assert_eq!(f.families.compact_partitions(&grants), grants);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn wire_grant_quota_stays_bounded_when_profiles_can_resolve_wide_schemas() {
+    let f = Fixture::new();
+    let authority = Authority::owner_in(
+        &f.root,
+        crate::DatabaseContext {
+            publisher: f.root.public_key(),
+            scope: f.resources[0].scope.domain,
+        },
+    )
+    .unwrap();
+    assert!(
+        authority
+            .issue_partition_terms(
+                f.identity.public_key(),
+                vec![f.resources[0].clone(); crate::MAX_GRANTS + 1],
+                vec![],
+                (1, Some(AuthorRange::new(1, 1000).unwrap())),
+                (TIME, 3600, 0)
+            )
+            .is_err()
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn old_sparse_grants_never_acquire_family_authority() {
+    let f = Fixture::new();
+    let chain = f.old_chain(vec![f.resources[0].clone()], vec![f.partitions[0].clone()]);
+    assert!(!chain.held().unwrap().extended().unwrap().families);
+    let verified = chain
+        .verified_with_families(
+            f.root.public_key(),
+            &RevocationSet::new(),
+            TIME,
+            &f.families,
+        )
+        .unwrap();
+    let (scope, tuple) = f.tuple(1, "A");
+    assert!(
+        verified
+            .partition(f.node.public_key(), scope, &tuple, TIME)
+            .is_err()
+    );
+    let bindings: Vec<_> = chain
+        .0
+        .iter()
+        .map(|link| link.author_binding.clone())
+        .collect();
+    assert!(
+        crate::AuthorBinding::verify_chain_with_families(
+            &bindings,
+            f.root.public_key(),
+            f.resources[1].scope.table,
+            1,
+            f.node.public_key(),
+            &f.families
+        )
+        .is_err()
+    );
+    let marked = f.chain(vec![f.resources[0].clone()], vec![f.partitions[0].clone()]);
+    assert!(
+        marked
+            .verified(f.root.public_key(), &RevocationSet::new(), TIME)
+            .is_err()
+    );
+    let bindings: Vec<_> = marked
+        .0
+        .iter()
+        .map(|link| link.author_binding.clone())
+        .collect();
+    crate::AuthorBinding::verify_chain_with_families(
+        &bindings,
+        f.root.public_key(),
+        f.resources[1].scope.table,
+        1,
+        f.node.public_key(),
+        &f.families,
+    )
+    .unwrap();
+    let mut tampered = marked.clone();
+    let mut extended = tampered.0[0].capability.extended().unwrap();
+    extended.families = false;
+    tampered.0[0].capability.extension = crate::Extension::new(extended).unwrap();
+    assert!(
+        tampered
+            .verified_with_families(
+                f.root.public_key(),
+                &RevocationSet::new(),
+                TIME,
+                &f.families
+            )
             .is_err()
     );
 }

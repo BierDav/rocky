@@ -30,8 +30,22 @@ impl AuthorBinding {
         let tables = capability
             .grants
             .iter()
-            .map(|grant| grant.scope.table)
-            .chain(extended.partitions.iter().map(|grant| grant.table))
+            .map(|grant| {
+                crate::families::binding_table(
+                    grant.scope.table,
+                    extended.families,
+                    &grant.rows,
+                    &grant.fields,
+                )
+            })
+            .chain(extended.partitions.iter().map(|grant| {
+                crate::families::binding_table(
+                    grant.table,
+                    extended.families,
+                    &grant.rows,
+                    &grant.fields,
+                )
+            }))
             .collect();
         let issuer = signer.principal()?;
         let bytes = Self::body(
@@ -146,11 +160,7 @@ impl AuthorBinding {
                 || binding.issuer != issuer
                 || !range.includes(&assigned)
                 || (binding.kind != PrincipalKind::Node
-                    && !(binding.issues
-                        || binding
-                            .tables
-                            .iter()
-                            .any(|granted| families.covers_table(*granted, table))))
+                    && !(binding.issues || families.authorizes_binding(&binding.tables, table)))
                 || (binding.issues && (binding.kind != PrincipalKind::User || !authority))
                 || binding
                     .attestation

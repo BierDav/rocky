@@ -1085,7 +1085,13 @@ impl Settings {
     }
     /// The grants of this device's node: its chain's leaf.
     fn grants(&self, domain: &Domain) -> Vec<ResourceGrant> {
-        domain.families.resources(self.credentials.grants())
+        match self.credentials.held() {
+            Some(held) => domain.families.for_capability(held).map_or_else(
+                |_| held.grants.clone(),
+                |families| families.resources(&held.grants),
+            ),
+            None => Vec::new(),
+        }
     }
     /// The paired grants this device's selectors resolve on one partition.
     fn selected(
@@ -1095,13 +1101,16 @@ impl Settings {
         tuple: &rocky_core::PartitionTuple,
     ) -> Vec<ResourceGrant> {
         self.credentials
-            .partitions()
-            .ok()
+            .held()
+            .and_then(|held| {
+                Some((
+                    domain.families.for_capability(held).ok()?,
+                    held.extended().ok()?.partitions,
+                ))
+            })
             .into_iter()
-            .flat_map(|grants| {
-                domain
-                    .families
-                    .partitions_for(&grants, scope.domain, scope.table)
+            .flat_map(|(families, grants)| {
+                families.partitions_for(&grants, scope.domain, scope.table)
             })
             .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
             .collect()
@@ -1111,7 +1120,7 @@ impl Settings {
         self.credentials
             .grants()
             .iter()
-            .chain(&self.selected(&domain, &member.scope, &member.tuple))
+            .chain(&self.selected(domain, &member.scope, &member.tuple))
             .any(|grant| {
                 grant.scope == member.scope
                     && grant.rows == RowSelection::All
@@ -1121,7 +1130,7 @@ impl Settings {
     /// Whether this device reads, inserts, updates and deletes every row
     /// of `member`.
     pub(crate) fn owns_partition(&self, domain: &Domain, member: &Member) -> bool {
-        let selected = self.selected(&domain, &member.scope, &member.tuple);
+        let selected = self.selected(domain, &member.scope, &member.tuple);
         [Right::Read, Right::Insert, Right::Update, Right::Delete]
             .iter()
             .all(|right| {
@@ -1145,7 +1154,7 @@ impl Settings {
     }
     /// Whether this device may read `scope` in whole, as a checkpoint needs.
     pub fn reads_whole(&self, domain: &Domain, scope: &rocky_core::ResourceScope) -> bool {
-        let concrete = self.grants(&domain).iter().any(|grant| {
+        let concrete = self.grants(domain).iter().any(|grant| {
             grant.scope == *scope
                 && grant.rows == RowSelection::All
                 && grant.rights.contains(&Right::Read)
@@ -1155,7 +1164,7 @@ impl Settings {
                 partitions
                     .iter()
                     .flat_map(|partition| &partition.members)
-                    .any(|member| member.scope == *scope && self.reads_partition(&domain, member))
+                    .any(|member| member.scope == *scope && self.reads_partition(domain, member))
             })
     }
     /// The scopes this device's credentials name: what its sessions and
@@ -1174,7 +1183,7 @@ impl Settings {
                     .filter(|member| {
                         grants.iter().any(|grant| grant.scope == member.scope)
                             || !self
-                                .selected(&domain, &member.scope, &member.tuple)
+                                .selected(domain, &member.scope, &member.tuple)
                                 .is_empty()
                     })
                     .map(|member| member.scope),
@@ -1831,7 +1840,13 @@ impl Settings {
             .families
             .compact_partitions(&whole_partitions(domain, &grants));
         let grants = domain.families.compact_resources(&grants);
-        Ok(authority.issue_partition_terms(
+        let issue = if domain.families.is_empty() {
+            Authority::issue_partition_terms
+        } else {
+            Authority::issue_family_terms
+        };
+        Ok(issue(
+            authority,
             identity,
             grants,
             partitions,
@@ -1901,7 +1916,10 @@ impl Settings {
         all: bool,
     ) -> Result<Vec<GroupDelivery>, Failure> {
         let domain = self.domain()?;
-        let grants = domain.effective_partitions(&capability.extended()?.partitions);
+        let grants = domain
+            .families
+            .for_capability(capability)?
+            .partitions(&capability.extended()?.partitions);
         // The envelopes travel inside a message the issuer authenticates.
         let sender = PrivateKey::from_bytes(&vault.get("node")?);
         let mut deliveries = Vec::new();
@@ -2061,7 +2079,7 @@ impl Settings {
                 || resolved
                     .members
                     .iter()
-                    .any(|member| !self.reads_partition(&domain, member))
+                    .any(|member| !self.reads_partition(domain, member))
             {
                 continue;
             }
@@ -2577,7 +2595,13 @@ impl Settings {
         let node = Self::node_key(vault)?;
         let authority = self.authority(&node)?;
         let time = now()?;
-        let capability = authority.issue_partition_terms(
+        let issue = if domain.families.is_empty() {
+            Authority::issue_partition_terms
+        } else {
+            Authority::issue_family_terms
+        };
+        let capability = issue(
+            &authority,
             device.identity,
             domain.families.compact_resources(&grants),
             domain
@@ -2680,6 +2704,11 @@ impl Settings {
         let node = Self::node_key(vault)?;
         let authors = Some(self.reserve_authors(device.identity, registry, terms.authors)?);
         // An issuer grants instead: its links refuse to delegate.
+        let family_context = if domain.families.is_empty() {
+            rocky_credentials::GrantFamilies::default()
+        } else {
+            domain.families.clone()
+        };
         let chain = self.credentials.delegable().delegate_with_families(
             rocky_credentials::Signer::node(&node, &self.credentials)?,
             device.identity,
@@ -2690,7 +2719,7 @@ impl Settings {
                 .compact_partitions(&whole_partitions(&domain, &grants)),
             (terms.delegations.unwrap_or(1), authors),
             (now()?, ttl, SKEW),
-            &domain.families,
+            &family_context,
         )?;
         let mut keys = Vec::new();
         for (name, epochs) in self.keys_for(vault, &domain, &grants)? {
@@ -3418,6 +3447,10 @@ impl Joining {
             enrollment.chain.issuer(settings.publisher, None)?
         };
         let issues = enrollment.capability.capability.extended()?.issues;
+        let granted = domain
+            .families
+            .for_capability(&enrollment.capability.capability)?
+            .resources(&enrollment.capability.capability.grants);
         if enrollment.capability.issuer != signer
             || enrollment.capability.capability.subject != identity
             || invite
@@ -3425,7 +3458,10 @@ impl Joining {
                 .as_ref()
                 .is_some_and(|invited| *invited != settings.profile)
             || issues != settings.profile.issues()
-            || (!issues && enrollment.capability.capability.grants != grants)
+            || (!issues
+                && (granted.len() != grants.len()
+                    || granted.iter().any(|grant| !grants.contains(grant))
+                    || grants.iter().any(|grant| !granted.contains(grant))))
         {
             return Err("the enrollment differs from its invitation".into());
         }
@@ -3481,10 +3517,11 @@ impl Settings {
             return Err("device was revoked".into());
         }
         let domain = self.domain()?;
-        let prior = request.verify(
+        let prior = request.verify_with_families(
             PrivateKey::from_bytes(&vault.get("node")?).public_key(),
             self.publisher,
             (now()?, SKEW),
+            &domain.families,
         )?;
         if self.revoked_identity(&prior.subject, registry) {
             return Err("device was revoked".into());
@@ -3520,13 +3557,14 @@ impl Settings {
             claims: None,
         };
         let node = Self::node_key(vault)?;
-        Ok(Renewal::seal_current(
+        Ok(Renewal::seal_current_with_families(
             &self.authority(&node)?,
             self.publisher,
             &request,
             self.revocations.clone(),
             now()?,
             &serde_json::to_vec(&sealed)?,
+            &domain.families,
         )?
         .to_bytes()?)
     }
@@ -3732,7 +3770,10 @@ impl Settings {
         next.learn_revocations(&renewal.revocations)?;
         let chain = next.certify(vault, renewal.chain(), &domain)?;
         // Keys of tables the renewal widened to arrive with it.
-        let grants = domain.families.resources(chain.grants());
+        let grants = domain
+            .families
+            .for_capability(chain.held().ok_or("missing identity capability")?)?
+            .resources(chain.grants());
         let Sealed {
             keys: received,
             groups,
@@ -3764,25 +3805,29 @@ impl Settings {
             claims,
         })
     }
-    /// Whether this device's profile over the current generation grants
-    /// more than its chain holds, as a table granted like a held one does.
-    /// Only a renewal adds it; the chain holds in every generation.
+    /// Whether this generation needs wider grants or newly inherited table keys.
+    /// Families resolve immediately; renewal supplies missing reader keys.
     pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
-        let held = self.grants(&domain);
+        let held = self.grants(domain);
         let wanted = profile_grants(&self.profile, domain)?;
-        let partitions = match self.credentials.0.last() {
-            Some(leaf) => leaf.capability.extended()?.partitions,
+        let partitions = self.credentials.partitions()?;
+        let held_partitions = match self.credentials.held() {
+            Some(held) => domain
+                .families
+                .for_capability(held)?
+                .partitions(&partitions),
             None => Vec::new(),
         };
-        Ok(
-            domain.effective_partitions(&partitions) != domain.families.partitions(&partitions)
-                || (held
+        Ok(domain.effective_partitions(&partitions) != held_partitions
+            || domain
+                .scopes()
+                .any(|(name, scope)| reads(&wanted, scope) && !self.keys.contains_key(name))
+            || (held
+                .iter()
+                .all(|grant| wanted.iter().any(|wide| wide.includes(grant)))
+                && wanted
                     .iter()
-                    .all(|grant| wanted.iter().any(|wide| wide.includes(grant)))
-                    && wanted
-                        .iter()
-                        .any(|wide| !held.iter().any(|grant| grant.includes(wide)))),
-        )
+                    .any(|wide| !held.iter().any(|grant| grant.includes(wide)))))
     }
     /// An issuer's own chain, signed again where it can.
     fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
@@ -3808,8 +3853,14 @@ impl Settings {
             .last()
             .ok_or("missing identity credential")?
             .capability;
-        let renewed_grants = domain.families.resources(&renewed.grants);
-        let held_grants = domain.families.resources(&held.grants);
+        let renewed_grants = domain
+            .families
+            .for_capability(renewed)?
+            .resources(&renewed.grants);
+        let held_grants = domain
+            .families
+            .for_capability(held)?
+            .resources(&held.grants);
         let profile_grants = profile_grants(&self.profile, domain)?;
         let same = |other: &[ResourceGrant]| {
             renewed_grants.len() == other.len()
@@ -3903,7 +3954,9 @@ impl Settings {
         // one the identity holds join its grants; nothing is narrowed. Issuer
         // authority names no grants: it holds every one.
         request.chain.verify_database(self.database_context()?)?;
-        let mut prior = request.verify(me, self.publisher, (time, SKEW))?.clone();
+        let mut prior = request
+            .verify_with_families(me, self.publisher, (time, SKEW), &domain.families)?
+            .clone();
         let known = registry.get(&prior.subject);
         if self.revoked_identity(&prior.subject, registry) {
             return Err("device was revoked".into());
@@ -3926,6 +3979,7 @@ impl Settings {
         let mut extended = prior.extended()?;
         extended.partitions = domain.effective_partitions(&extended.partitions);
         extended.partitions = domain.families.compact_partitions(&extended.partitions);
+        extended.families = !extended.issues && !domain.families.is_empty();
         prior.grants = domain.families.compact_resources(&prior.grants);
         prior.extension = rocky_credentials::Extension::new(extended)?;
         let (held_by, granted) = held(&prior, &domain)?;
@@ -4519,7 +4573,10 @@ fn held(
     if !capability.extended()?.issues {
         return Ok((
             capability.clone(),
-            domain.families.resources(&capability.grants),
+            domain
+                .families
+                .for_capability(capability)?
+                .resources(&capability.grants),
         ));
     }
     let grants = grants_of(&Profile::Issuer, domain)?;
@@ -4529,6 +4586,7 @@ fn held(
         partitions: domain
             .families
             .compact_partitions(&whole_partitions(domain, &grants)),
+        families: !domain.families.is_empty(),
         ..rocky_credentials::Extended::default()
     })?;
     Ok((held, grants))

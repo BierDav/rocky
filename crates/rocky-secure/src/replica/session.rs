@@ -197,7 +197,8 @@ impl<A: RowApplication> Inner<A> {
         scopes: &BTreeSet<ResourceScope>,
         time: u64,
     ) -> Result<SessionStatus, Error> {
-        if scopes.is_empty() || scopes.len() > 256 {
+        // Scope membership is checked against the bounded installed authority below.
+        if scopes.is_empty() {
             return Err(denied("session scope quota"));
         }
         let grants = self.local_grants(time)?;

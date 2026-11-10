@@ -910,6 +910,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     let mut wide = narrowed.0[1].capability.clone();
     wide.extension = Extension::new(Extended {
         partitions: Vec::new(),
+        families: false,
         authors: Some(AuthorRange::new(5, 15).expect("range")),
         node: None,
         issues: false,

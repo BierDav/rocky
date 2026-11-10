@@ -141,9 +141,6 @@
 //!
 //! Call [`Database::close`] at shutdown to await cleanup. See the `notes` example
 //! for a complete executable application.
-#[cfg(test)]
-extern crate self as rocky_sdk;
-
 mod activity;
 mod backup;
 mod claims;

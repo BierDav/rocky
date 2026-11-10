@@ -63,6 +63,7 @@ fn node_shape(capability: &Capability) -> Result<(), Error> {
             .authors
             .is_some_and(|range| range.single().is_some())
         || extended.issues
+        || extended.families
         || extended.trusted.is_some()
         || extended.claims.is_some()
         || extended.origin.is_some()
@@ -475,6 +476,9 @@ impl SignedCapability {
     /// signs, when `capability` names a node.
     pub fn sign<'s>(capability: Capability, signer: impl Into<Signer<'s>>) -> Result<Self, Error> {
         let signer = signer.into();
+        if capability.grants.len() + capability.extended()?.partitions.len() > crate::MAX_GRANTS {
+            return Err(denied("credential grant quota"));
+        }
         let purpose = match capability.kind {
             PrincipalKind::Node if signer.signing_node().is_some() => {
                 return Err(denied("only an identity's own key certifies its node"));
@@ -681,7 +685,7 @@ impl CredentialChain {
         Ok(VerifiedChain {
             leaf: leaf.clone(),
             held: held.clone(),
-            families: families.clone(),
+            families: families.for_capability(held)?,
             not_before: self
                 .0
                 .iter()
@@ -916,6 +920,9 @@ impl CredentialChain {
         for (index, signed) in self.0.iter().enumerate() {
             let capability = &signed.capability;
             let extended = capability.extended()?;
+            if extended.families && !families.authenticated() {
+                return Err(denied("grant families require an authenticated schema"));
+            }
             let node = capability.kind == PrincipalKind::Node;
             if capability
                 .grants
@@ -998,10 +1005,21 @@ impl CredentialChain {
             if let Some((parent, parent_extended)) = &parent {
                 // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;
-                let allowed = families.resources(&parent.grants);
-                let allowed_partitions = families.partitions(&parent_extended.partitions);
-                let requested = families.resources(&capability.grants);
-                let requested_partitions = families.partitions(&extended.partitions);
+                // An issuer can grant anything; a grant-free node certificate
+                // narrows only identity, lifetime and author numbers.
+                let compare = !authority && !node;
+                let parent_families = families.enabled(compare && parent_extended.families);
+                let child_families = families.enabled(compare && extended.families);
+                let (allowed, allowed_partitions, requested, requested_partitions) = if compare {
+                    (
+                        parent_families.resources(&parent.grants),
+                        parent_families.partitions(&parent_extended.partitions),
+                        child_families.resources(&capability.grants),
+                        child_families.partitions(&extended.partitions),
+                    )
+                } else {
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                };
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
@@ -1112,6 +1130,11 @@ impl CredentialChain {
     /// and nothing else (see `node_shape`). Only identities hold issuer
     /// authority.
     fn shape(capability: &Capability, extended: &Extended) -> Result<(), Error> {
+        if extended.families
+            && (extended.issues || extended.trusted.is_some() || extended.claims.is_some())
+        {
+            return Err(denied("grant families apply only to collection authority"));
+        }
         let valid = match capability.kind {
             PrincipalKind::Node => node_shape(capability).is_ok(),
             PrincipalKind::User => extended.node.is_none(),

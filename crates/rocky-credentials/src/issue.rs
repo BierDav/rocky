@@ -47,6 +47,9 @@ impl Grant {
             .iter()
             .find(|resource| resource.name == self.scope)
             .ok_or_else(|| denied("a grant names an unknown reader scope"))?;
+        self.resolve_resource(resource)
+    }
+    fn resolve_resource(&self, resource: &Resource) -> Result<ResourceGrant, Error> {
         if self.rights.is_empty() || self.rights.contains(&Right::PublishSchema) {
             return Err(denied(
                 "a grant names no right, or one that is not a collection's",
@@ -75,7 +78,7 @@ impl Grant {
             fields,
         })
     }
-    /// Every grant of `grants` resolved; there is no empty grant set.
+    /// Resolves a profile before compaction; signed capabilities enforce the quota.
     pub fn resolve_all(
         grants: &[Grant],
         resources: &[Resource],
@@ -83,9 +86,18 @@ impl Grant {
         if grants.is_empty() {
             return Err(denied("a profile holds at least one grant"));
         }
+        let by_name: BTreeMap<_, _> = resources
+            .iter()
+            .map(|resource| (resource.name.as_str(), resource))
+            .collect();
         grants
             .iter()
-            .map(|grant| grant.resolve(resources))
+            .map(|grant| {
+                let resource = by_name
+                    .get(grant.scope.as_str())
+                    .ok_or_else(|| denied("a grant names an unknown reader scope"))?;
+                grant.resolve_resource(resource)
+            })
             .collect()
     }
     /// The raw grant a signed one amounts to over `resources`, if any.
@@ -224,11 +236,12 @@ impl Profile {
             Self::Writer { scopes } => (Some(scopes), &WRITE),
             Self::Issuer => (None, &WRITE),
         };
+        let known: BTreeSet<_> = resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect();
         if let Some(names) = names
-            && (names.is_empty()
-                || names
-                    .iter()
-                    .any(|name| !resources.iter().any(|resource| resource.name == *name)))
+            && (names.is_empty() || names.iter().any(|name| !known.contains(name.as_str())))
         {
             return Err(denied("grant profile names no or unknown reader scopes"));
         }
@@ -478,6 +491,23 @@ impl<'a> Authority<'a> {
         partitions: Vec<PartitionGrant>,
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
+        self.hold_terms(grants, partitions, (time, ttl, skew), false)
+    }
+    pub fn hold_families(
+        &self,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        validity: (u64, u64, u64),
+    ) -> Result<SignedCapability, Error> {
+        self.hold_terms(grants, partitions, validity, true)
+    }
+    fn hold_terms(
+        &self,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        (time, ttl, skew): (u64, u64, u64),
+        families: bool,
+    ) -> Result<SignedCapability, Error> {
         let parent = &self
             .chain
             .0
@@ -511,6 +541,7 @@ impl<'a> Authority<'a> {
                 extension: Extension::new(Extended {
                     authors: held.authors,
                     partitions,
+                    families,
                     origin: self.origin()?,
                     ..Extended::default()
                 })?,
@@ -659,6 +690,7 @@ impl<'a> Authority<'a> {
             Extended {
                 authors: extended.authors,
                 partitions: extended.partitions,
+                families: extended.families,
                 issues: extended.issues,
                 trusted: None,
                 claims: extended.claims,
@@ -850,6 +882,7 @@ impl CredentialChain {
         let holder = holder.into();
         let parent = self.holder_key(holder.principal()?)?;
         let held = parent.extended()?;
+        let parent_families = families.enabled(held.families);
         if held.issues {
             return Err(denied("an issuer grants through its authority"));
         }
@@ -863,13 +896,13 @@ impl CredentialChain {
             || (parent.kind == PrincipalKind::Deployment && kind == PrincipalKind::User)
             || (grants.is_empty() && partitions.is_empty())
             || families.resources(&grants).iter().any(|grant| {
-                !families
+                !parent_families
                     .resources(&parent.grants)
                     .iter()
                     .any(|held| held.includes(grant))
             })
             || families.partitions(&partitions).iter().any(|grant| {
-                !families
+                !parent_families
                     .partitions(&held.partitions)
                     .iter()
                     .any(|held| held.includes(grant))
@@ -888,6 +921,7 @@ impl CredentialChain {
                 authors,
                 partitions,
                 origin: held.origin,
+                families: families.authenticated(),
                 ..Extended::default()
             })?,
         };

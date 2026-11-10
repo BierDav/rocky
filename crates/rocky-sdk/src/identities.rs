@@ -175,7 +175,15 @@ impl Settings {
         let chain = if issues {
             let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
             let partitions = crate::enrollment::whole_partitions(domain, &grants);
-            let held = Authority::issuer(key, &links.with_certificate(certificate.clone()))?.hold(
+            let certified = links.with_certificate(certificate.clone());
+            let authority = Authority::issuer(key, &certified)?;
+            let hold = if domain.families.is_empty() {
+                Authority::hold
+            } else {
+                Authority::hold_families
+            };
+            let held = hold(
+                &authority,
                 domain.families.compact_resources(&grants),
                 domain.families.compact_partitions(&partitions),
                 self.validity()?,

@@ -197,6 +197,11 @@ impl Node {
                 let terms = (delegations, Some(authors));
                 let node = Settings::node_key(&self.vault)?;
                 if kind == "partition_delegate" && !settings.issuer() {
+                    let families = if self.domain().families.is_empty() {
+                        rocky_credentials::GrantFamilies::default()
+                    } else {
+                        self.domain().families.clone()
+                    };
                     Ok(settings.credentials.delegable().delegate_with_families(
                         rocky_credentials::Signer::node(&node, &settings.credentials)?,
                         device.identity,
@@ -205,12 +210,18 @@ impl Node {
                         grants.clone(),
                         terms,
                         validity,
-                        &self.domain().families,
+                        &families,
                     )?)
                 } else {
                     // An issuer grants and delegates through its authority.
                     let authority = settings.authority(&node)?;
-                    Ok(authority.chain_of(authority.issue_partition_terms(
+                    let issue = if self.domain().families.is_empty() {
+                        rocky_credentials::Authority::issue_partition_terms
+                    } else {
+                        rocky_credentials::Authority::issue_family_terms
+                    };
+                    Ok(authority.chain_of(issue(
+                        &authority,
                         device.identity,
                         vec![],
                         grants.clone(),

@@ -317,6 +317,20 @@ impl RenewRequest {
         publisher: PublicKey,
         (time, skew): (u64, u64),
     ) -> Result<&Capability, Error> {
+        self.verify_with_families(
+            audience,
+            publisher,
+            (time, skew),
+            &crate::GrantFamilies::default(),
+        )
+    }
+    pub fn verify_with_families(
+        &self,
+        audience: PublicKey,
+        publisher: PublicKey,
+        (time, skew): (u64, u64),
+        families: &crate::GrantFamilies,
+    ) -> Result<&Capability, Error> {
         if self.version != Self::VERSION
             || self.audience != audience
             || self.time.abs_diff(time) > skew
@@ -324,7 +338,9 @@ impl RenewRequest {
         {
             return Err(denied("invalid renewal request"));
         }
-        let identity = self.chain.provenance(publisher, self.node)?;
+        let identity = self
+            .chain
+            .provenance_with_families(publisher, self.node, families)?;
         // The identity's link follows the publisher or an issuer link.
         let capabilities = self.chain.capabilities();
         let granted = match capabilities.0.len().checked_sub(2) {
@@ -440,9 +456,29 @@ impl Renewal {
         time: u64,
         payload: &[u8],
     ) -> Result<Self, Error> {
+        Self::seal_current_with_families(
+            authority,
+            publisher,
+            request,
+            revocations,
+            time,
+            payload,
+            &crate::GrantFamilies::default(),
+        )
+    }
+    pub fn seal_current_with_families(
+        authority: &Authority<'_>,
+        publisher: PublicKey,
+        request: &RenewRequest,
+        revocations: RevocationSet,
+        time: u64,
+        payload: &[u8],
+        families: &crate::GrantFamilies,
+    ) -> Result<Self, Error> {
         request
             .chain
-            .verify_selectors(publisher, request.node, &revocations, time)?;
+            .verified_with_families(publisher, &revocations, time, families)?
+            .selectors(request.node, time)?;
         let capability = request
             .chain
             .capabilities()

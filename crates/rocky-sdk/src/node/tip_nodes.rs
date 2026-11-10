@@ -122,7 +122,11 @@ impl Node {
             settings.save(&self.path)?;
         }
         self.replica.learn_revocations(&known).await?;
-        let grants = |chain: &CredentialChain| chain.grants().to_vec();
+        let grants = |chain: &CredentialChain| -> Result<_, Failure> {
+            let held = chain.held().ok_or("line node has no identity capability")?;
+            let extended = held.extended()?;
+            Ok((held.grants.clone(), extended.partitions, extended.families))
+        };
         let indexes: Vec<_> = (0..saved.nodes.len())
             .rev()
             .filter(|index| saved.nodes[*index].line == line)
@@ -144,7 +148,7 @@ impl Node {
                 ) else {
                     continue;
                 };
-                if grants(&current) != grants(&saved.nodes[index].credentials) {
+                if grants(&current)? != grants(&saved.nodes[index].credentials)? {
                     saved.nodes[index].credentials = current;
                     self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
                 }

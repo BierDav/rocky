@@ -47,6 +47,10 @@ impl GrantFamilies {
             .iter()
             .map(|field| (field.name.as_str(), field.id))
             .collect();
+        let mut by_table: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for scope in scopes {
+            by_table.entry(scope.table).or_default().push(scope);
+        }
         let mut families = BTreeMap::new();
         for (name, declaration) in &declarations {
             let Some(parent) = declaration.granted_like.as_deref() else {
@@ -81,16 +85,17 @@ impl GrantFamilies {
             } else {
                 None
             };
-            let pairs = scopes
-                .iter()
-                .filter(|scope| scope.table == parent_id)
+            let pairs = by_table
+                .get(&parent_id)
+                .into_iter()
+                .flatten()
                 .flat_map(|parent| {
-                    scopes
-                        .iter()
-                        .filter(move |scope| {
-                            scope.table == table_id && scope.domain == parent.domain
-                        })
-                        .map(move |table| (*parent, *table))
+                    by_table
+                        .get(&table_id)
+                        .into_iter()
+                        .flatten()
+                        .filter(move |scope| scope.domain == parent.domain)
+                        .map(move |table| (**parent, **table))
                 })
                 .collect();
             families.insert(
@@ -110,12 +115,38 @@ impl GrantFamilies {
         })
     }
 
-    pub fn covers_table(&self, granted: Commitment, table: Commitment) -> bool {
-        granted == table
+    pub(crate) fn authorizes_binding(
+        &self,
+        granted: &std::collections::BTreeSet<Commitment>,
+        table: Commitment,
+    ) -> bool {
+        granted.contains(&table)
+            || granted.contains(&family_binding(table))
             || self
                 .families
                 .get(&table)
-                .is_some_and(|family| family.parent == granted)
+                .is_some_and(|family| granted.contains(&family_binding(family.parent)))
+    }
+    pub(crate) fn authenticated(&self) -> bool {
+        self.digest != [0; 32]
+    }
+    pub(crate) fn enabled(&self, enabled: bool) -> Self {
+        if enabled {
+            self.clone()
+        } else {
+            Self::default()
+        }
+    }
+    pub fn for_capability(&self, capability: &crate::Capability) -> Result<Self, Error> {
+        let families = capability.extended()?.families;
+        if families && !self.authenticated() {
+            return Err(denied("grant families require an authenticated schema"));
+        }
+        Ok(self.enabled(families))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.families.is_empty()
     }
 
     pub fn digest(&self) -> Commitment {
@@ -283,13 +314,31 @@ impl GrantFamilies {
             .collect()
     }
 }
+fn family_binding(table: Commitment) -> Commitment {
+    rocky_core::commitment("rocky.author-binding.grant-family.v1", &table)
+}
+pub(crate) fn binding_table(
+    table: Commitment,
+    families: bool,
+    rows: &RowSelection,
+    fields: &FieldSelection,
+) -> Commitment {
+    if families && whole(rows, fields) {
+        family_binding(table)
+    } else {
+        table
+    }
+}
 fn whole(rows: &RowSelection, fields: &FieldSelection) -> bool {
     *rows == RowSelection::All
         && (matches!(fields, FieldSelection::All)
             || matches!(fields, FieldSelection::Only(fields) if fields.is_empty()))
 }
 fn same<T: PartialEq>(left: &[T], right: &[T]) -> bool {
-    !right.is_empty() && left.len() == right.len() && left.iter().all(|item| right.contains(item))
+    !right.is_empty()
+        && left.len() == right.len()
+        && left.iter().all(|item| right.contains(item))
+        && right.iter().all(|item| left.contains(item))
 }
 impl Family {
     fn partition(&self, grant: &PartitionGrant) -> Option<PartitionGrant> {

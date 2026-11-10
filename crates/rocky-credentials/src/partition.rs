@@ -224,12 +224,43 @@ impl crate::Authority<'_> {
         (delegations, authors): (u8, Option<crate::AuthorRange>),
         validity: (u64, u64, u64),
     ) -> Result<crate::SignedCapability, Error> {
+        self.issue_table_terms(
+            subject,
+            grants,
+            partitions,
+            (delegations, authors),
+            validity,
+            false,
+        )
+    }
+    /// Issues grants that opt into schema-authenticated families.
+    pub fn issue_family_terms(
+        &self,
+        subject: PublicKey,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        terms: (u8, Option<crate::AuthorRange>),
+        validity: (u64, u64, u64),
+    ) -> Result<crate::SignedCapability, Error> {
+        self.issue_table_terms(subject, grants, partitions, terms, validity, true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn issue_table_terms(
+        &self,
+        subject: PublicKey,
+        grants: Vec<ResourceGrant>,
+        partitions: Vec<PartitionGrant>,
+        (delegations, authors): (u8, Option<crate::AuthorRange>),
+        validity: (u64, u64, u64),
+        families: bool,
+    ) -> Result<crate::SignedCapability, Error> {
         self.sign_link(
             subject,
             grants,
             crate::Extended {
                 authors,
                 partitions,
+                families,
                 origin: self.origin()?,
                 ..crate::Extended::default()
             },

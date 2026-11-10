@@ -278,6 +278,7 @@ impl CreationProof {
     ) -> Result<(), Error> {
         self.verify_with_bindings(publisher, manifest, table, id, ceiling, None, families)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_with_bindings<'a>(
         &'a self,
         publisher: PublicKey,

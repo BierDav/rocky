@@ -438,6 +438,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         authors: Some(AuthorRange::new(11, 11).unwrap()),
         node: Some(crate::PeerId::of(node_signer.public_key())),
         partitions: vec![cross],
+        families: false,
         issues: false,
         trusted: None,
         claims: None,

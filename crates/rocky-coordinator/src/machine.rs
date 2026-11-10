@@ -11,7 +11,7 @@ const DOMAIN_BYTES: usize = 1024;
 /// Accounting of one tenant record.
 const TENANT_BYTES: usize = 64;
 /// Domains of a public service, open and closed.
-pub const MAX_PUBLIC_DOMAINS: usize = 4096;
+pub const MAX_PUBLIC_DOMAINS: usize = 65536;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Domain {

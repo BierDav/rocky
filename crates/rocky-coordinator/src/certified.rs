@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
 pub const MAX_FRAME: usize = 256 * 1024;
-pub const MAX_RECORDS: usize = 4096;
-pub const MAX_STORE: usize = 32 * 1024 * 1024;
+pub const MAX_RECORDS: usize = 65536;
+pub const MAX_STORE: usize = 1024 * 1024 * 1024;
 /// The one domain control format; a control signed under another is refused.
 const CONTROL_LABEL: &str = "rocky.control.v4";
 
@@ -114,7 +114,7 @@ pub struct PublicService {
 /// Most concurrent client requests one voter serves.
 pub const CLIENT_LANES: u32 = 64;
 impl PublicService {
-    fn validate(&self, voters: &[Voter]) -> Result<(), CoordinationError> {
+    pub(crate) fn validate(&self, voters: &[Voter]) -> Result<(), CoordinationError> {
         self.limits.validate()?;
         let tenants = self.tenants as usize;
         if self.endpoints.is_empty()

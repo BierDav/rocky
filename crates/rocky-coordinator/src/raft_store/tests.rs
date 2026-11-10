@@ -589,3 +589,36 @@ async fn client_follows_authenticated_leader_hints_and_receives_clock_skew() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn snapshots_larger_than_32_mib_can_be_saved_and_loaded() {
+    let (genesis, _, _, _) = certified();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+
+    // 33 MiB payload exceeds the former 32 MiB MAX_STORE cap
+    let large_payload = vec![0x42u8; 33 * 1024 * 1024];
+    let meta = SnapshotMeta {
+        last_log_id: None,
+        last_membership: openraft::StoredMembership::default(),
+        snapshot_id: "large-snapshot-test".into(),
+    };
+    store
+        .write_snapshot(
+            genesis.id().unwrap(),
+            &meta,
+            large_payload.clone(),
+            "large_snapshot_test",
+        )
+        .expect("writing a >32 MiB snapshot should succeed under 1 GiB store limit");
+
+    // Verify reading and unsealing the large snapshot
+    let path = store.snapshots_dir().join(file_name(snapshot_index(&meta)));
+    let raw = read(&path).expect("reading snapshot file should succeed");
+    assert!(raw.len() > 33 * 1024 * 1024);
+
+    let unsealed: SnapshotFile =
+        unseal(SNAPSHOT_LABEL, &raw).expect("unsealing >32 MiB snapshot should succeed");
+    assert_eq!(unsealed.meta, meta);
+    assert_eq!(unsealed.metadata.0.len(), 33 * 1024 * 1024);
+}

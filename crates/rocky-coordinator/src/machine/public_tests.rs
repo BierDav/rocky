@@ -643,3 +643,70 @@ fn a_registered_control_names_the_publisher_of_its_coordination_grant() {
         Ok(Outcome::Controlled(_))
     ));
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn limits_at_1_gib_bounds_validate_correctly() {
+    let max_total = crate::certified::MAX_STORE / 4 * 3;
+    assert_eq!(max_total, 768 * 1024 * 1024);
+
+    let valid_limits = Limits {
+        tenant_domains: 16,
+        tenant_bytes: 1024 * 1024,
+        total_bytes: max_total,
+        retry_window: 3600,
+        retry_records: 64,
+    };
+    assert!(valid_limits.validate().is_ok());
+
+    let mut invalid_limits = valid_limits;
+    invalid_limits.total_bytes = max_total + 1;
+    assert_eq!(
+        invalid_limits.validate().err(),
+        Some(CoordinationError::Configuration)
+    );
+
+    let service = Service::new(false);
+    let voters = &service.genesis.genesis.voters;
+    let endpoints = service
+        .genesis
+        .genesis
+        .public
+        .as_ref()
+        .unwrap()
+        .endpoints
+        .clone();
+
+    // 768 tenants * 1 MiB = 768 MiB, 768 * 64 = 49152 <= 65536 - 64
+    let public = PublicService {
+        endpoints: endpoints.clone(),
+        admission: None,
+        limits: valid_limits,
+        tenants: 768,
+        registrations_per_day: 256,
+        tenant_lanes: 4,
+    };
+    assert!(public.validate(voters).is_ok());
+
+    // 769 tenants * 1 MiB > 768 MiB fails
+    let starved = PublicService {
+        tenants: 769,
+        ..public.clone()
+    };
+    assert_eq!(
+        starved.validate(voters).err(),
+        Some(CoordinationError::Configuration)
+    );
+
+    // Exceeding retry records budget fails: 768 * 128 = 98304 > 65536 - 128
+    let too_many_retries = PublicService {
+        limits: Limits {
+            retry_records: 128,
+            ..valid_limits
+        },
+        ..public
+    };
+    assert_eq!(
+        too_many_retries.validate(voters).err(),
+        Some(CoordinationError::Configuration)
+    );
+}

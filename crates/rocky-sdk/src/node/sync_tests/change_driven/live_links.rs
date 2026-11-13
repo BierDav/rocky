@@ -1202,6 +1202,14 @@ async fn real_budget_gate() -> Result<(), Failure> {
             until(|| sa.live.len() == 1 && b.current().is_some_and(|s| s.live.len() == 1)).await;
             settled(&a).await;
             settled(&b).await;
+            // Both nodes dial; the losing inbound duplicate holds a permit until
+            // its admission ends. Only an accepted live link may hold one then.
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            until(|| {
+                let held = usize::from(sa.live.dialed(kb) == Some(false));
+                sa.live_budget.available_permits() == crate::node::live_links::BUDGET - held
+            })
+            .await;
             let full = sa
                 .live_budget
                 .clone()

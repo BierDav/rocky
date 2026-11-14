@@ -533,3 +533,53 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     // A clean close checkpoints and truncates the log.
     assert!(rocky_platform::fs::len(&wal).unwrap_or(0) == 0);
 }
+
+/// While a reader pins the log, resets that wait for it back off over
+/// groups instead of stalling every group; once it ends the log resets.
+// A second connection to the file, which the browser target keeps out.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn a_pinned_log_backs_off_waiting_resets() {
+    let dir = Scratch::new().await;
+    let runtime = open(&dir, one_file()).await;
+    let replica = runtime.domain(scope(1)).unwrap();
+    crate::tests::fault(&replica, Fault::CheckpointFrames(4)).await;
+    let mutate = async |index: usize| {
+        replica
+            .mutate(Mutation {
+                entity: None,
+                payload: format!("pinned-{index}").into_bytes(),
+            })
+            .unwrap()
+            .committed()
+            .await
+            .unwrap();
+    };
+    mutate(0).await;
+    // A read transaction that started on the log keeps it from resetting.
+    let reader = crate::sqlite::Connection::open_read_only(&dir.path().join(FILE)).unwrap();
+    reader.execute("BEGIN", ()).await.unwrap();
+    crate::tests::rows(&reader, "SELECT COUNT(*) FROM sqlite_schema")
+        .await
+        .unwrap();
+    let before = replica.writer_stats();
+    for index in 1..=64 {
+        mutate(index).await;
+    }
+    let pinned = replica.writer_stats();
+    let truncations = pinned.truncations - before.truncations;
+    let waits = pinned.truncate_waits - before.truncate_waits;
+    assert!(truncations >= 48, "{truncations}");
+    // Backoff doubles from one group: 1 + 2 + 4 + ... covers 64 in seven.
+    assert!(waits <= 7, "{waits} waits over {truncations} resets");
+    reader.execute("COMMIT", ()).await.unwrap();
+    mutate(65).await;
+    mutate(66).await;
+    let after = replica.writer_stats().wal_frames;
+    assert!(
+        after < pinned.wal_frames / 4,
+        "{after} of {}",
+        pinned.wal_frames
+    );
+    runtime.close().await.unwrap();
+}

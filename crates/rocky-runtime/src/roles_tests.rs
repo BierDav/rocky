@@ -236,7 +236,7 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
     let mut cursor = None;
     loop {
         let page = server.checkpoint_page(cursor).await.unwrap();
-        cursor = page.next;
+        cursor = page.next.clone();
         if late.import_checkpoint(page).await.unwrap().is_some() {
             break;
         }
@@ -281,4 +281,36 @@ async fn custody_needs_configured_full_nodes() {
     )
     .await;
     assert!(matches!(result, Err(Error::Incompatible(_))));
+}
+
+/// A reported frontier clears only the outgoing entries it newly covers:
+/// while another target holds every entry back, reporting one more
+/// operation costs the same however long the outbox is.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_reported_frontier_clears_only_the_outbox_range_it_newly_covers() {
+    let dir = Scratch::new().await;
+    let laptop = open(&dir, fixtures::LAPTOP, &[], 0).await;
+    let server = open(&dir, SERVER, &[], 0).await;
+    // The phone never reports, so every entry stays in the outbox.
+    let mut cost = Vec::new();
+    for backlog in [1, 200] {
+        for index in 0..backlog {
+            create(&laptop, &format!("todo {index}")).await;
+        }
+        pass(&laptop, &server, SERVER).await.unwrap();
+        create(&laptop, "one more").await;
+        let before = crate::tests::vm_steps(&laptop).await;
+        pass(&laptop, &server, SERVER).await.unwrap();
+        cost.push(crate::tests::vm_steps(&laptop).await - before);
+    }
+    let file = crate::sqlite::Connection::open_read_only(&dir.path().join("55.db")).unwrap();
+    assert_eq!(
+        crate::tests::rows(&file, "SELECT COUNT(*) FROM rocky_outbox")
+            .await
+            .unwrap(),
+        vec![vec![rocky_core::SqlValue::Integer(203)]]
+    );
+    assert!(cost[1] < cost[0] + 100, "{cost:?}");
+    laptop.close().await.unwrap();
+    server.close().await.unwrap();
 }

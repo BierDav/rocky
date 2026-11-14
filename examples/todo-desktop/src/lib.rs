@@ -481,6 +481,11 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                 {
                     error.set(Some(format!("Sharing lists: {failure}")));
                 }
+                if change.reconcile {
+                    notices
+                        .write()
+                        .push("Many changes were dropped or sealed at once.".into());
+                }
                 for token in change.dropped {
                     let reason = match todos.dropped(token).await {
                         Ok(Some((reason, _))) => format!("{reason:?}").to_lowercase(),

@@ -182,9 +182,10 @@ enum Command {
         oneshot::Sender<Result<crate::counters::Reading, Failure>>,
     ),
 }
+type Greeting = Result<Ready, Failure>;
 /// The scope and the network service a database opened with, and the
 /// identities its recovery revoked.
-type Greeting = Result<(String, Option<u64>, Vec<rocky_credentials::PublicKey>), Failure>;
+type Ready = (String, Option<u64>, Vec<rocky_credentials::PublicKey>);
 /// Where `run` reports how opening went: to the opener blocked on the
 /// database's thread, or to an opener that awaits it.
 enum Hello {
@@ -243,19 +244,66 @@ pub struct Database {
 /// caller's thread in a browser Worker and in a simulation.
 enum Worker {
     #[cfg(not(target_family = "wasm"))]
-    Thread(std::thread::JoinHandle<()>),
+    Thread {
+        thread: std::thread::JoinHandle<()>,
+        /// Fires once the thread's runtime, and the replica with it, dropped.
+        ended: oneshot::Receiver<()>,
+    },
     #[cfg(any(test, target_family = "wasm"))]
     Task(rocky_platform::task::JoinHandle<()>),
 }
+/// Before a database thread signals its end, it reports reaching it and
+/// waits for the release, so a test sees whether a closer still yields.
+#[cfg(all(test, not(target_family = "wasm")))]
+type HeldEnd = (oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+#[cfg(all(test, not(target_family = "wasm")))]
+thread_local! {
+    /// Taken by the next database thread this thread starts.
+    static HOLD_END: std::cell::RefCell<Option<HeldEnd>> = const { std::cell::RefCell::new(None) };
+}
 impl Worker {
+    #[cfg(not(target_family = "wasm"))]
+    fn thread(serve: impl FnOnce() + Send + 'static) -> std::io::Result<Self> {
+        let (end, ended) = oneshot::channel();
+        #[cfg(test)]
+        let held = HOLD_END.with(|hold| hold.borrow_mut().take());
+        let thread = std::thread::Builder::new()
+            .name("rocky-sdk".into())
+            .spawn(move || {
+                serve();
+                #[cfg(test)]
+                if let Some((reached, release)) = held {
+                    let _ = reached.send(());
+                    // Bounds a hang only: a closer blocking its executor never releases.
+                    let _ = release.recv_timeout(std::time::Duration::from_secs(30));
+                }
+                let _ = end.send(());
+            })?;
+        Ok(Self::Thread { thread, ended })
+    }
+    /// Waits for the worker to end without blocking the caller's executor.
     async fn join(self) -> Result<(), Failure> {
         match self {
             #[cfg(not(target_family = "wasm"))]
-            Self::Thread(thread) => thread.join().map_err(|_| "database thread failed")?,
+            Self::Thread { thread, ended } => {
+                ended.await.map_err(|_| "database thread failed")?;
+                // Only the thread's exit remains; it is detached, not joined.
+                drop(thread);
+            }
             #[cfg(any(test, target_family = "wasm"))]
             Self::Task(task) => task.await.map_err(|_| "database task failed")?,
         }
         Ok(())
+    }
+    /// Waits for the worker's end from a synchronous opener.
+    #[cfg(not(target_family = "wasm"))]
+    fn release(self) {
+        match self {
+            Self::Thread { thread, .. } => drop(thread.join()),
+            // A task ends with the error it sent.
+            #[cfg(test)]
+            Self::Task(_) => {}
+        }
     }
 }
 impl Database {
@@ -495,11 +543,15 @@ impl Database {
         let (cleanup, cleanups) = mpsc::unbounded_channel();
         let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
         let hello = Hello::Thread(hello);
-        let thread = std::thread::Builder::new()
-            .name("rocky-sdk".into())
-            .spawn(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
-        let greeting = greeting.recv().map_err(|_| "database failed to start")?;
-        Self::opened(greeting, input, cleanup, Worker::Thread(thread))
+        let worker =
+            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
+        match greeting.recv().map_err(|_| "database failed to start")? {
+            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
+            Err(error) => {
+                worker.release();
+                Err(error)
+            }
+        }
     }
     /// Opens without blocking the caller: natively the database gets its
     /// own thread, as `start` gives it; in a browser it is a task on the
@@ -515,11 +567,8 @@ impl Database {
         let (hello, greeting) = oneshot::channel();
         let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
         #[cfg(not(target_family = "wasm"))]
-        let worker = Worker::Thread(
-            std::thread::Builder::new()
-                .name("rocky-sdk".into())
-                .spawn(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?,
-        );
+        let worker =
+            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
         #[cfg(target_family = "wasm")]
         let worker = {
             // Everything after this is synchronous storage.
@@ -530,10 +579,16 @@ impl Database {
                 }
             }))
         };
-        let greeting = greeting
+        match greeting
             .await
-            .unwrap_or_else(|_| Err("database failed to start".into()));
-        Self::opened(greeting, input, cleanup, worker)
+            .unwrap_or_else(|_| Err("database failed to start".into()))
+        {
+            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
+            Err(error) => {
+                let _ = worker.join().await;
+                Err(error)
+            }
+        }
     }
     pub(crate) async fn launch_create(
         open: Open<'_>,
@@ -614,42 +669,28 @@ impl Database {
         Ok((setup, open.network))
     }
     fn opened(
-        greeting: Greeting,
+        (scope, network, revoked): Ready,
         input: mpsc::Sender<Command>,
         cleanup: mpsc::UnboundedSender<Command>,
         worker: Worker,
-    ) -> Result<Opened, Failure> {
-        match greeting {
-            Ok((scope, network, revoked)) => {
-                let shared = Arc::new(Shared {
-                    input,
-                    cleanup,
-                    budget: Semaphore::new(128),
-                    closed: AtomicBool::new(false),
-                    sessions: AtomicU64::new(1),
-                });
-                Ok(Opened {
-                    root: None,
-                    identity: None,
-                    revoked,
-                    network: network.map(|id| NetworkService::new(&shared, id)),
-                    database: Arc::new(Self {
-                        shared,
-                        scope,
-                        worker: Mutex::new(Some(worker)),
-                    }),
-                })
-            }
-            Err(error) => {
-                match worker {
-                    #[cfg(not(target_family = "wasm"))]
-                    Worker::Thread(thread) => drop(thread.join()),
-                    // The task ends with the error it sent.
-                    #[cfg(any(test, target_family = "wasm"))]
-                    Worker::Task(_) => {}
-                }
-                Err(error)
-            }
+    ) -> Opened {
+        let shared = Arc::new(Shared {
+            input,
+            cleanup,
+            budget: Semaphore::new(128),
+            closed: AtomicBool::new(false),
+            sessions: AtomicU64::new(1),
+        });
+        Opened {
+            root: None,
+            identity: None,
+            revoked,
+            network: network.map(|id| NetworkService::new(&shared, id)),
+            database: Arc::new(Self {
+                shared,
+                scope,
+                worker: Mutex::new(Some(worker)),
+            }),
         }
     }
     /// The domain's scope as the call contract spells it.
@@ -837,7 +878,8 @@ impl Database {
         let greeting = greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()));
-        let opened = Self::opened(greeting, input, cleanup, Worker::Task(task))?;
+        // The task ends with the error it sent.
+        let opened = Self::opened(greeting?, input, cleanup, Worker::Task(task));
         let node = exposed
             .try_recv()
             .map_err(|_| "the database exposed no node")?;
@@ -2583,6 +2625,49 @@ async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Close awaits the database thread's end instead of joining it, so
+    /// the closer's single-threaded executor runs other tasks meanwhile.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn close_yields_while_the_database_thread_ends() -> Result<(), Failure> {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let schema = crate::Schema::builder("closing", 1)
+            .table(
+                crate::Table::replayed("items")
+                    .column(crate::Column::new("title", crate::Affinity::Text)),
+            )
+            .build()?;
+        let schema = serde_json::to_string(&schema)?;
+        let (reached, reaching) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        HOLD_END.with(|hold| *hold.borrow_mut() = Some((reached, released)));
+        let database = Database::create(
+            Open {
+                directory: directory.path(),
+                schema: &schema,
+                secrets: None,
+                identity: None,
+                network: None,
+                coordination: None,
+            },
+            None,
+        )?
+        .database;
+        let releasing = async {
+            reaching
+                .await
+                .map_err(|_| -> Failure { "the database thread never ended".into() })?;
+            // Runs only while the close yields this thread.
+            release
+                .send(())
+                .map_err(|_| -> Failure { "the close blocked its executor".into() })
+        };
+        let (closed, released) = tokio::join!(database.close(), releasing);
+        closed?;
+        released?;
+        Ok(())
+    }
 
     #[cfg(feature = "qualification")]
     // Needs threads, which a browser Worker lacks.

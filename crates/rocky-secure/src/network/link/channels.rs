@@ -4,10 +4,14 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, PoisonError},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 const FRAGMENT: usize = IO_CHUNK;
 const QUEUE: usize = 64;
+/// Reassembled bytes one channel holds for its reader, beside the count bound.
+const QUEUE_BYTES: usize = 4 * MAX_SECURE_FRAME;
+/// A reassembled message keeps its share of the channel's byte budget until read.
+type Queued = (Vec<u8>, OwnedSemaphorePermit);
 
 /// Bounded qualification counters; keys are fixed protocol families, never payloads.
 #[cfg(any(test, feature = "qualification"))]
@@ -25,6 +29,8 @@ pub struct Traffic {
     pub repair_reasons: BTreeMap<crate::network::PublicationRepairReason, usize>,
     /// Most open request channels this side held at once.
     pub peak_channels: usize,
+    /// Most reassembled bytes one channel held for its reader.
+    pub peak_queued_bytes: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,7 +88,8 @@ struct Admission {
 struct Slot {
     generation: u64,
     publication: Option<(usize, rocky_platform::time::Instant)>,
-    receive: Option<mpsc::Sender<Vec<u8>>>,
+    receive: Option<mpsc::Sender<Queued>>,
+    queued: Arc<Semaphore>,
     bytes: Vec<u8>,
     total: usize,
     fragments: usize,
@@ -97,12 +104,13 @@ impl Slot {
     fn new(
         generation: u64,
         publication: Option<(usize, rocky_platform::time::Instant)>,
-        receive: mpsc::Sender<Vec<u8>>,
+        receive: mpsc::Sender<Queued>,
     ) -> Self {
         Self {
             generation,
             publication,
             receive: Some(receive),
+            queued: Arc::new(Semaphore::new(QUEUE_BYTES)),
             bytes: Vec::new(),
             total: 0,
             fragments: 0,
@@ -161,7 +169,7 @@ pub(crate) struct Io {
     handle: Handle,
     key: (bool, u16),
     generation: u64,
-    receive: mpsc::Receiver<Vec<u8>>,
+    receive: mpsc::Receiver<Queued>,
     closed: bool,
     pub(crate) publication: Option<(usize, rocky_platform::time::Instant)>,
     pub(crate) decoded: usize,
@@ -345,12 +353,27 @@ impl Channels {
                     let Some(receive) = &slot.receive else {
                         return Err(denied("data after link channel end"));
                     };
-                    match receive.try_send(std::mem::take(&mut slot.bytes)) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) if !receive.is_closed() => {
+                    let message = std::mem::take(&mut slot.bytes);
+                    let permit = u32::try_from(message.len())
+                        .ok()
+                        .and_then(|bytes| slot.queued.clone().try_acquire_many_owned(bytes).ok());
+                    // Over the byte budget (no permit) is refused like a full queue.
+                    match permit.map(|permit| receive.try_send((message, permit))) {
+                        Some(Ok(())) => {
+                            #[cfg(any(test, feature = "qualification"))]
+                            {
+                                let held =
+                                    QUEUE_BYTES.saturating_sub(slot.queued.available_permits());
+                                state.traffic.peak_queued_bytes =
+                                    state.traffic.peak_queued_bytes.max(held);
+                            }
+                        }
+                        None | Some(Err(mpsc::error::TrySendError::Full(_)))
+                            if !receive.is_closed() =>
+                        {
                             return Err(denied("link channel queue quota"));
                         }
-                        Err(_) => {
+                        _ => {
                             slot.closed = true;
                             slot.receive.take();
                             state.retired_frames = state.retired_frames.saturating_add(1);
@@ -722,7 +745,7 @@ impl Handle {
         &self,
         key: (bool, u16),
         generation: u64,
-        receive: mpsc::Receiver<Vec<u8>>,
+        receive: mpsc::Receiver<Queued>,
         publication: Option<(usize, rocky_platform::time::Instant)>,
     ) -> Result<NativeSession, Error> {
         let admission = &self.admission;
@@ -942,8 +965,11 @@ impl Io {
         loop {
             tokio::select! {
                 biased;
-                bytes = self.receive.recv() => {
-                    return bytes.ok_or_else(|| Error::Io(super::closed_by_peer()));
+                queued = self.receive.recv() => {
+                    // Dropping the permit returns the message's bytes to the budget.
+                    return queued
+                        .map(|(bytes, _)| bytes)
+                        .ok_or_else(|| Error::Io(super::closed_by_peer()));
                 }
                 _ = async {
                     match deadline {
@@ -1192,7 +1218,7 @@ pub(crate) mod tests {
                     },
                 ))
                 .unwrap();
-            io.receive.try_recv().unwrap();
+            drop(io.receive.try_recv().unwrap());
         }
         assert!(
             channels
@@ -1898,6 +1924,68 @@ pub(crate) mod tests {
             }
         };
         tokio::join!(read, deliver);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_flood_of_large_messages_holds_only_the_byte_budget_while_small_ones_flow() {
+        let channels = channels();
+        let large = |channels: &Channels| {
+            let fragments = MAX_SECURE_FRAME / FRAGMENT;
+            (0..fragments).try_for_each(|index| {
+                channels
+                    .accept(frame(
+                        2,
+                        Packet::Data {
+                            generation: 0,
+                            bytes: vec![1; FRAGMENT],
+                            last: index + 1 == fragments,
+                        },
+                    ))
+                    .map(drop)
+            })
+        };
+        let mut slow = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        let held = QUEUE_BYTES / MAX_SECURE_FRAME;
+        assert!(held < QUEUE);
+        for _ in 0..held {
+            large(&channels).unwrap();
+        }
+        assert_eq!(channels.handle.traffic().peak_queued_bytes, QUEUE_BYTES);
+        // Another channel's small messages still flow up to the count bound.
+        let mut other = channels
+            .accept(frame(3, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+        for _ in 0..QUEUE {
+            channels
+                .accept(frame(
+                    3,
+                    Packet::Data {
+                        generation: 1,
+                        bytes: vec![2],
+                        last: true,
+                    },
+                ))
+                .unwrap();
+        }
+        let SessionIo::Channel(io) = &mut other.stream else {
+            panic!("request channel");
+        };
+        assert_eq!(io.receive().await.unwrap(), [2]);
+        // Reading returns a message's bytes to the budget.
+        let SessionIo::Channel(io) = &mut slow.stream else {
+            panic!("request channel");
+        };
+        assert_eq!(io.receive().await.unwrap().len(), MAX_SECURE_FRAME);
+        large(&channels).unwrap();
+        let Err(Error::Rejected(reason)) = large(&channels) else {
+            panic!("an over-budget message must be refused");
+        };
+        assert_eq!(reason, "link channel queue quota");
+        assert_eq!(channels.handle.traffic().peak_queued_bytes, QUEUE_BYTES);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

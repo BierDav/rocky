@@ -48,6 +48,8 @@ pub(crate) enum Fault {
     CheckpointFrames(i64),
     /// Fail the follow-up pass after the next committed mutation.
     FailFollowing,
+    /// Test hook: SQLite steps run so far on the file writer's thread.
+    VmSteps(tokio::sync::oneshot::Sender<u64>),
 }
 /// Per committed group: each step's domain index and queue weight.
 #[cfg(test)]
@@ -65,6 +67,7 @@ impl Fault {
                 | Self::RecordGroups(_)
                 | Self::SnapshotAtFlush(_)
                 | Self::CheckpointFrames(_)
+                | Self::VmSteps(_)
         )
     }
 }
@@ -93,6 +96,8 @@ impl Unpublished {
         self.views.merge(changed);
     }
 }
+/// The tables and the views a projection statement can change.
+type Target = (Vec<String>, Vec<usize>);
 /// Distinct projection statements whose changed views are remembered.
 const MAX_STATEMENT_TARGETS: usize = 4096;
 /// Bytes one retained operation counts beyond its encoding.
@@ -126,9 +131,12 @@ pub(crate) struct Worker<A: StoredApplication> {
     config: crate::RuntimeConfig,
     plan: Arc<ReadPlan>,
     reads: Arc<Reads>,
-    /// The table and the views each installed projection statement can
+    /// The tables and the views each installed projection statement can
     /// change, by statement; None if its target is not recognized.
-    targets: std::collections::HashMap<Box<str>, Option<(String, Vec<usize>)>>,
+    targets: std::collections::HashMap<Box<str>, Option<Target>>,
+    /// Tables a write to each table may also change through foreign key
+    /// actions, transitively; logical and lowercase.
+    cascades: std::collections::HashMap<String, Vec<String>>,
     /// Observers of this domain's committed tables.
     events: Arc<crate::observe::TableEvents>,
     retention: retention::Retention,
@@ -305,6 +313,16 @@ where
         };
         let events = crate::observe::TableEvents::new(identity.scope, observed);
         reads.bind_events(&events);
+        let authors: std::collections::BTreeSet<_> =
+            config.authors.iter().map(|(node, _)| *node).collect();
+        reads.bind_projection(crate::read::ProjectionReads {
+            query: conn.names().sql(&schema.projection_query),
+            applied: conn.names().sql(
+                "SELECT sequence FROM rocky_operations WHERE node=? AND status='applied' ORDER BY sequence DESC LIMIT 1",
+            ),
+            retention: conn.names().sql("SELECT state FROM rocky_checkpoint WHERE id=1"),
+            authors: authors.into_iter().collect(),
+        });
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let initialization = async {
             if fresh {
@@ -346,6 +364,7 @@ where
             plan,
             reads,
             targets: Default::default(),
+            cascades: Default::default(),
             events,
             retention,
             retained: 0,
@@ -398,6 +417,7 @@ where
         }
         .await;
         finish(worker.conn(), migration).await?;
+        worker.cascades = cascades(worker.conn(), &worker.schema.statements).await?;
         worker
             .transaction(async |worker| worker.restore(true).await)
             .await?;
@@ -503,7 +523,6 @@ where
                 let result = self.sync(request).await;
                 if result.is_ok() {
                     self.notify(false);
-                    self.unpublished.meta = true;
                 }
                 Box::new(Answered { reply, result })
             }
@@ -521,7 +540,10 @@ where
     pub(crate) async fn read(&mut self, command: Command<A::Row>) {
         match command {
             Command::Query(reply) => {
-                let _ = reply.send(self.query().await);
+                let _ = reply.send(Ok(()));
+            }
+            Command::Decode(projected, reply) => {
+                let _ = reply.send(self.decode(*projected));
             }
             Command::LookupMutation(handle, reply) => {
                 let result = self
@@ -652,8 +674,7 @@ where
     }
     /// Runs `body` in one bounded read transaction on the read-only
     /// connection, never inside the writer's group. The file writer runs reads
-    /// between groups, so memory then equals the committed state; `body`
-    /// checks that against the stored revision.
+    /// between groups, so memory then equals the committed state.
     pub(super) async fn read_transaction<T>(
         &mut self,
         mut body: impl AsyncFnMut(&mut Self) -> Result<T, Error>,
@@ -689,58 +710,35 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// The committed revision in the current read transaction. Memory must be
-    /// at the same revision, or a reply would mix two states.
-    pub(super) async fn committed_revision(&self) -> Result<LocalRevision, Error> {
-        let metadata = rows(self.conn(), "SELECT revision FROM rocky_replica WHERE id=1").await?;
-        let Some([SqlValue::Integer(revision)]) = metadata.first().map(Vec::as_slice) else {
-            return Err(Error::Corrupt("missing revision".into()));
-        };
-        let revision = LocalRevision::new(*revision as u64)?;
-        if revision != self.revision {
-            return Err(Error::Corrupt(
-                "applied memory differs from the committed revision".into(),
-            ));
-        }
-        Ok(revision)
-    }
-    async fn query(&mut self) -> Result<Snapshot<A::Row>, Error> {
+    /// Decodes a projection read beside the writer and selects the rows
+    /// the caller may see under the current policy. Runs no statement.
+    fn decode(&self, projected: crate::read::Projected) -> Result<Snapshot<A::Row>, Error> {
         self.app
             .admit_read(self.identity.scope, self.identity.caller, &self.policy)
             .map_err(application)?;
-        self.read_transaction(async |worker| worker.snapshot().await)
-            .await
-    }
-    async fn snapshot(&self) -> Result<Snapshot<A::Row>, Error> {
-        {
-            let revision = self.committed_revision().await?;
-            let rows = self
-                .app
-                .decode_rows(rows(self.conn(), &self.schema.projection_query).await?)
-                .map_err(application)?;
-            let rows = self
-                .app
-                .select_rows(
-                    rows,
-                    rocky_core::AdmissionContext {
-                        scope: self.identity.scope,
-                        caller: self.identity.caller,
-                        policy_version: self.app.policy_version(&self.policy),
-                        boundary: AdmissionBoundary::Local,
-                    },
-                    &self.policy,
-                )
-                .map_err(application)?;
-            Ok(Snapshot {
+        let rows = self.app.decode_rows(projected.rows).map_err(application)?;
+        let rows = self
+            .app
+            .select_rows(
                 rows,
-                revision,
-                frontier: self.applied_frontier(),
-                query: crate::QueryIdentity {
+                rocky_core::AdmissionContext {
                     scope: self.identity.scope,
-                    name: self.app.definition(),
+                    caller: self.identity.caller,
+                    policy_version: self.app.policy_version(&self.policy),
+                    boundary: AdmissionBoundary::Local,
                 },
-            })
-        }
+                &self.policy,
+            )
+            .map_err(application)?;
+        Ok(Snapshot {
+            rows,
+            revision: projected.revision,
+            frontier: projected.frontier,
+            query: crate::QueryIdentity {
+                scope: self.identity.scope,
+                name: self.app.definition(),
+            },
+        })
     }
     /// The operation a handle committed. A handle whose operation is behind
     /// the pruned_prefix reports `Pruned`: it was committed and must not run again.
@@ -878,14 +876,23 @@ where
                 if self.targets.len() >= MAX_STATEMENT_TARGETS {
                     self.targets.clear();
                 }
-                let target = crate::read::written_table(&statement.sql)
-                    .map(|table| (table.clone(), self.plan.reading(&table).collect()));
+                let target = crate::read::written_table(&statement.sql).map(|table| {
+                    let mut tables = vec![table.clone()];
+                    tables.extend(self.cascades.get(&table).into_iter().flatten().cloned());
+                    let views = tables
+                        .iter()
+                        .flat_map(|table| self.plan.reading(table))
+                        .collect();
+                    (tables, views)
+                });
                 self.targets.insert(statement.sql.as_ref().into(), target);
             }
             match self.targets.get(statement.sql.as_ref()) {
-                Some(Some((table, views))) => {
+                Some(Some((tables, views))) => {
                     changed.record(Some(views));
-                    changed.table(table);
+                    for table in tables {
+                        changed.table(table);
+                    }
                 }
                 _ => changed.record(None),
             }
@@ -1179,6 +1186,62 @@ where
             .await?;
         Ok(())
     }
+}
+/// For each application table, the tables its foreign key actions (cascade,
+/// set null or set default, on update or delete) may change, transitively.
+async fn cascades(
+    conn: &ScopedConnection,
+    schema: &[impl AsRef<str>],
+) -> Result<std::collections::HashMap<String, Vec<String>>, Error> {
+    let tables: Vec<String> = crate::scoped_connection::tables(schema)
+        .into_iter()
+        .map(|(table, _)| table.to_ascii_lowercase())
+        .collect();
+    let logical: std::collections::HashMap<String, String> = tables
+        .iter()
+        .filter_map(|table| {
+            let physical = conn.names().physical(table)?;
+            Some((physical.to_ascii_lowercase(), table.clone()))
+        })
+        .collect();
+    let mut children: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for (physical, table) in &logical {
+        let sql = format!(
+            "PRAGMA foreign_key_list(\"{}\")",
+            physical.replace('"', "\"\"")
+        );
+        for row in rows(conn, &sql).await? {
+            let acts = |value: Option<&SqlValue>| {
+                matches!(value, Some(SqlValue::Text(action))
+                    if ["CASCADE", "SET NULL", "SET DEFAULT"].contains(&action.to_ascii_uppercase().as_str()))
+            };
+            let parent = match row.get(2) {
+                Some(SqlValue::Text(parent)) => logical.get(&parent.to_ascii_lowercase()),
+                _ => None,
+            };
+            if let (Some(parent), true) = (parent, acts(row.get(5)) || acts(row.get(6))) {
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(table.clone());
+            }
+        }
+    }
+    let mut closure = std::collections::HashMap::new();
+    for parent in children.keys() {
+        let mut reached = std::collections::BTreeSet::new();
+        let mut next = vec![parent.clone()];
+        while let Some(table) = next.pop() {
+            for child in children.get(&table).into_iter().flatten() {
+                if reached.insert(child.clone()) {
+                    next.push(child.clone());
+                }
+            }
+        }
+        reached.remove(parent);
+        closure.insert(parent.clone(), reached.into_iter().collect());
+    }
+    Ok(closure)
 }
 struct Prepared {
     handle: crate::MutationHandle,

@@ -39,6 +39,9 @@ pub struct TableChange {
     /// This replica's own transactions whose outcome a committed seal or
     /// checkpoint may have made final here; every observer receives them.
     pub sealed: BTreeSet<Commitment>,
+    /// More outcomes changed than one change holds: `dropped` and `sealed`
+    /// are empty and every transaction's outcome must be read again.
+    pub reconcile: bool,
 }
 impl TableChange {
     fn merge(
@@ -53,7 +56,24 @@ impl TableChange {
         *current = (*current).max(revision);
         self.causes.extend(causes);
     }
+    /// Adds changed outcomes; past `MAX_PENDING_OUTCOMES` they coalesce into
+    /// `reconcile`.
+    fn merge_outcomes(&mut self, outcomes: &Outcomes) {
+        if self.reconcile {
+            return;
+        }
+        self.dropped.extend(&outcomes.dropped);
+        self.sealed.extend(&outcomes.sealed);
+        if self.dropped.len() + self.sealed.len() > MAX_PENDING_OUTCOMES {
+            self.dropped.clear();
+            self.sealed.clear();
+            self.reconcile = true;
+        }
+    }
 }
+/// Changed outcomes one pending change names; more coalesce into a
+/// `reconcile`.
+pub const MAX_PENDING_OUTCOMES: usize = 4096;
 
 #[derive(Default)]
 struct Pending {
@@ -80,8 +100,7 @@ impl Slot {
         if let Ok(mut pending) = self.pending.lock() {
             let change = pending.change.get_or_insert_with(TableChange::default);
             change.merge(std::iter::empty(), scope, revision, &[Cause::Sync]);
-            change.dropped.extend(&outcomes.dropped);
-            change.sealed.extend(&outcomes.sealed);
+            change.merge_outcomes(outcomes);
         }
         self.notify.notify_one();
     }
@@ -413,5 +432,60 @@ mod tests {
         assert_eq!(change.revisions, [(scope(1), 2), (scope(2), 9)].into());
         let registry = first.registry.lock().unwrap();
         assert_eq!(registry.by_table["items"].len(), 1);
+    }
+    /// Outcomes an observer does not take stay bounded: past the cap they
+    /// coalesce into one reconcile, and later changes start over.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_burst_of_outcomes_past_the_cap_coalesces_into_a_reconcile() {
+        let events = TableEvents::new(scope(1), ["items".into()]);
+        let mut observer = TableObserver::new();
+        events.register(&observer, None).unwrap();
+        let held = |observer: &TableObserver| {
+            let pending = observer.slot.pending.lock().unwrap();
+            pending
+                .change
+                .as_ref()
+                .map_or(0, |change| change.dropped.len() + change.sealed.len())
+        };
+        let mut most = 0;
+        for index in 0..(3 * MAX_PENDING_OUTCOMES as u32) {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&index.to_le_bytes());
+            let outcomes = if index % 2 == 0 {
+                Outcomes {
+                    dropped: [id].into(),
+                    ..Outcomes::default()
+                }
+            } else {
+                Outcomes {
+                    sealed: [id].into(),
+                    ..Outcomes::default()
+                }
+            };
+            events.publish_outcomes(u64::from(index) + 1, &outcomes);
+            most = most.max(held(&observer));
+        }
+        assert!(most <= MAX_PENDING_OUTCOMES, "{most} held");
+        events.publish(Some(&set(&["items"])), 1, &[Cause::Local]);
+        let change = observer.next().await.unwrap();
+        assert!(change.reconcile);
+        assert!(change.dropped.is_empty() && change.sealed.is_empty());
+        assert_eq!(change.tables, set(&["items"]));
+        assert_eq!(
+            change.revisions,
+            [(scope(1), 3 * MAX_PENDING_OUTCOMES as u64)].into()
+        );
+        assert_eq!(change.causes, [Cause::Local, Cause::Sync].into());
+        // The next change names its outcomes again.
+        events.publish_outcomes(
+            1,
+            &Outcomes {
+                dropped: [[9; 32]].into(),
+                ..Outcomes::default()
+            },
+        );
+        let change = observer.next().await.unwrap();
+        assert!(!change.reconcile);
+        assert_eq!(change.dropped, [[9; 32]].into());
     }
 }

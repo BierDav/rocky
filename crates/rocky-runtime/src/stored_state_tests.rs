@@ -27,6 +27,9 @@ struct Watched {
     windows: Arc<AtomicUsize>,
     /// Declares the drafts table `WITHOUT ROWID`.
     rowless: bool,
+    /// Adds a `tags` row per draft that a draft's deletion cascades to; a
+    /// draft edited to `drop` is deleted.
+    cascading: bool,
 }
 impl Application for Watched {
     type State = <InventoryApp as Application>::State;
@@ -49,7 +52,12 @@ impl Application for Watched {
 }
 impl CompiledSchema for Watched {
     fn schema(&self) -> &'static [&'static str] {
-        if self.rowless {
+        if self.cascading {
+            &[
+                "CREATE TABLE drafts(node BLOB,sequence INTEGER,note TEXT,lamport INTEGER,stamp_node BLOB,stamp_sequence INTEGER,PRIMARY KEY(node,sequence))",
+                "CREATE TABLE tags(node BLOB,sequence INTEGER,PRIMARY KEY(node,sequence),FOREIGN KEY(node,sequence) REFERENCES drafts(node,sequence) ON DELETE CASCADE)",
+            ]
+        } else if self.rowless {
             &[
                 "CREATE TABLE drafts(node BLOB,sequence INTEGER,note TEXT,lamport INTEGER,stamp_node BLOB,stamp_sequence INTEGER,PRIMARY KEY(node,sequence)) WITHOUT ROWID",
                 "CREATE TABLE stock(id INTEGER PRIMARY KEY,remaining INTEGER NOT NULL,accepted INTEGER NOT NULL)",
@@ -86,7 +94,26 @@ impl StoredApplication for Watched {
         InventoryApp.window(rows)
     }
     fn project(&self, state: &Self::State, op: &Envelope) -> Vec<ProjectionStatement> {
-        InventoryApp.project(state, op)
+        let mut statements = InventoryApp.project(state, op);
+        if self.cascading {
+            let key = vec![
+                SqlValue::Blob(op.entity.node.0.to_vec()),
+                SqlValue::Integer(op.entity.sequence.get() as i64),
+            ];
+            if op.payload == b"drop" {
+                return vec![ProjectionStatement {
+                    sql: "DELETE FROM drafts WHERE node=? AND sequence=?".into(),
+                    values: key,
+                }];
+            }
+            if op.entity == op.id {
+                statements.push(ProjectionStatement {
+                    sql: "INSERT INTO tags VALUES(?,?)".into(),
+                    values: key,
+                });
+            }
+        }
+        statements
     }
     fn decode_rows(&self, rows: Vec<Vec<SqlValue>>) -> Result<Vec<Self::Row>, Self::Error> {
         InventoryApp.decode_rows(rows)
@@ -332,7 +359,7 @@ async fn a_rowless_checkpoint_imports_into_one_domain_of_a_shared_file() {
     let report = loop {
         let page = from.checkpoint_page(cursor).await.unwrap();
         let page = CheckpointPage::decode(&page.encode()).unwrap();
-        cursor = page.next;
+        cursor = page.next.clone();
         pages += 1;
         if let Some(report) = into.import_checkpoint(page).await.unwrap() {
             break report;
@@ -358,4 +385,119 @@ async fn a_rowless_checkpoint_imports_into_one_domain_of_a_shared_file() {
         assert!(replica.audit().await.unwrap().recomputed);
     }
     target.close().await.unwrap();
+}
+
+/// Pages of a `WITHOUT ROWID` checkpoint table continue after the last key:
+/// a late page costs what an earlier one does.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn rowless_checkpoint_pages_cost_the_same_at_any_depth() {
+    let dir = Scratch::new().await;
+    let options = RuntimeOptions {
+        retention: RetentionPolicy {
+            window: 0,
+            automatic: false,
+            ..RetentionPolicy::default()
+        },
+        ..RuntimeOptions::default()
+    };
+    let app = Watched {
+        rowless: true,
+        ..Watched::default()
+    };
+    let source = open_app(&dir, NODE, options, app).await.unwrap();
+    let from = source.domain(scope()).unwrap();
+    for index in 0..1600 {
+        write(&from, None, &format!("note-{index}")).await;
+    }
+    from.checkpoint().await.unwrap();
+    let (mut cursor, mut costs, mut rows) = (None, Vec::new(), 0);
+    loop {
+        let before = crate::tests::vm_steps(&from).await;
+        let page = from.checkpoint_page(cursor).await.unwrap();
+        let cost = crate::tests::vm_steps(&from).await - before;
+        if page.table == 0 {
+            rows += page.rows.len();
+            if page.rows.len() == 512 {
+                costs.push(cost);
+            }
+        }
+        cursor = CheckpointPage::decode(&page.encode()).unwrap().next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!((rows, costs.len()), (1600, 3));
+    // The first page has no key to seek after; later ones all seek.
+    assert!(costs[2] < costs[1] + costs[1] / 10, "{costs:?}");
+    source.close().await.unwrap();
+}
+
+/// A full query reads its rows beside the writer: the writer only decodes
+/// them, and the frontier read with them is the writer's own, also behind
+/// a pruned prefix.
+// A browser Worker runs the read pool on the writer's own thread.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn queries_run_no_statement_on_the_writer() {
+    let dir = Scratch::new().await;
+    let options = RuntimeOptions {
+        retention: RetentionPolicy {
+            window: 0,
+            automatic: false,
+            ..RetentionPolicy::default()
+        },
+        ..RuntimeOptions::default()
+    };
+    let runtime = open(&dir, NODE, options).await.unwrap();
+    let replica = runtime.domain(scope()).unwrap();
+    for index in 0..300 {
+        write(&replica, None, &format!("note-{index}")).await;
+    }
+    replica.checkpoint().await.unwrap();
+    replica.prune().await.unwrap();
+    write(&replica, None, "after the prune").await;
+    let state = replica.sync_state().await.unwrap();
+    assert_eq!(
+        state.pruned_prefix.0,
+        [(NODE, AuthorSequence::new(300).unwrap())]
+    );
+    let before = crate::tests::vm_steps(&replica).await;
+    let snapshot = replica.query().await.unwrap();
+    assert_eq!(crate::tests::vm_steps(&replica).await, before);
+    assert_eq!(snapshot.rows.len(), 301);
+    assert_eq!(snapshot.frontier, state.applied);
+    assert_eq!(snapshot.revision.get(), 301);
+    runtime.close().await.unwrap();
+}
+
+/// Observers see what a foreign key action changed: deleting a draft
+/// cascades to its tag, so observers of the tags hear of it.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn observers_see_rows_a_cascade_changed() {
+    let dir = Scratch::new().await;
+    let app = Watched {
+        cascading: true,
+        ..Watched::default()
+    };
+    let runtime = open_app(&dir, NODE, RuntimeOptions::default(), app)
+        .await
+        .unwrap();
+    let replica = runtime.domain(scope()).unwrap();
+    let created = write(&replica, None, "kept").await;
+    let mut tags = replica.observe_tables(Some(&["tags"])).unwrap();
+    write(&replica, Some(created.id), "drop").await;
+    let change = tags.try_next().unwrap().expect("the cascade changed tags");
+    assert_eq!(change.tables, ["tags".to_string()].into());
+    let file = crate::sqlite::Connection::open_read_only(&dir.path().join("3.db")).unwrap();
+    let left = crate::tests::rows(
+        &file,
+        &format!(
+            "SELECT COUNT(*) FROM \"{}_tags\"",
+            crate::runtime::namespace(scope())
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(left, vec![vec![SqlValue::Integer(0)]]);
+    runtime.close().await.unwrap();
 }

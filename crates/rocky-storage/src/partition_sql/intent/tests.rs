@@ -123,7 +123,7 @@ fn assertions_see_only_the_held_partition_of_their_own_tables() {
             &items(&[list], &[]),
         )
         .unwrap();
-        assert_eq!(checked.params, vec![text(list)]);
+        assert!(checked.params.is_empty());
         read(&conn, &checked).unwrap()
     };
     assert_eq!(capped("A"), vec![vec![text("A"), int(2)]]);
@@ -420,9 +420,9 @@ fn a_filter_that_pins_one_partition_yields_one_copy() {
     let statement = &copies[0].statement;
     assert_eq!(
         statement.sql,
-        "UPDATE items SET amount = ?1 WHERE (list = ?2) AND (\"items\".\"list\" IN (?3))"
+        "UPDATE items SET amount = ?1 WHERE (list = ?2) AND (\"items\".\"list\" IN ('A'))"
     );
-    assert_eq!(statement.params, [int(7), text("a"), text("A")]);
+    assert_eq!(statement.params, [int(7), text("a")]);
     for sql in [
         "DELETE FROM items WHERE id = 3 AND list IN ('b')",
         "INSERT INTO items(id, list, pos, amount) VALUES (9, 'B', 1, 0)",

@@ -60,6 +60,9 @@ pub(crate) enum Request {
     Acknowledge(NodeId, Acknowledgment),
     Progress(NodeId),
     PeerAcknowledgments(NodeId),
+    /// One operation's acknowledgment by a peer, if recorded; None only
+    /// checks that the peer is a delivery target.
+    PeerAcknowledgment(NodeId, Option<OperationId>),
 }
 impl Request {
     /// Receipt, application and acknowledgment write; the others only read.
@@ -232,6 +235,19 @@ where
             .await?
         {
             Response::Acks(acks) => Ok(acks),
+            _ => Err(Error::Corrupt("unexpected acknowledgment response".into())),
+        }
+    }
+    pub(crate) async fn peer_acknowledgment(
+        &self,
+        peer: NodeId,
+        id: Option<OperationId>,
+    ) -> Result<Option<Acknowledgment>, Error> {
+        match self
+            .sync_request(Request::PeerAcknowledgment(peer, id))
+            .await?
+        {
+            Response::Acks(acks) if acks.len() <= 1 => Ok(acks.into_iter().next()),
             _ => Err(Error::Corrupt("unexpected acknowledgment response".into())),
         }
     }

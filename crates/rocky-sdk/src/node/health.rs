@@ -456,6 +456,7 @@ impl Node {
     }
     /// Reloads the other trusted identities from the registry, merges the
     /// saved last-heard times and saves those that moved `HEARD_SAVE`.
+    /// Verifies against a snapshot, never under the settings lock.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
             Some(self.registry().await?)
@@ -463,15 +464,17 @@ impl Node {
             None
         };
         let mut known = self.replica.revocations().await;
-        let mut settings = self.settings.lock().await;
-        let own = settings.identity;
-        let database = settings.database_context()?;
-        known.merge_in(&settings.revocations, database, now()?)?;
-        if let Some(certificate) = settings.credentials.certificate() {
+        let snapshot = self.settings.lock().await.clone();
+        #[cfg(test)]
+        self.probe_settings_lock();
+        let own = snapshot.identity;
+        let database = snapshot.database_context()?;
+        known.merge_in(&snapshot.revocations, database, now()?)?;
+        if let Some(certificate) = snapshot.credentials.certificate() {
             known.link(certificate.clone())?;
         }
         known.verify_in(database)?;
-        let saved = settings
+        let saved = snapshot
             .authority
             .as_ref()
             .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
@@ -506,11 +509,12 @@ impl Node {
             }
             None => Default::default(),
         };
-        let mut observed = settings
+        let base = snapshot
             .authority
             .as_ref()
             .map(|issuing| issuing.trusted_nodes.clone())
             .unwrap_or_default();
+        let mut observed = base.clone();
         if registry.is_some() {
             crate::membership::observe_trusted(&known, &trusted, time, &mut observed)?;
         }
@@ -545,11 +549,15 @@ impl Node {
             });
             (moved || watch.heard.len() != saved.0.len()).then(|| watch.heard.clone())
         };
-        let observed_changed = settings
+        let mut settings = self.settings.lock().await;
+        // Writes only over the authority state the snapshot read: a
+        // concurrent refresh's stays, and the next one recomputes.
+        let current = settings
             .authority
             .as_ref()
-            .is_some_and(|issuing| issuing.trusted_nodes != observed);
-        if settings.authority.is_some() && (save.is_some() || observed_changed) {
+            .is_some_and(|issuing| issuing.heard == saved.0 && issuing.trusted_nodes == base);
+        let observed_changed = current && base != observed;
+        if current && (save.is_some() || observed_changed) {
             let mut draft = settings.clone();
             if let Some(issuing) = draft.authority.as_mut() {
                 if let Some(heard) = save {
@@ -579,10 +587,18 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .membership_alerts = membership_alerts;
+        drop(settings);
         if observed_changed {
             self.observations.touch();
         }
         Ok(())
+    }
+    /// Counts a verification that runs while anyone holds the settings lock.
+    #[cfg(test)]
+    fn probe_settings_lock(&self) {
+        if self.settings.try_lock().is_err() {
+            self.verified_under_settings.fetch_add(1, Ordering::Relaxed);
+        }
     }
     /// A sign of life from `node` at `at`, if it is another trusted node's.
     fn hear_trusted(&self, node: &PublicKey, at: u64) {
@@ -636,7 +652,7 @@ impl Node {
     }
     /// Whether this device collects health reports: a trusted node, whose
     /// identity holds the root's trusted grant.
-    async fn collects(&self) -> bool {
+    pub(super) async fn collects(&self) -> bool {
         self.settings.lock().await.trusted_links().is_some()
     }
     /// Whether `peer`, admitted with `chain`, is a trusted node: a node of
@@ -936,11 +952,10 @@ impl Node {
         }
         let (signed, received) = match wire.message {
             HealthMessage::Collector => {
-                let settings = self.settings.lock().await;
+                let settings = self.settings.lock().await.clone();
                 if !self.proves_collector(&settings, peer, chain)? {
                     return Err("the peer is no trusted node".into());
                 }
-                drop(settings);
                 self.hear_trusted(&peer, self.status_time()?);
                 collector.send_replace(true);
                 return Ok(());

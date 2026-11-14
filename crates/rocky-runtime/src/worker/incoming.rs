@@ -428,6 +428,10 @@ where
                 .read_transaction(async |worker| worker.peer_acknowledgments(peer).await)
                 .await
                 .map(Response::Acks),
+            Request::PeerAcknowledgment(peer, id) => self
+                .read_transaction(async |worker| worker.peer_acknowledgment(peer, id).await)
+                .await
+                .map(|ack| Response::Acks(ack.into_iter().collect())),
             Request::Progress(peer) => self
                 .read_transaction(async |worker| worker.progress(peer).await)
                 .await
@@ -537,6 +541,8 @@ where
         })
         .await?;
         self.lamport = clock;
+        // The pending backlog a read reports grew.
+        self.unpublished.meta = true;
         self.retained += 1;
         self.retained_bytes = self
             .retained_bytes
@@ -598,6 +604,7 @@ where
             self.frontier.insert(id.node, id.sequence);
         }
         self.revision = pass.revision;
+        self.unpublished.meta = true;
         self.unpublished
             .changed(pass.changed, crate::observe::Cause::Sync);
         if !pass.applied.is_empty() {
@@ -611,9 +618,13 @@ where
             }
         }
     }
-    /// One bounded pass inside the caller's transaction. Each ready operation
-    /// is reduced against stored rows and written before the next one is
-    /// read, so a successor in the same pass sees its predecessor.
+    /// One bounded pass inside the caller's transaction. An operation depends
+    /// on its author's predecessor, and an author's applied operations have
+    /// no gaps, so only the lowest pending operation of each author can be
+    /// applied or rejected: the pass follows those heads, never the blocked
+    /// operations behind them. Each one is reduced against stored rows and
+    /// written before the next is read; rounds repeat while one author's
+    /// progress may unblock another's head.
     async fn apply_pending(&mut self) -> Result<Option<Pass>, Error> {
         let mut pass = Pass {
             applied: Vec::new(),
@@ -622,66 +633,33 @@ where
             changed: Changed::default(),
         };
         let mut changes = 0;
-        let mut cursor: Option<OperationId> = None;
-        // Re-scan in subsequent passes for predecessors sorted after successors.
-        'pages: loop {
-            let mut page = match cursor {
-                Some(after) => self.conn().query("SELECT bytes FROM rocky_operations WHERE status<>'applied' AND status='pending' AND (node,sequence)>(?,?) ORDER BY node,sequence LIMIT 64", key(after)).await?,
-                None => self.conn().query("SELECT bytes FROM rocky_operations WHERE status<>'applied' AND status='pending' ORDER BY node,sequence LIMIT 64", ()).await?,
-            };
-            let mut empty = true;
-            while let Some(row) = page.next().await? {
-                empty = false;
-                let op = Envelope::decode(&row.get::<Vec<u8>>(0)?)?;
-                cursor = Some(op.id);
-                let outcome = match self.readiness(&op).await? {
-                    Readiness::Pending => continue,
-                    Readiness::Invalid(error) => Err(error.to_string()),
-                    Readiness::Ready => self
-                        .transition(&op, AdmissionBoundary::Incoming)
-                        .await?
-                        .map_err(|error| error.to_string()),
-                };
-                let status = match outcome {
-                    Ok(statements) => {
-                        pass.changed.merge(self.store(statements).await?);
-                        pass.applied.push(op.id);
-                        "applied"
+        'rounds: loop {
+            let mut progressed = false;
+            let mut after: Option<NodeId> = None;
+            while let Some(mut op) = self.pending_head(after, false).await? {
+                after = Some(op.id.node);
+                loop {
+                    let outcome = match self.readiness(&op).await? {
+                        Readiness::Pending => break,
+                        Readiness::Invalid(error) => Err(error.to_string()),
+                        Readiness::Ready => self
+                            .transition(&op, AdmissionBoundary::Incoming)
+                            .await?
+                            .map_err(|error| error.to_string()),
+                    };
+                    self.settle_pending(&op, outcome, &mut pass).await?;
+                    progressed = true;
+                    changes += 1;
+                    if changes == TRANSFER_PAGE_SIZE {
+                        break 'rounds;
                     }
-                    Err(error) => {
-                        // A refused local operation is reported, not dropped.
-                        if op.id.node == self.identity.node {
-                            self.conn()
-                                .execute(
-                                    "INSERT OR REPLACE INTO rocky_rejected_local VALUES(?,?,?)",
-                                    crate::sqlite::params![
-                                        op.id.node.0.to_vec(),
-                                        op.id.sequence.get() as i64,
-                                        error.clone()
-                                    ],
-                                )
-                                .await?;
-                        }
-                        pass.rejection = Some(error);
-                        "rejected"
+                    match self.pending_head(Some(op.id.node), true).await? {
+                        Some(next) => op = next,
+                        None => break,
                     }
-                };
-                self.conn()
-                    .execute(
-                        "UPDATE rocky_operations SET status=? WHERE node=? AND sequence=?",
-                        crate::sqlite::params![
-                            status,
-                            op.id.node.0.to_vec(),
-                            op.id.sequence.get() as i64
-                        ],
-                    )
-                    .await?;
-                changes += 1;
-                if changes == TRANSFER_PAGE_SIZE {
-                    break 'pages;
                 }
             }
-            if empty {
+            if !progressed {
                 break;
             }
         }
@@ -699,6 +677,62 @@ where
             .await?;
         self.inject_fault().await?;
         Ok(Some(pass))
+    }
+    /// The lowest pending operation of `node` with `same`, else of the first
+    /// author after `node` that has one.
+    async fn pending_head(
+        &self,
+        node: Option<NodeId>,
+        same: bool,
+    ) -> Result<Option<Envelope>, Error> {
+        let mut rows = match (node, same) {
+            (Some(node), true) => self.conn().query("SELECT bytes FROM rocky_operations WHERE status<>'applied' AND status='pending' AND node=? ORDER BY sequence LIMIT 1", [node.0.to_vec()]).await?,
+            (Some(node), false) => self.conn().query("SELECT bytes FROM rocky_operations WHERE status<>'applied' AND status='pending' AND node>? ORDER BY node,sequence LIMIT 1", [node.0.to_vec()]).await?,
+            (None, _) => self.conn().query("SELECT bytes FROM rocky_operations WHERE status<>'applied' AND status='pending' ORDER BY node,sequence LIMIT 1", ()).await?,
+        };
+        match rows.next().await? {
+            Some(row) => Ok(Some(Envelope::decode(&row.get::<Vec<u8>>(0)?)?)),
+            None => Ok(None),
+        }
+    }
+    /// Stores a pending operation's outcome: its statements, or its rejection.
+    async fn settle_pending(
+        &mut self,
+        op: &Envelope,
+        outcome: Result<Vec<ProjectionStatement>, String>,
+        pass: &mut Pass,
+    ) -> Result<(), Error> {
+        let status = match outcome {
+            Ok(statements) => {
+                pass.changed.merge(self.store(statements).await?);
+                pass.applied.push(op.id);
+                "applied"
+            }
+            Err(error) => {
+                // A refused local operation is reported, not dropped.
+                if op.id.node == self.identity.node {
+                    self.conn()
+                        .execute(
+                            "INSERT OR REPLACE INTO rocky_rejected_local VALUES(?,?,?)",
+                            crate::sqlite::params![
+                                op.id.node.0.to_vec(),
+                                op.id.sequence.get() as i64,
+                                error.clone()
+                            ],
+                        )
+                        .await?;
+                }
+                pass.rejection = Some(error);
+                "rejected"
+            }
+        };
+        self.conn()
+            .execute(
+                "UPDATE rocky_operations SET status=? WHERE node=? AND sequence=?",
+                crate::sqlite::params![status, op.id.node.0.to_vec(), op.id.sequence.get() as i64],
+            )
+            .await?;
+        Ok(())
     }
     pub(super) fn validate_peer(&self, peer: NodeId) -> Result<(), Error> {
         if peer == self.identity.node || !self.config.delivery_targets.contains(&peer) {
@@ -759,6 +793,34 @@ where
             });
         }
         Ok(acks)
+    }
+    async fn peer_acknowledgment(
+        &self,
+        peer: NodeId,
+        id: Option<OperationId>,
+    ) -> Result<Option<Acknowledgment>, Error> {
+        self.validate_peer(peer)?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT applied FROM rocky_peer_ack WHERE peer=? AND node=? AND sequence=?",
+                crate::sqlite::params![
+                    peer.0.to_vec(),
+                    id.node.0.to_vec(),
+                    id.sequence.get() as i64
+                ],
+            )
+            .await?;
+        Ok(match rows.next().await? {
+            Some(row) => Some(Acknowledgment {
+                id,
+                applied: row.get::<i64>(0)? == 1,
+            }),
+            None => None,
+        })
     }
     async fn progress(&self, peer: NodeId) -> Result<PeerProgress, Error> {
         let acks = self.peer_acknowledgments(peer).await?;
@@ -832,7 +894,8 @@ where
                 | Fault::AbortInCheckpoint
                 | Fault::RecordGroups(_)
                 | Fault::SnapshotAtFlush(_)
-                | Fault::CheckpointFrames(_) => {}
+                | Fault::CheckpointFrames(_)
+                | Fault::VmSteps(_) => {}
                 Fault::FailBeforeCommit => return Err(Error::InjectedFailure),
                 // Taken by the follow-up pass after the write.
                 Fault::FailFollowing => self.fault = Some(Fault::FailFollowing),

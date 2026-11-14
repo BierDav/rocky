@@ -837,6 +837,17 @@ impl<A: RowApplication> Inner<A> {
             }
             return;
         }
+        // At the hard limit, cursors pinning the log end so it can reset.
+        if !self.truncate_wal().await
+            && size >= self.wal_limits.1
+            && self.workspace.queries.cursors.preempt().await > 0
+        {
+            self.truncate_wal().await;
+        }
+    }
+    /// One truncating checkpoint, waiting briefly for readers of the old
+    /// log; whether it reset the log.
+    async fn truncate_wal(&mut self) -> bool {
         let waits = self
             .conn
             .connection()
@@ -861,20 +872,22 @@ impl<A: RowApplication> Inner<A> {
                 .connection()
                 .set_busy_timeout(std::time::Duration::ZERO);
         }
-        if let Ok(result) = checkpoint {
-            let complete = matches!(
-                result.first().map(Vec::as_slice),
-                Some([SqlValue::Integer(0), SqlValue::Integer(log), SqlValue::Integer(done)])
-                    if log == done
-            );
-            if complete {
-                self.passive.reset();
-            }
-            #[cfg(test)]
-            {
-                self.checkpoints += 1;
-            }
+        let Ok(result) = checkpoint else {
+            return false;
+        };
+        #[cfg(test)]
+        {
+            self.checkpoints += 1;
         }
+        let complete = matches!(
+            result.first().map(Vec::as_slice),
+            Some([SqlValue::Integer(0), SqlValue::Integer(log), SqlValue::Integer(done)])
+                if log == done
+        );
+        if complete {
+            self.passive.reset();
+        }
+        complete
     }
     /// Compaction and pruning free pages; between commits, one bounded
     /// incremental vacuum step gives them back to the file system.

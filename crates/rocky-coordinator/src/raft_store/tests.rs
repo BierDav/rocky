@@ -452,6 +452,82 @@ async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
     );
 }
 
+/// Polls `future` once: whether it completes without waiting on a lock.
+fn ready<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
+#[tokio::test]
+async fn requests_authorize_while_a_log_write_holds_the_image() {
+    let (genesis, executor, scope, _) = certified();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+    let request = crate::machine::self_certified(
+        genesis.id().unwrap(),
+        [1; 32],
+        Operation::Coordinated {
+            log: tip_log(scope),
+            action: crate::coordinated::Action::Head,
+        },
+        &executor,
+        now().unwrap(),
+    )
+    .unwrap();
+    // As a log append or vote holds it while it publishes.
+    let held = store.0.image.lock().await;
+    let answers = (
+        ready(store.preflight(&request)),
+        ready(store.read(&request)).map(|read| format!("{read:?}")),
+        ready(store.lane(&request)),
+    );
+    drop(held);
+    let free = (
+        store.preflight(&request).await,
+        format!("{:?}", store.read(&request).await),
+        store.lane(&request).await,
+    );
+    assert_eq!(answers, (Some(free.0), Some(free.1), Some(free.2)));
+}
+#[tokio::test]
+async fn updates_share_log_entries_and_apply_metadata_in_place() {
+    use openraft::storage::RaftLogStorageExt;
+    let (genesis, executor, scope, _) = certified();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+    let time = now().unwrap();
+    for index in 1..=16 {
+        let request = crate::machine::self_certified(
+            genesis.id().unwrap(),
+            crate::transport::nonce(),
+            Operation::Coordinated {
+                log: tip_log(scope),
+                action: crate::coordinated::Action::Head,
+            },
+            &executor,
+            time,
+        )
+        .unwrap();
+        let entry = Entry::<Types> {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(Proposal { time, request }),
+        };
+        store.blocking_append([entry.clone()]).await.unwrap();
+        store.save_committed(Some(entry.log_id)).await.unwrap();
+        assert!(matches!(
+            store.apply([entry]).await.unwrap().remove(0),
+            Ok(Outcome::CoordinatedHead(_))
+        ));
+    }
+    store.save_vote(&Vote::new(2, 1)).await.unwrap();
+    assert_eq!(store.try_get_log_entries(1..=16).await.unwrap().len(), 16);
+    // Every update shared the entries it kept; apply changes no metadata copy.
+    assert_eq!(store.0.copies.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 #[tokio::test]
 async fn head_and_preflight_do_not_wait_for_a_blocked_log_sync() {
     use openraft::storage::RaftLogStorageExt;

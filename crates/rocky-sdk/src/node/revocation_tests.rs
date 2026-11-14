@@ -345,6 +345,45 @@ async fn stop_at(
 }
 
 #[tokio::test]
+async fn holding_every_group_partition_keeps_escrow_in_one_pass() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let client = node.client(1)?;
+    let lists = 8;
+    for list in 0..lists {
+        node.dispatch(&client, &json!({"type":"partition_create","group":"list","values":[{"type":"text","value":format!("L{list}")}]})).await?;
+    }
+    let settings = node.settings.lock().await.clone();
+    let partitions = settings.partitions(&node.domain())?;
+    assert_eq!(partitions.len(), lists);
+    let count = crate::escrow::CONSIDERED.with(|considered| considered.replace(0));
+    assert!(count > 0);
+    crate::escrow::keep(&node.replica, &settings, &node.vault, &node.domain()).await?;
+    let pass = crate::escrow::CONSIDERED.with(|considered| considered.replace(0));
+    // Every member table of every partition is one key to consider.
+    assert!(pass >= lists * 3, "{pass}");
+    node.hold_keys(&settings, &partitions).await?;
+    // One pass for all partitions, not one per partition.
+    assert_eq!(
+        crate::escrow::CONSIDERED.with(|considered| considered.get()),
+        pass
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_verifies_revocations_outside_the_settings_lock() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    assert!(node.collects().await);
+    node.refresh_trusted_watch().await?;
+    node.observed_status().await?;
+    node.health_report().await?;
+    assert_eq!(node.verified_under_settings.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn received_sibling_resumes_after_each_table_installation() -> Result<(), Failure> {
     let template = tempfile::tempdir()?;
     let keys = Keys::default();

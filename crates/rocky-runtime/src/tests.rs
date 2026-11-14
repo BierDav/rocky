@@ -47,6 +47,12 @@ pub(super) async fn fault<A: StoredApplication>(replica: &Replica<A>, fault: wor
     enqueue(&replica.inner.commands, Command::Fault(fault, reply)).unwrap();
     result.await.unwrap().unwrap();
 }
+/// SQLite steps the domain's file writer has run so far.
+pub(super) async fn vm_steps<A: StoredApplication>(replica: &Replica<A>) -> u64 {
+    let (steps, counted) = oneshot::channel();
+    fault(replica, worker::Fault::VmSteps(steps)).await;
+    counted.await.unwrap()
+}
 pub(super) async fn disk(dir: &Scratch, sql: &str) -> Vec<Vec<SqlValue>> {
     let db = crate::sqlite::Connection::open(&dir.path().join("laptop.db")).unwrap();
     storage::collect_rows(db.query(sql, ()).await.unwrap())

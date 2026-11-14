@@ -187,7 +187,11 @@ enum Command<R> {
     LookupMutation(MutationHandle, Reply<Option<CommittedMutation>>),
     /// Answers once a flush covers every commit of the domain so far.
     Flush(Reply<()>),
-    Query(Reply<Snapshot<R>>),
+    /// Answered once the domain's earlier work has committed, so a snapshot
+    /// read after it includes that work.
+    Query(Reply<()>),
+    /// Decodes and selects rows read beside the writer under current policy.
+    Decode(Box<read::Projected>, Reply<Snapshot<R>>),
     Close(Reply<()>),
     Sync(replication::Request, Reply<replication::Response>),
     Retention(Box<checkpoint::Request>, Reply<checkpoint::Response>),
@@ -229,6 +233,7 @@ impl<R> Command<R> {
             Self::LookupMutation(_, reply) => drop(reply.send(Err(error))),
             Self::Flush(reply) => drop(reply.send(Err(error))),
             Self::Query(reply) => drop(reply.send(Err(error))),
+            Self::Decode(_, reply) => drop(reply.send(Err(error))),
             Self::Close(reply) => drop(reply.send(Err(error))),
             Self::Sync(_, reply) => drop(reply.send(Err(error))),
             Self::Retention(_, reply) => drop(reply.send(Err(error))),
@@ -514,7 +519,7 @@ where
         Ok(self.inner.reads()?.logical())
     }
     pub async fn query(&self) -> Result<Snapshot<A::Row>, Error> {
-        query(&self.inner.commands, false).await
+        query(&self.inner, false).await
     }
     pub fn scope(&self) -> Scope {
         self.inner.scope
@@ -601,6 +606,7 @@ impl<R> CommandQueue<R> {
             command,
             Command::Close(_)
                 | Command::Query(_)
+                | Command::Decode(..)
                 | Command::LookupMutation(_, _)
                 | Command::Flush(_)
         );
@@ -677,13 +683,27 @@ impl<R> CommandQueue<R> {
 fn enqueue<R>(sender: &CommandQueue<R>, command: Command<R>) -> Result<(), Error> {
     sender.try_send(command)
 }
-async fn query<R>(sender: &CommandQueue<R>, wait: bool) -> Result<Snapshot<R>, Error> {
+/// The whole projection: ordered after the domain's earlier work, read on
+/// the read pool, and only decoded by the writer, which owns the application.
+async fn query<R>(inner: &Inner<R>, wait: bool) -> Result<Snapshot<R>, Error> {
+    barrier(&inner.commands, wait).await?;
+    decode(inner, inner.reads()?.projection().await?).await
+}
+async fn barrier<R>(sender: &CommandQueue<R>, wait: bool) -> Result<(), Error> {
     let (reply, result) = oneshot::channel();
     if wait {
         sender.send(Command::Query(reply)).await?;
     } else {
         enqueue(sender, Command::Query(reply))?;
     }
+    result.await.map_err(|_| Error::Closed)?
+}
+async fn decode<R>(inner: &Inner<R>, projected: read::Projected) -> Result<Snapshot<R>, Error> {
+    let (reply, result) = oneshot::channel();
+    inner
+        .commands
+        .send(Command::Decode(Box::new(projected), reply))
+        .await?;
     result.await.map_err(|_| Error::Closed)?
 }
 pub struct Observer<R> {
@@ -703,7 +723,7 @@ impl<R> Observer<R> {
             self.revisions.changed().await.map_err(|_| Error::Closed)?;
         }
         let runtime = self.runtime.upgrade().ok_or(Error::Closed)?;
-        let snapshot = query(&runtime.commands, true).await?;
+        let snapshot = query(&runtime, true).await?;
         self.delivered = snapshot.revision;
         self.initial = false;
         Ok(snapshot)

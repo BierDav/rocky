@@ -75,6 +75,16 @@ pub(super) fn marks(frontier: &rocky_core::AppliedFrontier) -> Marks {
     marks.sort();
     marks
 }
+/// The pruned prefix of a stored retention state, for reads beside the writer.
+pub(crate) fn pruned_prefix(state: &[u8]) -> Result<Vec<(NodeId, u64)>, Error> {
+    #[derive(Deserialize)]
+    struct Pruned {
+        pruned_prefix: Marks,
+    }
+    serde_json::from_slice::<Pruned>(state)
+        .map(|stored| stored.pruned_prefix)
+        .map_err(|_| Error::Corrupt("checkpoint state".into()))
+}
 pub(super) fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
@@ -639,7 +649,7 @@ where
                     .admit_read(self.identity.scope, self.identity.caller, &self.policy)
                     .map_err(application)?;
                 let page = self
-                    .read_transaction(async |worker| worker.export(after).await)
+                    .read_transaction(async |worker| worker.export(after.clone()).await)
                     .await?;
                 self.retention.lease = Some(web_time::Instant::now() + EXPORT_LEASE);
                 Ok(Response::Page(Box::new(page)))

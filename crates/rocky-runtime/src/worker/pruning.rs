@@ -304,6 +304,7 @@ where
         let mut changed = None;
         if let Some(peer) = peer {
             let mut stored = retention.stored.clone();
+            let before = held_at(&stored, peer, self.identity.node);
             let mark = mark(&mut stored, peer);
             let mut advanced = mark.behind || mark.holding_since.is_some();
             mark.behind = false;
@@ -319,7 +320,7 @@ where
             }
             if advanced {
                 self.persist(&stored).await?;
-                self.clear_delivered(&stored).await?;
+                self.clear_delivered(&stored, peer, before).await?;
                 changed = Some(stored);
             }
         }
@@ -384,21 +385,24 @@ where
         self.inject_fault().await?;
         Ok((changed, Catchup::Operations(TransferPage { records, next })))
     }
-    /// Deletes outgoing entries every delivery target holds, by its
-    /// reported frontier or a receipt for the entry.
-    async fn clear_delivered(&self, stored: &Stored) -> Result<(), Error> {
+    /// Deletes the outgoing entries `peer`'s reported frontier newly covers,
+    /// after `from`, that every other delivery target holds too, by its
+    /// reported frontier or a receipt. A receipt clears its entry itself.
+    async fn clear_delivered(&self, stored: &Stored, peer: NodeId, from: u64) -> Result<(), Error> {
         let local = self.identity.node;
-        if self.config.delivery_targets.is_empty() {
+        let to = held_at(stored, peer, local);
+        if to <= from || !self.config.delivery_targets.contains(&peer) {
             return Ok(());
         }
-        let mut sql = String::from("DELETE FROM rocky_outbox WHERE node=?");
-        let mut values = vec![crate::sqlite::Value::Blob(local.0.to_vec())];
-        for target in &self.config.delivery_targets {
-            let held = stored
-                .peers
-                .iter()
-                .find(|(peer, _)| peer == target)
-                .map_or(0, |(_, mark)| at(&mark.held, local));
+        let mut sql =
+            String::from("DELETE FROM rocky_outbox WHERE node=? AND sequence>? AND sequence<=?");
+        let mut values = vec![
+            crate::sqlite::Value::Blob(local.0.to_vec()),
+            crate::sqlite::Value::Integer(from as i64),
+            crate::sqlite::Value::Integer(to as i64),
+        ];
+        for target in self.config.delivery_targets.iter().filter(|t| **t != peer) {
+            let held = held_at(stored, *target, local);
             sql.push_str(" AND (sequence<=? OR EXISTS(SELECT 1 FROM rocky_peer_ack a WHERE a.peer=? AND a.node=rocky_outbox.node AND a.sequence=rocky_outbox.sequence))");
             values.push(crate::sqlite::Value::Integer(held as i64));
             values.push(crate::sqlite::Value::Blob(target.0.to_vec()));
@@ -406,4 +410,12 @@ where
         self.conn().execute(sql, values).await?;
         Ok(())
     }
+}
+/// What `peer` last reported holding of `node`'s log.
+fn held_at(stored: &Stored, peer: NodeId, node: NodeId) -> u64 {
+    stored
+        .peers
+        .iter()
+        .find(|(known, _)| *known == peer)
+        .map_or(0, |(_, mark)| at(&mark.held, node))
 }

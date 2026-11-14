@@ -1336,6 +1336,64 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     );
 }
 
+/// A cursor that pins the log past its hard limit is ended so the log
+/// resets; it reports `Aborted(Preempted)` and a new cursor reads on.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_cursor_pinning_the_log_past_its_limit_is_preempted() {
+    use crate::cursor::CursorLimits;
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("a.db");
+    let alice = t
+        .open(&path, &PrivateKey::new(), t.full(), &[t.items])
+        .await;
+    let session = sql(&alice, &[t.items]).await;
+    let add = async |id: usize| {
+        insert(
+            &session,
+            "INSERT INTO items VALUES(?,'x',0)",
+            vec![text(&id.to_string())],
+        )
+        .await
+        .unwrap();
+    };
+    add(0).await;
+    let limits = CursorLimits {
+        page_rows: 1,
+        ..CursorLimits::default()
+    };
+    let mut cursor = session
+        .cursor("SELECT key FROM items", vec![], limits)
+        .await
+        .unwrap();
+    cursor.next().await.unwrap();
+    // Commits only check the limits they had; the check below sees new ones.
+    add(1).await;
+    alice.set_wal_limits(0, 0).await;
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    assert!(rocky_platform::fs::len(std::path::Path::new(&wal)).unwrap_or(0) > 0);
+    alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .checkpoint_if_due()
+        .await;
+    assert_eq!(
+        rocky_platform::fs::len(std::path::Path::new(&wal)).unwrap_or(0),
+        0
+    );
+    assert!(matches!(
+        cursor.next().await,
+        Err(Error::Sql(SqlError::Aborted(AbortReason::Preempted)))
+    ));
+    let mut cursor = session
+        .cursor("SELECT key FROM items", vec![], limits)
+        .await
+        .unwrap();
+    assert_eq!(rows_of(&mut cursor).await.len(), 2);
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn secure_table_events_follow_commits_receipts_and_authority() {
     use crate::observe::Cause;

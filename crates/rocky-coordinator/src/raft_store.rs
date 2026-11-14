@@ -92,16 +92,21 @@ pub struct Backup {
 }
 const BACKUP: &str = "BACKUP";
 const BACKUP_LABEL: &str = "rocky.voter-backup.v1";
+/// The durable Raft log state. An update drafts a shallow copy: entries
+/// are shared, and a changed log copies only the map's pointers.
 #[derive(Clone)]
 struct Image {
     hard: Hard,
     fence: Option<Fence>,
     pending_purge: Option<LogId<u64>>,
-    logs: BTreeMap<u64, Entry<Types>>,
+    logs: Arc<BTreeMap<u64, Arc<Entry<Types>>>>,
+    snapshot: Option<SnapshotMeta<u64, BasicNode>>,
+}
+/// The applied state machine, changed in place one entry at a time.
+struct Machine {
     applied: Option<LogId<u64>>,
     membership: StoredMembership<u64, BasicNode>,
     metadata: Metadata,
-    snapshot: Option<SnapshotMeta<u64, BasicNode>>,
 }
 /// Retained consensus state, by count and on-disk bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -124,7 +129,11 @@ struct SyncGate {
 }
 struct Inner {
     root: PathBuf,
+    /// The genesis ID requests are signed for.
+    identity: Commitment,
     image: Mutex<Image>,
+    /// Requests authorize under a shared guard, never the log image's lock.
+    machine: tokio::sync::RwLock<Machine>,
     /// Serializes durable mutations; metadata readers never acquire it.
     io: Arc<Mutex<()>>,
     deadlines: tokio::sync::watch::Sender<()>,
@@ -133,6 +142,9 @@ struct Inner {
     _lock: File,
     #[cfg(test)]
     sync_gate: std::sync::Mutex<Option<SyncGate>>,
+    /// Log entries an update copied instead of sharing.
+    #[cfg(test)]
+    copies: std::sync::atomic::AtomicUsize,
 }
 fn io_error(error: impl std::error::Error + 'static) -> StorageError<u64> {
     StorageIOError::write_state_machine(&error).into()
@@ -348,7 +360,7 @@ impl Store {
         let marker_path = path.join("PROVISIONED");
         let (logs_dir, snapshots_dir) = (path.join("log"), path.join("snapshots"));
         let state_path = path.join("state.cbor");
-        let image = if state_path.exists() {
+        let (image, machine) = if state_path.exists() {
             let hard: Hard = unseal(STATE_LABEL, &read(&state_path)?)?;
             if hard.format != FORMAT {
                 return Err(CoordinationError::UnsupportedFormat);
@@ -361,12 +373,12 @@ impl Store {
             {
                 return Err(CoordinationError::Configuration);
             }
-            let mut image = Self::load(hard, genesis, &logs_dir, &snapshots_dir)?;
+            let (mut image, machine) = Self::load(hard, genesis, &logs_dir, &snapshots_dir)?;
             let fence = path.join(FENCE);
             if fence.exists() {
                 image.fence = Some(unseal(FENCE_LABEL, &read(&fence)?)?);
             }
-            image
+            (image, machine)
         } else {
             let leftovers = [&logs_dir, &snapshots_dir].into_iter().any(|dir| {
                 std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
@@ -382,14 +394,16 @@ impl Store {
                 committed: None,
                 purged: None,
             };
-            let image = Image {
+            let machine = Machine {
                 metadata: Metadata::with_limits(genesis, limits)?,
+                applied: None,
+                membership: StoredMembership::default(),
+            };
+            let image = Image {
                 fence: None,
                 hard,
                 pending_purge: None,
-                logs: BTreeMap::new(),
-                applied: None,
-                membership: StoredMembership::default(),
+                logs: Arc::default(),
                 snapshot: None,
             };
             for dir in [&logs_dir, &snapshots_dir] {
@@ -400,17 +414,21 @@ impl Store {
                 .map_err(|_| CoordinationError::Corrupt)?;
             atomic_write(&state_path, &seal(STATE_LABEL, &image.hard)?, "provision")
                 .map_err(|_| CoordinationError::Corrupt)?;
-            image
+            (image, machine)
         };
         Ok(Self(Arc::new(Inner {
             root: path.to_path_buf(),
+            identity,
             image: Mutex::new(image),
+            machine: tokio::sync::RwLock::new(machine),
             io: Arc::new(Mutex::new(())),
             deadlines: tokio::sync::watch::channel(()).0,
             node: std::sync::OnceLock::new(),
             _lock: lock,
             #[cfg(test)]
             sync_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            copies: Default::default(),
         })))
     }
     fn load(
@@ -418,7 +436,7 @@ impl Store {
         genesis: CertifiedGenesis,
         logs_dir: &Path,
         snapshots_dir: &Path,
-    ) -> Result<Image, CoordinationError> {
+    ) -> Result<(Image, Machine), CoordinationError> {
         let purged = hard.purged.map(|id| id.index);
         // The newest readable snapshot that covers every purged entry.
         let mut snapshot = None;
@@ -472,7 +490,7 @@ impl Store {
             {
                 return Err(CoordinationError::Corrupt);
             }
-            logs.insert(index, entry);
+            logs.insert(index, Arc::new(entry));
         }
         if let Some(committed) = hard.committed
             && applied.is_none_or(|id| id.index < committed.index)
@@ -483,16 +501,20 @@ impl Store {
                 return Err(CoordinationError::Corrupt);
             }
         }
-        Ok(Image {
-            hard,
-            fence: None,
-            pending_purge: None,
-            logs,
-            applied,
-            membership,
-            metadata,
-            snapshot: meta,
-        })
+        Ok((
+            Image {
+                hard,
+                fence: None,
+                pending_purge: None,
+                logs: Arc::new(logs),
+                snapshot: meta,
+            },
+            Machine {
+                applied,
+                membership,
+                metadata,
+            },
+        ))
     }
     #[allow(clippy::result_large_err)] // OpenRaft defines the storage error type.
     fn persist_hard(&self, hard: &Hard, stage: &str) -> Result<(), StorageError<u64>> {
@@ -500,28 +522,50 @@ impl Store {
         atomic_write(&self.0.root.join("state.cbor"), &data, stage).map_err(io_error)
     }
     /// A blocking worker owns each durable mutation through publication, even
-    /// if its async caller is canceled. Readers retain the last durable image.
-    async fn update<T: Send + 'static>(
+    /// if its async caller is canceled.
+    async fn exclusive<T: Send + 'static>(
         &self,
-        changed: bool,
-        mutate: impl FnOnce(&Self, &mut Image) -> Result<T, StorageError<u64>> + Send + 'static,
+        work: impl FnOnce(&Self) -> Result<T, StorageError<u64>> + Send + 'static,
     ) -> Result<T, StorageError<u64>> {
         let io = self.0.io.clone().lock_owned().await;
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             let _io = io;
-            let mut image = store.0.image.blocking_lock().clone();
-            let pending = changed.then(|| image.metadata.pending_logs());
-            let result = mutate(&store, &mut image)?;
-            let changed = pending.is_some_and(|before| before != image.metadata.pending_logs());
-            *store.0.image.blocking_lock() = image;
-            if changed {
-                store.0.deadlines.send_replace(());
-            }
-            Ok(result)
+            work(&store)
         })
         .await
         .map_err(io_error)?
+    }
+    /// Mutates a draft of the log image and publishes it once `mutate`
+    /// succeeds: readers retain the last durable image meanwhile.
+    async fn update<T: Send + 'static>(
+        &self,
+        mutate: impl FnOnce(&Self, &mut Image) -> Result<T, StorageError<u64>> + Send + 'static,
+    ) -> Result<T, StorageError<u64>> {
+        self.exclusive(|store| store.publish(mutate)).await
+    }
+    #[allow(clippy::result_large_err)] // OpenRaft defines the storage error type.
+    fn publish<T>(
+        &self,
+        mutate: impl FnOnce(&Self, &mut Image) -> Result<T, StorageError<u64>>,
+    ) -> Result<T, StorageError<u64>> {
+        let mut image = self.0.image.blocking_lock().clone();
+        let result = mutate(self, &mut image)?;
+        let mut published = self.0.image.blocking_lock();
+        #[cfg(test)]
+        {
+            let copied = image.logs.iter().filter(|(index, entry)| {
+                published
+                    .logs
+                    .get(index)
+                    .is_some_and(|held| !Arc::ptr_eq(held, entry))
+            });
+            self.0
+                .copies
+                .fetch_add(copied.count(), std::sync::atomic::Ordering::Relaxed);
+        }
+        *published = image;
+        Ok(result)
     }
     fn logs_dir(&self) -> PathBuf {
         self.0.root.join("log")
@@ -538,8 +582,9 @@ impl Store {
         image.hard = hard;
         image.pending_purge = None;
         let doomed: Vec<_> = image.logs.range(..=log_id.index).map(|(i, _)| *i).collect();
+        let logs = Arc::make_mut(&mut image.logs);
         for index in doomed {
-            image.logs.remove(&index);
+            logs.remove(&index);
             std::fs::remove_file(self.logs_dir().join(file_name(index))).map_err(io_error)?;
         }
         sync_directory(&self.logs_dir()).map_err(io_error)
@@ -584,35 +629,44 @@ impl Store {
     pub(crate) fn deadlines(&self) -> tokio::sync::watch::Receiver<()> {
         self.0.deadlines.subscribe()
     }
+    /// Signatures verify before any lock; state checks run under a shared
+    /// guard, which neither other requests nor Raft log storage wait for.
     pub async fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
-        self.0.image.lock().await.metadata.preflight(request)
+        request.authenticate(self.0.identity)?;
+        request.fresh()?;
+        let machine = self.0.machine.read().await;
+        machine.metadata.authorize(request)
     }
     pub async fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
-        self.0.image.lock().await.metadata.read(request)
+        request.authenticate(self.0.identity)?;
+        let machine = self.0.machine.read().await;
+        machine.metadata.read_authenticated(request)
     }
     pub(crate) async fn pending_logs(
         &self,
     ) -> Vec<(rocky_core::TipLog, crate::coordinated::Pending)> {
-        self.0.image.lock().await.metadata.pending_logs()
+        self.0.machine.read().await.metadata.pending_logs()
     }
     pub(crate) async fn log_head(
         &self,
         log: rocky_core::TipLog,
     ) -> Result<crate::coordinated::Head, CoordinationError> {
-        self.0.image.lock().await.metadata.log_head(log)
+        self.0.machine.read().await.metadata.log_head(log)
     }
     /// The committed authority time.
     pub async fn time(&self) -> u64 {
-        self.0.image.lock().await.metadata.time()
+        self.0.machine.read().await.metadata.time()
     }
     /// Unauthorized requests share the unregistered lane, never the target's.
     pub async fn lane(&self, request: &Request) -> Option<p2panda_core::PublicKey> {
-        let image = self.0.image.lock().await;
-        image.metadata.preflight(request).ok()?;
-        image.metadata.tenant_lane(request)
+        request.authenticate(self.0.identity).ok()?;
+        request.fresh().ok()?;
+        let machine = self.0.machine.read().await;
+        machine.metadata.authorize(request).ok()?;
+        machine.metadata.tenant_lane(request)
     }
     pub async fn tenants(&self) -> usize {
-        self.0.image.lock().await.metadata.tenants()
+        self.0.machine.read().await.metadata.tenants()
     }
     pub fn set_node(&self, node: u64) {
         let _ = self.0.node.set(node);
@@ -622,7 +676,7 @@ impl Store {
     }
     /// Removes the fence of a re-added voter.
     pub async fn lift_fence(&self) -> Result<(), CoordinationError> {
-        self.update(false, |store, image| {
+        self.update(|store, image| {
             let path = store.0.root.join(FENCE);
             if path.exists() {
                 std::fs::remove_file(&path).map_err(io_error)?;
@@ -673,6 +727,11 @@ impl Store {
             .image
             .try_lock()
             .map_err(|_| CoordinationError::Corrupt)?;
+        let machine = store
+            .0
+            .machine
+            .try_read()
+            .map_err(|_| CoordinationError::Corrupt)?;
         let index = [
             image.logs.last_key_value().map(|(index, _)| *index),
             image
@@ -680,7 +739,7 @@ impl Store {
                 .as_ref()
                 .and_then(|meta| meta.last_log_id)
                 .map(|id| id.index),
-            image.applied.map(|id| id.index),
+            machine.applied.map(|id| id.index),
         ]
         .into_iter()
         .flatten()
@@ -737,11 +796,12 @@ impl Store {
         Ok(manifest)
     }
     pub async fn desired_voters(&self) -> std::collections::BTreeSet<u64> {
-        self.0.image.lock().await.metadata.desired_voters.clone()
+        self.0.machine.read().await.metadata.desired_voters.clone()
     }
     /// Retained state and the bytes it occupies on disk.
     pub async fn footprint(&self) -> Result<Footprint, CoordinationError> {
-        self.update(false, |store, image| {
+        self.exclusive(|store| {
+            let logs = store.0.image.blocking_lock().logs.len();
             let mut disk_bytes = 0;
             let mut allocated_bytes = 0;
             let mut snapshots = 0;
@@ -767,14 +827,15 @@ impl Store {
                     }
                 }
             }
+            let machine = store.0.machine.blocking_read();
             Ok(Footprint {
-                logs: image.logs.len(),
+                logs,
                 snapshots,
                 disk_bytes,
                 allocated_bytes,
-                state: image.metadata.retention(),
-                state_bytes: image.metadata.total_used().map_err(io_error)?,
-                retry_records: image.metadata.retry_records(),
+                state: machine.metadata.retention(),
+                state_bytes: machine.metadata.total_used().map_err(io_error)?,
+                retry_records: machine.metadata.retry_records(),
             })
         })
         .await
@@ -792,7 +853,7 @@ impl RaftLogReader<Types> for Store {
             .logs
             .range(range)
             .filter(|(index, _)| purged.is_none_or(|id| **index > id.index))
-            .map(|(_, e)| e.clone())
+            .map(|(_, e)| (**e).clone())
             .collect())
     }
 }
@@ -817,7 +878,7 @@ impl RaftLogStorage<Types> for Store {
     }
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
         let vote = *vote;
-        self.update(false, move |store, image| {
+        self.update(move |store, image| {
             let mut hard = image.hard.clone();
             hard.vote = Some(vote);
             store.persist_hard(&hard, "vote")?;
@@ -833,7 +894,7 @@ impl RaftLogStorage<Types> for Store {
         &mut self,
         committed: Option<LogId<u64>>,
     ) -> Result<(), StorageError<u64>> {
-        self.update(false, move |store, image| {
+        self.update(move |store, image| {
             let mut hard = image.hard.clone();
             hard.committed = committed;
             store.persist_hard(&hard, "commit")?;
@@ -856,7 +917,7 @@ impl RaftLogStorage<Types> for Store {
     {
         let entries: Vec<_> = entries.into_iter().collect();
         let result = self
-            .update(false, move |store, image| {
+            .update(move |store, image| {
                 #[cfg(test)]
                 if let Some(gate) = store.0.sync_gate.lock().unwrap().take() {
                     let _ = gate.entered.send(());
@@ -880,8 +941,9 @@ impl RaftLogStorage<Types> for Store {
                 }
                 sync_directory(&dir).map_err(io_error)?;
                 crash("log.after_sync");
+                let logs = Arc::make_mut(&mut image.logs);
                 for entry in written {
-                    image.logs.insert(entry.log_id.index, entry);
+                    logs.insert(entry.log_id.index, Arc::new(entry));
                 }
                 Ok(())
             })
@@ -895,7 +957,7 @@ impl RaftLogStorage<Types> for Store {
         }
     }
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        self.update(false, move |store, image| {
+        self.update(move |store, image| {
             // Highest first, so an interruption leaves a contiguous prefix.
             let doomed: Vec<_> = image
                 .logs
@@ -905,14 +967,14 @@ impl RaftLogStorage<Types> for Store {
                 .collect();
             for index in doomed {
                 std::fs::remove_file(store.logs_dir().join(file_name(index))).map_err(io_error)?;
-                image.logs.remove(&index);
+                Arc::make_mut(&mut image.logs).remove(&index);
             }
             sync_directory(&store.logs_dir()).map_err(io_error)
         })
         .await
     }
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        self.update(false, move |store, image| {
+        self.update(move |store, image| {
             if image
                 .snapshot
                 .as_ref()
@@ -935,8 +997,8 @@ impl RaftStateMachine<Types> for Store {
     async fn applied_state(
         &mut self,
     ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), StorageError<u64>> {
-        let image = self.0.image.lock().await;
-        Ok((image.applied, image.membership.clone()))
+        let machine = self.0.machine.read().await;
+        Ok((machine.applied, machine.membership.clone()))
     }
     async fn apply<I>(
         &mut self,
@@ -947,23 +1009,43 @@ impl RaftStateMachine<Types> for Store {
         I::IntoIter: Send,
     {
         let entries: Vec<_> = entries.into_iter().collect();
-        self.update(true, move |store, image| {
+        self.exclusive(move |store| {
+            let pending = store.0.machine.blocking_read().metadata.pending_logs();
             let mut replies = Vec::new();
             for entry in entries {
+                // Each entry applies whole: its fallible file write and its
+                // signature check come before the state lock.
                 let reply = match entry.payload {
-                    EntryPayload::Blank => Err(CoordinationError::Unavailable),
+                    EntryPayload::Blank => {
+                        store.0.machine.blocking_write().applied = Some(entry.log_id);
+                        Err(CoordinationError::Unavailable)
+                    }
                     EntryPayload::Membership(membership) => {
-                        image.membership = StoredMembership::new(Some(entry.log_id), membership);
-                        let membership = image.membership.clone();
-                        store.observe_membership(image, &membership)?;
-                        Ok(Outcome::Membership(image.metadata.desired_voters.clone()))
+                        let membership = StoredMembership::new(Some(entry.log_id), membership);
+                        store
+                            .publish(|store, image| store.observe_membership(image, &membership))?;
+                        let mut machine = store.0.machine.blocking_write();
+                        machine.membership = membership;
+                        machine.applied = Some(entry.log_id);
+                        Ok(Outcome::Membership(machine.metadata.desired_voters.clone()))
                     }
                     EntryPayload::Normal(proposal) => {
-                        image.metadata.apply_at(proposal.time, &proposal.request)
+                        let request = &proposal.request;
+                        let authenticated = request.authenticate(store.0.identity);
+                        let mut machine = store.0.machine.blocking_write();
+                        let reply = machine.metadata.apply_authenticated(
+                            proposal.time,
+                            request,
+                            authenticated,
+                        );
+                        machine.applied = Some(entry.log_id);
+                        reply
                     }
                 };
-                image.applied = Some(entry.log_id);
                 replies.push(reply);
+            }
+            if pending != store.0.machine.blocking_read().metadata.pending_logs() {
+                store.0.deadlines.send_replace(());
             }
             // Applied state is durable through committed entries and snapshots.
             crash("apply.after_apply");
@@ -985,31 +1067,41 @@ impl RaftStateMachine<Types> for Store {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let meta = meta.clone();
-        self.update(true, move |store, image| {
+        self.exclusive(move |store| {
             let data = snapshot.into_inner();
             let metadata: Metadata = decode(&data).map_err(io_error)?;
-            if metadata.genesis.id().map_err(io_error)? != image.hard.identity {
+            if metadata.genesis.id().map_err(io_error)? != store.0.identity {
                 return Err(other("foreign snapshot"));
             }
-            store.write_snapshot(image.hard.identity, &meta, data, "install_snapshot")?;
-            image.metadata = metadata;
-            image.applied = meta.last_log_id;
-            image.membership = meta.last_membership.clone();
-            image.snapshot = Some(meta.clone());
-            store.observe_membership(image, &meta.last_membership)?;
-            store.finish_purge(image)
+            store.write_snapshot(store.0.identity, &meta, data, "install_snapshot")?;
+            store.publish(|store, image| {
+                image.snapshot = Some(meta.clone());
+                store.observe_membership(image, &meta.last_membership)?;
+                store.finish_purge(image)
+            })?;
+            let mut machine = store.0.machine.blocking_write();
+            let pending = machine.metadata.pending_logs();
+            *machine = Machine {
+                applied: meta.last_log_id,
+                membership: meta.last_membership.clone(),
+                metadata,
+            };
+            if pending != machine.metadata.pending_logs() {
+                store.0.deadlines.send_replace(());
+            }
+            Ok(())
         })
         .await
     }
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<Types>>, StorageError<u64>> {
-        self.update(false, |store, image| {
-            let Some(meta) = &image.snapshot else {
+        self.exclusive(|store| {
+            let Some(meta) = store.0.image.blocking_lock().snapshot.clone() else {
                 return Ok(None);
             };
-            let path = store.snapshots_dir().join(file_name(snapshot_index(meta)));
+            let path = store.snapshots_dir().join(file_name(snapshot_index(&meta)));
             let file: SnapshotFile =
                 unseal(SNAPSHOT_LABEL, &read(&path).map_err(io_error)?).map_err(io_error)?;
-            if file.meta != *meta {
+            if file.meta != meta {
                 return Err(other("snapshot changed"));
             }
             Ok(Some(Snapshot {
@@ -1023,16 +1115,24 @@ impl RaftStateMachine<Types> for Store {
 #[allow(clippy::result_large_err)] // OpenRaft fixes the storage error type.
 impl RaftSnapshotBuilder<Types> for Store {
     async fn build_snapshot(&mut self) -> Result<Snapshot<Types>, StorageError<u64>> {
-        self.update(false, move |store, image| {
-            let data = encode(&image.metadata).map_err(io_error)?;
-            let meta = SnapshotMeta {
-                last_log_id: image.applied,
-                last_membership: image.membership.clone(),
-                snapshot_id: format!("{:?}", image.applied),
+        self.exclusive(move |store| {
+            // Encoded under the shared guard: only apply, which this
+            // worker excludes anyway, waits for it.
+            let (data, meta) = {
+                let machine = store.0.machine.blocking_read();
+                let data = encode(&machine.metadata).map_err(io_error)?;
+                let meta = SnapshotMeta {
+                    last_log_id: machine.applied,
+                    last_membership: machine.membership.clone(),
+                    snapshot_id: format!("{:?}", machine.applied),
+                };
+                (data, meta)
             };
-            store.write_snapshot(image.hard.identity, &meta, data.clone(), "snapshot")?;
-            image.snapshot = Some(meta.clone());
-            store.finish_purge(image)?;
+            store.write_snapshot(store.0.identity, &meta, data.clone(), "snapshot")?;
+            store.publish(|store, image| {
+                image.snapshot = Some(meta.clone());
+                store.finish_purge(image)
+            })?;
             Ok(Snapshot {
                 meta,
                 snapshot: Box::new(Cursor::new(data)),

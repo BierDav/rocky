@@ -27,6 +27,7 @@ where
                 "a newer checkpoint is being recomputed; restart the export".into(),
             ));
         }
+        let first = after.is_none();
         let start = match after {
             Some(cursor) if cursor.checkpoint != *commitment => {
                 return Err(Error::Rejected(
@@ -38,16 +39,17 @@ where
                 checkpoint: *commitment,
                 table: 0,
                 position: 0,
+                key: Vec::new(),
             },
         };
         let mut page = CheckpointPage {
-            start,
+            start: start.clone(),
             record: None,
             table: start.table,
             rows: Vec::new(),
             next: None,
         };
-        if after.is_none() {
+        if first {
             page.record = Some(record.encode());
         }
         let mut cursor = start;
@@ -56,18 +58,34 @@ where
             .find(|(index, _)| *index == cursor.table as usize)
         {
             let name = quoted(&table.shadow);
-            let (sql, hidden) = if table.without_rowid {
-                (format!("SELECT * FROM {name} LIMIT -1 OFFSET ?"), 0)
+            // Pages continue after the last key, never by offset.
+            let (sql, params, hidden) = if table.without_rowid {
+                let key = primary_key(self.conn(), &table.shadow)?;
+                if !cursor.key.is_empty() && cursor.key.len() != key.len() {
+                    return Err(Error::Rejected("checkpoint cursor key".into()));
+                }
+                let columns = key.join(",");
+                let after = if cursor.key.is_empty() {
+                    String::new()
+                } else {
+                    format!(" WHERE ({columns})>({})", vec!["?"; key.len()].join(","))
+                };
+                (
+                    format!("SELECT *,{columns} FROM {name}{after} ORDER BY {columns}"),
+                    bindings(cursor.key.clone()),
+                    key.len(),
+                )
             } else {
                 (
                     format!("SELECT *,rowid FROM {name} WHERE rowid>? ORDER BY rowid"),
+                    crate::sqlite::params![cursor.position],
                     1,
                 )
             };
             let read = |bytes| {
                 self.conn().connection().page(
                     &sql,
-                    crate::sqlite::params![cursor.position],
+                    params.clone(),
                     if bytes == usize::MAX { 1 } else { EXPORT_ROWS },
                     bytes,
                     hidden,
@@ -77,15 +95,24 @@ where
             if result.oversized {
                 result = read(usize::MAX)?;
             }
-            let last = match result.rows.last() {
-                Some(row) if hidden == 1 => match row.last() {
-                    Some(crate::sqlite::Value::Integer(rowid)) => *rowid,
-                    _ => return Err(Error::Corrupt("checkpoint row position".into())),
-                },
-                _ => cursor.position + result.rows.len() as i64,
-            };
+            let (mut position, mut key) = (cursor.position, Vec::new());
+            if let Some(row) = result.rows.last() {
+                let last = row[row.len().saturating_sub(hidden)..].to_vec();
+                if table.without_rowid {
+                    position = position.saturating_add(result.rows.len() as i64);
+                    key = last
+                        .into_iter()
+                        .map(storage::sql_value)
+                        .collect::<Result<_, _>>()?;
+                } else {
+                    let [crate::sqlite::Value::Integer(rowid)] = last.as_slice() else {
+                        return Err(Error::Corrupt("checkpoint row position".into()));
+                    };
+                    position = *rowid;
+                }
+            }
             for mut row in result.rows {
-                row.truncate(row.len() - hidden);
+                row.truncate(row.len().saturating_sub(hidden));
                 page.rows.push(
                     row.into_iter()
                         .map(storage::sql_value)
@@ -94,13 +121,15 @@ where
             }
             cursor = if result.more {
                 CheckpointCursor {
-                    position: last,
+                    position,
+                    key,
                     ..cursor
                 }
             } else {
                 CheckpointCursor {
                     table: cursor.table + 1,
                     position: 0,
+                    key: Vec::new(),
                     ..cursor
                 }
             };
@@ -243,7 +272,7 @@ where
                     .await?;
             }
         }
-        if let Some(next) = page.next {
+        if let Some(next) = &page.next {
             import.table = next.table;
             import.position = next.position;
             self.persist(&stored).await?;
@@ -328,4 +357,22 @@ where
             retained: (*count as usize, *bytes as usize),
         })
     }
+}
+/// The primary key columns of a `WITHOUT ROWID` table, quoted, in key order.
+fn primary_key(conn: &ScopedConnection, table: &str) -> Result<Vec<String>, Error> {
+    let rows = conn.connection().rows(
+        "SELECT name FROM pragma_table_info(?) WHERE pk>0 ORDER BY pk",
+        [crate::sqlite::Value::Text(table.to_string())],
+    )?;
+    let key: Vec<String> = rows
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [crate::sqlite::Value::Text(name)] => Ok(quoted(name)),
+            _ => Err(Error::Corrupt("checkpoint table key".into())),
+        })
+        .collect::<Result<_, _>>()?;
+    if key.is_empty() {
+        return Err(Error::Corrupt("checkpoint table key".into()));
+    }
+    Ok(key)
 }

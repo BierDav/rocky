@@ -399,10 +399,26 @@ async fn pending_processing_yields_to_queued_query_between_transactions() {
     let processing = b.clone();
     let task = rocky_platform::task::spawn(async move { processing.process_pending().await });
     waiting.await.unwrap();
-    let (reply, result) = oneshot::channel();
+    // The query's turn comes between the passes; the next pass pauses again
+    // so the snapshot read beside the writer holds exactly the first one.
+    let (reply, turn) = oneshot::channel();
     b.inner.commands.send(Command::Query(reply)).await.unwrap();
+    let (entered, waiting) = oneshot::channel();
+    let (next, resumed) = oneshot::channel();
+    let (reply, paused) = oneshot::channel();
+    let pause = worker::Fault::Pause(entered, resumed);
+    b.inner
+        .commands
+        .send(Command::Fault(pause, reply))
+        .await
+        .unwrap();
     resume.send(()).unwrap();
-    let snapshot = result.await.unwrap().unwrap();
+    turn.await.unwrap().unwrap();
+    paused.await.unwrap().unwrap();
+    waiting.await.unwrap();
+    let projected = b.inner.reads().unwrap().projection().await.unwrap();
+    next.send(()).unwrap();
+    let snapshot = crate::decode(&b.inner, projected).await.unwrap();
     assert_eq!(snapshot.rows.len(), 32);
     task.await.unwrap().unwrap();
     assert_eq!(b.query().await.unwrap().rows.len(), 65);

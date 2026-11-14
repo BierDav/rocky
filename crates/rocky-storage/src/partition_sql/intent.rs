@@ -283,7 +283,6 @@ pub fn split_intent_within<E>(
             tables: &unfiltered,
             reads: Vec::new(),
             numbers: &bindings.numbers,
-            params: Vec::new(),
         },
     );
     let (name, seed) = target(&statement)?;
@@ -369,13 +368,12 @@ pub fn split_intent_within<E>(
             tables: &only,
             reads: Vec::new(),
             numbers: &BTreeMap::new(),
-            params: split.values.clone(),
         };
         if let ControlFlow::Break(error) = VisitMut::visit(&mut copy, &mut filter) {
             return Err(IntentRefusal::Unsupported(error).into());
         }
         let _ = VisitMut::visit(&mut copy, &mut crate::exact::Checked);
-        let params = compact(&mut copy, &filter.params)?;
+        let params = compact(&mut copy, &split.values)?;
         copies.push(PartitionStatement {
             partition,
             statement: Checked {

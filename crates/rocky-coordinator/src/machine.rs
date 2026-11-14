@@ -454,9 +454,14 @@ impl Metadata {
     pub fn retry_records(&self) -> usize {
         self.retained.len()
     }
+    #[cfg(test)]
     pub fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
         request.fresh()?;
+        self.authorize(request)
+    }
+    /// `preflight` of a request already authenticated and fresh.
+    pub(crate) fn authorize(&self, request: &Request) -> Result<(), CoordinationError> {
         if self
             .retained
             .iter()
@@ -511,16 +516,31 @@ impl Metadata {
                 .map(|_| ()),
         }
     }
+    #[cfg(test)]
     /// Advances authority time to the leader-proposed `time`, clamping a
     /// backward clock, then applies `request` deterministically.
     pub fn apply_at(&mut self, time: u64, request: &Request) -> Result<Outcome, CoordinationError> {
+        let authenticated = self
+            .genesis
+            .id()
+            .and_then(|genesis| request.authenticate(genesis));
+        self.apply_authenticated(time, request, authenticated)
+    }
+    /// `apply_at` with the request's signature checked beforehand against
+    /// this genesis, as a caller does outside its state lock.
+    pub(crate) fn apply_authenticated(
+        &mut self,
+        time: u64,
+        request: &Request,
+        authenticated: Result<(), CoordinationError>,
+    ) -> Result<Outcome, CoordinationError> {
         if time > self.state.time {
             self.state.advance(time);
             let window = self.state.limits.retry_window;
             self.retained
                 .retain(|r| r.time.saturating_add(window) >= time);
         }
-        request.authenticate(self.genesis.id()?)?;
+        authenticated?;
         let digest = request.digest()?;
         if let Some(old) = self
             .retained
@@ -571,9 +591,17 @@ impl Metadata {
         }
         result
     }
+    #[cfg(test)]
     /// Answers a read-only request from applied state at its authority time.
     pub fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
+        self.read_authenticated(request)
+    }
+    /// `read` of a request already authenticated.
+    pub(crate) fn read_authenticated(
+        &self,
+        request: &Request,
+    ) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
         match &request.operation {
             Operation::Coordinated {

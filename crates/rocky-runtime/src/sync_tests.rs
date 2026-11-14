@@ -419,3 +419,152 @@ async fn cross_author_dependency_and_successor_survive_pending_restart() {
     laptop.close().await.unwrap();
     phone.close().await.unwrap();
 }
+
+/// Tracking a mutation reads its own acknowledgment, not every one the
+/// peer sent: the cost does not grow with acknowledged history.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn tracking_a_mutation_reads_only_its_acknowledgment() {
+    let dir = Scratch::new().await;
+    let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
+    let mut costs = Vec::new();
+    for (round, history) in [1u8, 200].into_iter().enumerate() {
+        for index in 0..history {
+            let id = create(&laptop, &format!("todo {index}")).await.id;
+            laptop
+                .acknowledge(fixtures::PHONE, Acknowledgment { id, applied: true })
+                .await
+                .unwrap();
+        }
+        let handle = MutationHandle([round as u8 + 1; 32]);
+        laptop
+            .mutate_with_handle(
+                handle,
+                mutation(
+                    None,
+                    Action::CreateTodo {
+                        title: "tracked".into(),
+                        completed: false,
+                    },
+                ),
+            )
+            .unwrap()
+            .committed()
+            .await
+            .unwrap();
+        let before = crate::tests::vm_steps(&laptop).await;
+        let progress = laptop
+            .track_mutation(handle, &[fixtures::PHONE])
+            .await
+            .unwrap();
+        costs.push(crate::tests::vm_steps(&laptop).await - before);
+        assert!(progress.committed.is_some() && !progress.peers[0].received);
+    }
+    assert!(costs[1] < costs[0] + 50, "{costs:?}");
+    // An unknown peer is refused whether or not the handle committed.
+    for handle in [MutationHandle([1; 32]), MutationHandle([9; 32])] {
+        assert!(matches!(
+            laptop.track_mutation(handle, &[NodeId([0x42; 16])]).await,
+            Err(Error::Rejected(_))
+        ));
+    }
+    laptop.close().await.unwrap();
+}
+
+/// Read observers wake for a changed backlog, not for every sync step:
+/// acknowledgments and passes with nothing to apply leave them asleep.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn sync_steps_wake_read_observers_only_when_the_backlog_changes() {
+    let dir = Scratch::new().await;
+    let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
+    let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
+    let reads = laptop.inner.reads().unwrap().clone();
+    let meta = || reads.counters("SELECT 1").1;
+    let mut ids = Vec::new();
+    for index in 0..4 {
+        ids.push(create(&laptop, &format!("todo {index}")).await.id);
+    }
+    let start = meta();
+    for id in ids {
+        laptop
+            .acknowledge(fixtures::PHONE, Acknowledgment { id, applied: true })
+            .await
+            .unwrap();
+        laptop.process_pending().await.unwrap();
+    }
+    assert_eq!(meta(), start);
+    // An edit whose creation is missing waits: the backlog grew.
+    let created = create(&phone, "phone todo").await;
+    let renamed = edit(&phone, created.id, Action::SetTitle("renamed".into())).await;
+    assert!(
+        !laptop
+            .receive(renamed.encode().unwrap())
+            .await
+            .unwrap()
+            .applied
+    );
+    let waiting = meta();
+    assert!(waiting > start);
+    laptop.process_pending().await.unwrap();
+    assert_eq!(meta(), waiting);
+    // Its creation arrives and both apply.
+    laptop.receive(created.encode().unwrap()).await.unwrap();
+    laptop.process_pending().await.unwrap();
+    assert!(meta() > waiting);
+    assert_eq!(
+        laptop
+            .read(
+                BoundQuery {
+                    sql: "SELECT 1".into(),
+                    values: Vec::new()
+                },
+                ReadOptions::new(fixtures::SCOPE, 1)
+            )
+            .await
+            .unwrap()
+            .completeness,
+        Completeness::Local {
+            pending_operations: 0
+        }
+    );
+    laptop.close().await.unwrap();
+    phone.close().await.unwrap();
+}
+
+/// A pass reads the head of each author's pending log, not the operations
+/// blocked behind it: with the first operation missing, a pass costs the
+/// same however long the blocked backlog is, and the gap's arrival applies
+/// all of it.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_pending_pass_skips_operations_blocked_behind_a_gap() {
+    let dir = Scratch::new().await;
+    let laptop = open(&dir, fixtures::LAPTOP, StaticPolicy::default()).await;
+    let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
+    let mut created = Vec::new();
+    for index in 0..321 {
+        created.push(create(&phone, &format!("phone {index}")).await);
+    }
+    let mut costs = Vec::new();
+    let mut received = 1;
+    for blocked in [32, 320] {
+        for operation in &created[received..=blocked] {
+            let ack = laptop.receive(operation.encode().unwrap()).await.unwrap();
+            assert!(!ack.applied);
+        }
+        received = blocked + 1;
+        let before = crate::tests::vm_steps(&laptop).await;
+        laptop.process_pending().await.unwrap();
+        costs.push(crate::tests::vm_steps(&laptop).await - before);
+    }
+    assert!(costs[1] < costs[0] + 100, "{costs:?}");
+    assert!(laptop.query().await.unwrap().rows.is_empty());
+    laptop.receive(created[0].encode().unwrap()).await.unwrap();
+    laptop.process_pending().await.unwrap();
+    assert_eq!(laptop.query().await.unwrap().rows.len(), 321);
+    let state = laptop.sync_state().await.unwrap();
+    assert!(state.applied.0.contains(&(
+        fixtures::PHONE,
+        rocky_core::AuthorSequence::new(321).unwrap()
+    )));
+    laptop.close().await.unwrap();
+    phone.close().await.unwrap();
+}

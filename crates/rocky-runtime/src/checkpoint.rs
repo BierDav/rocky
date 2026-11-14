@@ -88,7 +88,7 @@ pub struct CheckpointRecord {
 }
 const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v2";
 const NOTICE_MAGIC: &[u8] = b"rocky.pruned.v1";
-const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v2";
+const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v3";
 
 #[derive(Default)]
 struct Writer(Vec<u8>);
@@ -317,12 +317,14 @@ pub enum Catchup {
     BehindPruned(PrunedNotice),
 }
 
-/// A position in a checkpoint's rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A position in a checkpoint's rows: the last rowid of a table, or for a
+/// `WITHOUT ROWID` table the rows read so far and the last primary key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckpointCursor {
     pub checkpoint: Commitment,
     pub table: u32,
     pub position: i64,
+    pub key: Vec<SqlValue>,
 }
 /// One bounded page of a checkpoint's rows. The first page carries the
 /// record. `rows` are stored rows of the application's checkpoint table
@@ -342,6 +344,10 @@ impl CheckpointPage {
             out.bytes(&cursor.checkpoint);
             out.u32(cursor.table);
             out.u64(cursor.position as u64);
+            out.u32(cursor.key.len() as u32);
+            for value in &cursor.key {
+                write_value(out, value);
+            }
         };
         out.bytes(PAGE_MAGIC);
         cursor(&mut out, &self.start);
@@ -354,25 +360,7 @@ impl CheckpointPage {
         for row in &self.rows {
             out.u32(row.len() as u32);
             for value in row {
-                match value {
-                    SqlValue::Null => out.0.push(0),
-                    SqlValue::Integer(value) => {
-                        out.0.push(1);
-                        out.u64(*value as u64);
-                    }
-                    SqlValue::Text(value) => {
-                        out.0.push(2);
-                        out.blob(value.as_bytes());
-                    }
-                    SqlValue::Blob(value) => {
-                        out.0.push(3);
-                        out.blob(value);
-                    }
-                    SqlValue::Real(value) => {
-                        out.0.push(4);
-                        out.u64(value.bits());
-                    }
-                }
+                write_value(&mut out, value);
             }
         }
         out.0.push(u8::from(self.next.is_some()));
@@ -384,10 +372,19 @@ impl CheckpointPage {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut input = Reader(bytes);
         fn cursor(input: &mut Reader<'_>) -> Result<CheckpointCursor, Error> {
+            let (checkpoint, table, position) = (input.array()?, input.u32()?, input.u64()? as i64);
+            let mut key = Vec::new();
+            for _ in 0..input.u32()? {
+                if key.len() == MAX_CURSOR_KEY {
+                    return Err(malformed());
+                }
+                key.push(read_value(input)?);
+            }
             Ok(CheckpointCursor {
-                checkpoint: input.array()?,
-                table: input.u32()?,
-                position: input.u64()? as i64,
+                checkpoint,
+                table,
+                position,
+                key,
             })
         }
         fn flag(input: &mut Reader<'_>) -> Result<bool, Error> {
@@ -409,16 +406,7 @@ impl CheckpointPage {
         for _ in 0..input.u32()? {
             let mut row = Vec::new();
             for _ in 0..input.u32()? {
-                row.push(match input.u8()? {
-                    0 => SqlValue::Null,
-                    1 => SqlValue::Integer(input.u64()? as i64),
-                    2 => SqlValue::Text(String::from_utf8(input.blob()?).map_err(|_| malformed())?),
-                    3 => SqlValue::Blob(input.blob()?),
-                    4 => SqlValue::Real(
-                        rocky_core::Real::from_bits(input.u64()?).ok_or_else(malformed)?,
-                    ),
-                    _ => return Err(malformed()),
-                });
+                row.push(read_value(&mut input)?);
             }
             rows.push(row);
         }
@@ -438,6 +426,39 @@ impl CheckpointPage {
     }
 }
 
+/// Primary key columns a cursor may carry; SQLite allows far fewer columns.
+const MAX_CURSOR_KEY: usize = 2000;
+fn write_value(out: &mut Writer, value: &SqlValue) {
+    match value {
+        SqlValue::Null => out.0.push(0),
+        SqlValue::Integer(value) => {
+            out.0.push(1);
+            out.u64(*value as u64);
+        }
+        SqlValue::Text(value) => {
+            out.0.push(2);
+            out.blob(value.as_bytes());
+        }
+        SqlValue::Blob(value) => {
+            out.0.push(3);
+            out.blob(value);
+        }
+        SqlValue::Real(value) => {
+            out.0.push(4);
+            out.u64(value.bits());
+        }
+    }
+}
+fn read_value(input: &mut Reader<'_>) -> Result<SqlValue, Error> {
+    Ok(match input.u8()? {
+        0 => SqlValue::Null,
+        1 => SqlValue::Integer(input.u64()? as i64),
+        2 => SqlValue::Text(String::from_utf8(input.blob()?).map_err(|_| malformed())?),
+        3 => SqlValue::Blob(input.blob()?),
+        4 => SqlValue::Real(rocky_core::Real::from_bits(input.u64()?).ok_or_else(malformed)?),
+        _ => return Err(malformed()),
+    })
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointInfo {
     pub commitment: Commitment,
@@ -831,9 +852,10 @@ mod tests {
             checkpoint: record.commitment(),
             table: 0,
             position: 0,
+            key: Vec::new(),
         };
         let page = CheckpointPage {
-            start,
+            start: start.clone(),
             record: Some(bytes),
             table: 3,
             rows: vec![vec![
@@ -844,6 +866,7 @@ mod tests {
             ]],
             next: Some(CheckpointCursor {
                 position: 12,
+                key: vec![SqlValue::Blob(vec![1]), SqlValue::Integer(7)],
                 ..start
             }),
         };

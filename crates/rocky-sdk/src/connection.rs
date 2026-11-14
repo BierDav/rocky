@@ -165,7 +165,9 @@ pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
                     | Unavailable::Revoked,
                 ..
             })
-            | Error::Sql(SqlError::Aborted(rocky_secure::AbortReason::Timeout))
+            | Error::Sql(SqlError::Aborted(
+                rocky_secure::AbortReason::Timeout | rocky_secure::AbortReason::Preempted
+            ))
     );
     SqlFailure {
         code,
@@ -912,6 +914,10 @@ pub struct TableChange {
     /// This installation's transactions a seal or checkpoint may have made
     /// final since the last change; `Database::transaction_outcome` says.
     pub sealed: Vec<rocky_core::TransactionToken>,
+    /// More outcomes changed than one change names: `dropped` and `sealed`
+    /// are empty, and every transaction awaiting its outcome must be read
+    /// again through `Database::transaction_outcome`.
+    pub reconcile: bool,
 }
 impl TableEvents {
     pub(crate) fn new(observer: TableObserver) -> Self {
@@ -939,6 +945,7 @@ impl TableEvents {
                 .into_iter()
                 .map(rocky_core::TransactionToken)
                 .collect(),
+            reconcile: change.reconcile,
         })
     }
 }

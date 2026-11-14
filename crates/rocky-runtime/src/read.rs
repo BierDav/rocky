@@ -632,6 +632,8 @@ pub(crate) struct Reads {
     logical: std::sync::OnceLock<Arc<rocky_core::LogicalSchema>>,
     /// The worker's table events; gone once the domain closes.
     events: std::sync::OnceLock<Weak<crate::observe::TableEvents>>,
+    /// Statements of a full projection snapshot.
+    projection: std::sync::OnceLock<Arc<ProjectionReads>>,
     /// Test hook: reads executed for observers.
     #[cfg(test)]
     pub(crate) executed: std::sync::atomic::AtomicUsize,
@@ -684,6 +686,7 @@ impl Reads {
             audit,
             logical: Default::default(),
             events: Default::default(),
+            projection: Default::default(),
             #[cfg(test)]
             executed: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -700,6 +703,18 @@ impl Reads {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(Error::Closed)
+    }
+    pub(crate) fn bind_projection(&self, statements: ProjectionReads) {
+        let _ = self.projection.set(Arc::new(statements));
+    }
+    /// The whole projection with the revision and applied frontier of the
+    /// snapshot it was read in, read beside the writer.
+    pub(crate) async fn projection(self: &Arc<Self>) -> Result<Projected, Error> {
+        let statements = self.projection.get().cloned().ok_or(Error::Closed)?;
+        let revision = self.plan.revision.clone();
+        self.pool
+            .run(move |conn| retried(|| project(conn, &statements, &revision)))
+            .await
     }
     pub(crate) fn bind_logical(&self, schema: rocky_core::LogicalSchema) {
         let _ = self.logical.set(Arc::new(schema));
@@ -995,6 +1010,86 @@ impl Reads {
         *latest = Some((now, snapshot.clone()));
         Ok((now, snapshot))
     }
+}
+/// The statements that read a domain's projection and applied frontier.
+pub(crate) struct ProjectionReads {
+    pub(crate) query: String,
+    /// An author's newest applied sequence.
+    pub(crate) applied: String,
+    /// The stored retention state, which holds the pruned prefix.
+    pub(crate) retention: String,
+    pub(crate) authors: Vec<rocky_core::NodeId>,
+}
+/// Projection rows with the revision and applied frontier they were read at.
+pub(crate) struct Projected {
+    pub(crate) rows: Vec<Vec<SqlValue>>,
+    pub(crate) revision: LocalRevision,
+    pub(crate) frontier: rocky_core::AppliedFrontier,
+}
+/// One bounded read transaction over the projection. The frontier is
+/// derived as the writer restores it: the newest applied sequence of each
+/// author, and at least its pruned prefix.
+fn project(
+    conn: &sqlite::Connection,
+    statements: &ProjectionReads,
+    revision: &str,
+) -> Result<Projected, Error> {
+    conn.set_deadline(Some(
+        web_time::Instant::now() + storage::READ_TRANSACTION_BOUND,
+    ))?;
+    let result = (|| {
+        conn.run_now("BEGIN")?;
+        let result = (|| {
+            let corrupt = || Error::Corrupt("projection snapshot".into());
+            let revision = match conn.rows(revision, ())?.first().map(Vec::as_slice) {
+                Some([sqlite::Value::Integer(revision)]) => LocalRevision::new(*revision as u64)?,
+                _ => return Err(corrupt()),
+            };
+            let pruned = match conn
+                .rows(&statements.retention, ())?
+                .first()
+                .map(Vec::as_slice)
+            {
+                Some([sqlite::Value::Blob(state)]) => {
+                    crate::worker::retention::pruned_prefix(state)?
+                }
+                _ => return Err(corrupt()),
+            };
+            let mut frontier = std::collections::BTreeMap::new();
+            for node in &statements.authors {
+                let newest =
+                    conn.rows(&statements.applied, [sqlite::Value::Blob(node.0.to_vec())])?;
+                let applied = match newest.first().map(Vec::as_slice) {
+                    Some([sqlite::Value::Integer(sequence)]) => *sequence as u64,
+                    None => 0,
+                    _ => return Err(corrupt()),
+                };
+                let pruned = pruned
+                    .iter()
+                    .find(|(author, _)| author == node)
+                    .map_or(0, |(_, sequence)| *sequence);
+                if applied.max(pruned) > 0 {
+                    frontier.insert(*node, rocky_core::AuthorSequence::new(applied.max(pruned))?);
+                }
+            }
+            let rows = conn
+                .rows(&statements.query, ())?
+                .into_iter()
+                .map(sql_values)
+                .collect::<Result<_, _>>()?;
+            Ok(Projected {
+                rows,
+                revision,
+                frontier: rocky_core::AppliedFrontier(frontier.into_iter().collect()),
+            })
+        })();
+        if !conn.is_autocommit()? {
+            conn.run_now("ROLLBACK")?;
+        }
+        result
+    })();
+    conn.set_deadline(None)?;
+    result
 }
 /// Reruns a read while another process briefly holds the file.
 fn retried<T>(mut read: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {

@@ -452,7 +452,7 @@ impl Prepared {
         &self.tables
     }
     /// Checks every query block separately. The returned statement filters
-    /// partial reads to held scopes, whose values it binds after `params`.
+    /// partial reads to held scopes and binds only `params`.
     pub fn check(
         &self,
         params: &[SqlValue],
@@ -485,7 +485,7 @@ impl Prepared {
         if let ControlFlow::Break(error) = statement.visit(&mut bindings) {
             return Err(error.into());
         }
-        let used = bindings.bind()?;
+        bindings.bind()?;
         let mut checker = Checker {
             tables,
             bindings: &bindings,
@@ -498,7 +498,6 @@ impl Prepared {
             tables,
             reads: Vec::new(),
             numbers: &bindings.numbers,
-            params: params.to_vec(),
         };
         if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut filter) {
             return Err(error.into());
@@ -506,16 +505,9 @@ impl Prepared {
         if assertion {
             let _ = VisitMut::visit(&mut statement, &mut crate::exact::Checked);
         }
-        if filter.params.len() > params.len() && used != params.len() {
-            return Err(format!(
-                "the statement uses {used} parameters, {} were given",
-                params.len()
-            )
-            .into());
-        }
         Ok(Checked {
             sql: statement.to_string(),
-            params: filter.params,
+            params: params.to_vec(),
         })
     }
 }
@@ -607,13 +599,9 @@ fn literal(value: &SqlValue) -> String {
         ),
     }
 }
-/// Rows of the held partitions; their values bind as parameters after
-/// `params`, so the text depends only on how many there are.
-fn held_partitions(
-    rule: &TablePartitions,
-    alias: Option<&str>,
-    params: &mut Vec<SqlValue>,
-) -> String {
+/// Rows of the held partitions, their values written as literals: binding
+/// them would make the statement's parameters grow with the holdings.
+fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
     if rule.held.is_empty() || rule.columns.is_empty() {
         return "0".into();
     }
@@ -629,14 +617,7 @@ fn held_partitions(
         .held
         .iter()
         .map(|tuple| {
-            let values = tuple
-                .iter()
-                .map(|value| {
-                    params.push(value.clone());
-                    format!("?{}", params.len())
-                })
-                .collect::<Vec<_>>()
-                .join(",");
+            let values = tuple.iter().map(held_value).collect::<Vec<_>>().join(",");
             if names.len() > 1 {
                 format!("({values})")
             } else {
@@ -652,15 +633,36 @@ fn held_partitions(
     };
     format!("{names} IN ({values})")
 }
-fn filter_expr(
-    rule: &TablePartitions,
-    alias: Option<&str>,
-    params: &mut Vec<SqlValue>,
-) -> Result<Expr, String> {
-    let Statement::Query(query) = parse(&format!(
-        "SELECT 1 WHERE {}",
-        held_partitions(rule, alias, params)
-    ))?
+/// A held value as SQL that reads back as the same value and storage class.
+fn held_value(value: &SqlValue) -> String {
+    let hex = |bytes: &[u8]| {
+        let mut hex = String::with_capacity(bytes.len() * 2 + 3);
+        hex.push_str("X'");
+        for byte in bytes {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02X}");
+        }
+        hex.push('\'');
+        hex
+    };
+    match value {
+        SqlValue::Null => "NULL".into(),
+        SqlValue::Integer(value) => value.to_string(),
+        // The shortest text that reads back as the same double.
+        SqlValue::Real(value) if value.get().is_finite() => format!("{:?}", value.get()),
+        SqlValue::Real(value) if value.get() > 0.0 => "9e999".into(),
+        SqlValue::Real(_) => "-9e999".into(),
+        // A NUL would end the statement's text.
+        SqlValue::Text(text) if text.contains('\0') => {
+            format!("CAST({} AS TEXT)", hex(text.as_bytes()))
+        }
+        SqlValue::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        SqlValue::Blob(bytes) => hex(bytes),
+    }
+}
+fn filter_expr(rule: &TablePartitions, alias: Option<&str>) -> Result<Expr, String> {
+    let Statement::Query(query) =
+        parse(&format!("SELECT 1 WHERE {}", held_partitions(rule, alias)))?
     else {
         return Err("partition filter".into());
     };
@@ -683,8 +685,6 @@ struct Filter<'a> {
     tables: &'a BTreeMap<String, TablePartitions>,
     reads: Vec<(u64, u64)>,
     numbers: &'a BTreeMap<(u64, u64), usize>,
-    /// The caller's parameters, then the held values of each filter.
-    params: Vec<SqlValue>,
 }
 impl Filter<'_> {
     fn read_factor(&mut self, factor: &TableFactor) {
@@ -767,7 +767,7 @@ impl VisitorMut for Filter<'_> {
         let query = match parse(&format!(
             "SELECT * FROM {} WHERE {}",
             quoted(&name),
-            held_partitions(rule, None, &mut self.params)
+            held_partitions(rule, None)
         )) {
             Ok(Statement::Query(query)) => query,
             _ => return ControlFlow::Break("partition filter".into()),
@@ -811,7 +811,7 @@ impl VisitorMut for Filter<'_> {
         if let Some(((name, alias), selection)) = target
             && let Some(rule) = self.tables.get(&name).filter(|rule| rule.filtered())
         {
-            match filter_expr(rule, Some(&alias), &mut self.params) {
+            match filter_expr(rule, Some(&alias)) {
                 Ok(filter) => append(selection, filter),
                 Err(error) => return ControlFlow::Break(error),
             }
@@ -1054,61 +1054,153 @@ mod tests {
         assert!(check("SELECT * FROM items WHERE list='C'", &[], &rules).is_err());
         assert!(!incomplete("SELECT * FROM items WHERE list='C'"));
     }
+    fn bound(params: &[SqlValue]) -> Vec<rusqlite::types::Value> {
+        params
+            .iter()
+            .map(|value| match value {
+                SqlValue::Null => rusqlite::types::Value::Null,
+                SqlValue::Integer(value) => (*value).into(),
+                SqlValue::Real(value) => value.get().into(),
+                SqlValue::Text(value) => value.clone().into(),
+                SqlValue::Blob(value) => value.clone().into(),
+            })
+            .collect()
+    }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn held_values_bind_after_the_callers_parameters_and_keep_the_text_stable() {
+    fn held_values_are_written_in_and_bind_only_the_callers_parameters() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE items(list TEXT,amount INTEGER); INSERT INTO items VALUES('A',10),('B',20);").unwrap();
         let sql = "SELECT ? + SUM(amount) FROM items WHERE amount>?";
-        let checked = check_with_views(
-            sql,
-            &[SqlValue::Integer(1), SqlValue::Integer(5)],
-            &rules(),
-            &[],
-        )
-        .unwrap();
-        assert!(!checked.sql.contains("'A'"), "{}", checked.sql);
+        let params = [1, 5].map(SqlValue::Integer);
+        let checked = check_with_views(sql, &params, &rules(), &[]).unwrap();
+        assert!(checked.sql.contains("'A'"), "{}", checked.sql);
+        assert_eq!(checked.params, params);
         assert_eq!(
-            checked.params,
-            [1, 5]
-                .map(SqlValue::Integer)
-                .into_iter()
-                .chain([SqlValue::Text("A".into())])
-                .collect::<Vec<_>>()
-        );
-        let params: Vec<rusqlite::types::Value> = checked
-            .params
-            .iter()
-            .map(|value| match value {
-                SqlValue::Integer(value) => (*value).into(),
-                SqlValue::Text(value) => value.clone().into(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(
-            conn.query_row(&checked.sql, rusqlite::params_from_iter(params), |row| row
-                .get::<_, i64>(
-                0
-            ))
+            conn.query_row(
+                &checked.sql,
+                rusqlite::params_from_iter(bound(&checked.params)),
+                |row| row.get::<_, i64>(0)
+            )
             .unwrap(),
             11
         );
-        // Another held set of the same size reads the same text.
-        let mut other = rules();
-        other.get_mut("items").unwrap().held = vec![vec![SqlValue::Text("B".into())]];
-        let again = check_with_views(
-            sql,
-            &[SqlValue::Integer(1), SqlValue::Integer(5)],
-            &other,
-            &[],
-        )
-        .unwrap();
-        assert_eq!(again.sql, checked.sql);
         assert!(Arc::ptr_eq(
             &prepare(sql, &[]).unwrap(),
             &prepare(sql, &[]).unwrap()
         ));
-        // Too few parameters for a filtered statement is refused, not padded.
-        assert!(check_with_views(sql, &[SqlValue::Integer(1)], &rules(), &[]).is_err());
+        // A held value never fills a parameter the caller left out.
+        let short = check_with_views(sql, &params[..1], &rules(), &[]).unwrap();
+        assert_eq!(short.params, params[..1]);
+        assert!(
+            conn.query_row(
+                &short.sql,
+                rusqlite::params_from_iter(bound(&short.params)),
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .is_err()
+        );
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn held_values_read_back_as_the_same_value_and_class() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let values = [
+            SqlValue::Null,
+            SqlValue::Integer(i64::MIN),
+            SqlValue::Integer(i64::MAX),
+            SqlValue::real(0.1).unwrap(),
+            SqlValue::real(-5e-324).unwrap(),
+            SqlValue::real(1.0).unwrap(),
+            SqlValue::real(f64::INFINITY).unwrap(),
+            SqlValue::Text("it's".into()),
+            SqlValue::Text("a\0b".into()),
+            SqlValue::Blob(vec![0, 1, 254, 255]),
+            SqlValue::Blob(Vec::new()),
+        ];
+        for value in values {
+            // Through the parser and back, as a filter is.
+            let sql = parse(&format!("SELECT {}", held_value(&value)))
+                .unwrap()
+                .to_string();
+            let read = conn
+                .query_row(&sql, [], |row| row.get::<_, rusqlite::types::Value>(0))
+                .unwrap();
+            assert_eq!(vec![read], bound(std::slice::from_ref(&value)), "{sql}");
+        }
+    }
+    /// Holdings past SQLite's variable limit still filter: the statement
+    /// binds the caller's parameters only, however many partitions are held.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn holdings_past_the_variable_limit_bind_no_parameters() {
+        // The bundled engine's SQLITE_MAX_VARIABLE_NUMBER.
+        const LIMIT: usize = 32766;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items(list TEXT COLLATE NOCASE,pos REAL,tag BLOB,amount INTEGER);
+             INSERT INTO items VALUES('x''1',0.1,X'00FF',1),('X''1',0.1,X'00ff',2),
+             ('y',0.2,X'00FF',4),('z',1e300,X'',8),('w',-0.5,X'01',16);",
+        )
+        .unwrap();
+        let column = |name: &str, affinity| PartitionColumn {
+            name: name.into(),
+            key: KeyColumn {
+                affinity,
+                collation: rocky_core::Collation::Nocase,
+            },
+        };
+        let mut held: Vec<Vec<SqlValue>> = (0..LIMIT as i64 + 10)
+            .map(|index| {
+                vec![
+                    SqlValue::Text(format!("filler-{index}")),
+                    SqlValue::real(index as f64).unwrap(),
+                    SqlValue::Blob(index.to_le_bytes().to_vec()),
+                ]
+            })
+            .collect();
+        held.extend([
+            vec![
+                SqlValue::Text("x'1".into()),
+                SqlValue::real(0.1).unwrap(),
+                SqlValue::Blob(vec![0, 255]),
+            ],
+            vec![
+                SqlValue::Text("z".into()),
+                SqlValue::real(1e300).unwrap(),
+                SqlValue::Blob(Vec::new()),
+            ],
+        ]);
+        let rules: BTreeMap<String, TablePartitions> = [(
+            "items".into(),
+            TablePartitions {
+                columns: vec![
+                    column("list", rocky_core::Affinity::Text),
+                    column("pos", rocky_core::Affinity::Real),
+                    column("tag", rocky_core::Affinity::Blob),
+                ],
+                complete: false,
+                held,
+                waiting: Vec::new(),
+            },
+        )]
+        .into();
+        let params = [SqlValue::Integer(0)];
+        let checked = check_with_views(
+            "SELECT SUM(amount) FROM items WHERE amount>?",
+            &params,
+            &rules,
+            &[],
+        )
+        .unwrap();
+        // The bound parameters are the caller's alone.
+        assert_eq!(checked.params.len(), params.len());
+        let sum = conn
+            .query_row(
+                &checked.sql,
+                rusqlite::params_from_iter(bound(&checked.params)),
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        // NOCASE matches 'X''1'; the BLOB and REAL values match exactly.
+        assert_eq!(sum, 1 + 2 + 8);
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn nested_views_are_expanded_and_cycles_refused() {

@@ -81,7 +81,7 @@ async fn rebootstrap(from: &Replica<TodoApp>, to: &Replica<TodoApp>) -> Rebootst
     loop {
         let page = from.checkpoint_page(cursor).await.unwrap();
         let page = CheckpointPage::decode(&page.encode()).unwrap();
-        cursor = page.next;
+        cursor = page.next.clone();
         if let Some(report) = to.import_checkpoint(page).await.unwrap() {
             assert!(cursor.is_none());
             return report;
@@ -606,7 +606,7 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
     let mut pages = 0;
     let report = loop {
         let page = laptop.checkpoint_page(cursor).await.unwrap();
-        cursor = page.next;
+        cursor = page.next.clone();
         pages += 1;
         fault(&phone, worker::Fault::FailBeforeCommit).await;
         assert!(matches!(
@@ -682,7 +682,7 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
     create(&laptop, "newer").await;
     laptop.checkpoint().await.unwrap();
     assert!(matches!(
-        laptop.checkpoint_page(first.next).await,
+        laptop.checkpoint_page(first.next.clone()).await,
         Err(Error::Rejected(_))
     ));
     let mut tampered = laptop.checkpoint_page(None).await.unwrap();
@@ -778,7 +778,7 @@ async fn crash_child() {
                 die(&phone).await;
                 let _ = phone.import_checkpoint(first).await;
             } else {
-                let last = laptop.checkpoint_page(first.next).await.unwrap();
+                let last = laptop.checkpoint_page(first.next.clone()).await.unwrap();
                 assert!(last.next.is_none());
                 phone.import_checkpoint(first).await.unwrap();
                 phone.flush().await.unwrap();

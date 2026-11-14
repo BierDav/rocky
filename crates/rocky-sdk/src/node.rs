@@ -319,6 +319,9 @@ pub(crate) struct Node {
     /// Health reports that reached this device.
     #[cfg(test)]
     pub(crate) reports_received: AtomicU64,
+    /// Revocation verifications that ran under the settings lock.
+    #[cfg(test)]
+    pub(crate) verified_under_settings: AtomicU64,
     /// A session brought statements since the last renewal. Rotated keys
     /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
@@ -406,6 +409,8 @@ impl Node {
             report_failing: AtomicBool::new(false),
             #[cfg(test)]
             reports_received: AtomicU64::new(0),
+            #[cfg(test)]
+            verified_under_settings: AtomicU64::new(0),
             observations,
             owner: Default::default(),
             replica,
@@ -1440,9 +1445,8 @@ impl Node {
             }),
         );
         // New grants may make more members of a held group readable.
-        for partition in settings.partitions(&self.domain())? {
-            self.hold_keys(&settings, &partition).await?;
-        }
+        self.hold_keys(&settings, &settings.partitions(&self.domain())?)
+            .await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain());
         drop(settings);
@@ -1939,11 +1943,17 @@ impl Node {
         draft.save(&self.path)?;
         *settings = draft;
         self.apply(&mut settings, keys).await?;
-        for partition in settings.partitions(&self.domain())? {
-            let address = crate::groups::record_key(&partition.record.address);
-            if rotation.groups.contains_key(&address) {
-                self.hold_keys(&settings, &partition).await?;
-            }
+        let rotated: Vec<_> = settings
+            .partitions(&self.domain())?
+            .into_iter()
+            .filter(|partition| {
+                rotation
+                    .groups
+                    .contains_key(&crate::groups::record_key(&partition.record.address))
+            })
+            .collect();
+        if !rotated.is_empty() {
+            self.hold_keys(&settings, &rotated).await?;
         }
         let status = settings.revocation_status()?;
         drop(settings);
@@ -2073,9 +2083,8 @@ impl Node {
                 .map_err(|_| "scope catalog poisoned")?
                 .len();
             self.apply(&mut settings, keys).await?;
-            for partition in settings.partitions(&self.domain())? {
-                self.hold_keys(&settings, &partition).await?;
-            }
+            self.hold_keys(&settings, &settings.partitions(&self.domain())?)
+                .await?;
             // A table granted like a held one is projected, and held where
             // its group partitions are, once granted.
             if settings.granted(&self.domain()).len() > readable {
@@ -2104,9 +2113,8 @@ impl Node {
                     .ok_or("exposure rotation intent disappeared")?;
                 settings.save(&self.path)?;
                 self.apply(&mut settings, keys).await?;
-                for partition in settings.partitions(&self.domain())? {
-                    self.hold_keys(&settings, &partition).await?;
-                }
+                self.hold_keys(&settings, &settings.partitions(&self.domain())?)
+                    .await?;
             }
         }
         if !changed {
@@ -3010,9 +3018,8 @@ impl Node {
                 .ok_or("missing exposure rotation")?;
             draft.save(&self.path)?;
             self.apply(&mut draft, keys).await?;
-            for partition in draft.partitions(&self.domain())? {
-                self.hold_keys(&draft, &partition).await?;
-            }
+            self.hold_keys(&draft, &draft.partitions(&self.domain())?)
+                .await?;
             rotated = true;
         }
         draft.save(&self.path)?;
@@ -3697,9 +3704,8 @@ impl Node {
                             draft.save(&self.path)?;
                             *current = draft;
                             self.apply(&mut current, Vec::new()).await?;
-                            for partition in current.partitions(&self.domain())? {
-                                self.hold_keys(&current, &partition).await?;
-                            }
+                            self.hold_keys(&current, &current.partitions(&self.domain())?)
+                                .await?;
                         }
                         let reply =
                             current.answer_epochs(&self.vault, &request.request, &registry)?;

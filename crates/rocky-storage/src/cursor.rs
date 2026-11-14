@@ -17,7 +17,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use web_time::Instant;
 
 /// Bounds of one cursor.
@@ -46,6 +46,9 @@ impl Default for CursorLimits {
 const POLL: Duration = Duration::from_millis(50);
 /// Open cursors one session may hold.
 pub const MAX_SESSION_CURSORS: usize = 64;
+/// Free workers a host keeps for later cursors; a worker freed beyond them
+/// ends with its connection.
+const MAX_IDLE_WORKERS: usize = 2;
 /// Longest cursor lifetime a caller may ask for.
 pub const MAX_CURSOR_LIFETIME: Duration = Duration::from_secs(300);
 impl CursorLimits {
@@ -120,6 +123,8 @@ enum Request {
     Next(oneshot::Sender<Result<CursorPage, Error>>),
     Reset(oneshot::Sender<Result<(), Error>>),
     Run(Statement),
+    /// Wakes an idle worker to notice that its cursor ended.
+    Wake,
 }
 impl Request {
     /// Answers whatever the request waits for with `error`.
@@ -128,6 +133,7 @@ impl Request {
             Self::Next(reply) => drop(reply.send(Err(error))),
             Self::Reset(reply) => drop(reply.send(Err(error))),
             Self::Run(statement) => drop(statement.reply.send(Err(error))),
+            Self::Wake => {}
         }
     }
 }
@@ -145,12 +151,17 @@ struct Control {
     alive: task::Held,
     /// The handle is gone; the worker ends the cursor on its next turn.
     dropped: AtomicBool,
+    /// Reaches the worker without keeping the channel open.
+    wake: mpsc::WeakUnboundedSender<Request>,
+    /// Set once the worker ended the cursor's read transaction.
+    released: watch::Sender<bool>,
 }
 #[derive(Clone, Copy, Debug)]
 enum End {
     Finished,
     Expired,
     Cancelled,
+    Preempted,
     Closed,
     Failed,
 }
@@ -160,12 +171,21 @@ impl Control {
             ended.get_or_insert(end);
         }
     }
+    fn ending(&self) -> Option<End> {
+        self.ended.lock().ok().and_then(|ended| *ended)
+    }
     fn error(&self) -> Error {
-        match self.ended.lock().ok().and_then(|ended| *ended) {
+        match self.ending() {
             Some(End::Expired) => Error::Sql(SqlError::Aborted(AbortReason::Timeout)),
             Some(End::Cancelled) => Error::Sql(SqlError::Aborted(AbortReason::Cancelled)),
+            Some(End::Preempted) => Error::Sql(SqlError::Aborted(AbortReason::Preempted)),
             _ => Error::Closed,
         }
+    }
+    /// The worker no longer holds the cursor's connection.
+    fn release(&self) {
+        self.alive.set(false);
+        self.released.send_replace(true);
     }
 }
 
@@ -174,7 +194,7 @@ impl Control {
 pub struct CursorHost {
     controls: Mutex<Vec<Weak<Control>>>,
     closed: AtomicBool,
-    workers: Mutex<Vec<Worker>>,
+    workers: Arc<Mutex<Vec<Worker>>>,
 }
 impl CursorHost {
     pub fn new() -> Arc<Self> {
@@ -183,11 +203,15 @@ impl CursorHost {
     /// Ends every cursor and waits until their connections are closed.
     /// Later opens are refused.
     pub fn close(&self) {
-        let mut workers = match self.workers.lock() {
-            Ok(workers) => workers,
+        // Workers free themselves under this lock, so it is not held while
+        // they are joined; `closed` keeps later leases from adding one.
+        let workers = match self.workers.lock() {
+            Ok(mut workers) => {
+                self.closed.store(true, Ordering::SeqCst);
+                std::mem::take(&mut *workers)
+            }
             Err(_) => return,
         };
-        self.closed.store(true, Ordering::SeqCst);
         let controls = match self.controls.lock() {
             Ok(mut controls) => std::mem::take(&mut *controls),
             Err(_) => return,
@@ -198,14 +222,46 @@ impl CursorHost {
             // An idle worker notices within its poll interval.
             control.alive.wait_released(POLL);
         }
-        for worker in std::mem::take(&mut *workers) {
+        for worker in workers {
             drop(worker.jobs);
             worker.task.release();
         }
     }
-    /// Workers allocated so far; connections are reused between leases.
+    /// Workers that keep a connection; connections are reused between leases.
     pub fn workers(&self) -> usize {
-        self.workers.lock().map_or(0, |workers| workers.len())
+        self.workers.lock().map_or(0, |workers| {
+            workers
+                .iter()
+                .filter(|worker| !worker.retired.load(Ordering::SeqCst))
+                .count()
+        })
+    }
+    /// Ends every open cursor with `Aborted(Preempted)` and waits until
+    /// their read transactions end, so the write-ahead log can be reset.
+    /// Returns how many it ended.
+    pub async fn preempt(&self) -> usize {
+        let open: Vec<_> = match self.controls.lock() {
+            Ok(controls) => controls
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter(|control| control.ending().is_none())
+                .collect(),
+            Err(_) => return 0,
+        };
+        let mut released = Vec::with_capacity(open.len());
+        for control in &open {
+            control.end(End::Preempted);
+            control.cancelled.store(true, Ordering::SeqCst);
+            if let Some(worker) = control.wake.upgrade() {
+                let _ = worker.send(Request::Wake);
+            }
+            released.push(control.released.subscribe());
+        }
+        for mut released in released {
+            // An error means the control is gone, and with it the worker's turn.
+            let _ = released.wait_for(|released| *released).await;
+        }
+        open.len()
     }
     /// Open cursors, for tests and diagnostics.
     pub fn open_cursors(&self) -> usize {
@@ -260,13 +316,15 @@ impl SnapshotCursor {
                 limit: MAX_SESSION_CURSORS,
             });
         }
+        let (requests, receiver) = mpsc::unbounded_channel();
         let control = Arc::new(Control {
             cancelled: Arc::new(AtomicBool::new(false)),
             ended: Mutex::new(None),
             alive: task::Held::new(true),
             dropped: AtomicBool::new(false),
+            wake: requests.downgrade(),
+            released: watch::Sender::new(false),
         });
-        let (requests, receiver) = mpsc::unbounded_channel();
         let (opened, opening) = oneshot::channel();
         let cursor = Self {
             columns: Vec::new(),
@@ -282,7 +340,7 @@ impl SnapshotCursor {
             control: cursor.control.clone(),
         };
         if let Err(error) = host.lease(job) {
-            cursor.control.alive.set(false);
+            cursor.control.release();
             return Err(error);
         }
         let mut cursor = cursor;
@@ -361,6 +419,8 @@ struct Job {
 struct Worker {
     jobs: mpsc::Sender<Job>,
     busy: Arc<AtomicBool>,
+    /// The worker ended after its last cursor; it takes no more jobs.
+    retired: Arc<AtomicBool>,
     task: task::Dedicated<()>,
     /// The cursor it serves or last served.
     serving: Weak<Control>,
@@ -369,6 +429,9 @@ impl Worker {
     /// Free, or ending a cursor whose handle is gone, with room to queue the
     /// next job. Natively a dropped handle waits until its worker is free.
     fn available(&self) -> bool {
+        if self.retired.load(Ordering::SeqCst) {
+            return false;
+        }
         !self.busy.load(Ordering::SeqCst)
             || (self.jobs.capacity() > 0
                 && self
@@ -388,6 +451,8 @@ impl CursorHost {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
         }
+        // A retired worker's task has ended or is ending; its handle detaches.
+        workers.retain(|worker| !worker.retired.load(Ordering::SeqCst));
         let worker = match workers.iter_mut().find(|worker| worker.available()) {
             Some(worker) => worker,
             None => {
@@ -399,20 +464,26 @@ impl CursorHost {
                 }
                 let (jobs, mut receiver) = mpsc::channel::<Job>(1);
                 let busy = Arc::new(AtomicBool::new(false));
-                let working = busy.clone();
+                let retired = Arc::new(AtomicBool::new(false));
+                let (working, retiring) = (busy.clone(), retired.clone());
+                let pool = Arc::downgrade(&self.workers);
                 let task = task::dedicated("rocky-reader", move || async move {
                     let mut connection: Option<(PathBuf, sqlite::Connection)> = None;
                     while let Some(job) = receiver.recv().await {
                         let control = job.control.clone();
                         serve(job, &mut connection).await;
-                        working.store(false, Ordering::SeqCst);
-                        control.alive.set(false);
+                        let retire = free(&pool, &working, &retiring, &receiver);
+                        control.release();
+                        if retire {
+                            break;
+                        }
                     }
                 })
                 .map_err(Error::Io)?;
                 workers.push(Worker {
                     jobs,
                     busy,
+                    retired,
                     task,
                     serving: Weak::new(),
                 });
@@ -427,6 +498,37 @@ impl CursorHost {
         worker.serving = Arc::downgrade(&job.control);
         worker.jobs.try_send(job).map_err(|_| Error::Closed)
     }
+}
+/// Frees a worker after its cursor, under the host's lock so workers ending
+/// together count each other. Returns whether it ends instead: when no job
+/// waits for it and enough other workers are free.
+fn free(
+    pool: &Weak<Mutex<Vec<Worker>>>,
+    busy: &AtomicBool,
+    retired: &AtomicBool,
+    jobs: &mpsc::Receiver<Job>,
+) -> bool {
+    let workers = pool.upgrade();
+    let workers = workers.as_deref().map(Mutex::lock);
+    // A lease queues a job only while it holds the lock.
+    if !jobs.is_empty() {
+        return false;
+    }
+    let retire = match &workers {
+        Some(Ok(workers)) => {
+            workers
+                .iter()
+                .filter(|worker| {
+                    !worker.busy.load(Ordering::SeqCst) && !worker.retired.load(Ordering::SeqCst)
+                })
+                .count()
+                >= MAX_IDLE_WORKERS
+        }
+        _ => false,
+    };
+    retired.store(retire, Ordering::SeqCst);
+    busy.store(false, Ordering::SeqCst);
+    retire
 }
 // The worker owns its connection; nothing else locks it while a cursor
 // holds it across the awaits between pages.
@@ -614,7 +716,7 @@ async fn run(
             }
             let wait = (active + plan.limits.idle).min(expires) - now;
             let request = time::timeout(wait.min(POLL), requests.recv()).await;
-            if matches!(request, Ok(Some(_))) {
+            if matches!(request, Ok(Some(ref request)) if !matches!(request, Request::Wake)) {
                 active = Instant::now();
             }
             if control.cancelled.load(Ordering::SeqCst) {
@@ -629,12 +731,7 @@ async fn run(
                     let failed = page.is_err();
                     let _ = reply.send(page);
                     if failed {
-                        break 'exec control
-                            .ended
-                            .lock()
-                            .ok()
-                            .and_then(|ended| *ended)
-                            .unwrap_or(End::Failed);
+                        break 'exec control.ending().unwrap_or(End::Failed);
                     }
                 }
                 Ok(Some(Request::Reset(reply))) => {
@@ -650,12 +747,17 @@ async fn run(
                         statement.max_bytes,
                     );
                     let failed = result.is_err() && control.cancelled.load(Ordering::SeqCst);
-                    let _ = statement.reply.send(result);
+                    let _ = statement
+                        .reply
+                        .send(result.map_err(|error| match control.ending() {
+                            Some(End::Cancelled | End::Preempted) => control.error(),
+                            _ => error,
+                        }));
                     if failed {
                         break 'exec End::Cancelled;
                     }
                 }
-                Err(_elapsed) => {}
+                Ok(Some(Request::Wake)) | Err(_) => {}
                 Ok(None) => break 'exec End::Finished,
             }
         }
@@ -740,8 +842,8 @@ fn page(
     control: &Control,
 ) -> Result<CursorPage, Error> {
     let interrupted = |error: Error| {
-        if let Some(End::Cancelled) = control.ended.lock().ok().and_then(|ended| *ended) {
-            return Error::Sql(SqlError::Aborted(AbortReason::Cancelled));
+        if let Some(End::Cancelled | End::Preempted) = control.ending() {
+            return control.error();
         }
         if control.cancelled.load(Ordering::SeqCst) {
             return Error::Closed;
@@ -889,6 +991,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cursor.next().await.unwrap().rows.len(), 1);
+        drop(cursor);
+        host.close();
+        assert_eq!(host.workers(), 0);
+    }
+
+    /// Workers freed after a burst of cursors end beyond the few kept for
+    /// reuse, closing their connections; a later cursor still opens.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn freed_workers_beyond_the_idle_bound_retire() {
+        let file = file(1).await;
+        let host = CursorHost::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut cursors = Vec::new();
+        for _ in 0..5 {
+            let plan = plan(&file, "SELECT id FROM items", small(1), open());
+            cursors.push(
+                SnapshotCursor::open(&host, count.clone(), plan)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(host.workers(), 5);
+        drop(cursors);
+        // Waits until every worker is past its cursor rather than sleeping:
+        // the last reference to a control goes when its worker's turn ends.
+        let serving = || {
+            host.controls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|control| control.strong_count() > 0)
+        };
+        while serving() {
+            task::yield_now().await;
+        }
+        assert_eq!(host.workers(), MAX_IDLE_WORKERS);
+        let mut cursor = SnapshotCursor::open(
+            &host,
+            count,
+            plan(&file, "SELECT id FROM items", small(1), open()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor.next().await.unwrap().rows.len(), 1);
+        assert_eq!(host.workers(), MAX_IDLE_WORKERS);
         drop(cursor);
         host.close();
         assert_eq!(host.workers(), 0);
@@ -1169,6 +1316,68 @@ mod tests {
         file.writer
             .run_now("PRAGMA wal_checkpoint(TRUNCATE)")
             .unwrap();
+    }
+
+    /// A writer that must reset the log ends the cursors pinning it: they
+    /// report `Aborted(Preempted)` and the reset completes.
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn preempting_ends_the_cursors_that_pin_the_log() {
+        let file = file(3).await;
+        file.writer.set_busy_timeout(Duration::ZERO).unwrap();
+        // `(busy, log frames, checkpointed frames)` of a resetting checkpoint.
+        let reset = || match file.writer.rows("PRAGMA wal_checkpoint(TRUNCATE)", ()) {
+            Ok(rows) => rows[0].clone(),
+            Err(error) => panic!("{error}"),
+        };
+        let host = CursorHost::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut idle = SnapshotCursor::open(
+            &host,
+            count.clone(),
+            plan(&file, "SELECT id FROM items", small(1), open()),
+        )
+        .await
+        .unwrap();
+        idle.next().await.unwrap();
+        let mut unread = SnapshotCursor::open(
+            &host,
+            count.clone(),
+            plan(&file, "SELECT id FROM items", small(1), open()),
+        )
+        .await
+        .unwrap();
+        file.writer
+            .run_now("INSERT INTO items VALUES(10,'later')")
+            .unwrap();
+        assert_eq!(
+            reset()[0],
+            Value::Integer(1),
+            "the open snapshots pin the log"
+        );
+        assert_eq!(host.preempt().await, 2);
+        assert_eq!(
+            reset(),
+            vec![Value::Integer(0), Value::Integer(0), Value::Integer(0)]
+        );
+        assert_eq!(host.open_cursors(), 0);
+        for cursor in [&mut idle, &mut unread] {
+            assert!(matches!(
+                cursor.next().await,
+                Err(Error::Sql(SqlError::Aborted(AbortReason::Preempted)))
+            ));
+        }
+        assert_eq!(host.preempt().await, 0);
+        drop((idle, unread));
+        // Later cursors read the new snapshot.
+        let mut cursor = SnapshotCursor::open(
+            &host,
+            count,
+            plan(&file, "SELECT id FROM items", small(10), open()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor.revision(), Some(4));
+        assert_eq!(cursor.next().await.unwrap().rows.len(), 4);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -55,6 +55,12 @@ impl Escrowed {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Keys `seal` considered on this thread: the work of every escrow pass.
+    pub(crate) static CONSIDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Seals every key `settings` holds that `held`, the replica's records by
 /// slot and tag, lacks: each collection key epoch under its scope, each
 /// group secret epoch under every member table's scope, and the naming
@@ -97,6 +103,8 @@ fn seal(
     if let Some(root) = vault.find(NAMING_ROLE)? {
         items.push((None, Escrowed::Naming { root }));
     }
+    #[cfg(test)]
+    CONSIDERED.with(|considered| considered.set(considered.get() + items.len()));
     let mut sealed = Vec::new();
     for (slot, item) in items {
         let tag = escrow_tag(settings.publisher, item.secret());

@@ -1869,6 +1869,67 @@ async fn incoming_pushes_do_not_wait_for_page_publication() -> Result<(), Failur
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_stalled_peer_does_not_hold_publication_to_another() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let reader = || Profile::Reader {
+                scopes: ["items".into()].into(),
+            };
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, reader()))).await?;
+            let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, reader()))).await?;
+            targets(&a, &[b.clone(), c.clone()]).await?;
+            for node in [&b, &c] {
+                targets(node, std::slice::from_ref(&a)).await?;
+            }
+            for node in [&a, &b, &c] {
+                start(node, true).await?;
+            }
+            until(|| a.current().is_some_and(|service| service.live.len() == 2)).await;
+            for node in [&a, &b, &c] {
+                settled(node).await;
+            }
+            let (a_service, b_service, c_service) = (
+                a.current().ok_or("service")?,
+                b.current().ok_or("service")?,
+                c.current().ok_or("service")?,
+            );
+            let intakes = |service: &Link| -> usize {
+                service.live.traffic().iter().map(|t| t.intakes).sum()
+            };
+            let (b_before, c_before) = (intakes(&b_service), intakes(&c_service));
+            // B admits each publication but never reads it until the gate opens.
+            let gate = Arc::new(Semaphore::new(0));
+            *b_service.live.push_gate.lock().unwrap() = Some(gate.clone());
+            for key in 1..=2u8 {
+                add(&a, key).await?;
+                while rows(&c).await?.len() != usize::from(key) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert_eq!(intakes(&c_service) - c_before, 2);
+            assert_eq!(intakes(&b_service) - b_before, 0);
+            assert!(rows(&b).await?.is_empty());
+            *b_service.live.push_gate.lock().unwrap() = None;
+            gate.add_permits(1);
+            // The stalled pass finishes, then the signal it missed publishes the rest.
+            while rows(&b).await?.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+            until(|| !a_service.live.publishing_or_receiving()).await;
+            assert_eq!(intakes(&b_service) - b_before, 2);
+            assert_eq!(intakes(&c_service) - c_before, 2);
+            for node in [&a, &b, &c] {
+                node.detach(None).await;
+            }
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn publication_backpressure_preserves_committed_work_without_reopening_the_link()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new()

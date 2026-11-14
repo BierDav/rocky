@@ -49,9 +49,9 @@ where
             .map(|operation| operation.scoped_id());
         let mut evidence = Vec::new();
         for peer in peers {
-            let acknowledgments = self.peer_acknowledgments(*peer).await?;
-            let ack =
-                committed.and_then(|id| acknowledgments.iter().find(|ack| ack.id == id.operation));
+            let ack = self
+                .peer_acknowledgment(*peer, committed.map(|id| id.operation))
+                .await?;
             evidence.push(PeerEvidence {
                 peer: *peer,
                 received: ack.is_some(),

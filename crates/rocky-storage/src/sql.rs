@@ -79,6 +79,9 @@ pub enum AbortReason {
     Poisoned(String),
     /// The engine ended the transaction, as `OR ROLLBACK` or an interrupt does.
     Engine(String),
+    /// A cursor's snapshot was ended so the write-ahead log could be reset;
+    /// open the cursor again.
+    Preempted,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SqlError {

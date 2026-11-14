@@ -66,9 +66,8 @@ impl Node {
                 .ok_or("missing unlink rotation")?;
             settings.save(&self.path)?;
             self.apply(&mut settings, keys).await?;
-            for partition in settings.partitions(&self.domain())? {
-                self.hold_keys(&settings, &partition).await?;
-            }
+            self.hold_keys(&settings, &settings.partitions(&self.domain())?)
+                .await?;
         } else {
             self.replica.learn_revocations(&known).await?;
         }
@@ -138,9 +137,8 @@ impl Node {
                 .ok_or("missing unlink rotation")?;
             settings.save(&self.path)?;
             self.apply(&mut settings, keys).await?;
-            for partition in settings.partitions(&self.domain())? {
-                self.hold_keys(&settings, &partition).await?;
-            }
+            self.hold_keys(&settings, &settings.partitions(&self.domain())?)
+                .await?;
         } else {
             self.replica.learn_revocations(&known).await?;
         }

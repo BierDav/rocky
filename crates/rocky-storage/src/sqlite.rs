@@ -975,6 +975,9 @@ impl Connection {
             }
             page.rows.push(values);
         }
+        drop(rows);
+        #[cfg(any(test, feature = "test-support"))]
+        count_steps(&statement);
         Ok(page)
     }
     /// `query` for callers outside an async context.
@@ -1009,6 +1012,8 @@ impl Connection {
             result.push_back(Row(values));
         }
         drop(rows);
+        #[cfg(any(test, feature = "test-support"))]
+        count_steps(&statement);
         drop(statement);
         Ok((result, raw.changes()))
     }
@@ -1053,6 +1058,7 @@ pub fn wal_frames() -> i64 {
 }
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
+    static VM_STEPS: Cell<u64> = const { Cell::new(0) };
     static STATEMENTS: Cell<u64> = const { Cell::new(0) };
     static STATEMENT_TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
@@ -1060,6 +1066,17 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn statements() -> u64 {
     STATEMENTS.with(Cell::get)
+}
+#[cfg(any(test, feature = "test-support"))]
+fn count_steps(statement: &rusqlite::Statement<'_>) {
+    let steps = statement.reset_status(rusqlite::StatementStatus::VmStep);
+    VM_STEPS.with(|cell| cell.set(cell.get() + steps.max(0) as u64));
+}
+/// Virtual machine steps of the statements this thread ran, for tests that
+/// bound the work of a pass independently of the stored rows.
+#[cfg(any(test, feature = "test-support"))]
+pub fn vm_steps() -> u64 {
+    VM_STEPS.with(Cell::get)
 }
 
 /// Starts or stops collecting statement text on this test thread; returns the previous trace.

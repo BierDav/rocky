@@ -137,27 +137,31 @@ impl Node {
         }
         Ok(())
     }
-    /// Registers the readable members and installs every held epoch's
-    /// derived key; installing an installed key again does nothing.
+    /// Registers the readable members of `partitions` and installs every
+    /// held epoch's derived key; installing an installed key again does
+    /// nothing. Escrow is kept once for all of them: each pass covers
+    /// every key `settings` holds.
     pub(super) async fn hold_keys(
         &self,
         settings: &Settings,
-        partition: &GroupPartition,
+        partitions: &[GroupPartition],
     ) -> Result<(), Failure> {
         let domain = self.domain();
-        for member in &partition.members {
-            if !settings.reads_partition(&domain, member) {
-                continue;
-            }
-            self.replica
-                .register_partition(member.scope, member.tuple.clone(), partition.record.name)
-                .await?;
-            for epoch in partition.record.epochs.iter().rev() {
+        for partition in partitions {
+            for member in &partition.members {
+                if !settings.reads_partition(&domain, member) {
+                    continue;
+                }
                 self.replica
-                    .install_key_epoch(partition.key(&self.vault, member, *epoch)?)
+                    .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                     .await?;
+                for epoch in partition.record.epochs.iter().rev() {
+                    self.replica
+                        .install_key_epoch(partition.key(&self.vault, member, *epoch)?)
+                        .await?;
+                }
+                crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
             }
-            crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
         }
         crate::escrow::keep(&self.replica, settings, &self.vault, &domain).await
     }
@@ -292,7 +296,8 @@ impl Node {
         let granted = draft.granted(&self.domain());
         *settings = draft;
         let partition = GroupPartition::of(&self.domain(), &record)?;
-        self.hold_keys(&settings, &partition).await?;
+        self.hold_keys(&settings, std::slice::from_ref(&partition))
+            .await?;
         // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(json!({
@@ -400,7 +405,8 @@ impl Node {
         let granted = draft.granted(&self.domain());
         *settings = draft;
         let partition = GroupPartition::of(&self.domain(), &record)?;
-        self.hold_keys(&settings, &partition).await?;
+        self.hold_keys(&settings, std::slice::from_ref(&partition))
+            .await?;
         // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(true)

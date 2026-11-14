@@ -46,6 +46,8 @@ const WRITER_CACHE_KIB: i64 = -8 * 1024;
 const WRITER_CACHE_KIB: i64 = -32 * 1024;
 /// Longest wait of a resetting checkpoint for readers of the old log.
 const RESET_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// Most groups between two resets that wait for readers while one pins the log.
+const MAX_RESET_BACKOFF: u32 = 64;
 
 /// What one file writer has done since open. Times are microseconds on the
 /// writer thread; whatever is left of wall time was spent idle.
@@ -91,6 +93,8 @@ pub struct WriterStats {
     /// Truncating checkpoints, included above, and their time.
     pub truncations: u64,
     pub truncate_micros: u64,
+    /// Truncating checkpoints that waited for readers of the old log.
+    pub truncate_waits: u64,
     /// WAL frames after the latest commit, and the most seen.
     pub wal_frames: u64,
     pub wal_frames_max: u64,
@@ -132,6 +136,7 @@ pub(crate) struct Metrics {
     checkpoint_flush_micros: AtomicU64,
     truncations: AtomicU64,
     truncate_micros: AtomicU64,
+    truncate_waits: AtomicU64,
     wal_frames: AtomicU64,
     wal_frames_max: AtomicU64,
     deferred_follows: AtomicU64,
@@ -204,6 +209,7 @@ impl Metrics {
             checkpoint_flush_micros: self.checkpoint_flush_micros.load(Relaxed),
             truncations: self.truncations.load(Relaxed),
             truncate_micros: self.truncate_micros.load(Relaxed),
+            truncate_waits: self.truncate_waits.load(Relaxed),
             wal_frames: self.wal_frames.load(Relaxed),
             wal_frames_max: self.wal_frames_max.load(Relaxed),
             deferred_follows: self.deferred_follows.load(Relaxed),
@@ -394,6 +400,10 @@ pub(crate) struct Writer<A: StoredApplication> {
     /// Domains whose first deferred request waits for that flush.
     waiting: Vec<usize>,
     checkpoint_frames: i64,
+    /// While a reader keeps the log from being reset: groups between resets
+    /// that wait for it, and the groups left before the next one.
+    reset_backoff: u32,
+    reset_skip: u32,
     /// Whether subphase timing and checkpoint-interval recording are on.
     instrument: bool,
     metrics: Arc<Metrics>,
@@ -456,6 +466,8 @@ where
             flush_wanted: true,
             waiting: Vec::new(),
             checkpoint_frames: i64::from(options.checkpoint_frames),
+            reset_backoff: 0,
+            reset_skip: 0,
             instrument: options.instrument,
             metrics,
             #[cfg(test)]
@@ -613,7 +625,9 @@ where
                 slot.receiver.close();
                 slot.closing = Some(reply);
             }
-            command @ Command::Query(_) if closing => command.refuse(Error::Closed),
+            command @ (Command::Query(_) | Command::Decode(..)) if closing => {
+                command.refuse(Error::Closed)
+            }
             #[cfg(test)]
             Command::Fault(_, reply) if closing => drop(reply.send(Err(Error::Closed))),
             #[cfg(test)]
@@ -634,6 +648,11 @@ where
             #[cfg(test)]
             Command::Fault(crate::worker::Fault::CheckpointFrames(frames), reply) => {
                 self.checkpoint_frames = frames;
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(test)]
+            Command::Fault(crate::worker::Fault::VmSteps(steps), reply) => {
+                let _ = steps.send(sqlite::vm_steps());
                 let _ = reply.send(Ok(()));
             }
             #[cfg(test)]
@@ -971,12 +990,16 @@ where
     /// readers kept passive ones from completing. A checkpoint that
     /// cannot finish now is retried after a later group. Returns true when
     /// the writer must stop.
-    async fn checkpoint(&self, conn: &sqlite::Connection) -> bool {
+    async fn checkpoint(&mut self, conn: &sqlite::Connection) -> bool {
         let frames = sqlite::wal_frames();
         self.metrics.wal_frames.store(frames.max(0) as u64, Relaxed);
         self.metrics
             .wal_frames_max
             .fetch_max(frames.max(0) as u64, Relaxed);
+        if frames < 2 * self.checkpoint_frames {
+            self.reset_backoff = 0;
+            self.reset_skip = 0;
+        }
         if frames < self.checkpoint_frames {
             return false;
         }
@@ -991,13 +1014,28 @@ where
             copy_micros = copy;
             flush_micros = flush;
         } else {
-            // A reset must wait for readers of the old log; bound that wait well
-            // below the retry bound, and try again after a later group.
+            // A reset must wait for readers of the old log. It first tries
+            // without waiting; while a reader pins the log, the bounded wait
+            // backs off over groups instead of stalling every one.
             kind = CheckpointKind::Truncate;
-            if conn.set_busy_timeout(RESET_WAIT).is_ok() {
-                let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await;
+            let mut reset = truncate(conn).await;
+            if !reset && self.reset_skip > 0 {
+                self.reset_skip -= 1;
+            } else if !reset {
+                self.metrics.truncate_waits.fetch_add(1, Relaxed);
+                if conn.set_busy_timeout(RESET_WAIT).is_ok() {
+                    reset = truncate(conn).await;
+                }
+                let _ = conn.set_busy_timeout(std::time::Duration::ZERO);
+                if !reset {
+                    self.reset_backoff = (self.reset_backoff * 2).clamp(1, MAX_RESET_BACKOFF);
+                    self.reset_skip = self.reset_backoff;
+                }
             }
-            let _ = conn.set_busy_timeout(std::time::Duration::ZERO);
+            if reset {
+                self.reset_backoff = 0;
+                self.reset_skip = 0;
+            }
             self.metrics.truncations.fetch_add(1, Relaxed);
             self.metrics
                 .truncate_micros
@@ -1117,6 +1155,14 @@ where
             drop(file);
         }
     }
+}
+/// A resetting checkpoint; whether it reset the log. Busy readers make it
+/// copy what it can, as a passive one does.
+async fn truncate(conn: &sqlite::Connection) -> bool {
+    matches!(
+        rows_raw(conn, "PRAGMA wal_checkpoint(TRUNCATE)").await.as_deref(),
+        Ok([row]) if row.first() == Some(&SqlValue::Integer(0))
+    )
 }
 async fn rows_raw(conn: &sqlite::Connection, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error> {
     storage::collect_rows(conn.query(sql, ()).await?).await

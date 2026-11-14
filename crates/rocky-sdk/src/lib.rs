@@ -102,7 +102,8 @@
 //!   same transaction; a dispatcher wakes on [`TableChange::sealed`] and
 //!   after a restart reconciles every pending outbox row through
 //!   [`Database::transaction_outcome`], since notifications are not
-//!   replayed. A final apply is not a coordinator decision: an effect that
+//!   replayed; it does the same on [`TableChange::reconcile`], which
+//!   replaces the names once more outcomes change than one change holds. A final apply is not a coordinator decision: an effect that
 //!   must not happen twice across devices still needs one. Finality
 //!   follows the followed seal path: if owners seal one tip concurrently,
 //!   the losing seal's outcomes turn provisional again.
